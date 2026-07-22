@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.asa-v3-backup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
+		<string>/Users/messi/Documents/ASA/scripts/asa_v3_backup.py</string>
+		<string>--label</string>
+		<string>daily</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key><integer>9</integer>
+		<key>Minute</key><integer>41</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/messi/.hermes/logs/asa_v3_backup.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/messi/.hermes/logs/asa_v3_backup_error.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/messi/Documents/ASA</string>
+</dict>
+</plist>
