@@ -823,6 +823,16 @@ class CoreService:
             return self.agent_service.get_workflow_candidates(workflow_id, limit, offset)
         raise RuntimeError("workflow service unavailable")
 
+    def workflow_strategy_review(self, workflow_id: str) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_strategy_review(workflow_id)
+        raise RuntimeError("workflow service unavailable")
+
+    def rebuild_strategy_review(self, workflow_id: str) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.rebuild_strategy_review(workflow_id)
+        raise RuntimeError("workflow service unavailable")
+
     def workflow_sourcing_funnel(self, workflow_id: str) -> dict[str, Any]:
         conn = connect(self.db_path)
         try:

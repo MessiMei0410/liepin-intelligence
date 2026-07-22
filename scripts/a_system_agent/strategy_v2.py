@@ -437,12 +437,15 @@ def build_strategy_v2(
     profile_match: dict[str, Any] | None = None,
     graph_pool: list[dict[str, Any]] | None = None,
     restricted_rules: list[dict[str, Any]] | None = None,
+    negative_checklist: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """组装 strategy_v2：LLM 填充各步，运行时兜底必备键并强制版本号/定级/顾问留痕。
 
     consultant_override=True 时，所有推断锚点保持 inferred:true + confidence（PRD §1）。
     S4-2：profile_match（客户画像挂载留痕）、graph_pool（kb_graph 公司，只用于召回排序）、
     restricted_rules（禁挖/竞业白名单，source=restricted_client）由运行时传入并合。
+    S4-3：negative_checklist（排除规则引擎五类清单，negative_rules 模块输出，逐项含
+    applicable/rule/basis/source）由运行时传入，强制逐类留痕并入 negative_rules。
     """
     consultant = consultant or {}
     fragment = llm_fragment if isinstance(llm_fragment, dict) else {}
@@ -593,6 +596,27 @@ def build_strategy_v2(
             )
             existing_rule_texts.add(text)
             assembly_trace.append(f"negative_rules 并入 restricted 约束：{str(rule.get('type') or '')}")
+
+    # S4-3：排除规则引擎五类清单强制逐类留痕（PRD §4，第 4 步之后必过）。
+    # 每项 {type, applicable, rule, basis, source}；不适用的类同样留痕（applicable=false + 理由）。
+    # 与既有 negative_rules 条目按 (type, rule) 去重，五类清单条目始终保留。
+    existing_pairs = {(str(rule.get("type") or ""), str(rule.get("rule") or "")) for rule in negative_rules}
+    for item in negative_checklist or []:
+        if not isinstance(item, dict):
+            continue
+        entry = {
+            "type": str(item.get("type") or "未分类"),
+            "applicable": bool(item.get("applicable")),
+            "rule": str(item.get("rule") or ""),
+            "basis": str(item.get("basis") or ""),
+            "source": str(item.get("source") or "none"),
+        }
+        if (entry["type"], entry["rule"]) in existing_pairs:
+            continue
+        negative_rules.append(entry)
+        existing_pairs.add((entry["type"], entry["rule"]))
+        state = "适用" if entry["applicable"] else "不适用"
+        assembly_trace.append(f"排除规则五类清单[{entry['type']}]：{state}（{entry['basis']}）")
 
     edits = fragment.get("consultant_edits")
     consultant_edits = [dict(item) for item in edits if isinstance(item, dict)] if isinstance(edits, list) else []

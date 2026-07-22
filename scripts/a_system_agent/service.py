@@ -904,6 +904,37 @@ class AgentService:
     def get_workflow_candidates(self, workflow_id: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return self.workflow_engine.get_workflow_candidates(workflow_id, limit, offset)
 
+    def get_strategy_review(self, workflow_id: str) -> dict[str, Any]:
+        """S4-3：读取工作流最新策略复盘；工作流不存在/无复盘均抛 LookupError（API 404）。"""
+        from . import strategy_review
+
+        conn = self._connect()
+        try:
+            exists = conn.execute("SELECT 1 FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if exists is None:
+                raise LookupError(f"工作流不存在：{workflow_id}")
+            payload = strategy_review.get_strategy_review(conn, workflow_id)
+            if payload is None:
+                raise LookupError(f"该工作流暂无策略复盘：{workflow_id}")
+            return {"ok": True, **payload}
+        finally:
+            conn.close()
+
+    def rebuild_strategy_review(self, workflow_id: str) -> dict[str, Any]:
+        """S4-3：按需重算复盘（存量终局工作流补生成；幂等覆盖，version 自增 + history）。
+
+        工作流不存在抛 LookupError（404）；非终局（completed/blocked/failed）抛 ValueError（409）。
+        """
+        from . import strategy_review
+
+        conn = self._connect()
+        try:
+            artifact_id, review = strategy_review.rebuild_for_workflow(conn, workflow_id)
+            conn.commit()
+            return {"ok": True, "workflow_id": workflow_id, "artifact_id": artifact_id, "review": review}
+        finally:
+            conn.close()
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 

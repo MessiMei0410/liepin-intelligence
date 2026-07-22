@@ -1270,6 +1270,30 @@ class WorkflowEngine:
     def _sourcing_target_status(self, conn, goal: Any, workflow_id: str) -> dict[str, int] | None:
         return sourcing_target_stats(conn, goal["objective"], _loads(goal["context_json"], {}), workflow_id)
 
+    def _auto_strategy_review(self, conn, workflow_id: str, status: str) -> None:
+        """S4-3：寻访类工作流终局后自动生成策略复盘（PRD §5，规则版 v1）。
+
+        复盘生成失败绝不阻塞终局流转：异常只留事件留痕。幂等：重算覆盖同工作流旧复盘。
+        """
+        try:
+            from . import strategy_review
+
+            review = strategy_review.generate_for_workflow(conn, workflow_id)
+            artifact_id = strategy_review.upsert_strategy_review(conn, review)
+            self._event(
+                conn, workflow_id, None, "strategy_review_generated", status,
+                f"策略复盘已生成：{review.get('verdict_label')}（{artifact_id}）",
+                {"artifact_id": artifact_id, "verdict": review.get("verdict"), "version": review.get("version")},
+            )
+        except Exception as exc:
+            try:
+                self._event(
+                    conn, workflow_id, None, "strategy_review_failed", status,
+                    f"策略复盘生成失败（不影响终局）：{str(exc)[:200]}",
+                )
+            except Exception:
+                pass
+
     def _finish(self, conn, workflow_id: str, goal_id: str, steps: list[Any]) -> None:
         goal = conn.execute("SELECT * FROM agent_goals WHERE goal_id=?", (goal_id,)).fetchone()
         target_status = self._sourcing_target_status(conn, goal, workflow_id) if goal is not None else None
@@ -1291,6 +1315,7 @@ class WorkflowEngine:
                 (business_outcome, summary, error, goal_id),
             )
             self._event(conn, workflow_id, None, "goal_target_checked", "blocked", "评估完成，但目标人数尚未完全达成", target_status)
+            self._auto_strategy_review(conn, workflow_id, "blocked")
             return
         artifact_count = int(conn.execute("SELECT COUNT(*) FROM agent_artifacts WHERE workflow_id=?", (workflow_id,)).fetchone()[0])
         summary = f"目标已完成：{len(steps)} 个步骤全部处理，生成 {artifact_count} 项产物；外部动作均经过独立审批和结果验证。"
@@ -1298,6 +1323,8 @@ class WorkflowEngine:
         conn.execute("UPDATE agent_workflows SET status='completed',business_outcome=?,active_step_id=NULL,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE workflow_id=?", (business_outcome, workflow_id))
         conn.execute("UPDATE agent_goals SET status='completed',business_outcome=?,progress=1,result_summary=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE goal_id=?", (business_outcome, summary, goal_id))
         self._event(conn, workflow_id, None, "workflow_completed", "completed", summary)
+        if target_status:
+            self._auto_strategy_review(conn, workflow_id, "completed")
 
     def decide_approval(self, approval_id: str, decision: str, note: str = "") -> dict[str, Any]:
         if decision not in {"approve", "reject", "revise"}:

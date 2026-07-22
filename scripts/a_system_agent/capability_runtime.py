@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
-from . import knowledge_base, strategy_v2
+from . import knowledge_base, negative_rules, strategy_v2
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -1272,8 +1272,17 @@ class RecruitingCapabilityRuntime:
         ]
         if len(graph_pool) < before:
             graph_pool_trace.append(f"已从图谱池剔除客户本公司 {before - len(graph_pool)} 家")
+        # S4-3：排除规则引擎 —— 第 4 步之后强制过五类检查清单（PRD §4），
+        # 逐类输出 适用/不适用+依据；禁挖名单/竞业从 restricted 层按客户继承。
+        # 只在运行时并入 negative_rules，绝不进入 LLM 输入。
+        negative_checklist, checklist_trace = negative_rules.build_negative_rule_checklist(
+            job,
+            restricted_info=restricted_info,
+            archetype=archetype,
+            consultant_answers=consultant["consultant_answers"],
+        )
         classification["trace"] = [
-            *classification["trace"], *profile_trace, *restricted_trace, *graph_trace, *graph_pool_trace,
+            *classification["trace"], *profile_trace, *restricted_trace, *graph_trace, *graph_pool_trace, *checklist_trace,
         ]
         client_profile_payload: dict[str, Any] = {"matched": False}
         if profile_match:
@@ -1326,6 +1335,7 @@ class RecruitingCapabilityRuntime:
             profile_match=knowledge_base.profile_matched_info(profile_match),
             graph_pool=graph_pool,
             restricted_rules=knowledge_base.restricted_negative_rules(restricted_info),
+            negative_checklist=negative_checklist,
         )
         v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
         result: dict[str, Any] = {

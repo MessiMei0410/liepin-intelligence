@@ -189,6 +189,17 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 无寻访运行时返回空结构（channels/runs 为空数组），不抛 404
         return core.workflow_sourcing_funnel(workflow_id)
 
+    @app.get("/api/v1/workflows/{workflow_id}/strategy-review")
+    def workflow_strategy_review(workflow_id: str) -> dict[str, Any]:
+        # 无复盘或工作流不存在均 404（LookupError 由全局异常处理器映射）
+        return core.workflow_strategy_review(workflow_id)
+
+    @app.post("/api/v1/workflows/{workflow_id}/strategy-review/rebuild")
+    def workflow_strategy_review_rebuild(workflow_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 按需重算（存量终局工作流补生成）：走 execute_idempotent 模式，重放返回首次响应
+        return idem("workflow.strategy_review_rebuild", body, idempotency_key, "workflow", workflow_id,
+                    lambda: core.rebuild_strategy_review(workflow_id))
+
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
         return core.audit_events(limit, offset)
