@@ -617,6 +617,36 @@ def test_workflow_archive_hides_current_card_but_preserves_detail(db_path: Path)
         assert detail.json()["workflow"]["archived_at"]
 
 
+def test_dashboard_workflows_expose_business_outcome_matching_summary(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        request_id = f"dashboard-outcome-{uuid.uuid4().hex[:8]}"
+        created = client.post(
+            "/api/v1/copilot/messages",
+            headers={"Idempotency-Key": request_id},
+            json={
+                "request_id": request_id,
+                "message": "给士兰微技术市场经理再找些候选人",
+                "context": {"type": "job", "id": 111},
+            },
+        )
+        workflow_id = created.json()["workflow_id"]
+        # 业务终态生产上由引擎 _finish 写入；此处直接写临时库验证透传链
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE agent_workflows SET business_outcome='completed_needs_review' WHERE workflow_id=?",
+            (workflow_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        workflows = client.get("/api/v1/dashboard").json()["workflows"]
+        assert all("business_outcome" in item for item in workflows)
+        item = next(i for i in workflows if i["workflow_id"] == workflow_id)
+        assert item["business_outcome"] == "completed_needs_review"
+        summary = client.get(f"/api/v1/workflows/{workflow_id}/summary").json()
+        assert item["business_outcome"] == summary["business_outcome"]
+
+
 def test_copilot_job_split_creates_job_library_update_workflow(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         request_id = f"copilot-job-library-update-{uuid.uuid4().hex[:8]}"

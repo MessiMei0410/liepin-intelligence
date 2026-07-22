@@ -396,7 +396,7 @@ class CoreService:
             workflows = [
                 _row(row)
                 for row in conn.execute(
-                    """SELECT w.workflow_id,w.status,w.current_stage,w.updated_at,g.title,g.progress
+                    """SELECT w.workflow_id,w.status,w.business_outcome,w.current_stage,w.updated_at,g.title,g.progress
                        FROM agent_workflows w JOIN agent_goals g ON g.goal_id=w.goal_id
                        WHERE w.archived_at IS NULL
                        ORDER BY w.updated_at DESC LIMIT 8"""
