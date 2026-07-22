@@ -21,8 +21,10 @@ test('总览', async ({ page }) => {
 test('岗位 #154 详情', async ({ page }) => {
   const panel = await openJob(page)
   await expect(panel.locator('.job-funnel')).toBeVisible()
-  // 6 位人选全部渲染
-  await expect(panel.locator('.job-candidate-list button')).toHaveCount(6)
+  // 人选数随真实业务增长（T3 第 4 轮新增 4 位），从同实例 API 取期望数，不再钉死
+  const job = await (await page.request.get('/api/v1/jobs/154')).json()
+  const expected = ((job.job ?? job).candidates ?? []).length
+  await expect(panel.locator('.job-candidate-list button')).toHaveCount(expected)
   await expect(panel.locator('.job-candidate-list')).toContainText('唐**')
   await expect(page).toHaveScreenshot('job-154.png')
 })
@@ -30,8 +32,8 @@ test('岗位 #154 详情', async ({ page }) => {
 test('工作流详情（blocked + completed_needs_review）', async ({ page }) => {
   const panel = await openWorkflow(page)
   await expect(panel.getByRole('group', { name: '下一步操作' })).toBeVisible()
-  // 人选结果加载完成（本轮评估 6 人）+ 执行步骤 5 步全部渲染
-  await expect(panel.locator('.workflow-candidates')).toContainText('岗位已评估 6 人')
+  // 人选结果加载完成（岗位级口径，人数随轮次增长）+ 执行步骤 5 步全部渲染
+  await expect(panel.locator('.workflow-candidates')).toContainText(/岗位已评估 \d+ 人/)
   await expect(panel.locator('.workflow-step')).toHaveCount(5)
   // 渠道漏斗加载完成（该历史轮次无明细，显示回落文案，避免拍到加载中状态）
   await expect(panel.locator('.workflow-funnel')).toContainText('该轮未记录渠道明细')

@@ -1,0 +1,693 @@
+{
+  "meta": {
+    "version": "v1",
+    "created": "2026-07-23",
+    "case_id": "case_pengxinxu_fab",
+    "source": "鹏新旭项目管理表.xlsx（客户项目管理表：公司信息+98职位+推荐漏斗+顾问认领）",
+    "input_level": "L1.5（客户信息/硬过滤/禁挖名单齐全，目标公司池需按 fab 常识推导）",
+    "governance": "【受限】话术红线、禁挖名单、顾问手机号、offer金额为高度敏感字段：只进本地知识库 restricted 层，绝不进 Copilot 通用回答、推荐报告或任何对外输出"
+  },
+  "client_profile": {
+    "name": "深圳市鹏新旭技术有限公司",
+    "type": "Foundry（晶圆代工）",
+    "focus": "40nm/28nm 成熟逻辑工艺，深圳坪山，隶属深圳市重大产业投资集团，2022 年成立，产能建设期",
+    "comp_structure": "固定12薪 + 一般3个月年终奖；深圳一档社保，公积金5%；市场中上水平",
+    "interview_process": "一般三轮线上腾讯会议：业务面试(专业) → 资格面试(HR) → 综合面试(部门领导)",
+    "report_template": "嘉驰模板",
+    "asa_link": "ASA DB 岗位 #22「分析设备专家」属此客户；口头状态'已暂停'与 DB'已发布/推进中'不一致，待走 A 系统渠道落实"
+  },
+  "hard_filters": {
+    "只看12寸背景": "所有技术岗硬性过滤——8寸/6寸背景人选不推；这是 fab 客户最常见的'产线代际'过滤，策略 Agent 必须作为结构化硬条件",
+    "禁挖名单_受限": "见 restricted 字段",
+    "话术红线_受限": "见 restricted 字段"
+  },
+  "restricted": {
+    "banned_companies": [
+      "青岛芯恩",
+      "福建晋华",
+      "楚芯",
+      "方正微",
+      "鹏新旭",
+      "鹏芯微",
+      "昇微旭"
+    ],
+    "banned_rule": "指目前在职；已离职可正常推荐",
+    "scripts_redline": "1、薪资结构和社保公积金：固定12薪+一般三个月年终奖（大部分至少三个月，极少数人，会低于三个月），薪资具体面议，处于市场中上水平；薪资福利部分：没什么福利；社保公积金：深圳一档，公积金5%                                                                                                                                       2、面试流程：一般三轮线上腾讯视频会议面试，业务面试（专业）-资格面试（HR）-综合面试（部门领导）                                                                         3、推荐格式：用嘉驰模板即可；                                          4、话术需严格注意（避免触碰客户红线）：跟候选人沟通标准话术： \n1）意向不明确之前不用讲做什么，可以说是深圳一家做逻辑的代工厂\n2）如果刚兴趣 在介绍 鹏芯旭，候选人问工艺怎么答—行业里深耕的人，对公司内部认识，他们知晓不会问。中层以下的人不知道，可以回复听说它们家做Finfet 结构，具体什么工艺节点，保密性强，可以在面试中沟通。\n3）TD专家想看台湾人，但一定要问对中国共",
+    "pii_note": "顾问认领表含手机号，未抽取入库"
+  },
+  "position_landscape": {
+    "total": 97,
+    "by_module": {
+      "其他": 22,
+      "TD": 14,
+      "WET": 7,
+      "PIE": 5,
+      "IMP": 4,
+      "EPI": 4,
+      "Etch": 4,
+      "CMP": 3,
+      "量测": 3,
+      "FUR": 3,
+      "Litho": 3,
+      "CVD": 3,
+      "PVD": 3,
+      "产品": 2,
+      "YE": 2,
+      "MQE": 2,
+      "IT": 2,
+      "分析": 2,
+      "OPC": 2,
+      "AMHS": 1,
+      "办公": 1,
+      "Device": 1,
+      "成本": 1,
+      "内审": 1,
+      "QS": 1,
+      "PQE": 1
+    },
+    "level_year_mapping": {
+      "专家": "本科10年/硕士7年+（TD 系列普遍）",
+      "工程师": "5年+（量产模块普遍）",
+      "工程师_部分": "本科8年/硕士5年（如 YE）"
+    },
+    "location": "深圳（坪山区为主）",
+    "positions": [
+      {
+        "title": "AMHS软件专家",
+        "job_code": "J10949",
+        "location": "坪山区",
+        "requirements_years": "10"
+      },
+      {
+        "title": "办公装备服务专家",
+        "job_code": "J10948",
+        "location": "坪山区",
+        "requirements_years": "10"
+      },
+      {
+        "title": "Device专家",
+        "job_code": "J10804",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "WET设备专家",
+        "job_code": "J10219",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "WET工艺工程师",
+        "job_code": "J10217",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "WET工艺专家",
+        "job_code": "J10216",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "CMP设备工程师",
+        "job_code": "J10210",
+        "location": "",
+        "requirements_years": "5"
+      },
+      {
+        "title": "PIE技术专家（SRAM）",
+        "job_code": "J10944",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "成本核算专家",
+        "job_code": "J10943",
+        "location": "深圳市",
+        "requirements_years": "3"
+      },
+      {
+        "title": "产品工程专家（NPI）",
+        "job_code": "J10941",
+        "location": "",
+        "requirements_years": "10"
+      },
+      {
+        "title": "产品工程专家（良率）",
+        "job_code": "J10942",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "量测设备工程师",
+        "job_code": "J10339",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "YE工程师",
+        "job_code": "J10825",
+        "location": "坪山区",
+        "requirements_years": "5"
+      },
+      {
+        "title": "WET工艺工程师",
+        "job_code": "J10217",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IMP工艺工程师",
+        "job_code": "J10013",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "EPI设备工程师",
+        "job_code": "J10198",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "FUR设备工程师",
+        "job_code": "J10189",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "FUR工艺工程师",
+        "job_code": "J10010",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "EPI工艺工程师",
+        "job_code": "J10201",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "TD PIE技术专家",
+        "job_code": "J10084",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "内审经理",
+        "job_code": "J10912",
+        "location": "坪山区",
+        "requirements_years": "5"
+      },
+      {
+        "title": "PIE技术专家（BSL）",
+        "job_code": "J10939",
+        "location": "坪山区",
+        "requirements_years": "5"
+      },
+      {
+        "title": "MQE工程师",
+        "job_code": "J10245",
+        "location": "深圳市",
+        "requirements_years": ""
+      },
+      {
+        "title": "EPI设备专家",
+        "job_code": "",
+        "location": "深圳市",
+        "requirements_years": "6"
+      },
+      {
+        "title": "TD WET工艺专家",
+        "job_code": "J10935",
+        "location": "坪山区",
+        "requirements_years": "10"
+      },
+      {
+        "title": "TD PVD工艺专家",
+        "job_code": "J10934",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "TD MMT工艺专家",
+        "job_code": "J10933",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "TD Litho工艺专家",
+        "job_code": "J10932",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "TD Etch工艺专家",
+        "job_code": "J10931",
+        "location": "坪山区",
+        "requirements_years": ""
+      },
+      {
+        "title": "TD EPI工艺专家",
+        "job_code": "J10930",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "TD DIFF工艺专家",
+        "job_code": "J10929",
+        "location": "坪山区",
+        "requirements_years": "6"
+      },
+      {
+        "title": "TD CVD工艺专家",
+        "job_code": "J10928",
+        "location": "坪山区",
+        "requirements_years": "10"
+      },
+      {
+        "title": "TD CMP工艺专家",
+        "job_code": "J10927",
+        "location": "坪山区",
+        "requirements_years": "10"
+      },
+      {
+        "title": "WAT测试工程师",
+        "job_code": "J10913",
+        "location": "深圳市",
+        "requirements_years": ""
+      },
+      {
+        "title": "DBA专家",
+        "job_code": "J10081",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "AI算法工程师",
+        "job_code": "J10895",
+        "location": "坪山区",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IT-CIM专家",
+        "job_code": "J10280",
+        "location": "深圳市",
+        "requirements_years": "12"
+      },
+      {
+        "title": "PMC专家",
+        "job_code": "J10905",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "PIE工程师",
+        "job_code": "J10827",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "PIE技术专家",
+        "job_code": "J10828",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "YE技术专家",
+        "job_code": "J10829",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "IT运维管理专家（",
+        "job_code": "J10812",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "数据分析工程师",
+        "job_code": "J10809",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "EES专家",
+        "job_code": "J10284",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "分析设备专家",
+        "job_code": "J10800",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "OPS专家",
+        "job_code": "J10785",
+        "location": "坪山区",
+        "requirements_years": ""
+      },
+      {
+        "title": "网络专家",
+        "job_code": "J10290",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "AI技术专家",
+        "job_code": "J10759",
+        "location": "坪山区",
+        "requirements_years": "6"
+      },
+      {
+        "title": "薪酬福利专家",
+        "job_code": "J10748",
+        "location": "坪山区",
+        "requirements_years": "8"
+      },
+      {
+        "title": "Infra运维工程师",
+        "job_code": "J10050",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "QS专家",
+        "job_code": "J10251",
+        "location": "深圳市",
+        "requirements_years": "3"
+      },
+      {
+        "title": "可靠性测试工程师",
+        "job_code": "J10387",
+        "location": "深圳市",
+        "requirements_years": "3"
+      },
+      {
+        "title": "MES专家",
+        "job_code": "J10282",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "K8s运维工程师",
+        "job_code": "J10409",
+        "location": "深圳市",
+        "requirements_years": "3"
+      },
+      {
+        "title": "APC工程师",
+        "job_code": "J10405",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "MQE专家",
+        "job_code": "J10244",
+        "location": "深圳市",
+        "requirements_years": ""
+      },
+      {
+        "title": "量测设备专家",
+        "job_code": "J10338",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "PQE专家",
+        "job_code": "J10249",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "厂务-气化专家",
+        "job_code": "J10266",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "WET设备工程师",
+        "job_code": "J10220",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "WET设备专家",
+        "job_code": "J10219",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "WET工艺专家",
+        "job_code": "J10216",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "FUR设备专家",
+        "job_code": "J10188",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "Litho设备工程师",
+        "job_code": "J10186",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IMP设备工程师",
+        "job_code": "J10192",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IMP设备专家",
+        "job_code": "J10191",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "RTP设备工程师",
+        "job_code": "J10195",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "CVD设备工程师",
+        "job_code": "J10204",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "CVD设备专家",
+        "job_code": "J10203",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "EPI工艺专家",
+        "job_code": "J10200",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "Etch设备工程师",
+        "job_code": "J10213",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "Etch设备专家",
+        "job_code": "J10212",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "PVD设备工程师",
+        "job_code": "J10207",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "Etch工艺专家",
+        "job_code": "J10006",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "Etch工艺工程师",
+        "job_code": "J10007",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IMP工艺专家",
+        "job_code": "J10012",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "CVD工艺专家",
+        "job_code": "J10018",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "CMP工艺专家",
+        "job_code": "J10024",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "PVD工艺专家",
+        "job_code": "J10021",
+        "location": "深圳市",
+        "requirements_years": "10"
+      },
+      {
+        "title": "PVD工艺工程师",
+        "job_code": "J10022",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "量测技术专家",
+        "job_code": "J10027",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "CMP工艺工程师",
+        "job_code": "J10025",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "制造工程师",
+        "job_code": "J10032",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "EES工程师",
+        "job_code": "J10044",
+        "location": "深圳市",
+        "requirements_years": "1"
+      },
+      {
+        "title": "TD PIE工程师",
+        "job_code": "J10085",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "TD YE技术专家",
+        "job_code": "J10087",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "OPC技术专家",
+        "job_code": "J10096",
+        "location": "深圳市",
+        "requirements_years": "8"
+      },
+      {
+        "title": "OPC工程师",
+        "job_code": "J10097",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IE工程师",
+        "job_code": "J10103",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "MC工程师",
+        "job_code": "J10106",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "IE专家",
+        "job_code": "J10112",
+        "location": "深圳市",
+        "requirements_years": "15"
+      },
+      {
+        "title": "RE技术专家",
+        "job_code": "J10129",
+        "location": "深圳市",
+        "requirements_years": ""
+      },
+      {
+        "title": "Litho工艺工程师",
+        "job_code": "J10157",
+        "location": "深圳市",
+        "requirements_years": "5"
+      },
+      {
+        "title": "Litho工艺专家",
+        "job_code": "J10156",
+        "location": "深圳市",
+        "requirements_years": ""
+      },
+      {
+        "title": "目前HR部分重点职位：                                                                                                                                                                                                                1、Sylvia(对接生产的招聘）:IMP设备专家/工程师、FUR设备专家/工程师、CMP工艺专家/工程师、WET工艺专家、WET设备专家/工程师、Litho工艺专家/工程师、气化专家,工程师需要资深一点的，本科六年硕士四年以上;                                                                                                                               2、Avila（对接研发、OP PIE、YE&MMT的招聘）：TD YE工程师/专家、TD PIE专家/工程师、OPC专家/工程师、OP YE专家/工程师、OP PIE专家/工程师、量测技术专家。工程师需要资深一点的，工作经验为本科毕业六年、硕士毕业四年以上；                                                                                             3、Keri（负责IT、质量、IE、PMC等部门）：CIM专家、EES 主任/专家（有FDC、APC、OEE经验都可）、MES 主任/专家；（MES系统）、OPS系统运维主任工（K8s容器经验）、数据分析主任工（Python语言，进行数据分析、数据挖掘、数据建模、数据可视化等）、质量：MQE主任/专家（半导体行业SQE），目前IT 岗位比较紧需CIM方向；                                                                                                                                                                                                                         备注：                                                                                                                                                                                                                                          1、TD PIE/YE  7/5/3nm以内，TD PIE专家想看台湾专家，7nm以内优先，OPC可以看乙方的，OPC eda的可以看，PIE YE OPC工程师和专家岗位数量不上限，工程师要求6年相关工作经验，专家岗要求12年相关工作经验；                                                                                                                          2、量测专家需求2位；                                                                                                                                                                                                                3、OP PIE专家需求5个，制程都是7nm以下，OP YE专家需求5个，制程都是7nm以下；                                                                                                                         4、OP：炉管设备专家需求1个，CMP PE专家一个，离子注入  PE专家需求1个，EE专家1个，WET PE/EE专家需求各2个，WET EE工程师需求5个;                            5、Litho PE专家需求1位（至少有浸润式工艺背景）；                                                                                                                                                          6、TSMC、中芯南方、ICRD离职的人，数量不限；专家只看台湾的，工程师国内大厂都可以看；                                                                                         7、IT线比较弱，都可以推荐，专家数量不限，争取2月底之前要把所有岗位搞定，数据分析需求2个，IT运维专家需求1个（除了禁挖名单以外，富芯、鼎泰、积塔、也不看），OPS运维专家需求1个，MQE主任需求3个，专家需求1位，PMC部长需求两个方向：PC（订单管理）和MC（物料管理），要求12寸大厂，硕士学历。",
+        "job_code": "",
+        "location": "",
+        "requirements_years": ""
+      },
+      {
+        "title": "目前已暂停岗位：PIE",
+        "job_code": "J10827",
+        "location": "",
+        "requirements_years": ""
+      },
+      {
+        "title": "新增岗位：TD PIE工程师",
+        "job_code": "J10085",
+        "location": "",
+        "requirements_years": ""
+      }
+    ]
+  },
+  "funnel_snapshot": {
+    "推荐记录条数": 30,
+    "status_distribution": {
+      "推荐待反馈": 8,
+      "用人部门淘汰": 4,
+      "pass": 3,
+      "面试淘汰": 2,
+      "待一面": 1,
+      "offered": 1,
+      "待定": 1,
+      "重复": 1,
+      "待二面": 1,
+      "一面待反馈": 1,
+      "约面": 1,
+      "约面 测评": 1,
+      "推荐反馈中": 1,
+      "一面中": 1,
+      "二面中": 1,
+      "淘汰": 1,
+      "简历淘汰": 1
+    },
+    "note": "IT运维管理专家霍晓飞已 offer 入职（2026-04-01，Demi）；WET/CVD/PIE/量测多岗有推进；淘汰原因多为'用人部门淘汰'"
+  },
+  "strategy_derivation_example": {
+    "说明": "fab 类岗位的目标池推导规则（L1.5 输入下的标准动作）",
+    "target_pool_rule": "12寸逻辑 fab 同模块人选：中芯国际、华虹、晶合集成、粤芯、积塔、武汉新芯、长鑫(DRAM 需注意其存储背景是否被接受)、长江存储等 → 再应用硬过滤（12寸）与禁挖名单",
+    "conflict_note": "禁挖名单中的芯恩/晋华/方正微本是 12 寸逻辑对口池，被禁后 T1 池明显收窄——此类'禁挖收窄'必须在策略预期中体现（预估召回下调）",
+    "tw_hiring_note": "TD 专家岗客户接受特定背景人选但有额外筛选条件（restricted），策略层只记录'有附加筛选条件'，细节留 restricted 层"
+  },
+  "cross_case_rules": [
+    "规律4：fab 客户的头号硬过滤是'产线代际'（只看12寸）+ 模块对口，优先级高于学历年限",
+    "规律5：禁挖名单会把最对口的池子挖掉一块，策略的预期召回必须按'禁挖后净池'估算",
+    "规律6：产能建设期的新 fab（2022 年成立）大量岗位是'0到1搭建'型（AMHS/新产线导入），'有搭建经验'比'维护经验'更值钱——评估证据链要区分这两类经验"
+  ]
+}

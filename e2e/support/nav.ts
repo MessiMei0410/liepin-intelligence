@@ -2,7 +2,7 @@ import type { Locator, Page } from '@playwright/test'
 import { expect } from './fixtures'
 
 // 数据锚点（来自正式库只读副本，每次运行由 global-setup 新鲜复制）：
-// 岗位 #154 士兰微·技术市场经理/总监（PC电源）共 6 位人选；
+// 岗位 #154 士兰微·技术市场经理/总监（PC电源），人选数随真实业务增长（断言从 API 取期望值）；
 // #559 衣**（S1 在推）、#563 唐**（H5 已停止）；
 // workflow_1076e0e1d5d5 = blocked + completed_needs_review 的真实业务终态样本。
 export const JOB_ID = 154

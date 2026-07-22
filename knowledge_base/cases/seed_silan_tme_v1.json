@@ -1,0 +1,325 @@
+{
+  "meta": {
+    "version": "v1.1",
+    "created": "2026-07-23",
+    "source": "技术市场需求梳理(士兰微260630).xlsx（客户提供的需求梳理，Kimi 整理）",
+    "calibrated_by": "顾问本人",
+    "usage": "知识库 Agent 种子数据 + 策略 Agent 校准基准；五步判断树的第 2/4 步直接消费本文件",
+    "calibrated": "2026-07-23 顾问口头校准 4 项全部确认"
+  },
+  "job_archetype": {
+    "archetype_id": "tme_computing_power",
+    "title": "技术市场经理/总监（TME，计算电源管理方向）",
+    "client": "士兰微",
+    "client_profile": "IDM 功率半导体原厂；本产品线为计算/服务器/车载场景的多相控制器、DrMOS、POL、eFuse 等电源管理器件",
+    "essence": "面向整机/车企客户的技术型市场岗：识别下一代产品机会、主导立项、技术宣讲与培训、协助 FAE 解决复杂问题、制作推广材料、负责项目导入。要求既懂器件与应用，又懂客户端需求。",
+    "directions": [
+      {
+        "name": "PC",
+        "customers": [
+          "联想",
+          "联宝",
+          "荣耀"
+        ],
+        "products": [
+          "多相控制器",
+          "DrMOS",
+          "POL"
+        ],
+        "competitors": [
+          "MPS",
+          "矽力杰",
+          "杰华特"
+        ]
+      },
+      {
+        "name": "服务器三次电源（板级电源）",
+        "customers": [
+          "浪潮",
+          "新华三"
+        ],
+        "products": [
+          "多相控制器",
+          "DrMOS",
+          "eFuse",
+          "POL"
+        ],
+        "competitors": [
+          "MPS",
+          "矽力杰",
+          "杰华特",
+          "晶丰明源"
+        ]
+      },
+      {
+        "name": "ADAS",
+        "customers": [
+          "蔚来",
+          "比亚迪",
+          "零跑",
+          "吉利",
+          "小鹏",
+          "理想"
+        ],
+        "products": [
+          "多相控制器",
+          "DrMOS"
+        ],
+        "competitors": [
+          "MPS",
+          "矽力杰",
+          "杰华特"
+        ]
+      }
+    ],
+    "location_policy": "杭州优先；其他地方看人选沟通情况",
+    "target_functions": [
+      "TME",
+      "FAE",
+      "AE",
+      "电源工程师"
+    ]
+  },
+  "target_company_pool": {
+    "T1_competitor_device": {
+      "rationale": "同赛道功率半导体原厂，做多相/DrMOS/POL 的 TME/FAE/AE/电源工程师，产品与客户结构最接近，迁移成本最低",
+      "companies": [
+        {
+          "name": "MPS（芯源系统）",
+          "tier": "T1",
+          "directions": [
+            "PC",
+            "服务器",
+            "ADAS"
+          ]
+        },
+        {
+          "name": "矽力杰",
+          "tier": "T1",
+          "directions": [
+            "PC",
+            "服务器",
+            "ADAS"
+          ]
+        },
+        {
+          "name": "杰华特",
+          "tier": "T1",
+          "directions": [
+            "PC",
+            "服务器",
+            "ADAS"
+          ]
+        },
+        {
+          "name": "晶丰明源",
+          "tier": "T1",
+          "directions": [
+            "服务器"
+          ]
+        }
+      ]
+    },
+    "T2_customer_OEM": {
+      "rationale": "客户整机/车企内的电源工程师：深懂客户端应用与工况，转入器件原厂做技术市场是常见路径；客户明确把客户名列入检索词",
+      "companies": [
+        {
+          "name": "联想",
+          "directions": [
+            "PC"
+          ]
+        },
+        {
+          "name": "联宝",
+          "directions": [
+            "PC"
+          ]
+        },
+        {
+          "name": "荣耀",
+          "directions": [
+            "PC"
+          ]
+        },
+        {
+          "name": "浪潮",
+          "directions": [
+            "服务器"
+          ]
+        },
+        {
+          "name": "新华三",
+          "directions": [
+            "服务器"
+          ]
+        },
+        {
+          "name": "蔚来",
+          "directions": [
+            "ADAS"
+          ]
+        },
+        {
+          "name": "比亚迪",
+          "directions": [
+            "ADAS"
+          ]
+        },
+        {
+          "name": "零跑",
+          "directions": [
+            "ADAS"
+          ]
+        },
+        {
+          "name": "吉利",
+          "directions": [
+            "ADAS"
+          ]
+        },
+        {
+          "name": "小鹏",
+          "directions": [
+            "ADAS"
+          ]
+        },
+        {
+          "name": "理想",
+          "directions": [
+            "ADAS"
+          ]
+        }
+      ]
+    },
+    "T3_adjacent_unconfirmed": {
+      "rationale": "已启用（顾问确认）：其他有多相/DrMOS/POL 产品线的原厂与大型方案商/代理商技术市场；优先级按市场上公司在该领域的实际能力排",
+      "enabled": true,
+      "ranking_principle": "按多相控制器/DrMOS/POL 领域的产品能力与人才密度排序，非按公司规模",
+      "companies": [
+        {
+          "name": "南芯科技",
+          "priority": 1,
+          "note": "国内电源管理 IC 第一梯队，电荷泵/DC-DC 强"
+        },
+        {
+          "name": "希荻微",
+          "priority": 2,
+          "note": "DC-DC/电源管理实力强，消费电子+车载"
+        },
+        {
+          "name": "TI（德州仪器）",
+          "priority": 3,
+          "note": "多相/DrMOS 全球标杆，国内相关团队规模有限"
+        },
+        {
+          "name": "英飞凌",
+          "priority": 4,
+          "note": "功率+电源管理全线，DrMOS 有布局"
+        },
+        {
+          "name": "安森美",
+          "priority": 5,
+          "note": "DrMOS/多相有产品线"
+        },
+        {
+          "name": "ST（意法半导体）",
+          "priority": 6,
+          "note": "电源管理全线"
+        },
+        {
+          "name": "大型方案商/代理商技术市场",
+          "priority": 7,
+          "note": "懂器件+懂客户应用，作为补充池"
+        }
+      ],
+      "note": "排序为按顾问原则的初始建议，可在复盘中再调"
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "competitor_tme",
+      "targets": "T1 友商技术市场/应用序列",
+      "terms": [
+        "MPS",
+        "矽力杰",
+        "杰华特",
+        "晶丰明源",
+        "TME",
+        "FAE",
+        "AE",
+        "电源工程师",
+        "多相控制器",
+        "DrMOS",
+        "POL"
+      ]
+    },
+    {
+      "group": "customer_power",
+      "targets": "T2 客户整机厂电源工程师",
+      "terms": [
+        "联想",
+        "联宝",
+        "荣耀",
+        "浪潮",
+        "新华三",
+        "蔚来",
+        "比亚迪",
+        "零跑",
+        "吉利",
+        "小鹏",
+        "理想",
+        "电源工程师"
+      ]
+    },
+    {
+      "group": "product_tech",
+      "targets": "跨公司产品技术词兜底",
+      "terms": [
+        "多相控制器",
+        "DrMOS",
+        "POL",
+        "eFuse",
+        "板级电源",
+        "三次电源",
+        "VRM"
+      ]
+    }
+  ],
+  "negative_rules": [
+    "方向词不用“PC电源”字面（客户语义是 Computing 电源管理器件：多相/DrMOS/POL）",
+    "行业不放宽：排除非半导体/非电源背景",
+    "纯分立器件背景（只做 IGBT/MOS 单管、无多相/DrMOS 产品线经验）：不排除，降级为备选，排在有多相/DrMOS 经验人选之后"
+  ],
+  "skills_ontology_nodes": [
+    "多相控制器",
+    "DrMOS",
+    "POL",
+    "eFuse",
+    "VRM",
+    "板级电源",
+    "三次电源",
+    "AC-DC",
+    "DC-DC",
+    "ADAS 电源",
+    "服务器电源",
+    "客户导入",
+    "参考设计"
+  ],
+  "review_notes_round3": {
+    "hypothesis": "第 3 轮 0 高分的主因是策略锁定“PC电源”方向词而非“多相/DrMOS/POL 器件 + 友商/客户公司池”，关键词体系与客户真实语义错位",
+    "evidence_to_check": "第 4 轮按本文件重建关键词组后，对比猎聘/X-SaaS 召回量与高分率变化（agent_sourcing_funnel 直接可读）"
+  },
+  "level_mapping": {
+    "job_title_range": "经理/总监",
+    "accepted_candidate_levels": [
+      "主管",
+      "高级工程师",
+      "资深工程师",
+      "经理",
+      "总监",
+      "副总"
+    ],
+    "note": "客户接受范围宽：主管到副总都可以看；评估时按‘独立负责过产品线/客户方向’而非 title 定档，title 相近而职责偏执行的人选降档",
+    "applies_to": "tme_computing_power 原型；电源管理方向其他岗位可复用"
+  }
+}
