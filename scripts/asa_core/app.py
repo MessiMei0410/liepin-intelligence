@@ -60,6 +60,15 @@ class CopilotMessage(WriteEnvelope):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class CopilotIntentConfirm(WriteEnvelope):
+    intent: dict[str, Any] = Field(default_factory=dict)
+    intent_hash: str = ""
+    candidate_id: int = 0
+    preflight_token: str = ""
+    message: str = ""
+    session_id: str = ""
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -197,6 +206,24 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def copilot(body: CopilotMessage, idempotency_key: str = Header(alias="Idempotency-Key")) -> dict[str, Any]:
         return idem("copilot.message", body, idempotency_key, "copilot_session", body.session_id or "new",
                     lambda: core.copilot(body.message, session_id=body.session_id, context=body.context))
+
+    @app.post("/api/v1/copilot/intents/confirm")
+    def copilot_intent_confirm(body: CopilotIntentConfirm, idempotency_key: str = Header(alias="Idempotency-Key")):
+        if not body.candidate_id:
+            raise HTTPException(400, "candidate_id is required")
+        if not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
+        if not body.intent_hash:
+            raise HTTPException(400, "intent_hash is required")
+        return idem("copilot.intent_confirm", body, idempotency_key, "job_candidate", str(body.candidate_id),
+                    lambda: core.confirm_copilot_intent(
+                        body.intent,
+                        intent_hash=body.intent_hash,
+                        candidate_id=body.candidate_id,
+                        preflight_token=body.preflight_token,
+                        message=body.message,
+                        session_id=body.session_id,
+                    ))
 
     def idem(operation: str, body: WriteEnvelope, key: str, target_type: str, target_id: str, action):
         try:

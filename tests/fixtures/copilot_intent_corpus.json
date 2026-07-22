@@ -1,0 +1,62 @@
+{
+  "version": "r9-2026-07-22",
+  "description": "ASA Copilot 意图结构化语料清单（PRD 阶段 4 R9）：message → 期望解析结果。tier=direct 表示沿用既有直写链路；tier=confirm 表示只产出 pending_intent，确认后才写入；kind=none 表示不得产生任何写入意图。供前端确认卡片与后续模型切换回归复用。",
+  "schema": {
+    "kind": "candidate_action | candidate_update | none",
+    "action": "stop | recommend | contact | advance | read_no_reply | \"\"",
+    "tier": "direct | confirm | \"\""
+  },
+  "entries": [
+    {"message": "这个人选复核不通过", "expected": {"tier": "direct", "kind": "candidate_action", "action": "stop"}, "note": "既有直写短句，兼容期保持不变"},
+    {"message": "停止推进", "expected": {"tier": "direct", "kind": "candidate_action", "action": "stop"}, "note": "既有直写短句"},
+    {"message": "淘汰", "expected": {"tier": "direct", "kind": "candidate_action", "action": "stop"}, "note": "既有直写短句"},
+    {"message": "这个人选已推荐给客户", "expected": {"tier": "direct", "kind": "candidate_action", "action": "recommend"}, "note": "既有直写短句"},
+    {"message": "推荐给客户", "expected": {"tier": "direct", "kind": "candidate_action", "action": "recommend"}, "note": "既有直写短句"},
+    {"message": "这个人选已联系", "expected": {"tier": "direct", "kind": "candidate_action", "action": "contact"}, "note": "既有直写短句"},
+    {"message": "已联系", "expected": {"tier": "direct", "kind": "candidate_action", "action": "contact"}, "note": "既有直写短句"},
+    {"message": "复核通过", "expected": {"tier": "direct", "kind": "candidate_action", "action": "advance"}, "note": "既有直写短句"},
+    {"message": "这个候选人继续推进", "expected": {"tier": "direct", "kind": "candidate_action", "action": "advance"}, "note": "既有直写短句"},
+    {"message": "这个人选已读不回", "expected": {"tier": "direct", "kind": "candidate_update", "action": "read_no_reply"}, "note": "既有直写跟进记录"},
+    {"message": "记录一下，这个人选消息已读未回", "expected": {"tier": "direct", "kind": "candidate_update", "action": "read_no_reply"}, "note": "既有直写跟进记录"},
+
+    {"message": "这人不合适，停了吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 同义句：否定评价+停顿搭配"},
+    {"message": "感觉不太行，别推了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 同义句"},
+    {"message": "先别联系他了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 同义句：先别+联系"},
+    {"message": "客户说算了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 同义句：客户放弃"},
+    {"message": "这个人先放一放，不推进了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 同义句：搁置+不推进"},
+    {"message": "先别推给客户", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "stop"}, "note": "stop 优先于 recommend：先别+推给客户落在 stop"},
+
+    {"message": "这个可以，约面试吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "advance 同义句：肯定+约面试"},
+    {"message": "挺好的，继续往下推吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "advance 同义句"},
+    {"message": "简历没问题，通过吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "advance 同义句"},
+    {"message": "这个人不错，安排面试", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "advance 同义句"},
+
+    {"message": "我跟他电话聊过了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "contact 同义句"},
+    {"message": "微信上已经沟通过了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "contact 同义句"},
+    {"message": "昨天给他打过电话了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "contact 同义句"},
+    {"message": "已经和本人对接上了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "contact 同义句"},
+
+    {"message": "可以推给客户了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
+    {"message": "发给客户看看吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
+    {"message": "客户那边可以推了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
+    {"message": "这个人直接报给客户吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
+
+    {"message": "这个人选已读不回怎么办", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "这人不合适，要不要停？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "感觉他不太行，该怎么处理？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "要不要先别联系他？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "这个可以约面试吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "客户说算了是什么意思？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "停止推进后还能恢复吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "现在推荐给这个客户合适吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "淘汰这个人会影响客户评价吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "他多久没回消息了？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "为什么不推进这个人？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
+    {"message": "先别联系他了，行吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写：动作搭配+商量语气仍是询问句"},
+
+    {"message": "先不约面试", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+约面试不得判 advance"},
+    {"message": "还没联系上他", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：没+联系上不得判 contact"},
+    {"message": "没聊过，只是发了消息", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：没+聊过不得判 contact"},
+    {"message": "不推给客户了", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+推给客户不得判 recommend"}
+  ]
+}

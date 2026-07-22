@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .database import DEFAULT_DB, connect, json_value, transaction
+from .intent import (
+    direct_candidate_action,
+    direct_candidate_update,
+    intent_signature,
+    parse_candidate_intent,
+)
 
 
 STOP_TOKENS = ("停止", "淘汰", "不推进", "拒绝", "关闭")
@@ -26,6 +32,14 @@ CANDIDATE_UPDATE_LABELS = {
     "read_no_reply": "已读未回复",
 }
 
+# 确认通道文案：新识别出的意图不直写，先由用户确认（PRD 阶段 4 R9）。
+CANDIDATE_ACTION_CONFIRM_TEXTS = {
+    "advance": "将标记 {name} 复核通过并继续推进，确认？",
+    "contact": "将记录 {name} 已联系，确认？",
+    "recommend": "将记录 {name} 已推荐给客户，确认？",
+    "stop": "将停止推进 {name}，确认？",
+}
+
 
 def _row(row: Any) -> dict[str, Any]:
     return dict(row) if row else {}
@@ -37,58 +51,13 @@ def _is_stopped(stage: Any, raw_status: Any) -> bool:
 
 
 def _explicit_candidate_action(message: str) -> str:
-    text = re.sub(r"[\s，。！？!?、；;：:]+", "", str(message or ""))
-    rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        (
-            "stop",
-            (
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:复核|初筛|筛选)(?:不通过|未通过|失败)$",
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:停止推进|停止|淘汰)$",
-                r"^(?:停止推进|停止|淘汰)(?:这个|该|当前)?(?:人选|候选人)?$",
-            ),
-        ),
-        (
-            "recommend",
-            (
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:已经|已)?推荐(?:给客户)?(?:了)?$",
-                r"^(?:已经|已)?(?:把)?(?:这个|该|当前)?(?:人选|候选人)推荐给客户(?:了)?$",
-            ),
-        ),
-        (
-            "contact",
-            (
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:已经|已)?联系(?:过|了)?$",
-                r"^(?:我)?(?:已经|已)?联系(?:过)?(?:这个|该|当前)?(?:人选|候选人)(?:了)?$",
-            ),
-        ),
-        (
-            "advance",
-            (
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:复核|初筛|筛选)(?:通过|合格)$",
-                r"^(?:复核|初筛|筛选)(?:通过|合格)(?:这个|该|当前)?(?:人选|候选人)?$",
-                r"^(?:这个|该|当前)?(?:人选|候选人)?(?:可以|继续)推进$",
-                r"^(?:继续推进)(?:这个|该|当前)?(?:人选|候选人)?$",
-            ),
-        ),
-    )
-    for action, patterns in rules:
-        if any(re.fullmatch(pattern, text) for pattern in patterns):
-            return action
-    return ""
+    # 直写层已迁入 asa_core.intent（R9 分层解析器），语义逐字保留。
+    return direct_candidate_action(message)
 
 
 def _explicit_candidate_update(message: str) -> str:
-    raw = str(message or "")
-    text = re.sub(r"\s+", "", raw)
-    if not re.search(r"已读(?:不回|未回|没回|未回复|没有回复)", text):
-        return ""
-    question = re.search(r"(?:怎么|如何|怎么办|是否|要不要|能不能|可以吗)", text)
-    write_intent = re.search(r"(?:记录(?:一下|下)?|备注(?:一下|下)?|标记(?:一下|下)?|更新(?:为|一下)?|同步|记一下)", text)
-    if question and not re.search(r"(?:请|帮我|直接|记录下|备注下|标记为|更新为)", text):
-        return ""
-    if write_intent or re.fullmatch(r"(?:这个|该|当前)?(?:人选|候选人)?已读(?:不回|未回|没回|未回复|没有回复)", text):
-        return "read_no_reply"
-    return ""
+    # 直写层已迁入 asa_core.intent（R9 分层解析器），语义逐字保留。
+    return direct_candidate_update(message)
 
 
 def _candidate_action_already_applied(detail: dict[str, Any], action: str) -> bool:
@@ -217,7 +186,60 @@ class CoreService:
                 surface="asa_copilot",
             )
 
-        result = self.agent_service.copilot(message, session_id=session_id, context=raw_context)
+        # R9：直写层未命中时走分层解析的确认层。新识别出的意图不直写，
+        # 产出 pending_intent（含签名 + preflight token），由确认端点执行。
+        pending_intent: dict[str, Any] | None = None
+        pending_blocked = ""
+        pending_unresolved = False
+        confirm_intent: dict[str, Any] = {}
+        if not action and not update_type:
+            parsed_intent = parse_candidate_intent(message)
+            if parsed_intent.get("tier") == "confirm" and parsed_intent.get("kind") == "candidate_action":
+                confirm_intent = parsed_intent
+                pending_action = str(parsed_intent["action"])
+                if not candidate_id:
+                    # 目标指代无法唯一定位：只追问，绝不产生 pending_intent。
+                    pending_unresolved = True
+                else:
+                    detail = self.candidate(candidate_id)["candidate"]
+                    if detail["is_stopped"] and pending_action != "stop":
+                        pending_blocked = "该人选已经停止推进，不能直接执行新的推进动作；如需重启，请先做人工状态纠正。"
+                    elif _candidate_action_already_applied(detail, pending_action):
+                        pass  # 已处于目标状态：无需确认，按普通问答处理
+                    else:
+                        try:
+                            preflight = self.candidate_preflight(candidate_id, pending_action)
+                        except ValueError as exc:
+                            pending_blocked = str(exc)
+                        else:
+                            pending_message = re.sub(r"\s+", " ", str(message or "")).strip()
+                            pending_intent = {
+                                "kind": "candidate_action",
+                                "action": pending_action,
+                                "action_label": CANDIDATE_ACTION_LABELS[pending_action],
+                                "target_scope": "current_candidate",
+                                "confidence": parsed_intent["confidence"],
+                                "reason": parsed_intent["reason"],
+                                "candidate": {
+                                    "id": candidate_id,
+                                    "name": detail["name"],
+                                    "stage": detail.get("clean_stage"),
+                                    "job": detail.get("job"),
+                                    "client": detail.get("client"),
+                                },
+                                "confirm_text": CANDIDATE_ACTION_CONFIRM_TEXTS[pending_action].format(name=detail["name"]),
+                                "intent_hash": intent_signature("candidate_action", pending_action, candidate_id, pending_message),
+                                "preflight_token": preflight["token"],
+                                "expires_at": preflight["expires_at"],
+                                "message": pending_message,
+                            }
+
+        agent_context = dict(raw_context)
+        if confirm_intent:
+            # 该消息是候选人写入指令（待确认），抑制工作流级意图路由，
+            # 防止同一条消息既产生确认卡片又建立/启动工作流。
+            agent_context["suppress_goal_intent"] = True
+        result = self.agent_service.copilot(message, session_id=session_id, context=agent_context)
         if action_result:
             action_label = CANDIDATE_ACTION_LABELS[action]
             result["candidate_action"] = action_result
@@ -243,7 +265,16 @@ class CoreService:
             result["answer"] = "这条跟进记录尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
             result["suggested_actions"] = []
             result["write_blocked"] = True
-        if action or update_type:
+        elif pending_intent:
+            result["pending_intent"] = pending_intent
+            result["answer"] = f"{pending_intent['confirm_text']}\n\n未确认前不会写入 ASA。"
+        elif pending_blocked:
+            result["answer"] = f"这条指令未写入 ASA：{pending_blocked}"
+            result["write_blocked"] = True
+        elif pending_unresolved:
+            result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
+            result["write_blocked"] = True
+        if action or update_type or pending_intent:
             result_session_id = str(result.get("session_id") or session_id or "")
             if result_session_id:
                 structured = {
@@ -254,6 +285,8 @@ class CoreService:
                 }
                 if candidate_update_result:
                     structured["candidate_update"] = candidate_update_result
+                if pending_intent:
+                    structured["pending_intent"] = pending_intent
                 with transaction(self.db_path) as conn:
                     conn.execute(
                         """
@@ -267,6 +300,75 @@ class CoreService:
                         (result["answer"], json.dumps(structured, ensure_ascii=False), result_session_id),
                     )
         return result
+
+    def confirm_copilot_intent(
+        self,
+        intent: dict[str, Any],
+        *,
+        intent_hash: str,
+        candidate_id: int,
+        preflight_token: str,
+        message: str = "",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """执行已确认的候选人意图（PRD 阶段 4 R9 确认通道）。
+
+        重新校验意图签名与候选人当前状态（防状态漂移），命中后走与直写
+        相同的 candidate_commit（preflight token）→ 审计 → 幂等链路。
+        任何校验失败抛 ValueError，由 API 层映射为 409。
+        """
+        payload_intent = dict(intent or {})
+        kind = str(payload_intent.get("kind") or "")
+        confirmed_action = str(payload_intent.get("action") or "")
+        if kind != "candidate_action" or confirmed_action not in CANDIDATE_ACTION_LABELS:
+            raise ValueError("不支持确认的意图类型，请回到会话重新发起")
+        try:
+            target_id = int(candidate_id)
+        except (TypeError, ValueError):
+            raise ValueError("意图目标缺失，请回到会话重新发起") from None
+        normalized = re.sub(r"\s+", " ", str(message or payload_intent.get("message") or "")).strip()
+        expected_hash = intent_signature(kind, confirmed_action, target_id, normalized)
+        if not intent_hash or not secrets.compare_digest(expected_hash, str(intent_hash)):
+            raise ValueError("意图签名校验失败，请回到会话重新发起确认")
+        if not preflight_token:
+            raise ValueError("缺少 preflight token，请回到会话重新发起确认")
+
+        request_seed = f"{session_id}|{target_id}|{confirmed_action}|confirm|{normalized}"
+        request_hash = hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:20]
+        request_id = f"copilot_intent_confirm_{request_hash}"
+
+        def commit_action() -> dict[str, Any]:
+            # candidate_commit 内部重新校验 preflight token 与候选人当前
+            # 状态：确认期间被停止的人选对任何动作（含重复停止）都会在此
+            # 抛 ValueError → 409，沿用既有“已停止的再停止→409”语义。
+            return self.candidate_commit(
+                target_id,
+                confirmed_action,
+                f"ASA Copilot 确认指令：{normalized[:160]}",
+                preflight_token,
+            )
+
+        action_result, _ = self.execute_idempotent(
+            operation="candidate.commit",
+            request_id=request_id,
+            idempotency_key=request_id,
+            payload={"candidate_id": target_id, "action": confirmed_action, "message": normalized, "channel": "copilot_intent_confirm"},
+            target_type="job_candidate",
+            target_id=str(target_id),
+            action=commit_action,
+            actor="user",
+            surface="asa_copilot",
+        )
+        detail = self.candidate(target_id)["candidate"]
+        action_label = CANDIDATE_ACTION_LABELS[confirmed_action]
+        return {
+            "ok": True,
+            "candidate_action": action_result,
+            "answer": (
+                f"已确认并同步到 ASA：{detail['name']} {action_label}，"
+                f"当前阶段为“{action_result.get('stage') or detail.get('clean_stage') or '已更新'}”。"
+            ),
+        }
 
     def dashboard(self) -> dict[str, Any]:
         conn = connect(self.db_path)

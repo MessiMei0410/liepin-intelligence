@@ -4413,7 +4413,11 @@ class AgentService:
             r"(?:确认|锁定).*(?:offer|Offer|入职条件)",
             r"(?:记住|沉淀|保存).*(?:规则|经验|记忆)",
         )
-        if auto_start_sourcing or any(re.search(pattern, message, re.I) for pattern in goal_patterns):
+        # R9：CoreService 判定该消息是待确认的候选人写入意图时置
+        # suppress_goal_intent，此处不再路由工作流级目标（防止同一条
+        # 消息既产生确认卡片又建立/启动工作流）。
+        suppress_goal_intent = bool(raw_context.get("suppress_goal_intent"))
+        if not suppress_goal_intent and (auto_start_sourcing or any(re.search(pattern, message, re.I) for pattern in goal_patterns)):
             goal_context, _, grounding_error = self._ground_copilot_goal(goal_request, selected, session_id)
             if grounding_error:
                 forced_answer = grounding_error
