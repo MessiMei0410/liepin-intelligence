@@ -1,0 +1,663 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { Activity, Archive, Ban, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleGauge, Clock3, ExternalLink, ListChecks, LoaderCircle, MapPin, MessageSquareText, Route, Search, Send, ShieldAlert, ShieldCheck, SquarePen, Target, TriangleAlert, UserRoundSearch, UsersRound, X } from 'lucide-react'
+import { api, BusinessFocus, Candidate, CandidateDetail, Job, JobDetail, Workflow } from './api'
+import './styles.css'
+
+type Tab = 'overview' | 'jobs' | 'progress' | 'candidates'
+type CopilotAction = { type: string; id?: string | number; label?: string }
+type ChatMessage = { role: string; text: string; actions?: CopilotAction[] }
+type CandidateAction = 'advance' | 'contact' | 'recommend' | 'stop'
+type CandidateActionPreflight = { action: CandidateAction; token: string; impact: string; expires_at?: string }
+const candidateActionLabels: Record<CandidateAction,string> = {
+  advance:'复核通过', contact:'标记已联系', recommend:'标记已推荐', stop:'停止推进',
+}
+const tabs: Array<[Tab, string, React.ReactNode]> = [
+  ['overview', '总览', <CircleGauge />], ['jobs', '岗位看板', <BriefcaseBusiness />],
+  ['progress', '人选进度', <ListChecks />], ['candidates', '人选列表', <UsersRound />],
+]
+
+const stageTone = (value = '') => value.includes('停止') || value.includes('淘汰') ? 'muted' : value.includes('待') || value.includes('核验') ? 'warn' : 'ok'
+const candidateStopped = (candidate: Candidate) => ['初筛不通过','停止','淘汰','关闭'].some(token => (candidate.clean_stage || '').includes(token)) || ['screen_rejected','xsaas_review_stop','rejected','stopped','closed'].includes((candidate.raw_status || '').toLowerCase())
+const date = (value?: string) => value ? value.replace('T', ' ').slice(0, 16) : '暂无记录'
+const parseDate = (value?: string) => value ? new Date(value.includes('T') ? value : value.replace(' ', 'T')).getTime() : 0
+const elapsed = (started?: string, finished?: string, now = Date.now()) => {
+  const from = parseDate(started)
+  if (!from) return ''
+  const seconds = Math.max(0, Math.floor(((parseDate(finished) || now) - from) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+}
+const workflowStatusLabel: Record<string,string> = {
+  planned:'计划就绪', queued:'正在排队', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
+  blocked:'已阻塞', failed:'执行失败', completed:'已完成', cancelled:'已取消', paused:'已暂停',
+}
+const stepStatusLabel: Record<string,string> = {
+  pending:'待执行', queued:'排队中', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
+  completed:'已完成', skipped:'已跳过', blocked:'已阻塞', failed:'失败', cancelled:'已取消',
+}
+const activeWorkflowStatuses = new Set(['queued','running','waiting_approval','waiting_external'])
+const stepTone = (status='') => ['completed','skipped'].includes(status) ? 'done' : ['running','queued','waiting_external'].includes(status) ? 'active' : status==='waiting_approval' ? 'needs-approval' : ['failed','blocked'].includes(status) ? 'error' : ['cancelled'].includes(status) ? 'muted' : 'pending'
+const recordValue = (value: unknown): Record<string,any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string,any> : {}
+const arrayValue = (value: unknown): any[] => Array.isArray(value) ? value : []
+const textList = (...values: unknown[]): string[] => [...new Set(values.flatMap(value => {
+  if(Array.isArray(value))return value.map(String)
+  const text=String(value||'').trim()
+  if(!text)return []
+  if(text.startsWith('[')){try{const parsed=JSON.parse(text);if(Array.isArray(parsed))return parsed.map(String)}catch{/* Keep text fallback. */}}
+  return text.split(/[\n；;、]+/)
+}).map(value=>value.trim()).filter(value=>Boolean(value)&&!/^[0-9]+$/.test(value)))]
+const humanizeWorkflowError = (error?: string) => {
+  const text=String(error||'').trim()
+  if(!text)return '执行失败，尚未记录明确原因。'
+  if(text.includes('write_report')||text.includes('run_published_position_search.py')&&text.includes('FileNotFound'))return '寻访结果已获取，但保存报告失败：岗位名称包含路径分隔符。该问题已修复，可以重试本步骤。'
+  if(text.includes('No such file or directory'))return '执行所需的文件或目录不存在。请修复路径后重试。'
+  if(text.includes('Traceback'))return '执行脚本遇到异常，技术详情已隐藏。修复后可以重试本步骤。'
+  return text.length>180?`${text.slice(0,180)}…`:text
+}
+const humanizeWorkflowEvent = (event:NonNullable<Workflow['events']>[number]) => {
+  const summary=String(event.summary||'')
+  if(event.status==='failed'||summary.includes('Traceback'))return `渠道执行失败：${humanizeWorkflowError(summary)}`
+  return summary
+}
+const humanizeActionError = (error: unknown, fallback: string) => {
+  const message=copilotText(error)
+  if(message.includes('Internal Server Error'))return '操作未提交，ASA 已保留当前状态，请稍后重试。'
+  return message||fallback
+}
+const stepBusinessResult = (step:Workflow['steps'][number]) => {
+  if(step.error)return {headline:humanizeWorkflowError(step.error),facts:['本步骤未完成，后续步骤尚未执行。'],error:true}
+  let data=recordValue(step.output)
+  if(!Object.keys(data).length&&step.output_json){try{data=recordValue(JSON.parse(step.output_json))}catch{/* Ignore legacy malformed output. */}}
+  const facts:string[]=[]
+  const diagnosis=recordValue(data.diagnosis)
+  const funnel=recordValue(diagnosis.funnel)
+  if(Object.keys(funnel).length)facts.push(`当前人才漏斗 ${Number(funnel.total||0)} 人，待复核 ${Number(funnel.pending_review||0)} 人。`)
+  const candidates=arrayValue(data.candidates)
+  if(candidates.length){const names=candidates.slice(0,3).map(item=>recordValue(item).display_name).filter(Boolean);facts.push(`读取 ${candidates.length} 条历史人岗关系${names.length?`：${names.join('、')}`:''}。`)}
+  const strategy=recordValue(data.strategy)
+  const channels=recordValue(strategy.channels)
+  if(Object.keys(channels).length)facts.push(`寻访策略：猎聘 ${arrayValue(channels.liepin).length} 组关键词，X-SaaS ${arrayValue(channels.xsaas).length} 组关键词。`)
+  const request=recordValue(data.auto_execute_request||data.external_request)
+  const preflight=recordValue(recordValue(request.preflight).preflight)
+  const readyChannels=recordValue(preflight.channels)
+  if(Object.keys(readyChannels).length){const ready=Object.entries(readyChannels).filter(([,item])=>recordValue(item).ready).map(([name])=>name==='liepin'?'猎聘':name==='xsaas'?'X-SaaS':name);facts.push(`渠道已就绪：${ready.join('、')||'等待浏览器连接'}。`)}
+  const external=recordValue(data.external_result)
+  const runs=arrayValue(external.channel_runs)
+  if(runs.length)facts.push(`渠道结果：${runs.map(item=>`${recordValue(item).channel||'渠道'} ${recordValue(item).status||'已返回'}`).join('，')}。`)
+  const shadow=recordValue(external.opencli_shadow)
+  const shadowChannels=arrayValue(shadow.channels)
+  if(shadow.enabled&&shadowChannels.length){
+    const labels=shadowChannels.map(item=>{const row=recordValue(item);const comparison=recordValue(row.comparison);const channel=row.channel==='liepin'?'猎聘':row.channel==='xsaas'?'X-SaaS':String(row.channel||'渠道');return row.status==='completed'?`${channel} 重合 ${Number(comparison.overlap||0)}/${Number(comparison.baseline_count||0)}`:`${channel} ${row.status==='blocked'?'受阻':'跳过'}`})
+    facts.push(`OpenCLI 只读影子：${labels.join('，')}；未参与入库。`)
+  }
+  const appliedIntake=recordValue(recordValue(recordValue(external.intake).applied).intake)
+  if(Object.keys(appliedIntake).length)facts.push(`本轮新增入库 ${Number(appliedIntake.inserted||0)} 人，跳过已有 ${Number(appliedIntake.skipped_existing||0)} 人。`)
+  const artifacts=arrayValue(data.artifacts)
+  if(artifacts.length)facts.push(`已生成 ${artifacts.length} 个业务产物。`)
+  const verification=recordValue(step.verification)
+  if(verification.status==='verified')facts.push('执行后校验已通过。')
+  const recovery=recordValue(step.recovery)
+  if(recovery.action==='retry_same_step')facts.push(`已按恢复计划自动重试 ${Number(recovery.attempt||1)} 次。`)
+  const fallback=step.status==='completed'?'步骤已完成。':step.status==='waiting_external'?'正在等待渠道返回寻访结果。':step.status==='waiting_approval'?'批准后才会执行外部寻访。':'尚未执行。'
+  return {headline:String(data.summary||fallback),facts:[...new Set(facts)],error:false}
+}
+const nativeCopilotBridge = () => (window as Window & { webkit?: { messageHandlers?: { asaNative?: { postMessage: (message: Record<string, unknown>) => void } } } }).webkit?.messageHandlers?.asaNative
+const copilotContextLabel = (context: Record<string, unknown>) => context.type === 'job' ? String(context.job || `岗位 #${context.id}`) : context.type === 'candidate' ? String(context.candidate || `候选人 #${context.id}`) : context.type === 'workflow' ? `工作流 ${context.id}` : tabs.find(item => item[0] === context.page)?.[1] || '总览'
+const publishCopilotContext = async (context: Record<string, unknown>, trigger: string, explicit: boolean) => {
+  if (!nativeCopilotBridge()) return false
+  const subtitle = [context.client, context.job].filter(Boolean).join(' / ') || 'ASA Agent'
+  try {
+    const response = await fetch('/api/asa/floating/context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ surface: 'a_system', instance_id: 'asa-agent', trigger, explicit, user_selected: explicit, page_focused: true, page_visible: true, context: { ...context, label: copilotContextLabel(context), subtitle } }),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+const openCopilotWindow = async (context: Record<string, unknown>) => {
+  const nativeBridge = nativeCopilotBridge()
+  if (nativeBridge) {
+    await publishCopilotContext(context, 'copilot', true)
+    nativeBridge.postMessage({ type: 'showFloating' })
+    return
+  }
+  const params = new URLSearchParams({ surface: 'copilot', context: JSON.stringify(context) })
+  const popup = window.open(`${location.pathname}?${params}`, 'asa-copilot', 'popup=yes,width=390,height=680,resizable=yes,scrollbars=no')
+  popup?.focus()
+}
+
+function App() {
+  const [tab, setTab] = useState<Tab>('overview')
+  const [boot, setBoot] = useState<any>()
+  const [dashboard, setDashboard] = useState<any>()
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [candidates, setCandidates] = useState<Candidate[]>([])
+  const [query, setQuery] = useState('')
+  const [job, setJob] = useState<JobDetail>()
+  const [candidate, setCandidate] = useState<CandidateDetail>()
+  const [workflow, setWorkflow] = useState<Workflow>()
+  const [error, setError] = useState('')
+  const [refreshKey, setRefreshKey] = useState(0)
+  const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
+
+  useEffect(() => {
+    Promise.all([api.bootstrap(), api.dashboard(), api.jobs(), api.candidates()])
+      .then(([b, d, j, c]) => { setBoot(b); setDashboard(d); setJobs(j.items); setCandidates(c.items); setError('') })
+      .catch(e => setError(String(e.message || e)))
+  }, [refreshKey])
+
+  useEffect(() => {
+    let active = true
+    let refreshing = false
+    const refreshDashboard = async () => {
+      if (!active || refreshing || document.hidden) return
+      refreshing = true
+      try {
+        const next = await api.dashboard()
+        if (active) setDashboard(next)
+      } catch {
+        // The full bootstrap path surfaces persistent connection failures.
+      } finally {
+        refreshing = false
+      }
+    }
+    const timer = window.setInterval(refreshDashboard, 2000)
+    const onVisible = () => { if (!document.hidden) void refreshDashboard() }
+    window.addEventListener('focus', refreshDashboard)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshDashboard)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
+  useEffect(() => { candidateStateRef.current = candidate }, [candidate])
+
+  useEffect(() => {
+    const candidateId = candidate?.id
+    if (!candidateId) return
+    let active = true
+    const refreshCandidate = async () => {
+      try {
+        const fresh = (await api.candidate(candidateId)).candidate
+        if (!active || candidateStateRef.current?.id !== candidateId) return
+        const current = candidateStateRef.current
+        const changed = !current
+          || current.updated_at !== fresh.updated_at
+          || current.clean_stage !== fresh.clean_stage
+          || current.raw_status !== fresh.raw_status
+          || current.events.length !== fresh.events.length
+        if (changed) {
+          candidateStateRef.current = fresh
+          setCandidate(fresh)
+          setRefreshKey(value => value + 1)
+        }
+      } catch {
+        // Keep the current detail visible during a transient core restart.
+      }
+    }
+    const timer = window.setInterval(refreshCandidate, 2000)
+    window.addEventListener('focus', refreshCandidate)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshCandidate)
+    }
+  }, [candidate?.id])
+
+  useEffect(() => {
+    const openHash = () => {
+      const hash = new URLSearchParams(location.hash.slice(1))
+      const id = Number(hash.get('candidate'))
+      const workflowId = hash.get('workflow')
+      const jobId = Number(hash.get('job'))
+      if (id) { openCandidate(id); return }
+      if (workflowId) { openWorkflow(workflowId); return }
+      if (jobId) { openJob(jobId); return }
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined)
+    }
+    openHash(); addEventListener('hashchange', openHash); return () => removeEventListener('hashchange', openHash)
+  }, [])
+
+  const openCandidate = async (id: number) => {
+    try { setJob(undefined); setWorkflow(undefined); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e: any) { setError(e.message) }
+  }
+  const refreshCandidateDetail = async (id: number) => {
+    const fresh = (await api.candidate(id)).candidate
+    candidateStateRef.current = fresh
+    setCandidate(fresh)
+    setRefreshKey(value => value + 1)
+  }
+  const openJob = async (id: number) => {
+    try { setCandidate(undefined); setWorkflow(undefined); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e: any) { setError(e.message) }
+  }
+  const archiveWorkflow = async (id: string) => {
+    try { await api.workflowAction(id, 'archive'); setRefreshKey(value => value + 1) }
+    catch (e: any) { setError(humanizeActionError(e?.message, '归档失败，请重试。')) }
+  }
+  const openWorkflow = async (id: string) => {
+    try { setJob(undefined); setCandidate(undefined); setWorkflow(await api.workflow(id)); location.hash = `workflow=${id}` } catch (e: any) { setError(e.message) }
+  }
+  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); history.replaceState(null, '', location.pathname) }
+  const visibleJobs = jobs.filter(j => !query || `${j.id} ${j.client} ${j.title} ${j.status}`.toLowerCase().includes(query.toLowerCase()))
+  const visibleCandidates = candidates.filter(c => !query || `${c.name} ${c.current_company} ${c.current_title} ${c.job} ${c.client}`.toLowerCase().includes(query.toLowerCase()))
+  const copilotContext = candidate ? { type: 'candidate', id: candidate.id, candidate: candidate.name, client: candidate.client, job: candidate.job } : job ? { type: 'job', id: job.id, client: job.client, job: job.title } : workflow ? { type: 'workflow', id: workflow.workflow.workflow_id } : { type: 'page', page: tab }
+  const copilotContextSignature = JSON.stringify(copilotContext)
+  useEffect(() => {
+    if (copilotContext.type === 'page') return
+    void publishCopilotContext(copilotContext, 'selection', true)
+  }, [copilotContextSignature])
+
+  if (error && !boot) return <Diagnostics error={error} retry={() => setRefreshKey(x => x + 1)} />
+
+  return <div className="shell">
+    <aside className="nav">
+      <div className="brand"><span>ASA</span><strong>Agent</strong><small>Recruiting OS</small></div>
+      <nav>{tabs.map(([id, label, icon]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setQuery('') }}>{icon}<span>{label}</span></button>)}</nav>
+      <a className="legacy" href="/admin/legacy" target="_blank">审计与旧版</a>
+    </aside>
+    <main className="main">
+      <header className="topbar">
+        <div><h1>{tabs.find(x => x[0] === tab)?.[1]}</h1><p>{boot?.core?.status === 'connected' ? 'ASA Agent 在线 · Core 已连接 · v3 实时数据' : 'ASA Agent 正在连接 Core'}</p></div>
+        {(tab === 'jobs' || tab === 'candidates' || tab === 'progress') && <label className="search"><Search/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索姓名、公司或岗位" aria-label="搜索姓名、公司或岗位" /></label>}
+        <button className="button copilot-launch" title="打开 ASA Copilot 浮窗" aria-label="打开 ASA Copilot 浮窗" onClick={()=>openCopilotWindow(copilotContext)}><MessageSquareText/><span>Copilot</span></button>
+      </header>
+      <div className="content">
+        {tab === 'overview' && <Overview dashboard={dashboard} jobs={jobs} candidates={candidates} openWorkflow={openWorkflow} openCandidate={openCandidate} archiveWorkflow={archiveWorkflow} />}
+        {tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
+        {tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
+        {tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
+      </div>
+    </main>
+    {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
+    {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+    {workflow && <WorkflowPanel value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
+    {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
+  </div>
+}
+
+function Overview({ dashboard, jobs, candidates, openWorkflow, openCandidate, archiveWorkflow }: any) {
+  const counts = dashboard?.counts || {}
+  return <>
+    <section className="metrics">
+      <Metric label="在推岗位" value={counts.active_jobs ?? '-'} detail="规范岗位实体" />
+      <Metric label="候选关系" value={counts.candidates ?? '-'} detail="人选 × 岗位" />
+      <Metric label="待处理" value={counts.pending_candidates ?? '-'} detail="已排除停止推进" />
+      <Metric label="待审批" value={counts.pending_approvals ?? '-'} detail="需单次确认" />
+    </section>
+    <div className="overview-grid">
+      <section className="section"><SectionHead title="当前工作流" meta={`${dashboard?.workflows?.length || 0} 条`} />
+        <div className="rows">{dashboard?.workflows?.map((w: any) => <div className="work-row-shell" key={w.workflow_id}><button className="work-row" onClick={() => openWorkflow(w.workflow_id)}><span className={`dot ${stageTone(w.status)}`}/><div><b>{w.title}</b><small>{w.workflow_id} · {w.current_stage || '未开始'}</small></div><span className="tag">{workflowStatusLabel[w.status]||w.status}</span></button>{!activeWorkflowStatuses.has(w.status)&&<button className="row-icon-action" title="归档工作流" aria-label={`归档工作流 ${w.title}`} onClick={()=>archiveWorkflow(w.workflow_id)}><Archive/></button>}</div>)}</div>
+      </section>
+      <section className="section"><SectionHead title="优先岗位" meta="按活跃人选排序" />
+        <div className="rows">{jobs.slice(0, 6).map((j: Job) => <div className="compact-row" key={j.id}><div><b>{j.title}</b><small>{j.client} · {j.priority || j.status}</small></div><strong>{j.active_candidate_count || 0}</strong></div>)}</div>
+      </section>
+    </div>
+    <section className="section"><SectionHead title="最近更新人选" meta="实时数据库" /><Candidates items={candidates.slice(0, 8)} openCandidate={openCandidate} compact /></section>
+  </>
+}
+const Metric = ({label,value,detail}: any) => <div className="metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+const SectionHead = ({title,meta}: any) => <div className="section-head"><h2>{title}</h2><span>{meta}</span></div>
+
+function Jobs({items,onSelect}:{items:Job[],onSelect:(id:number)=>void}) { const [mode,setMode]=useState<'p0'|'pipeline'|'all'>('p0'); const shown=items.filter(j=>mode==='all'||(mode==='p0'?(j.priority||'').includes('P0'):['sourcing','published','active_pipeline','client_feedback','offer'].includes(j.lifecycle_stage||''))); const open=(event:React.KeyboardEvent,id:number)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();onSelect(id)}}; return <section className="section table-section"><div className="section-head"><h2>岗位</h2><div className="detail-actions" role="group" aria-label="岗位范围"><button className={`button ${mode==='p0'?'primary':''}`} onClick={()=>setMode('p0')}>P0</button><button className={`button ${mode==='pipeline'?'primary':''}`} onClick={()=>setMode('pipeline')}>在推</button><button className={`button ${mode==='all'?'primary':''}`} onClick={()=>setMode('all')}>全部</button></div><span>{shown.length} 个结果</span></div><div className="table-wrap"><table><thead><tr><th>客户 / 岗位</th><th>优先级 / 阶段</th><th>地点</th><th className="num">活跃人选</th><th>更新</th></tr></thead><tbody>{shown.map(j => <tr key={j.id} tabIndex={0} aria-label={`打开岗位 ${j.client} ${j.title}`} onKeyDown={e=>open(e,j.id)} onClick={() => onSelect(j.id)}><td><b>{j.title}</b><small>{j.client}</small></td><td>{j.priority?.includes('P0-最急') && <span className="tag warn">P0 最急</span>}<small>{j.status || j.lifecycle_stage || '待启动'}</small></td><td>{j.location || '-'}</td><td className="num">{j.active_candidate_count || 0}</td><td>{date(j.updated_at)}</td></tr>)}{shown.length===0&&<tr><td colSpan={5}><div className="empty">没有符合当前条件的岗位。</div></td></tr>}</tbody></table></div></section> }
+
+function Candidates({items,openCandidate,compact=false}:{items:Candidate[],openCandidate:(id:number)=>void,compact?:boolean}) { const [mode,setMode]=useState<'active'|'all'|'stopped'>('active'); const shown=compact?items:items.filter(c=>mode==='all'||(mode==='stopped'?candidateStopped(c):!candidateStopped(c))); const open=(event:React.KeyboardEvent,id:number)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();openCandidate(id)}}; return <div className={compact ? 'table-wrap embedded' : 'section table-section'}>{!compact&&<div className="section-head"><h2>候选人关系</h2><div className="detail-actions" role="group" aria-label="候选人范围"><button className={`button ${mode==='active'?'primary':''}`} onClick={()=>setMode('active')}>待处理</button><button className={`button ${mode==='all'?'primary':''}`} onClick={()=>setMode('all')}>全部</button><button className={`button ${mode==='stopped'?'primary':''}`} onClick={()=>setMode('stopped')}>已停止</button></div><span>{shown.length} 个结果</span></div>}<div className="table-wrap"><table><thead><tr><th>候选人</th><th>目标岗位</th><th>渠道</th><th>阶段</th><th>更新</th></tr></thead><tbody>{shown.map(c => <tr key={c.id} tabIndex={0} aria-label={`打开候选人 ${c.name}`} onKeyDown={e=>open(e,c.id)} onClick={() => openCandidate(c.id)}><td><b>{c.name}</b><small>{c.current_company || '公司待补充'} · {c.current_title || '职位待补充'}</small></td><td><b>{c.job || '待关联岗位'}</b><small>{c.client}</small></td><td>{sourceLabel(c.source_type)}</td><td><span className={`tag ${stageTone(c.clean_stage)}`}>{c.clean_stage || c.flow_bucket || '待复核'}</span></td><td>{date(c.updated_at)}</td></tr>)}{shown.length===0&&<tr><td colSpan={5}><div className="empty">没有符合当前条件的候选人。</div></td></tr>}</tbody></table></div></div> }
+
+function Progress({items,openCandidate}:{items:Candidate[],openCandidate:(id:number)=>void}) {
+  const groups = useMemo(() => Object.entries(items.reduce<Record<string,Candidate[]>>((a,c) => { const k=c.flow_bucket || c.clean_stage || '待复核'; (a[k] ||= []).push(c); return a },{})).sort((a,b)=>Number(candidateStopped(a[1][0]))-Number(candidateStopped(b[1][0]))),[items])
+  return groups.length?<div className="stage-grid">{groups.map(([stage,list]) => <section className="stage" key={stage}><header><span>{stage}</span><b>{list.length}</b></header>{list.map(c => <button key={c.id} onClick={() => openCandidate(c.id)}><UserRoundSearch/><span><b>{c.name}</b><small>{c.client} · {c.job}</small></span></button>)}</section>)}</div>:<div className="empty">没有符合当前条件的人选进度。</div>
+}
+
+function JobPanel({value,close,openCandidate}:{value:JobDetail,close:()=>void,openCandidate:(id:number)=>void}) {
+  const position=recordValue(value.position)
+  const profile=recordValue(value.profile)
+  const hard=textList(profile.hard_requirements,position.hard_requirements,value.hard_requirements)
+  const abilities=textList(profile.ability_keywords,position.ability_keywords,value.ability_keywords)
+  const targets=textList(profile.target_companies,position.target_companies,value.target_companies,value.metric_target_companies)
+  const exclusions=textList(profile.exclusion_tags,position.exclusions,value.exclusions,value.exclude_terms)
+  const keywords=textList(profile.search_keywords,position.search_words,value.search_words,value.next_keywords)
+  const pitch=textList(profile.pitch_points)
+  const risks=textList(profile.risk_points,value.risk)
+  const maxStage=Math.max(1,...value.stages.map(item=>item.count))
+  const facts=[
+    ['优先级',value.priority||'常规'],['状态',value.status||value.lifecycle_stage||'待启动'],
+    ['地点',position.location||value.location||'待确认'],['薪资',position.salary||'待确认'],
+    ['编制',position.headcount??'待确认'],['截止',position.deadline||'待确认'],
+    ['学历',position.education||profile.education_requirement||'待确认'],['经验',position.experience||profile.experience_requirement||'待确认'],
+  ]
+  return <div className="overlay"><article className="detail-panel job-detail-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.title}</h2><p>{value.client} · {position.department||position.team||value.location||'岗位详情'} · 岗位 #{value.id}</p></div><div className="detail-actions"><button className="button" onClick={()=>openCopilotWindow({type:'job',id:value.id,client:value.client,job:value.title})}><MessageSquareText/>Copilot</button>{value.priority?.includes('P0')&&<span className="tag warn">P0 最急</span>}<button className="icon-btn" onClick={close} title="关闭" aria-label="关闭"><X/></button></div></header><div className="job-detail-body"><main>
+    <section className="job-funnel" aria-label="岗位漏斗"><div><span>全部人选</span><b>{value.funnel.total}</b></div><div><span>活跃推进</span><b>{value.funnel.active}</b></div><div><span>已触达</span><b>{value.funnel.contacted}</b></div><div><span>已推荐</span><b>{value.funnel.recommended}</b></div><div><span>已停止</span><b>{value.funnel.stopped}</b></div></section>
+    <section className="job-detail-section"><h3>岗位概况</h3><div className="job-facts">{facts.map(([label,content])=><div key={label}><span>{label}</span><b>{String(content)}</b></div>)}</div>{(profile.jd_analysis_summary||value.summary)&&<p className="job-summary">{String(profile.jd_analysis_summary||value.summary)}</p>}{value.closed_reason&&<p className="job-warning">{value.closed_reason}</p>}</section>
+    <JobListSection title="硬性要求" items={hard}/>
+    <JobListSection title="核心能力" items={abilities}/>
+    <JobListSection title="岗位卖点" items={pitch}/>
+    <div className="job-detail-columns"><JobListSection title="目标公司" items={targets}/><JobListSection title="排除条件" items={exclusions} tone="warn"/></div>
+    <section className="job-detail-section"><h3>阶段分布</h3>{value.stages.length?<div className="job-stage-list">{value.stages.map(item=><div key={item.stage}><span>{item.stage}</span><i><b style={{width:`${Math.max(5,item.count/maxStage*100)}%`}}/></i><strong>{item.count}</strong></div>)}</div>:<div className="empty">当前岗位还没有候选人阶段记录。</div>}</section>
+    <section className="job-detail-section"><h3>寻访策略</h3>{keywords.length?<div className="job-keywords">{keywords.map(item=><span key={item}>{item}</span>)}</div>:<div className="empty">暂无已确认的寻访关键词。</div>}{risks.length>0&&<div className="job-risk-list">{risks.map(item=><p key={item}><ShieldAlert/>{item}</p>)}</div>}{value.search_experiments.length>0&&<div className="job-experiments">{value.search_experiments.slice(0,12).map(item=><div key={item.id}><Route/><div><b>{String(item.query||'未记录关键词')}</b><span>{sourceLabel(String(item.channel||''))} · 结果 {Number(item.result_count||0)} · 提取 {Number(item.extracted_count||0)} · 推荐 {Number(item.recommended_count||0)}</span></div><small>{date(String(item.updated_at||item.run_time||''))}</small></div>)}</div>}</section>
+  </main><aside><SectionHead title="岗位人选" meta={`${value.candidates.length} 人`} />{value.candidates.length===0?<div className="aside-empty"><UserRoundSearch/><span>当前岗位还没有人选</span></div>:<div className="job-candidate-list">{value.candidates.map(candidate=><button key={candidate.id} onClick={()=>openCandidate(candidate.id)}><UserRoundSearch/><div><b>{candidate.name}</b><span>{candidate.current_company||'公司待补充'} · {candidate.current_title||'职位待补充'}</span><small>{candidate.clean_stage||candidate.flow_bucket||'待复核'}</small></div><ChevronRight/></button>)}</div>}
+    <SectionHead title="待办" meta={`${value.followups.length} 条`} />{value.followups.length===0?<div className="aside-empty"><CircleCheck/><span>当前没有岗位待办</span></div>:value.followups.slice(0,12).map(item=><div className="aside-item" key={item.id}><b>{String(item.candidate_name||item.task_type||'岗位待办')}</b><span>{String(item.reason||'待处理')}</span><small>{item.due_at?`截止 ${date(String(item.due_at))}`:'未设置截止时间'}</small></div>)}
+    <SectionHead title="最近动态" meta={`${value.events.length} 条`} />{value.events.length===0?<div className="aside-empty"><CircleDashed/><span>当前没有业务动态</span></div>:<div className="timeline">{value.events.slice(0,20).map(event=><div key={event.id}><i/><span>{date(event.event_time)}</span><b>{event.summary||event.event_type}</b><small>{event.event_status}</small></div>)}</div>}</aside></div></article></div>
+}
+
+function JobListSection({title,items,tone=''}:{title:string;items:string[];tone?:string}) {
+  if(!items.length)return null
+  return <section className={`job-detail-section ${tone}`}><h3>{title}</h3><div className="job-list-items">{items.map(item=><div key={item}><Check/><span>{item}</span></div>)}</div></section>
+}
+
+function CandidatePanel({value,close,changed}:{value:CandidateDetail,close:()=>void,changed:()=>void|Promise<void>}) {
+  const [busy,setBusy]=useState('')
+  const [feedback,setFeedback]=useState<{tone:'error'|'success';text:string}>()
+  const [pendingAction,setPendingAction]=useState<CandidateActionPreflight>()
+  const [actionNote,setActionNote]=useState('')
+  const [view,setView]=useState<'overview'|'resume'|'activity'>('overview')
+  const act=async(action:CandidateAction)=>{ setBusy(`preflight:${action}`); setFeedback(undefined); try { const pre=await api.preflight(value.id,action); setActionNote(''); setPendingAction({action,token:pre.token,impact:pre.impact,expires_at:pre.expires_at}) } catch(e:any) { setFeedback({tone:'error',text:copilotText(e?.message)||'操作预检失败，请重试。'}) } finally { setBusy('') } }
+  const commitAction=async()=>{ if(!pendingAction)return; const {action,token}=pendingAction; setBusy(`commit:${action}`); setFeedback(undefined); try { await api.commit(value.id,action,token,actionNote.trim()); setPendingAction(undefined); await changed(); setFeedback({tone:'success',text:`${candidateActionLabels[action]}已完成，候选人状态已更新。`}) } catch(e:any) { setFeedback({tone:'error',text:copilotText(e?.message)||'操作提交失败，请重试。'}) } finally { setBusy('') } }
+  const resume=value.resume
+  const links=[...new Map(value.source_links.filter(x=>x.source_url).map(link=>[sourceLinkLabel(link.source_system),link])).values()]
+  const stage=value.clean_stage||''
+  const reviewPassed=['S2 ','S3 ','S7 ','S8 ','S9 ','S10 ','S11 ','S12 ','S13 '].some(prefix=>stage.startsWith(prefix))
+  const contacted=['S3 ','S7 ','S8 ','S9 ','S10 ','S11 ','S12 ','S13 '].some(prefix=>stage.startsWith(prefix))
+  const recommended=['S7 ','S8 ','S9 ','S10 ','S11 ','S12 ','S13 '].some(prefix=>stage.startsWith(prefix))
+  return <div className="overlay"><article className="detail-panel candidate-panel"><header className="detail-head candidate-head"><div className="candidate-head-primary"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.name}</h2><p>{value.current_title || '职位待补充'} · {value.current_company || '公司待补充'} · {value.city || '城市待补充'}</p></div></div><div className="detail-actions"><button className="button" onClick={()=>openCopilotWindow({type:'candidate',id:value.id})}><MessageSquareText/>Copilot</button>{links.map(link=><a className="button" href={link.source_url} target="_blank" rel="noreferrer" title={`打开${sourceLinkLabel(link.source_system)}`} key={sourceLinkLabel(link.source_system)}>{sourceLinkLabel(link.source_system)}<ExternalLink/></a>)}{value.is_stopped?<span className="button danger"><Ban/>已停止推进</span>:<><button className="button" disabled={!!busy||reviewPassed} onClick={()=>act('advance')}>{busy==='preflight:advance'?<LoaderCircle className="spin"/>:reviewPassed?<Check/>:null}复核通过</button><button className="button" disabled={!!busy||contacted} onClick={()=>act('contact')}>{busy==='preflight:contact'?<LoaderCircle className="spin"/>:contacted?<Check/>:null}已联系</button><button className="button primary" disabled={!!busy||recommended} onClick={()=>act('recommend')}>{busy==='preflight:recommend'?<LoaderCircle className="spin"/>:recommended?<Check/>:null}已推荐</button><button className="button danger" disabled={!!busy} onClick={()=>act('stop')}>{busy==='preflight:stop'?<LoaderCircle className="spin"/>:<Ban/>}停止</button></>}</div></header>
+      {feedback&&<div className={`candidate-action-feedback ${feedback.tone}`} role={feedback.tone==='error'?'alert':'status'}>{feedback.tone==='error'?<TriangleAlert/>:<CircleCheck/>}<span>{feedback.text}</span></div>}
+      <div className="detail-body"><main><div className="candidate-main-content">
+        <section className="resume-hero"><div><span>目标岗位</span><b>{value.client} · {value.job}</b></div><div><span>当前阶段</span><b>{value.clean_stage || value.flow_bucket || '待复核'}</b></div><div><span>经验 / 学历</span><b>{value.experience || '-'} · {value.education || '-'}</b></div></section>
+        <nav className="candidate-tabs" aria-label="候选人详情"><button className={view==='overview'?'active':''} onClick={()=>setView('overview')}><UserRoundSearch/>概览</button><button className={view==='resume'?'active':''} onClick={()=>setView('resume')}><BriefcaseBusiness/>履历</button><button className={view==='activity'?'active':''} onClick={()=>setView('activity')}><Clock3/>记录</button></nav>
+        {view==='overview'&&<>
+          <ResumeOverview text={resume.summary || resume.full_text} company={value.current_company}/>
+          {value.sourcing_attributions?.length>0&&<section className="sourcing-trace"><div className="sourcing-trace-head"><Search/><div><span>寻访来源</span><b>关键词及后续业务反馈</b></div></div>{value.sourcing_attributions.map(item=><div className="sourcing-trace-row" key={item.id}><div><span>{sourceLabel(item.channel)} · {item.source_round||'寻访查询'}</span><b>{item.source_query}</b><small>{item.source_purpose||'根据岗位策略生成'}{item.strategy_model?` · ${item.strategy_model}`:''}</small></div><div className={`learning-score ${Number(item.learning_score||0)<0?'negative':Number(item.learning_score||0)>0?'positive':''}`}><b>{Number(item.learning_score||0).toFixed(1)}</b><span>经验分</span></div><LearningSignals item={item}/></div>)}</section>}
+        </>}
+        {view==='resume'&&<div className="resume-workspace"><ResumeTimelineSection title="工作经历" text={resume.work_text} empty="尚未采集结构化工作经历，可通过来源链接核对原始简历。"/><ResumeTimelineSection title="项目经历" text={resume.project_text} empty="暂无结构化项目经历。"/><ResumeTimelineSection title="教育经历" text={resume.education_text} empty="暂无结构化教育经历。"/>{resume.full_text&&<details className="raw-resume"><summary>完整原始履历</summary><pre>{resume.full_text}</pre></details>}</div>}
+        {view==='activity'&&<div className="candidate-records"><section className="resume-section"><h3>岗位关系</h3><div className="relation-list">{value.job_relations.map(r=><div key={r.id}><div><b>{r.job}</b><span>{r.client}</span></div><small>{r.clean_stage || r.flow_bucket}</small></div>)}</div></section><section className="resume-section"><h3>业务时间线</h3><div className="timeline timeline-main">{value.events.map(e=><div key={e.id}><i/><span>{date(e.event_time)}</span><b>{e.summary || e.event_type}</b><small>{eventStatusLabel(e.event_status)}</small></div>)}</div></section></div>}
+      </div></main><aside><SectionHead title="岗位关系" meta={`${value.job_relations.length} 条`} />{value.job_relations.map(r=><div className="aside-item" key={r.id}><b>{r.job}</b><span>{r.client}</span><small>{r.clean_stage || r.flow_bucket}</small></div>)}<SectionHead title="最近动态" meta={`${value.events.length} 条`} /><div className="timeline">{value.events.slice(0,8).map(e=><div key={e.id}><i/><span>{date(e.event_time)}</span><b>{e.summary || e.event_type}</b><small>{eventStatusLabel(e.event_status)}</small></div>)}</div></aside></div>
+    </article>{pendingAction&&<div className="action-dialog-backdrop" role="presentation"><section className="action-dialog" role="alertdialog" aria-modal="true" aria-labelledby="candidate-action-title"><header><span className={`action-dialog-icon ${pendingAction.action==='stop'?'danger':''}`}>{pendingAction.action==='stop'?<Ban/>:<ShieldCheck/>}</span><div><small>操作确认</small><h3 id="candidate-action-title">{candidateActionLabels[pendingAction.action]}</h3></div><button className="icon-btn" disabled={busy.startsWith('commit:')} onClick={()=>{setPendingAction(undefined);setFeedback(undefined)}} title="取消" aria-label="取消"><X/></button></header><div className="action-dialog-body"><dl><div><dt>候选人</dt><dd>{value.name}</dd></div><div><dt>当前阶段</dt><dd>{value.clean_stage||value.flow_bucket||'待复核'}</dd></div></dl><p><ShieldCheck/>预检已通过：{pendingAction.impact}</p>{pendingAction.action==='stop'&&<label><span>停止备注（选填）</span><textarea value={actionNote} onChange={event=>setActionNote(event.target.value)} placeholder="例如：方向不符" rows={3}/></label>}{feedback?.tone==='error'&&<div className="action-dialog-error"><TriangleAlert/>{feedback.text}</div>}</div><footer><button className="button" disabled={busy.startsWith('commit:')} onClick={()=>{setPendingAction(undefined);setFeedback(undefined)}}>取消</button><button className={`button ${pendingAction.action==='stop'?'danger-fill':'primary'}`} disabled={busy.startsWith('commit:')} onClick={commitAction} autoFocus>{busy.startsWith('commit:')?<LoaderCircle className="spin"/>:pendingAction.action==='stop'?<Ban/>:<Check/>}确认{candidateActionLabels[pendingAction.action]}</button></footer></section></div>}</div>
+}
+
+function ResumeOverview({text,company}:{text?:string;company?:string}) {
+  const normalized=String(text||'').replace(/\s+/g,' ').trim()
+  if(!normalized)return <section className="resume-section"><h3>职业概览</h3><div className="empty">暂无职业概览。</div></section>
+  const marker='求职期望：'
+  const markerIndex=normalized.indexOf(marker)
+  const companyIndex=company&&markerIndex>=0?normalized.indexOf(company,markerIndex+marker.length):-1
+  const basic=markerIndex>=0?normalized.slice(0,markerIndex).trim():normalized
+  const intent=markerIndex>=0?normalized.slice(markerIndex+marker.length,companyIndex>markerIndex?companyIndex:undefined).trim():''
+  return <section className="resume-section resume-overview"><h3>职业概览</h3><dl><div><dt>基本信息</dt><dd>{basic.split(/\s+/).join(' · ')}</dd></div>{intent&&<div><dt>求职意向与关键词</dt><dd>{intent}</dd></div>}</dl></section>
+}
+
+function ResumeTimelineSection({title,text,empty}:{title:string;text?:string;empty:string}) {
+  const items=String(text||'').split(/\n+/).map(item=>item.trim()).filter(Boolean)
+  const groups=items.reduce<Array<{label:string;entries:string[]}>>((result,item)=>{const parts=item.split(/\s*·\s*/).map(part=>part.trim()).filter(Boolean);const label=parts[0]||item;const entry=parts.slice(1).join(' · ');const existing=result.find(group=>group.label===label);if(existing)existing.entries.push(entry);else result.push({label,entries:[entry]});return result},[])
+  return <section className="resume-section"><h3>{title}<span>{items.length?`${groups.length} 组 · ${items.length} 段`:''}</span></h3>{groups.length?<div className="resume-timeline">{groups.map(group=><div key={group.label}><i/><div><b>{group.label}</b><div className="resume-timeline-entries">{group.entries.filter(Boolean).map((entry,index)=><span key={`${entry}-${index}`}>{entry}</span>)}</div></div></div>)}</div>:<div className="empty">{empty}</div>}</section>
+}
+
+function LearningSignals({item}:{item:CandidateDetail['sourcing_attributions'][number]}) {
+  const signals=[['通过',item.review_pass_count],['联系',item.contacted_count],['推荐',item.recommended_count],['停止',item.stopped_count],['客户正向',item.client_positive_count],['客户否决',item.client_rejected_count]].filter(([,count])=>Number(count||0)>0)
+  return <div className="learning-signals">{signals.length?signals.map(([label,count])=><span key={String(label)}>{label} {Number(count)}</span>):<span>暂无后续业务反馈</span>}</div>
+}
+
+function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void}) {
+  const [busy,setBusy]=useState('')
+  const [actionError,setActionError]=useState('')
+  const [now,setNow]=useState(Date.now())
+  const [strategyOpen,setStrategyOpen]=useState(false)
+  const status=value.workflow.status
+  const live=activeWorkflowStatuses.has(status)
+  const failedStep=value.steps.find(s=>s.status==='failed')
+  const current=value.steps.find(s=>['running','waiting_approval','waiting_external','queued'].includes(s.status)) || failedStep || value.steps.find(s=>s.status==='pending')
+  const completed=value.progress?.completed ?? value.steps.filter(s=>['completed','skipped'].includes(s.status)).length
+  const total=value.progress?.total ?? value.steps.length
+  const percent=Math.max(0,Math.min(100,Math.round((value.progress?.ratio ?? completed/Math.max(1,total))*100)))
+  const pendingApprovals=value.approvals.filter(x=>x.status==='pending')
+  const archiveAllowed=!activeWorkflowStatuses.has(status)&&!value.workflow.archived_at
+  const events=value.events || []
+  const strategyStep=value.steps.find(step=>step.capability_id==='search_strategy')
+  const strategy=recordValue(recordValue(strategyStep?.output).strategy)
+  const strategyChannels=recordValue(strategy.channels)
+  const reviewGates=recordValue(strategy.review_gates)
+  const sourcingStep=value.steps.find(step=>step.capability_id==='multi_channel_sourcing')
+  const externalResult=recordValue(recordValue(sourcingStep?.output).external_result)
+  const appliedResult=recordValue(recordValue(recordValue(externalResult.intake).applied))
+  const stagedResult=recordValue(appliedResult.staged)
+  const acceptedCandidates=arrayValue(stagedResult.accepted)
+  const receipts=arrayValue(recordValue(appliedResult.intake).receipts)
+  const assessmentStep=value.steps.find(step=>step.capability_id==='candidate_batch_assessment')
+  const assessmentQueue=recordValue(recordValue(assessmentStep?.output).assessment_queue)
+  const completedAssessments=arrayValue(assessmentQueue.completed_items)
+  const assessmentByCandidate=new Map(completedAssessments.map(item=>[Number(recordValue(item).job_candidate_id),recordValue(item)]))
+  const newCandidates=acceptedCandidates.map((candidate,index)=>{
+    const item=recordValue(candidate)
+    const receipt=recordValue(receipts.find(entry=>recordValue(entry).name===item.name)||receipts[index])
+    const assessment=recordValue(assessmentByCandidate.get(Number(receipt.job_candidate_id)))
+    const raw=recordValue(item.raw)
+    return {...item,jobCandidateId:Number(receipt.job_candidate_id||0),searchScore:Number(raw.fit_score||0),searchLevel:String(raw.fit_level||''),assessmentScore:Number(assessment.fit_score||0),recommendation:String(assessment.recommendation||'')}
+  })
+  const assessedSource=arrayValue(assessmentQueue.assessed_items).length?arrayValue(assessmentQueue.assessed_items):completedAssessments
+  const assessedCandidates=assessedSource.map(entry=>{
+    const item=recordValue(entry)
+    return {...item,jobCandidateId:Number(item.job_candidate_id||0),assessmentScore:Number(item.fit_score||0),recommendation:String(item.recommendation||'')}
+  })
+  const contextJobId=Number(value.goal.context?.id||strategy.job_id||0)
+  const jobEntity=jobs.find(job=>job.id===contextJobId)
+  const target={client:String(strategy.client||appliedResult.client||jobEntity?.client||'客户待确认'),job:String(strategy.job||appliedResult.job||jobEntity?.title||'岗位待确认'),location:jobEntity?.location||'',status:jobEntity?.status||'',priority:jobEntity?.priority||'',id:contextJobId}
+
+  useEffect(()=>{
+    if(status!=='waiting_approval'||pendingApprovals.length===0)setActionError('')
+  },[status,pendingApprovals.length])
+
+  useEffect(()=>{
+    if(!live)return
+    let refreshing=false
+    const refresh=async()=>{
+      if(refreshing || document.hidden)return
+      refreshing=true
+      try{await reload()}finally{refreshing=false}
+    }
+    const poll=window.setInterval(refresh,1200)
+    const clock=window.setInterval(()=>setNow(Date.now()),1000)
+    const onVisible=()=>{if(!document.hidden)void refresh()}
+    document.addEventListener('visibilitychange',onVisible)
+    return()=>{window.clearInterval(poll);window.clearInterval(clock);document.removeEventListener('visibilitychange',onVisible)}
+  },[value.workflow.workflow_id,status])
+
+  const action=async(name:string,payload:Record<string,unknown>={})=>{
+    setBusy(name);setActionError('')
+    try{await api.workflowAction(value.workflow.workflow_id,name,payload);if(name==='archive')archived();else await reload()}
+    catch(e:any){setActionError(humanizeActionError(e?.message,'工作流操作失败，请重试。'))}
+    finally{setBusy('')}
+  }
+  const revise=()=>{const instruction=prompt('输入计划修改意见');if(instruction?.trim())action('revise',{instruction:instruction.trim()})}
+  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'审批失败，请重试。'))}finally{setBusy('')}}
+  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'重试失败，请稍后再试。'))}finally{setBusy('')}}
+  const headline=status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待批准寻访` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='planned' ? '计划已就绪，可以启动' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
+  return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {workflowStatusLabel[status]||status}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" onClick={()=>openCopilotWindow({type:'workflow',id:value.workflow.workflow_id})}><MessageSquareText/>Copilot</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{['planned','blocked','failed'].includes(status)&&<button className="button" disabled={!!busy} onClick={revise}>修改计划</button>}{!['cancelled','completed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>action('cancel')}>取消</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}启动</button>}</div></header><div className="workflow-body"><main>
+    <section className={`workflow-progress ${stepTone(status)}`} aria-live="polite">
+      <div className="progress-status"><span className="progress-icon"><WorkflowStatusIcon status={status}/></span><div><span>{workflowStatusLabel[status]||status}</span><b>{headline}</b><small>{status==='waiting_approval'&&pendingApprovals[0]?.created_at?`已等待 ${elapsed(pendingApprovals[0].created_at,undefined,now)}`:live&&value.workflow.started_at?`已运行 ${elapsed(value.workflow.started_at,value.workflow.finished_at,now)}`:`更新于 ${date(value.workflow.updated_at)}`}</small></div><strong>{percent}%</strong></div>
+      <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><i style={{width:`${percent}%`}}/></div>
+      <div className="progress-meta"><span>{completed} 步完成</span><span>{Math.max(0,total-completed)} 步待处理</span><span>{pendingApprovals.length?`${pendingApprovals.length} 项待审批`:'无需审批'}</span></div>
+    </section>
+    <WorkflowTarget target={target} objective={value.goal.objective}/>
+    <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
+    <WorkflowCandidates newItems={newCandidates} assessedItems={assessedCandidates} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
+    <div className="workflow-section-label"><ListChecks/><b>执行步骤</b><span>{completed}/{total} 已完成</span></div>
+    <div className="step-list">{value.steps.map(s=>{const tone=stepTone(s.status);const result=stepBusinessResult(s);return <details className={`workflow-step ${tone}`} key={s.id} open={s.id===current?.id || s.status==='running'}><summary><span className={`step-no ${tone}`}><StepStatusIcon status={s.status} sequence={s.sequence}/></span><div><b>{s.business_label}</b><small>{s.reason}</small>{s.started_at&&<span className="step-time"><Clock3/>{s.status==='running'?`已执行 ${elapsed(s.started_at,s.finished_at,now)}`:`${date(s.started_at)}${s.finished_at?` · 用时 ${elapsed(s.started_at,s.finished_at,now)}`:''}`}</span>}</div><span className={`status-badge ${tone}`}>{s.risk_level} · {stepStatusLabel[s.status]||s.status}</span></summary><div className={`step-detail business-result ${result.error?'error':''}`}><b>{result.headline}</b>{result.facts.map((fact,index)=><span key={index}><Check/>{fact}</span>)}{s.status==='failed'&&<button className="button" disabled={!!busy} onClick={()=>retry(s.id)}>{busy===`retry-${s.id}`?<LoaderCircle className="spin"/>:<Activity/>}重试此步骤</button>}</div></details>})}</div>
+  </main><aside><SectionHead title="待审批" meta={`${pendingApprovals.length} 条`} />{pendingApprovals.length===0&&<div className="aside-empty"><ShieldCheck/><span>当前没有待审批动作</span></div>}{pendingApprovals.map(a=><div className={`approval ${a.status}`} key={a.approval_id}><div className="approval-title"><ShieldCheck/><div><b>{a.title}</b><span>{a.risk_level} · {a.preflight?.channel||'ASA'}</span></div></div>{a.preflight?.object_label&&<strong>{a.preflight.object_label}</strong>}{a.preflight?.before&&<p><span>批准前</span>{a.preflight.before}</p>}{a.preflight?.after&&<p><span>批准后</span>{a.preflight.after}</p>}<div className="approval-actions"><button disabled={!!busy} onClick={()=>decide(a.approval_id,'reject')}>拒绝</button><button className="approve" disabled={!!busy} onClick={()=>decide(a.approval_id,'approve')}>{busy===a.approval_id?<LoaderCircle className="spin"/>:<Check/>}批准寻访</button></div></div>)}
+    <SectionHead title="执行动态" meta={`${events.length} 条`} />{events.length===0?<div className="aside-empty"><CircleDashed/><span>启动后将在这里显示过程</span></div>:<div className="workflow-events">{events.slice(0,12).map(e=><div key={e.id}><i className={stepTone(e.status)}/><span>{date(e.created_at)}</span><b>{humanizeWorkflowEvent(e)}</b></div>)}</div>}
+    <SectionHead title="产物" meta={`${value.artifacts.length} 个`} />{value.artifacts.length===0&&<div className="aside-empty"><CircleDashed/><span>暂无执行产物</span></div>}{value.artifacts.map(a=><div className="aside-item" key={a.artifact_id}><b>{a.title}</b><small>{a.artifact_type} · {a.validation_status}</small></div>)}</aside></div></article></div>
+}
+
+function WorkflowTarget({target,objective}:{target:{client:string;job:string;location:string;status:string;priority:string;id:number},objective:string}) {
+  const openJob=()=>{if(target.id)location.hash=`job=${target.id}`}
+  return <section className="workflow-insight workflow-target">
+    <header><span className="insight-icon"><Target/></span><div><span>本次对应岗位</span><b>{target.client} / {target.job}</b></div>{target.id>0&&<button className="button" onClick={openJob}><BriefcaseBusiness/>打开岗位<ChevronRight/></button>}</header>
+    <div className="target-facts"><div><Building2/><span>客户</span><b>{target.client}</b></div><div><BriefcaseBusiness/><span>岗位</span><b>{target.job}</b></div><div><MapPin/><span>状态</span><b>{target.location||'地点待确认'}{target.status?` · ${target.status}`:''}</b></div></div>
+    <p>{objective}</p>{target.priority?.includes('P0')&&<span className="tag warn">P0 最急</span>}
+  </section>
+}
+
+function WorkflowStrategy({strategy,channels,gates,open,toggle}:{strategy:Record<string,any>;channels:Record<string,any>;gates:Record<string,any>;open:boolean;toggle:()=>void}) {
+  const liepin=arrayValue(channels.liepin)
+  const xsaas=arrayValue(channels.xsaas)
+  const hasStrategy=liepin.length+xsaas.length>0
+  const generation=recordValue(strategy.generation)
+  const renderQueries=(items:any[],label:string)=>{
+    const visible=open?items:items.slice(0,3)
+    return <div className="strategy-channel"><div className="strategy-channel-head"><b>{label}</b><span>{items.length} 组关键词</span></div><div className="strategy-queries">{visible.map((entry,index)=>{const item=recordValue(entry);return <div key={`${item.query}-${index}`}><b>{String(item.query||'关键词待补充')}</b><span>{String(item.purpose||'按岗位画像检索')}</span></div>})}</div>{!open&&items.length>3&&<small>另有 {items.length-3} 组关键词</small>}</div>
+  }
+  return <section className="workflow-insight workflow-strategy">
+    <header><span className="insight-icon"><Route/></span><div><span>多渠道寻访策略</span><b>{hasStrategy?`猎聘 ${liepin.length} 组 · X-SaaS ${xsaas.length} 组`:'等待生成策略'}</b>{generation.mode&&<small>{generation.mode==='llm'?`大模型生成 · ${generation.model||'ASA Model'}`:'规则兜底'}{Number(generation.memory_hits||0)>0?` · 参考 ${generation.memory_hits} 条岗位记忆`:''}{Number(generation.experiment_count||0)>0?` · ${generation.experiment_count} 条历史实验`:''}</small>}</div>{hasStrategy&&<button className="button" onClick={toggle} aria-expanded={open}>{open?'收起策略':'查看完整策略'}<ChevronDown className={open?'rotate':''}/></button>}</header>
+    {hasStrategy?<><div className="strategy-grid">{renderQueries(liepin,'猎聘')}{renderQueries(xsaas,'X-SaaS')}</div>{open&&<div className="strategy-rules"><StrategyRule title="硬性条件" values={arrayValue(gates.hard_requirements)} tone="required"/><StrategyRule title="排除规则" values={arrayValue(gates.negative_rules)} tone="excluded"/><StrategyRule title="风险提醒" values={arrayValue(gates.risk_points)} tone="risk"/></div>}</>:<div className="insight-empty">完成“生成多渠道寻访策略”后，这里会展示每个渠道的关键词与筛选规则。</div>}
+  </section>
+}
+
+function StrategyRule({title,values,tone}:{title:string;values:any[];tone:string}) {
+  if(!values.length)return null
+  return <div className={`strategy-rule ${tone}`}><b>{title}</b><div>{values.map((value,index)=><span key={index}>{String(value)}</span>)}</div></div>
+}
+
+function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate}:{newItems:Array<Record<string,any>>;assessedItems:Array<Record<string,any>>;sourcingStatus:string;openCandidate:(id:number)=>void}) {
+  const finished=['completed','failed','blocked'].includes(sourcingStatus)
+  const newIds=new Set(newItems.map(item=>Number(item.jobCandidateId||0)).filter(Boolean))
+  const mergedById=new Map<number,Record<string,any>>()
+  assessedItems.forEach(item=>{if(item.jobCandidateId)mergedById.set(Number(item.jobCandidateId),item)})
+  newItems.forEach((item,index)=>{
+    const id=Number(item.jobCandidateId||0)
+    if(id)mergedById.set(id,{...mergedById.get(id),...item})
+    else mergedById.set(-(index+1),item)
+  })
+  const items=[...mergedById.values()]
+  return <section className="workflow-insight workflow-candidates">
+    <header><span className="insight-icon"><UsersRound/></span><div><span>人选结果</span><b>{finished?`本轮新增 ${newItems.length} 人 · 岗位已评估 ${assessedItems.length} 人`:'等待渠道与评估结果'}</b></div>{items.length>0&&<span className="tag warn">点击查看详情</span>}</header>
+    {items.length?<div className="candidate-result-list">{items.map((candidate,index)=>{const score=Number(candidate.assessmentScore||candidate.searchScore||0);const recommendation=candidate.recommendation==='not_recommended'?'不推荐':candidate.recommendation==='verify_first'?'待补证据':score>=75?'推荐':'待复核';const isNew=newIds.has(Number(candidate.jobCandidateId||0));return <button key={`${candidate.jobCandidateId}-${index}`} disabled={!candidate.jobCandidateId} onClick={()=>candidate.jobCandidateId&&openCandidate(candidate.jobCandidateId)}><span className="candidate-result-icon"><UserRoundSearch/></span><div><b>{String(candidate.name||'姓名待补充')}</b><span>{String(candidate.company||'公司待补充')} · {String(candidate.title||'职位待补充')}</span><small>{isNew?'本轮新增':'历史入库'} · {sourceLabel(String(candidate.channel||candidate.source||''))} · {String(candidate.city||'城市待补充')} · {String(candidate.experience||'经验待补充')} · {String(candidate.education||'学历待补充')}</small></div><div className="candidate-score"><b>{score||'-'}</b><span>ASA 评估</span><small className={recommendation==='不推荐'?'bad':recommendation==='推荐'?'good':'warn'}>{recommendation}</small></div><ChevronRight/></button>})}</div>:<div className="insight-empty">{finished?'本轮没有新增人选，岗位也暂无评估结果。':'寻访执行并完成排重后，人选会显示在这里。'}</div>}
+  </section>
+}
+
+function WorkflowStatusIcon({status}:{status:string}) {
+  if(['queued','running','waiting_external'].includes(status))return <LoaderCircle className="spin"/>
+  if(status==='waiting_approval')return <ShieldCheck className="pulse"/>
+  if(status==='completed')return <CircleCheck/>
+  if(['failed','blocked'].includes(status))return <TriangleAlert/>
+  if(status==='cancelled')return <Ban/>
+  return <CircleDashed/>
+}
+
+function StepStatusIcon({status,sequence}:{status:string,sequence:number}) {
+  if(['queued','running','waiting_external'].includes(status))return <LoaderCircle className="spin"/>
+  if(status==='waiting_approval')return <ShieldCheck className="pulse"/>
+  if(['completed','skipped'].includes(status))return <Check/>
+  if(['failed','blocked'].includes(status))return <TriangleAlert/>
+  if(status==='cancelled')return <Ban/>
+  return <>{sequence}</>
+}
+
+function copilotText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return value.map(copilotText).filter(Boolean).join('\n')
+  if (!value || typeof value !== 'object') return ''
+  const item = value as Record<string, unknown>
+  for (const key of ['text', 'content', 'answer', 'message', 'summary', 'title', 'label']) {
+    const result = copilotText(item[key])
+    if (result) return result
+  }
+  return ''
+}
+
+function Copilot({context,openWorkflow,standalone=false}:{context:Record<string,unknown>,openWorkflow:(id:string)=>void|Promise<void>,standalone?:boolean}) {
+  const [messages,setMessages]=useState<ChatMessage[]>([])
+  const [text,setText]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [actionBusy,setActionBusy]=useState('')
+  const [sessionId,setSessionId]=useState(()=>{try{return localStorage.getItem('asa-copilot-session-id')||''}catch{return ''}})
+  const [focus,setFocus]=useState<BusinessFocus>()
+  const supportedAction=(action:CopilotAction)=>['start_workflow','open_workflow'].includes(action.type) && !!action.id
+  const runAction=async(action:CopilotAction)=>{
+    if(!supportedAction(action) || actionBusy)return
+    const id=String(action.id)
+    setActionBusy(`${action.type}:${id}`)
+    try{
+      if(action.type==='start_workflow'){
+        await api.workflowAction(id,'start')
+        setMessages(m=>[...m,{role:'asa',text:'已启动工作流，正在打开计划面板。'}])
+      }
+      await openWorkflow(id)
+    }catch(e:any){
+      setMessages(m=>[...m,{role:'asa',text:copilotText(e?.message)||'工作流操作失败，请重试。'}])
+    }finally{
+      setActionBusy('')
+    }
+  }
+  const actionsFrom=(value:unknown):CopilotAction[]=>Array.isArray(value)?value.filter((item):item is CopilotAction=>!!item&&typeof item==='object'&&supportedAction(item as CopilotAction)):[]
+  useEffect(()=>{
+    if(!sessionId)return
+    let active=true
+    api.copilotSession(sessionId).then(history=>{
+      if(!active)return
+      setMessages((history.messages||[]).map(item=>({role:item.role==='assistant'?'asa':'user',text:copilotText(item.content),actions:actionsFrom(item.suggested_actions)})))
+      setFocus(history.business_focus)
+    }).catch(()=>undefined)
+    return()=>{active=false}
+  },[sessionId])
+  const newSession=()=>{
+    setSessionId('');setMessages([]);setFocus(undefined);setText('')
+    try{localStorage.removeItem('asa-copilot-session-id')}catch{/* Storage can be disabled. */}
+  }
+  const send=async()=>{
+    if(!text.trim()||busy)return
+    const q=text
+    setText('')
+    setMessages(m=>[...m,{role:'user',text:q}])
+    setBusy(true)
+    try{
+      const r=await api.copilot(q,context,sessionId)
+      const nextSession=String(r.session_id||sessionId)
+      if(nextSession&&nextSession!==sessionId){setSessionId(nextSession);try{localStorage.setItem('asa-copilot-session-id',nextSession)}catch{/* Storage can be disabled. */}}
+      setFocus(r.business_focus)
+      const answer=copilotText(r.answer) || copilotText(r.message) || copilotText(r.response) || copilotText(r.summary)
+      setMessages(m=>[...m,{role:'asa',text:answer||'已完成分析，请查看关联工作流与产物。',actions:actionsFrom(r.suggested_actions)}])
+    }catch(e:any){
+      setMessages(m=>[...m,{role:'asa',text:copilotText(e?.message)||'Copilot 请求失败，请稍后重试。'}])
+    }finally{
+      setBusy(false)
+    }
+  }
+  const contextLabel = context.type === 'candidate' ? `候选人 #${context.id}` : context.type === 'workflow' ? `工作流 ${context.id}` : `ASA Agent · ${tabs.find(item => item[0] === context.page)?.[1] || '总览'}`
+  const focusLabel=focus?.candidate?.name||[focus?.client,focus?.job?.title].filter(Boolean).join(' / ')||focus?.client||''
+  const actionLabel:Record<string,string>={job_archive:'归档岗位',job_split:'拆分岗位',job_publish:'发布岗位',candidate_sourcing:'寻访人选',candidate_outreach:'触达人选',candidate_review:'复核人选',recommendation:'客户推荐',salary:'谈薪处理'}
+  return <aside className={`copilot ${standalone?'standalone':''}`}><header><MessageSquareText/><div><b>ASA Copilot</b><span>{contextLabel}</span></div><button className="icon-btn copilot-new" onClick={newSession} title="新建会话" aria-label="新建会话"><SquarePen/></button>{standalone&&<button className="icon-btn copilot-close" onClick={()=>window.close()} title="关闭浮窗" aria-label="关闭浮窗"><X/></button>}</header>{focusLabel&&<div className={`business-focus ${focus?.needs_clarification?'conflict':''}`}><span>{focus?.needs_clarification?'需要确认':'当前焦点'}</span><b>{focusLabel}</b>{focus?.action&&<small>{actionLabel[focus.action]||focus.action}{focus.directions?.length?` · ${focus.directions.join(' / ')}`:''}</small>}</div>}<div className="chat" aria-live="polite">{messages.length===0?<div className="chat-empty"><b>可以直接开始</b><span>询问当前岗位、人选或工作流。</span></div>:messages.map((m,i)=><div className={`message ${m.role}`} key={i}>{m.text}{!!m.actions?.length&&<div className="message-actions">{m.actions.map((action,index)=><button className={`button ${action.type==='start_workflow'?'primary':''}`} disabled={!!actionBusy} onClick={()=>runAction(action)} key={`${action.type}-${action.id}-${index}`}>{action.type==='start_workflow'?<Check/>:<ExternalLink/>}{action.label||'打开'}</button>)}</div>}</div>)}</div><div className="composer"><textarea value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}} placeholder="问 ASA…" aria-label="向 ASA 提问"/><button disabled={busy||!text.trim()} onClick={send} title="发送" aria-label="发送"><Send/></button></div></aside>
+}
+
+function CopilotSurface() {
+  let context: Record<string, unknown> = { type: 'page', page: 'overview' }
+  try {
+    const value = JSON.parse(new URLSearchParams(location.search).get('context') || '{}')
+    if (value && typeof value === 'object') context = value
+  } catch { /* Keep the safe default context. */ }
+  const openWorkflow = async (id: string) => {
+    if (window.opener && !window.opener.closed) {
+      window.opener.location.hash = `workflow=${id}`
+      window.opener.focus()
+      return
+    }
+    const agentUrl = new URL(location.href)
+    agentUrl.search = ''
+    agentUrl.hash = `workflow=${id}`
+    window.open(agentUrl, 'asa-agent')
+  }
+  return <main className="copilot-surface"><Copilot context={context} openWorkflow={openWorkflow} standalone /></main>
+}
+
+function Diagnostics({error,retry}:{error:string,retry:()=>void}) { return <main className="diagnostics"><ShieldAlert/><h1>ASA Core 无法连接</h1><p>{error}</p><dl><dt>服务地址</dt><dd>http://127.0.0.1:8765/api/v1/health</dd><dt>数据策略</dt><dd>诊断期间不会显示演示数据或缓存人选。</dd></dl><button className="button primary" onClick={retry}>重新连接</button></main> }
+const sourceLabel=(v='')=>v.toLowerCase().includes('xsaas')||v.toLowerCase().includes('x-saas')?'X-SaaS':v.toLowerCase().includes('liepin')?'猎聘':'人才库'
+const sourceLinkLabel=(v='')=>sourceLabel(v)==='X-SaaS'?'X-SaaS档案':sourceLabel(v)==='猎聘'?'猎聘简历':'来源档案'
+const eventStatusLabel=(v='')=>({pending_review:'待复核',completed:'已完成',open:'待处理',done:'已完成',verified:'已核验',failed:'失败',stopped:'已停止'}[v]||v.replaceAll('_',' ')||'已记录')
+
+const surface = new URLSearchParams(location.search).get('surface')
+document.title = surface === 'copilot' ? 'ASA Copilot' : 'ASA Agent'
+createRoot(document.getElementById('root')!).render(<React.StrictMode>{surface === 'copilot' ? <CopilotSurface/> : <App />}</React.StrictMode>)

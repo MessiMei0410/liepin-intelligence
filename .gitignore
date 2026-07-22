@@ -1,0 +1,26 @@
+# 构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 运行产物与临时目录
+work/
+*.log
+.cache/
+tmp/
+screenshots/
+
+# opencli 运行时浏览器登录资料（含 Cookie / 会话，绝不提交）
+opencli/chrome-profile/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 敏感配置
+.env
+.env.*
+*.pem
+
+# 系统文件
+.DS_Store

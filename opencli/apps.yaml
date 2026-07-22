@@ -1,0 +1,14 @@
+{
+  "apps": {
+    "liepin": {
+      "port": 9223,
+      "processName": "Google Chrome",
+      "displayName": "Liepin Browser"
+    },
+    "xsaas": {
+      "port": 9223,
+      "processName": "Google Chrome",
+      "displayName": "X-SaaS Browser"
+    }
+  }
+}
