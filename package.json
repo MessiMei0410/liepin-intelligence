@@ -14,6 +14,7 @@
     "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
     "backup:db": "python3 scripts/asa_v3_backup.py",
     "drill:db": "python3 scripts/asa_v3_restore_drill.py --fresh",
+    "doctor": "python3 scripts/asa_doctor.py",
     "check:api-drift": "node scripts/check-api-drift.mjs",
     "test:e2e": "playwright test --project=functional && playwright test --project=shots-desktop --project=shots-floating",
     "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run test:e2e && npm run check:api-drift"
