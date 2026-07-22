@@ -10,8 +10,9 @@
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "test": "vitest run",
     "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
-    "ci": "npm run typecheck && npm run lint && npm run build && npm run test:contract"
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",
@@ -20,16 +21,21 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "eslint": "^10.7.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^29.1.1",
     "openapi-typescript": "^7.13.0",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.65.0",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   }
 }

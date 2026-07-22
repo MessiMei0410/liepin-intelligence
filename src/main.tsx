@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, Archive, Ban, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleGauge, Clock3, ExternalLink, ListChecks, LoaderCircle, MapPin, MessageSquareText, Route, Search, Send, ShieldAlert, ShieldCheck, SquarePen, Target, TriangleAlert, UserRoundSearch, UsersRound, X } from 'lucide-react'
 import { api, BusinessFocus, Candidate, CandidateDetail, Job, JobDetail, Workflow } from './api'
+import { RevisePlanDialog } from './components/RevisePlanDialog'
+import { mapWorkflowStatus, workflowStatusLabel } from './workflow/statusMapping'
 import './styles.css'
 
 type Tab = 'overview' | 'jobs' | 'progress' | 'candidates'
@@ -28,10 +30,6 @@ const elapsed = (started?: string, finished?: string, now = Date.now()) => {
   if (seconds < 60) return `${seconds} 秒`
   const minutes = Math.floor(seconds / 60)
   return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
-}
-const workflowStatusLabel: Record<string,string> = {
-  planned:'计划就绪', queued:'正在排队', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
-  blocked:'已阻塞', failed:'执行失败', completed:'已完成', cancelled:'已取消', paused:'已暂停',
 }
 const stepStatusLabel: Record<string,string> = {
   pending:'待执行', queued:'排队中', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
@@ -351,7 +349,7 @@ function JobListSection({title,items,tone=''}:{title:string;items:string[];tone?
   return <section className={`job-detail-section ${tone}`}><h3>{title}</h3><div className="job-list-items">{items.map(item=><div key={item}><Check/><span>{item}</span></div>)}</div></section>
 }
 
-function CandidatePanel({value,close,changed}:{value:CandidateDetail,close:()=>void,changed:()=>void|Promise<void>}) {
+export function CandidatePanel({value,close,changed}:{value:CandidateDetail,close:()=>void,changed:()=>void|Promise<void>}) {
   const [busy,setBusy]=useState('')
   const [feedback,setFeedback]=useState<{tone:'error'|'success';text:string}>()
   const [pendingAction,setPendingAction]=useState<CandidateActionPreflight>()
@@ -402,12 +400,17 @@ function LearningSignals({item}:{item:CandidateDetail['sourcing_attributions'][n
   return <div className="learning-signals">{signals.length?signals.map(([label,count])=><span key={String(label)}>{label} {Number(count)}</span>):<span>暂无后续业务反馈</span>}</div>
 }
 
-function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void}) {
+export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void}) {
   const [busy,setBusy]=useState('')
   const [actionError,setActionError]=useState('')
   const [now,setNow]=useState(Date.now())
   const [strategyOpen,setStrategyOpen]=useState(false)
+  const [reviseOpen,setReviseOpen]=useState(false)
+  const candidatesRef=useRef<HTMLElement>(null)
   const status=value.workflow.status
+  const businessOutcome=value.business_outcome??value.workflow.business_outcome??value.goal.business_outcome
+  const mapped=mapWorkflowStatus({status,business_outcome:businessOutcome,steps:value.steps})
+  const progressTone=mapped.kind==='default'?stepTone(status):mapped.tone==='green'?'done':mapped.tone==='amber'?'needs-approval':mapped.tone==='red'?'error':''
   const live=activeWorkflowStatuses.has(status)
   const failedStep=value.steps.find(s=>s.status==='failed')
   const current=value.steps.find(s=>['running','waiting_approval','waiting_external','queued'].includes(s.status)) || failedStep || value.steps.find(s=>s.status==='pending')
@@ -472,24 +475,26 @@ function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{value:W
     catch(e:any){setActionError(humanizeActionError(e?.message,'工作流操作失败，请重试。'))}
     finally{setBusy('')}
   }
-  const revise=()=>{const instruction=prompt('输入计划修改意见');if(instruction?.trim())action('revise',{instruction:instruction.trim()})}
+  const revise=(instruction:string)=>{setReviseOpen(false);action('revise',{instruction})}
+  const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
   const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'审批失败，请重试。'))}finally{setBusy('')}}
   const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'重试失败，请稍后再试。'))}finally{setBusy('')}}
-  const headline=status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待批准寻访` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='planned' ? '计划已就绪，可以启动' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
-  return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {workflowStatusLabel[status]||status}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" onClick={()=>openCopilotWindow({type:'workflow',id:value.workflow.workflow_id})}><MessageSquareText/>Copilot</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{['planned','blocked','failed'].includes(status)&&<button className="button" disabled={!!busy} onClick={revise}>修改计划</button>}{!['cancelled','completed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>action('cancel')}>取消</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}启动</button>}</div></header><div className="workflow-body"><main>
-    <section className={`workflow-progress ${stepTone(status)}`} aria-live="polite">
-      <div className="progress-status"><span className="progress-icon"><WorkflowStatusIcon status={status}/></span><div><span>{workflowStatusLabel[status]||status}</span><b>{headline}</b><small>{status==='waiting_approval'&&pendingApprovals[0]?.created_at?`已等待 ${elapsed(pendingApprovals[0].created_at,undefined,now)}`:live&&value.workflow.started_at?`已运行 ${elapsed(value.workflow.started_at,value.workflow.finished_at,now)}`:`更新于 ${date(value.workflow.updated_at)}`}</small></div><strong>{percent}%</strong></div>
+  const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待批准寻访` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='planned' ? '计划已就绪，可以启动' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
+  return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" onClick={()=>openCopilotWindow({type:'workflow',id:value.workflow.workflow_id})}><MessageSquareText/>Copilot</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{['planned','blocked','failed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}修改计划</button>}{!['cancelled','completed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'&&<LoaderCircle className="spin"/>}取消</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}启动</button>}</div></header><div className="workflow-body"><main>
+    <section className={`workflow-progress ${progressTone}`} aria-live="polite">
+      <div className="progress-status"><span className="progress-icon"><WorkflowStatusIcon status={status}/></span><div><span>{mapped.label}</span><b>{headline}</b><small>{status==='waiting_approval'&&pendingApprovals[0]?.created_at?`已等待 ${elapsed(pendingApprovals[0].created_at,undefined,now)}`:live&&value.workflow.started_at?`已运行 ${elapsed(value.workflow.started_at,value.workflow.finished_at,now)}`:`更新于 ${date(value.workflow.updated_at)}`}</small></div><strong>{percent}%</strong></div>
       <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><i style={{width:`${percent}%`}}/></div>
       <div className="progress-meta"><span>{completed} 步完成</span><span>{Math.max(0,total-completed)} 步待处理</span><span>{pendingApprovals.length?`${pendingApprovals.length} 项待审批`:'无需审批'}</span></div>
     </section>
+    {mapped.showNextActions&&<div className="workflow-next-actions" role="group" aria-label="下一步操作"><button className="button" disabled={!!busy} onClick={reviewCandidates}><UserRoundSearch/>复核现有人选</button><button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}调整条件再搜</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}结束本轮</button>}</div>}
     <WorkflowTarget target={target} objective={value.goal.objective}/>
     <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
-    <WorkflowCandidates newItems={newCandidates} assessedItems={assessedCandidates} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
+    <WorkflowCandidates ref={candidatesRef} newItems={newCandidates} assessedItems={assessedCandidates} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
     <div className="workflow-section-label"><ListChecks/><b>执行步骤</b><span>{completed}/{total} 已完成</span></div>
     <div className="step-list">{value.steps.map(s=>{const tone=stepTone(s.status);const result=stepBusinessResult(s);return <details className={`workflow-step ${tone}`} key={s.id} open={s.id===current?.id || s.status==='running'}><summary><span className={`step-no ${tone}`}><StepStatusIcon status={s.status} sequence={s.sequence}/></span><div><b>{s.business_label}</b><small>{s.reason}</small>{s.started_at&&<span className="step-time"><Clock3/>{s.status==='running'?`已执行 ${elapsed(s.started_at,s.finished_at,now)}`:`${date(s.started_at)}${s.finished_at?` · 用时 ${elapsed(s.started_at,s.finished_at,now)}`:''}`}</span>}</div><span className={`status-badge ${tone}`}>{s.risk_level} · {stepStatusLabel[s.status]||s.status}</span></summary><div className={`step-detail business-result ${result.error?'error':''}`}><b>{result.headline}</b>{result.facts.map((fact,index)=><span key={index}><Check/>{fact}</span>)}{s.status==='failed'&&<button className="button" disabled={!!busy} onClick={()=>retry(s.id)}>{busy===`retry-${s.id}`?<LoaderCircle className="spin"/>:<Activity/>}重试此步骤</button>}</div></details>})}</div>
   </main><aside><SectionHead title="待审批" meta={`${pendingApprovals.length} 条`} />{pendingApprovals.length===0&&<div className="aside-empty"><ShieldCheck/><span>当前没有待审批动作</span></div>}{pendingApprovals.map(a=><div className={`approval ${a.status}`} key={a.approval_id}><div className="approval-title"><ShieldCheck/><div><b>{a.title}</b><span>{a.risk_level} · {a.preflight?.channel||'ASA'}</span></div></div>{a.preflight?.object_label&&<strong>{a.preflight.object_label}</strong>}{a.preflight?.before&&<p><span>批准前</span>{a.preflight.before}</p>}{a.preflight?.after&&<p><span>批准后</span>{a.preflight.after}</p>}<div className="approval-actions"><button disabled={!!busy} onClick={()=>decide(a.approval_id,'reject')}>拒绝</button><button className="approve" disabled={!!busy} onClick={()=>decide(a.approval_id,'approve')}>{busy===a.approval_id?<LoaderCircle className="spin"/>:<Check/>}批准寻访</button></div></div>)}
     <SectionHead title="执行动态" meta={`${events.length} 条`} />{events.length===0?<div className="aside-empty"><CircleDashed/><span>启动后将在这里显示过程</span></div>:<div className="workflow-events">{events.slice(0,12).map(e=><div key={e.id}><i className={stepTone(e.status)}/><span>{date(e.created_at)}</span><b>{humanizeWorkflowEvent(e)}</b></div>)}</div>}
-    <SectionHead title="产物" meta={`${value.artifacts.length} 个`} />{value.artifacts.length===0&&<div className="aside-empty"><CircleDashed/><span>暂无执行产物</span></div>}{value.artifacts.map(a=><div className="aside-item" key={a.artifact_id}><b>{a.title}</b><small>{a.artifact_type} · {a.validation_status}</small></div>)}</aside></div></article></div>
+    <SectionHead title="产物" meta={`${value.artifacts.length} 个`} />{value.artifacts.length===0&&<div className="aside-empty"><CircleDashed/><span>暂无执行产物</span></div>}{value.artifacts.map(a=><div className="aside-item" key={a.artifact_id}><b>{a.title}</b><small>{a.artifact_type} · {a.validation_status}</small></div>)}</aside></div></article>{reviseOpen&&<RevisePlanDialog onCancel={()=>setReviseOpen(false)} onSubmit={revise}/>}</div>
 }
 
 function WorkflowTarget({target,objective}:{target:{client:string;job:string;location:string;status:string;priority:string;id:number},objective:string}) {
@@ -521,7 +526,7 @@ function StrategyRule({title,values,tone}:{title:string;values:any[];tone:string
   return <div className={`strategy-rule ${tone}`}><b>{title}</b><div>{values.map((value,index)=><span key={index}>{String(value)}</span>)}</div></div>
 }
 
-function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate}:{newItems:Array<Record<string,any>>;assessedItems:Array<Record<string,any>>;sourcingStatus:string;openCandidate:(id:number)=>void}) {
+function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate,ref}:{newItems:Array<Record<string,any>>;assessedItems:Array<Record<string,any>>;sourcingStatus:string;openCandidate:(id:number)=>void;ref?:React.Ref<HTMLElement>}) {
   const finished=['completed','failed','blocked'].includes(sourcingStatus)
   const newIds=new Set(newItems.map(item=>Number(item.jobCandidateId||0)).filter(Boolean))
   const mergedById=new Map<number,Record<string,any>>()
@@ -532,7 +537,7 @@ function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate
     else mergedById.set(-(index+1),item)
   })
   const items=[...mergedById.values()]
-  return <section className="workflow-insight workflow-candidates">
+  return <section ref={ref} className="workflow-insight workflow-candidates">
     <header><span className="insight-icon"><UsersRound/></span><div><span>人选结果</span><b>{finished?`本轮新增 ${newItems.length} 人 · 岗位已评估 ${assessedItems.length} 人`:'等待渠道与评估结果'}</b></div>{items.length>0&&<span className="tag warn">点击查看详情</span>}</header>
     {items.length?<div className="candidate-result-list">{items.map((candidate,index)=>{const score=Number(candidate.assessmentScore||candidate.searchScore||0);const recommendation=candidate.recommendation==='not_recommended'?'不推荐':candidate.recommendation==='verify_first'?'待补证据':score>=75?'推荐':'待复核';const isNew=newIds.has(Number(candidate.jobCandidateId||0));return <button key={`${candidate.jobCandidateId}-${index}`} disabled={!candidate.jobCandidateId} onClick={()=>candidate.jobCandidateId&&openCandidate(candidate.jobCandidateId)}><span className="candidate-result-icon"><UserRoundSearch/></span><div><b>{String(candidate.name||'姓名待补充')}</b><span>{String(candidate.company||'公司待补充')} · {String(candidate.title||'职位待补充')}</span><small>{isNew?'本轮新增':'历史入库'} · {sourceLabel(String(candidate.channel||candidate.source||''))} · {String(candidate.city||'城市待补充')} · {String(candidate.experience||'经验待补充')} · {String(candidate.education||'学历待补充')}</small></div><div className="candidate-score"><b>{score||'-'}</b><span>ASA 评估</span><small className={recommendation==='不推荐'?'bad':recommendation==='推荐'?'good':'warn'}>{recommendation}</small></div><ChevronRight/></button>})}</div>:<div className="insight-empty">{finished?'本轮没有新增人选，岗位也暂无评估结果。':'寻访执行并完成排重后，人选会显示在这里。'}</div>}
   </section>
@@ -660,4 +665,5 @@ const eventStatusLabel=(v='')=>({pending_review:'待复核',completed:'已完成
 
 const surface = new URLSearchParams(location.search).get('surface')
 document.title = surface === 'copilot' ? 'ASA Copilot' : 'ASA Agent'
-createRoot(document.getElementById('root')!).render(<React.StrictMode>{surface === 'copilot' ? <CopilotSurface/> : <App />}</React.StrictMode>)
+const rootElement = document.getElementById('root')
+if (rootElement) createRoot(rootElement).render(<React.StrictMode>{surface === 'copilot' ? <CopilotSurface/> : <App />}</React.StrictMode>)

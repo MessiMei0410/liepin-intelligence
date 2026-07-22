@@ -41,8 +41,11 @@ export type CandidateDetail = Candidate & {
 
 export type Workflow = {
   ok: boolean;
-  goal: { title: string; objective: string; status: string; progress: number; started_at?: string; finished_at?: string; error?: string; context?: { type?: string; id?: number; page?: string } };
-  workflow: { workflow_id: string; status: string; current_stage?: string; updated_at?: string; started_at?: string; finished_at?: string; active_step_id?: number; archived_at?: string };
+  // 业务终态：null 或 completed_target_met / completed_needs_review / completed_pool_insufficient / failed_technical。
+  // 后端在顶层、workflow、goal 三处冗余同一值；未知新值由 statusMapping 兜底，故类型保持宽松的 string。
+  business_outcome?: string | null;
+  goal: { title: string; objective: string; status: string; progress: number; started_at?: string; finished_at?: string; error?: string; business_outcome?: string | null; context?: { type?: string; id?: number; page?: string } };
+  workflow: { workflow_id: string; status: string; current_stage?: string; updated_at?: string; started_at?: string; finished_at?: string; active_step_id?: number; archived_at?: string; business_outcome?: string | null };
   progress?: { completed: number; total: number; ratio: number };
   steps: Array<{
     id: number; sequence: number; business_label: string; reason?: string; risk_level: string; status: string;
