@@ -69,6 +69,9 @@ export type ContractAnchor = [
   paths['/api/v1/candidate-actions/commit']['post'],
   // R10 增补：停止原因摘要路由入锚。
   paths['/api/v1/candidates/stop-reasons/summary']['get'],
+  // S4-3 增补：策略复盘读取与按需重算路由入锚。
+  paths['/api/v1/workflows/{workflow_id}/strategy-review']['get'],
+  paths['/api/v1/workflows/{workflow_id}/strategy-review/rebuild']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -94,6 +97,49 @@ export type Bootstrap = {
 }
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
+
+// S4-3 策略复盘：Core 返回动态 dict（openapi 只描述为 object），按 strategy_review.py 实际 payload 收窄声明。
+// revision_diff 逐项可采纳/拒绝（status: pending → accepted/rejected）；本期后端无条目级回写接口，
+// 顾问决策由 RevisePlanDialog 暂存 localStorage 并随 revise instruction 汇入学习链路。
+export type StrategyReviewDiff = {
+  diff_id: string
+  step: string
+  op: 'add' | 'replace' | 'review'
+  tier?: string
+  companies?: string[]
+  group?: string
+  terms?: string[]
+  reason: string
+  status: 'pending' | 'accepted' | 'rejected'
+}
+export type StrategyReviewChannelFinding = {
+  channel: string; status?: string; recall_count?: number; unique_count?: number;
+  intake_new_count?: number; assessed_count?: number; high_score_count?: number;
+  detail_complete?: number; detail_partial?: number; detail_failed?: number;
+  detail_failed_ratio?: number | null; zero_attribution?: string | null;
+  finding?: string; note?: string;
+}
+export type StrategyReviewEvidence = {
+  has_strategy_v2?: boolean; funnel_channels?: number; expected_recall_total?: number;
+  recall_total?: number; detail_total?: number; detail_failed_total?: number;
+  detail_failed_ratio?: number | null; intake_new_total?: number; assessed_total?: number;
+  high_score_total?: number; high_score_rate?: number | null; assessment_source?: string;
+}
+export type StrategyReview = {
+  verdict: string; verdict_label: string; verdict_reason: string; degraded?: boolean;
+  thresholds?: { recall_shortfall_ratio?: number; detail_failed_ratio?: number; high_score_rate?: number };
+  evidence?: StrategyReviewEvidence;
+  per_channel_findings?: StrategyReviewChannelFinding[];
+  revision_diff?: StrategyReviewDiff[];
+  escalation?: { kind?: string; target?: string; reason?: string; status?: string } | null;
+  notes?: string[]; generated_at?: string; version?: number;
+  history?: Array<{ version?: number; verdict?: string; verdict_reason?: string; generated_at?: string }>;
+}
+export type StrategyReviewPayload = {
+  ok?: boolean; artifact_id: string; workflow_id: string; title: string; content: string;
+  created_at?: string; review: StrategyReview;
+}
+export type StrategyReviewRebuildResult = { ok?: boolean; workflow_id: string; artifact_id: string; review: StrategyReview }
 
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
@@ -128,6 +174,18 @@ export const api = {
   // R8 渠道漏斗：独立按需路由（面板挂载/详情刷新时拉取），不进 /summary 轮询签名，轮询负载不回升。
   workflowSourcingFunnel: async (id: string): Promise<SourcingFunnel> =>
     parseSourcingFunnel(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/sourcing-funnel`)),
+  // S4-3 策略复盘：无复盘或工作流不存在时 Core 返回 404，此处收敛为 null（其余错误照常抛出，携带 status）。
+  strategyReview: async (id: string): Promise<StrategyReviewPayload | null> => {
+    try {
+      return await json<StrategyReviewPayload>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review`)
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) return null
+      throw error
+    }
+  },
+  // 按需重算（终局工作流补生成）：幂等走 write 封装；非终局 Core 返回 409，错误带 status 由调用方呈现。
+  rebuildStrategyReview: (id: string) =>
+    write<StrategyReviewRebuildResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/rebuild`, {}),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),

@@ -151,3 +151,43 @@
 .funnel-query-text{flex:1;min-width:0;overflow-wrap:anywhere;color:#343934}
 .funnel-query-stat{flex:0 0 auto;color:var(--muted);font-size:10.5px}
 .funnel-queries li>.tag{margin:0}
+
+/* S4-3 策略复盘（StrategyReview）：沿用 workflow-insight 骨架，判定理由 + 证据数字流 + 渠道简表 + 修订 diff 列表 */
+.workflow-review .review-verdict{padding:10px 13px;border-top:1px solid var(--line);display:grid;gap:6px}
+.workflow-review .review-verdict>p{margin:0;font-size:11.5px;line-height:1.55;color:#343934}
+.workflow-review .review-channels{border-top:1px solid var(--line)}
+.workflow-review .review-channel{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;padding:8px 13px;font-size:11px}
+.workflow-review .review-channel+.review-channel{border-top:1px solid #eceee9}
+.workflow-review .review-channel>b{font-size:11.5px}
+.workflow-review .review-channel-stats{color:var(--muted)}
+.workflow-review .review-channel>.tag{margin:0}
+.workflow-review .review-channel>small{flex-basis:100%;font-size:10px;color:var(--muted);line-height:1.5}
+.workflow-review .review-diffs{border-top:1px solid var(--line);padding:10px 13px;display:grid;gap:8px}
+.workflow-review .review-diffs-head{display:flex;align-items:baseline;gap:8px}
+.workflow-review .review-diffs-head>b{font-size:11.5px}
+.workflow-review .review-diffs-head>span{font-size:9.5px;color:var(--muted)}
+.workflow-review .review-diff{border-left:2px solid #a9c7dd;background:#f7fafc;padding:6px 9px;display:grid;gap:3px}
+.workflow-review .review-diff-head{display:flex;align-items:center;gap:8px}
+.workflow-review .review-diff-head>b{font-size:11px}
+.workflow-review .review-diff-head>.tag{margin:0}
+.workflow-review .review-diff-content{font-size:11px;color:#20231f;overflow-wrap:anywhere}
+.workflow-review .review-diff>small{font-size:9.5px;color:var(--muted);line-height:1.5}
+.workflow-review .review-escalation{margin:0;padding:9px 13px;border-top:1px solid var(--line);font-size:10.5px;color:var(--amber);line-height:1.5}
+.workflow-review .review-notes{margin:0;padding:8px 13px 10px 26px;border-top:1px solid var(--line);display:grid;gap:3px}
+.workflow-review .review-notes li{font-size:10px;color:var(--muted);line-height:1.5}
+.workflow-review .insight-empty{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+
+/* S4-3 修改计划对话框内修订 diff（RevisePlanDialog）：逐项采纳/拒绝，采纳预填进修改意见 */
+.revise-diffs{margin:0 0 12px;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+.revise-diffs-head{padding:7px 10px;background:#fafbf9;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:8px}
+.revise-diffs-head>b{font-size:11px}
+.revise-diffs-head>span{font-size:9.5px;color:var(--muted)}
+.revise-diff-item{padding:8px 10px;display:grid;gap:4px}
+.revise-diff-item+.revise-diff-item{border-top:1px solid #eceee9}
+.revise-diff-item>p{margin:0;font-size:10px;color:var(--muted);line-height:1.5}
+.revise-diff-line{display:flex;align-items:baseline;gap:6px;font-size:11.5px;flex-wrap:wrap}
+.revise-diff-line>b{font-size:11px}
+.revise-diff-actions{display:flex;gap:6px}
+.revise-diff-actions .button{height:26px;padding:0 10px;font-size:10.5px}
+.revise-diff-actions .button.primary{background:var(--green);border-color:var(--green);color:#fff}
+.revise-diff-actions .button.danger{background:var(--red-soft);border-color:#e5c7c7;color:var(--red)}
