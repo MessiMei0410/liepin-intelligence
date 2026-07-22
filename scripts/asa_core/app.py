@@ -150,6 +150,27 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.get("/api/v1/workflows/{workflow_id}")
     def workflow(workflow_id: str) -> dict[str, Any]: return core.workflow(workflow_id)
 
+    @app.get("/api/v1/workflows/{workflow_id}/summary")
+    def workflow_summary(workflow_id: str) -> dict[str, Any]:
+        try:
+            return core.workflow_summary(workflow_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/v1/workflows/{workflow_id}/steps/{step_id}")
+    def workflow_step(workflow_id: str, step_id: int) -> dict[str, Any]:
+        try:
+            return core.workflow_step(workflow_id, step_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/api/v1/workflows/{workflow_id}/candidates")
+    def workflow_candidates(workflow_id: str, limit: int = Query(50, le=200), offset: int = 0) -> dict[str, Any]:
+        try:
+            return core.workflow_candidates(workflow_id, limit, offset)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
         return core.audit_events(limit, offset)

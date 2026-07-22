@@ -672,6 +672,21 @@ class CoreService:
             return self.agent_service.get_workflow(workflow_id)
         raise RuntimeError("workflow service unavailable")
 
+    def workflow_summary(self, workflow_id: str) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_workflow_summary(workflow_id)
+        raise RuntimeError("workflow service unavailable")
+
+    def workflow_step(self, workflow_id: str, step_id: int) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_workflow_step(workflow_id, step_id)
+        raise RuntimeError("workflow service unavailable")
+
+    def workflow_candidates(self, workflow_id: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_workflow_candidates(workflow_id, limit, offset)
+        raise RuntimeError("workflow service unavailable")
+
     def audit_events(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         conn = connect(self.db_path)
         try:

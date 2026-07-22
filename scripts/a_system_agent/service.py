@@ -897,6 +897,12 @@ class AgentService:
     def get_workflow_summary(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.get_workflow_summary(workflow_id)
 
+    def get_workflow_step(self, workflow_id: str, step_id: int) -> dict[str, Any]:
+        return self.workflow_engine.get_workflow_step(workflow_id, step_id)
+
+    def get_workflow_candidates(self, workflow_id: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        return self.workflow_engine.get_workflow_candidates(workflow_id, limit, offset)
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 

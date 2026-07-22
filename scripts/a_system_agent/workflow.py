@@ -26,6 +26,16 @@ def _row(row: Any) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()} if row else {}
 
 
+def _mask_candidate_name(value: Any) -> str:
+    """对外列表只暴露遮罩姓名；已遮罩（含 * / 某 / 先生 / 女士 / 老师）的保持原样。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "*" in text or "某" in text or text.endswith(("先生", "女士", "老师")):
+        return text
+    return text[:1] + "**"
+
+
 STAGE_ORDER = [
     "job_intake", "jd_calibration", "job_library", "search_strategy", "sourcing", "resume_capture",
     "assessment", "verification", "outreach", "reply", "recommendation", "interview",
@@ -1502,6 +1512,34 @@ class WorkflowEngine:
         item["context"] = _loads(item.pop("context_json", "{}"), {})
         return item
 
+    def _step_item(self, row: Any, goal_context: dict[str, Any]) -> dict[str, Any]:
+        """单步骤的对外结构：解析 JSON 列，并为岗位批量评估步骤实时注入评估队列。"""
+        item = _row(row)
+        for source, target, default in (
+            ("depends_on_json", "depends_on", []), ("input_json", "inputs", {}),
+            ("output_json", "output", {}), ("references_json", "references", []),
+            ("verification_json", "verification", {}), ("recovery_json", "recovery", {}),
+        ):
+            item[target] = _loads(item.pop(source), default)
+        if (
+            item.get("capability_id") == "candidate_batch_assessment"
+            and goal_context.get("type") == "job"
+            and goal_context.get("id")
+        ):
+            assessed_items = self.service._current_assessed_candidates(int(goal_context["id"]))
+            queue = item["output"].get("assessment_queue")
+            if not isinstance(queue, dict):
+                queue = {}
+                item["output"]["assessment_queue"] = queue
+            queue["assessed_items"] = assessed_items
+            queue["completed"] = len(assessed_items)
+            queue["score_75_plus"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) >= 75])
+            queue["verify_first"] = len([entry for entry in assessed_items if entry.get("recommendation") == "verify_first"])
+            queue["low_score"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) < 55])
+            if int(queue.get("started") or 0) == 0:
+                item["output"]["summary"] = f"本轮没有新增待评估人选；岗位当前已有 {len(assessed_items)} 位评估结果。"
+        return item
+
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         conn = self._connect()
         try:
@@ -1516,33 +1554,7 @@ class WorkflowEngine:
             artifacts = conn.execute("SELECT * FROM agent_artifacts WHERE workflow_id=? ORDER BY id DESC", (workflow_id,)).fetchall()
             events = conn.execute("SELECT * FROM agent_step_events WHERE workflow_id=? ORDER BY id DESC LIMIT 100", (workflow_id,)).fetchall()
             goal_context = _loads(goal["context_json"], {})
-            step_items = []
-            for row in steps:
-                item = _row(row)
-                for source, target, default in (
-                    ("depends_on_json", "depends_on", []), ("input_json", "inputs", {}),
-                    ("output_json", "output", {}), ("references_json", "references", []),
-                    ("verification_json", "verification", {}), ("recovery_json", "recovery", {}),
-                ):
-                    item[target] = _loads(item.pop(source), default)
-                if (
-                    item.get("capability_id") == "candidate_batch_assessment"
-                    and goal_context.get("type") == "job"
-                    and goal_context.get("id")
-                ):
-                    assessed_items = self.service._current_assessed_candidates(int(goal_context["id"]))
-                    queue = item["output"].get("assessment_queue")
-                    if not isinstance(queue, dict):
-                        queue = {}
-                        item["output"]["assessment_queue"] = queue
-                    queue["assessed_items"] = assessed_items
-                    queue["completed"] = len(assessed_items)
-                    queue["score_75_plus"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) >= 75])
-                    queue["verify_first"] = len([entry for entry in assessed_items if entry.get("recommendation") == "verify_first"])
-                    queue["low_score"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) < 55])
-                    if int(queue.get("started") or 0) == 0:
-                        item["output"]["summary"] = f"本轮没有新增待评估人选；岗位当前已有 {len(assessed_items)} 位评估结果。"
-                step_items.append(item)
+            step_items = [self._step_item(row, goal_context) for row in steps]
             approval_items = []
             for row in approvals:
                 item = _row(row)
@@ -1656,6 +1668,99 @@ class WorkflowEngine:
                 "R4": "永久禁止自动执行",
             },
         }
+
+    def get_workflow_step(self, workflow_id: str, step_id: int) -> dict[str, Any]:
+        """单步骤详情：完整 output（含渠道审计 stdout 与实时注入的评估队列），按需取用。"""
+        conn = self._connect()
+        try:
+            if self._refresh_expired_approvals(conn, workflow_id):
+                conn.commit()
+            workflow = conn.execute("SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if workflow is None:
+                raise ValueError("工作流不存在")
+            row = conn.execute(
+                "SELECT * FROM agent_workflow_steps WHERE workflow_id=? AND id=?", (workflow_id, int(step_id))
+            ).fetchone()
+            if row is None:
+                raise ValueError("步骤不存在")
+            goal = conn.execute("SELECT context_json FROM agent_goals WHERE goal_id=?", (workflow["goal_id"],)).fetchone()
+            goal_context = _loads(goal["context_json"], {}) if goal else {}
+            return {"ok": True, "workflow_id": workflow_id, "step": self._step_item(row, goal_context)}
+        finally:
+            conn.close()
+
+    def get_workflow_candidates(self, workflow_id: str, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """工作流候选人结果分页：岗位上下文下"已评估或有寻访归因"的人选，只含摘要字段。"""
+        conn = self._connect()
+        try:
+            workflow = conn.execute("SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if workflow is None:
+                raise ValueError("工作流不存在")
+            goal = conn.execute("SELECT context_json FROM agent_goals WHERE goal_id=?", (workflow["goal_id"],)).fetchone()
+            goal_context = _loads(goal["context_json"], {}) if goal else {}
+            limit = max(1, min(int(limit or 50), 200))
+            offset = max(0, int(offset or 0))
+            if goal_context.get("type") != "job" or not goal_context.get("id"):
+                return {"ok": True, "workflow_id": workflow_id, "items": [], "total": 0, "limit": limit, "offset": offset}
+            job_id = int(goal_context["id"])
+            base = """
+                FROM job_candidates jc
+                JOIN people p ON p.id=jc.person_id
+                LEFT JOIN agent_candidate_assessments a ON a.id=(
+                    SELECT a2.id FROM agent_candidate_assessments a2
+                    JOIN agent_runs r2 ON r2.run_id=a2.run_id
+                    WHERE a2.job_candidate_id=jc.id AND a2.is_current=1 AND r2.status='completed'
+                    ORDER BY a2.id DESC LIMIT 1
+                )
+                LEFT JOIN agent_sourcing_attributions sa ON sa.id=(
+                    SELECT sa2.id FROM agent_sourcing_attributions sa2
+                    WHERE sa2.job_candidate_id=jc.id ORDER BY sa2.id DESC LIMIT 1
+                )
+                WHERE jc.job_id=? AND (a.id IS NOT NULL OR sa.id IS NOT NULL)
+            """
+            total = int(conn.execute(f"SELECT COUNT(*) {base}", (job_id,)).fetchone()[0])
+            rows = conn.execute(
+                f"""
+                SELECT jc.id,p.id AS person_id,p.display_name,p.current_company,p.current_title,
+                       jc.clean_stage,jc.flow_bucket,jc.raw_status,jc.updated_at,
+                       a.fit_score,a.fit_level,a.recommendation,
+                       sa.channel AS attribution_channel,sa.source_query AS attribution_query,
+                       sa.source_round AS attribution_round,sa.workflow_id AS attribution_workflow_id
+                {base}
+                ORDER BY (a.fit_score IS NULL),a.fit_score DESC,jc.id DESC LIMIT ? OFFSET ?
+                """,
+                (job_id, limit, offset),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = _row(row)
+                attribution = None
+                if item.get("attribution_channel") is not None:
+                    attribution = {
+                        "channel": item["attribution_channel"],
+                        "source_query": item["attribution_query"],
+                        "source_round": item["attribution_round"],
+                        "from_workflow": bool(item["attribution_workflow_id"]) and item["attribution_workflow_id"] == workflow_id,
+                    }
+                items.append({
+                    "id": item["id"],
+                    "person_id": item["person_id"],
+                    "name": _mask_candidate_name(item["display_name"]),
+                    "company": item["current_company"],
+                    "title": item["current_title"],
+                    "fit_score": item["fit_score"],
+                    "fit_level": item["fit_level"],
+                    "recommendation": item["recommendation"],
+                    "stage": item["clean_stage"],
+                    "flow_bucket": item["flow_bucket"],
+                    "status": item["raw_status"],
+                    "assessed": item["fit_score"] is not None,
+                    "attribution": attribution,
+                    "updated_at": item["updated_at"],
+                })
+            return {"ok": True, "workflow_id": workflow_id, "items": items, "total": total, "limit": limit, "offset": offset}
+        finally:
+            conn.close()
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any]:
         conn = self._connect()
