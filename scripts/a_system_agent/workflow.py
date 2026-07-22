@@ -32,6 +32,112 @@ STAGE_ORDER = [
     "salary", "decision", "offer", "onboarding", "retrospective",
 ]
 
+SOURCING_OBJECTIVE_TOKENS = ("补充", "补池", "寻访", "找人", "搜索")
+
+BUSINESS_OUTCOMES = (
+    "completed_target_met",
+    "completed_needs_review",
+    "completed_pool_insufficient",
+    "failed_technical",
+)
+
+
+def sourcing_target_stats(conn: Any, objective: Any, context: dict[str, Any], workflow_id: str) -> dict[str, int] | None:
+    """寻访类目标的达标信号（score_75_plus/verify_first 等）；非寻访目标返回 None。"""
+    objective_text = str(objective or "")
+    if not any(token in objective_text for token in SOURCING_OBJECTIVE_TOKENS):
+        return None
+    if context.get("type") != "job" or not context.get("id"):
+        return None
+    match = re.search(r"(\d+)\s*(?:位|个|人)", objective_text)
+    target = (min(100, int(match.group(1))) if match else 0) or 10
+    step = conn.execute(
+        """
+        SELECT output_json FROM agent_workflow_steps
+        WHERE workflow_id=? AND capability_id='candidate_batch_assessment'
+        ORDER BY sequence DESC LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone()
+    queue = _loads(step["output_json"], {}).get("assessment_queue") if step else {}
+    if not isinstance(queue, dict):
+        queue = {}
+    stats = {
+        "target": int(target),
+        "assessed": int(queue.get("completed") or queue.get("assessed") or 0),
+        "score_75_plus": int(queue.get("score_75_plus") or 0),
+        "verify_first": int(queue.get("verify_first") or 0),
+        "low_score": int(queue.get("low_score") or 0),
+    }
+    if stats["assessed"]:
+        return stats
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS assessed,
+                   SUM(CASE WHEN a.fit_score>=75 THEN 1 ELSE 0 END) AS high,
+                   SUM(CASE WHEN a.recommendation='verify_first' THEN 1 ELSE 0 END) AS verify_first,
+                   SUM(CASE WHEN a.fit_score<55 THEN 1 ELSE 0 END) AS low_score
+            FROM agent_candidate_assessments a
+            JOIN job_candidates jc ON jc.id=a.job_candidate_id
+            JOIN agent_runs r ON r.run_id=a.run_id
+            WHERE jc.job_id=? AND a.is_current=1 AND r.status='completed'
+            """,
+            (int(context["id"]),),
+        ).fetchone()
+        stats.update({
+            "assessed": int(row["assessed"] or 0),
+            "score_75_plus": int(row["high"] or 0),
+            "verify_first": int(row["verify_first"] or 0),
+            "low_score": int(row["low_score"] or 0),
+        })
+    except Exception:
+        pass
+    return stats
+
+
+def classify_business_outcome(conn: Any, workflow_id: str) -> str | None:
+    """从库中数据推导工作流的业务终态（business_outcome），与引擎写入口径一致。
+
+    - 非寻访类目标（不符合寻访判定条件）→ None
+    - 终端为 failed（步骤失败/异常路径）→ 'failed_technical'
+    - 寻访类且 score_75_plus >= target → 'completed_target_met'
+    - 寻访类未达标但仍有待人工复核人选（verify_first > 0）→ 'completed_needs_review'
+    - 寻访类未达标且待复核为 0 → 'completed_pool_insufficient'
+    - blocked 的步骤阻塞/缺输入来源（无 goal_target_checked 终局事件）→ None
+    - 非终局状态（queued/running/waiting_*/cancelled/superseded 等）→ None
+    """
+    row = conn.execute(
+        """
+        SELECT w.status AS workflow_status,g.objective AS objective,g.context_json AS context_json
+        FROM agent_workflows w JOIN agent_goals g ON g.goal_id=w.goal_id
+        WHERE w.workflow_id=?
+        """,
+        (workflow_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    stats = sourcing_target_stats(conn, row["objective"], _loads(row["context_json"], {}), workflow_id)
+    if stats is None:
+        return None
+    status = str(row["workflow_status"] or "")
+    if status == "failed":
+        return "failed_technical"
+    if status not in {"blocked", "completed"}:
+        return None
+    if status == "blocked":
+        checked = conn.execute(
+            "SELECT 1 FROM agent_step_events WHERE workflow_id=? AND event_type='goal_target_checked' LIMIT 1",
+            (workflow_id,),
+        ).fetchone()
+        if checked is None:
+            return None
+    if stats["score_75_plus"] >= stats["target"]:
+        return "completed_target_met"
+    if stats["verify_first"] > 0:
+        return "completed_needs_review"
+    return "completed_pool_insufficient"
+
 
 class WorkflowEngine:
     MAX_STEPS = 12
@@ -1132,89 +1238,36 @@ class WorkflowEngine:
         progress = round(float(completed or 0) / max(1, int(total or 0)), 4)
         conn.execute("UPDATE agent_goals SET progress=?,updated_at=datetime('now','localtime') WHERE goal_id=?", (progress, goal_id))
 
-    @staticmethod
-    def _target_count(objective: Any) -> int:
-        match = re.search(r"(\d+)\s*(?:位|个|人)", str(objective or ""))
-        return min(100, int(match.group(1))) if match else 0
-
     def _sourcing_target_status(self, conn, goal: Any, workflow_id: str) -> dict[str, int] | None:
-        objective = str(goal["objective"] or "")
-        if not any(token in objective for token in ("补充", "补池", "寻访", "找人", "搜索")):
-            return None
-        context = _loads(goal["context_json"], {})
-        if context.get("type") != "job" or not context.get("id"):
-            return None
-        target = self._target_count(objective) or 10
-        step = conn.execute(
-            """
-            SELECT output_json FROM agent_workflow_steps
-            WHERE workflow_id=? AND capability_id='candidate_batch_assessment'
-            ORDER BY sequence DESC LIMIT 1
-            """,
-            (workflow_id,),
-        ).fetchone()
-        queue = _loads(step["output_json"], {}).get("assessment_queue") if step else {}
-        if not isinstance(queue, dict):
-            queue = {}
-        stats = {
-            "target": int(target),
-            "assessed": int(queue.get("completed") or queue.get("assessed") or 0),
-            "score_75_plus": int(queue.get("score_75_plus") or 0),
-            "verify_first": int(queue.get("verify_first") or 0),
-            "low_score": int(queue.get("low_score") or 0),
-        }
-        if stats["assessed"]:
-            return stats
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS assessed,
-                       SUM(CASE WHEN a.fit_score>=75 THEN 1 ELSE 0 END) AS high,
-                       SUM(CASE WHEN a.recommendation='verify_first' THEN 1 ELSE 0 END) AS verify_first,
-                       SUM(CASE WHEN a.fit_score<55 THEN 1 ELSE 0 END) AS low_score
-                FROM agent_candidate_assessments a
-                JOIN job_candidates jc ON jc.id=a.job_candidate_id
-                JOIN agent_runs r ON r.run_id=a.run_id
-                WHERE jc.job_id=? AND a.is_current=1 AND r.status='completed'
-                """,
-                (int(context["id"]),),
-            ).fetchone()
-            stats.update({
-                "assessed": int(row["assessed"] or 0),
-                "score_75_plus": int(row["high"] or 0),
-                "verify_first": int(row["verify_first"] or 0),
-                "low_score": int(row["low_score"] or 0),
-            })
-        except Exception:
-            pass
-        return stats
+        return sourcing_target_stats(conn, goal["objective"], _loads(goal["context_json"], {}), workflow_id)
 
     def _finish(self, conn, workflow_id: str, goal_id: str, steps: list[Any]) -> None:
         goal = conn.execute("SELECT * FROM agent_goals WHERE goal_id=?", (goal_id,)).fetchone()
-        if goal is not None:
-            target_status = self._sourcing_target_status(conn, goal, workflow_id)
-            if target_status and target_status["score_75_plus"] < target_status["target"]:
-                summary = (
-                    f"已入库并评估 {target_status['assessed']} 位："
-                    f"{target_status['score_75_plus']} 位高分，{target_status['verify_first']} 位待核验；"
-                    f"目标 {target_status['target']} 位合适人选尚未完全达成。"
-                )
-                error = (
-                    f"当前确认高分人选 {target_status['score_75_plus']} 位，"
-                    f"另有 {target_status['verify_first']} 位需要补充简历或核验后再判断；"
-                    "可先复核 ASA 结果，仍不足时继续发起下一轮补池。"
-                )
-                conn.execute("UPDATE agent_workflows SET status='blocked',active_step_id=NULL,updated_at=datetime('now','localtime') WHERE workflow_id=?", (workflow_id,))
-                conn.execute(
-                    "UPDATE agent_goals SET status='blocked',progress=1,result_summary=?,error=?,updated_at=datetime('now','localtime') WHERE goal_id=?",
-                    (summary, error, goal_id),
-                )
-                self._event(conn, workflow_id, None, "goal_target_checked", "blocked", "评估完成，但目标人数尚未完全达成", target_status)
-                return
+        target_status = self._sourcing_target_status(conn, goal, workflow_id) if goal is not None else None
+        if target_status and target_status["score_75_plus"] < target_status["target"]:
+            business_outcome = "completed_needs_review" if target_status["verify_first"] > 0 else "completed_pool_insufficient"
+            summary = (
+                f"已入库并评估 {target_status['assessed']} 位："
+                f"{target_status['score_75_plus']} 位高分，{target_status['verify_first']} 位待核验；"
+                f"目标 {target_status['target']} 位合适人选尚未完全达成。"
+            )
+            error = (
+                f"当前确认高分人选 {target_status['score_75_plus']} 位，"
+                f"另有 {target_status['verify_first']} 位需要补充简历或核验后再判断；"
+                "可先复核 ASA 结果，仍不足时继续发起下一轮补池。"
+            )
+            conn.execute("UPDATE agent_workflows SET status='blocked',business_outcome=?,active_step_id=NULL,updated_at=datetime('now','localtime') WHERE workflow_id=?", (business_outcome, workflow_id))
+            conn.execute(
+                "UPDATE agent_goals SET status='blocked',business_outcome=?,progress=1,result_summary=?,error=?,updated_at=datetime('now','localtime') WHERE goal_id=?",
+                (business_outcome, summary, error, goal_id),
+            )
+            self._event(conn, workflow_id, None, "goal_target_checked", "blocked", "评估完成，但目标人数尚未完全达成", target_status)
+            return
         artifact_count = int(conn.execute("SELECT COUNT(*) FROM agent_artifacts WHERE workflow_id=?", (workflow_id,)).fetchone()[0])
         summary = f"目标已完成：{len(steps)} 个步骤全部处理，生成 {artifact_count} 项产物；外部动作均经过独立审批和结果验证。"
-        conn.execute("UPDATE agent_workflows SET status='completed',active_step_id=NULL,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE workflow_id=?", (workflow_id,))
-        conn.execute("UPDATE agent_goals SET status='completed',progress=1,result_summary=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE goal_id=?", (summary, goal_id))
+        business_outcome = "completed_target_met" if target_status else None
+        conn.execute("UPDATE agent_workflows SET status='completed',business_outcome=?,active_step_id=NULL,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE workflow_id=?", (business_outcome, workflow_id))
+        conn.execute("UPDATE agent_goals SET status='completed',business_outcome=?,progress=1,result_summary=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE goal_id=?", (business_outcome, summary, goal_id))
         self._event(conn, workflow_id, None, "workflow_completed", "completed", summary)
 
     def decide_approval(self, approval_id: str, decision: str, note: str = "") -> dict[str, Any]:
@@ -1521,8 +1574,12 @@ class WorkflowEngine:
                 artifact_items.append(item)
             workflow_item = _row(workflow)
             workflow_item["plan"] = _loads(workflow_item.pop("plan_json"), {})
+            workflow_item.setdefault("business_outcome", None)
+            goal_item = self._goal_public(goal)
+            goal_item.setdefault("business_outcome", None)
             return {
-                "ok": True, "goal": self._goal_public(goal), "workflow": workflow_item,
+                "ok": True, "goal": goal_item, "workflow": workflow_item,
+                "business_outcome": workflow_item.get("business_outcome") or goal_item.get("business_outcome"),
                 "steps": step_items, "approvals": approval_items, "artifacts": artifact_items,
                 "events": [_row(row) for row in events],
                 "progress": {"completed": len([s for s in step_items if s["status"] in {"completed", "skipped"}]), "total": len(step_items), "ratio": float(goal["progress"] or 0)},
@@ -1549,6 +1606,7 @@ class WorkflowEngine:
             "goal_id": goal.get("goal_id"),
             "title": goal.get("title") or goal.get("objective"),
             "status": workflow.get("status") or goal.get("status"),
+            "business_outcome": workflow.get("business_outcome") or goal.get("business_outcome"),
             "progress": payload.get("progress") or {},
             "current_stage": workflow.get("current_stage"),
             "next_step": {

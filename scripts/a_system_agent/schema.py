@@ -431,7 +431,8 @@ CREATE TABLE IF NOT EXISTS agent_goals (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    business_outcome TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_goals_status
@@ -450,6 +451,7 @@ CREATE TABLE IF NOT EXISTS agent_workflows (
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     started_at TEXT,
     finished_at TEXT,
+    business_outcome TEXT,
     FOREIGN KEY(goal_id) REFERENCES agent_goals(goal_id)
 );
 
@@ -570,13 +572,20 @@ ON agent_workflow_feedback(feedback_type, created_at DESC);
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
+    if column in columns:
+        return
+    try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _ensure_column(conn, "agent_workflows", "archived_at", "TEXT")
+    _ensure_column(conn, "agent_workflows", "business_outcome", "TEXT")
+    _ensure_column(conn, "agent_goals", "business_outcome", "TEXT")
     _ensure_column(conn, "agent_workflow_steps", "verification_json", "TEXT NOT NULL DEFAULT '{}'" )
     _ensure_column(conn, "agent_workflow_steps", "recovery_json", "TEXT NOT NULL DEFAULT '{}'" )
     _ensure_column(conn, "agent_learning_rules", "support_count", "INTEGER NOT NULL DEFAULT 1")
