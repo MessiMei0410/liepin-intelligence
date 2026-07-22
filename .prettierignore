@@ -4,3 +4,17 @@ package-lock.json
 # R4 拆分前不格式化巨石文件，避免一次性重排污染 diff
 src/main.tsx
 src/styles.css
+# R4 拆分 verbatim 搬运目标文件，保持字节等价，收口后再纳入格式化
+src/shared/format.ts
+src/shared/records.ts
+src/shared/text.ts
+src/shared/errors.ts
+src/shared/tabs.tsx
+src/shared/primitives.tsx
+src/workflows/utils.ts
+src/pages/Overview.tsx
+src/pages/Jobs.tsx
+src/pages/Candidates.tsx
+src/pages/Progress.tsx
+src/panels/JobPanel.tsx
+src/copilot/bridge.ts

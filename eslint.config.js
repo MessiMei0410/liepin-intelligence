@@ -29,6 +29,16 @@ export default tseslint.config(
     rules: { '@typescript-eslint/no-explicit-any': 'warn' },
   },
   {
+    // R4 verbatim 搬运豁免，拆分收口后收紧：搬运代码含存量 any 与 hooks 存量违例，保持 warn
+    files: ['src/shared/*.{ts,tsx}', 'src/workflows/utils.ts', 'src/pages/*.tsx', 'src/panels/*.tsx', 'src/copilot/bridge.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
+      'react-hooks/immutability': 'warn',
+      'react-hooks/purity': 'warn',
+      'react-hooks/set-state-in-effect': 'warn',
+    },
+  },
+  {
     // Node 脚本（CI 工具）的最小全局声明，避免 no-undef 误报
     files: ['scripts/**/*.mjs'],
     languageOptions: {
