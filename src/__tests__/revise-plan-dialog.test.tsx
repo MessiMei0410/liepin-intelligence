@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { RevisePlanDialog } from '../components/RevisePlanDialog'
-import { WorkflowPanel } from '../main'
+import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import { mockResponse, plannedWorkflow } from './helpers'
 
 describe('修改计划对话框', () => {

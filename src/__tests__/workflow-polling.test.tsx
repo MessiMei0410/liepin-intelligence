@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { App, WorkflowPanel } from '../main'
+import { App } from '../app/App'
+import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import type { Workflow } from '../api'
 import { candidateDetail, mockResponse, plannedWorkflow } from './helpers'
 

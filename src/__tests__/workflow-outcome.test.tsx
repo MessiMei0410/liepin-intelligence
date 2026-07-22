@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { Workflow } from '../api'
-import { WorkflowPanel } from '../main'
+import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import { mockResponse, plannedWorkflow } from './helpers'
 
 const outcomeWorkflow = (status: string, businessOutcome: string | null, overrides: Partial<Workflow> = {}): Workflow => ({

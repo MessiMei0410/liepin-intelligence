@@ -12,8 +12,8 @@ ASA App 前端（React 19 + Vite 8 + TS strict），由 ASA Core（127.0.0.1:876
 ## 硬性约定
 
 - **禁止 JS 原生对话框**：`prompt()`/`confirm()`/`alert()` 全仓清零，用 React 内对话框（参照 `src/components/RevisePlanDialog.tsx`）。WKWebView 不实现 JS 对话框代理，曾有静默失败事故。
-- **`src/main.tsx` 是 663 行巨石，拆分（PRD R4）前**：不重写、不搬家现有组件、不格式化存量压缩 JSX（`.prettierignore` 已排除）；新逻辑放新文件，main.tsx 只做接线。
-- 候选人确认层（`role="alertdialog"`、preflight/commit token 链路）的字面量被 `tests/test_candidate_action_dialog.py` 正则断言，改动会打破契约测试。
+- **PRD R4 拆分已完成**：`src/main.tsx` 只剩入口装配（surface 判定 + createRoot）；组件分布在 `src/app/`（App/Diagnostics）、`src/pages/`、`src/panels/`、`src/workflows/`（面板 + utils）、`src/copilot/`、`src/shared/`。搬运来的存量压缩 JSX 逐字节保留，其路径列入 `.prettierignore`，不重排、不格式化、不"修"存量 lint warn；新逻辑放新文件。
+- 候选人确认层（`role="alertdialog"`、preflight/commit token 链路）的字面量被 `tests/test_candidate_action_dialog.py` 正则断言——正向锚定 `src/panels/CandidatePanel.tsx`，负向 `confirm(` 扫描 `src/**/*.tsx` 拼接文本，改动会打破契约测试。
 - 新增代码禁止显式 `any`（eslint 对 main.tsx 以外已设为 error）。
 - 工作流状态文案一律走 `src/workflow/statusMapping.ts`，不新增本地映射；`business_outcome` 值不得直接渲染英文原形。
 - 提交前确认 `git status` 无 `opencli/chrome-profile/`、Cookie、CDP 会话值、`.env` 等敏感文件。

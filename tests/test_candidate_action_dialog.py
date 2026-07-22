@@ -4,15 +4,19 @@ import unittest
 from pathlib import Path
 
 
-MAIN_SOURCE = Path(__file__).resolve().parents[1] / "src" / "main.tsx"
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+PANEL_SOURCE = SRC_DIR / "panels" / "CandidatePanel.tsx"
 
 
 class CandidateActionDialogRegressionTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.source = MAIN_SOURCE.read_text(encoding="utf-8")
+        self.source = PANEL_SOURCE.read_text(encoding="utf-8")
+        self.all_sources = "".join(
+            path.read_text(encoding="utf-8") for path in SRC_DIR.rglob("*.tsx")
+        )
 
     def test_candidate_actions_do_not_depend_on_browser_confirm(self) -> None:
-        self.assertNotRegex(self.source, r"\b(?:window\.)?confirm\s*\(")
+        self.assertNotRegex(self.all_sources, r"\b(?:window\.)?confirm\s*\(")
         self.assertIn('role="alertdialog"', self.source)
 
     def test_preflight_token_is_committed_from_custom_dialog(self) -> None:

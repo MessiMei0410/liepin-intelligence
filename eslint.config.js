@@ -30,7 +30,7 @@ export default tseslint.config(
   },
   {
     // R4 verbatim 搬运豁免，拆分收口后收紧：搬运代码含存量 any 与 hooks 存量违例，保持 warn
-    files: ['src/shared/*.{ts,tsx}', 'src/workflows/utils.ts', 'src/pages/*.tsx', 'src/panels/*.tsx', 'src/copilot/bridge.ts'],
+    files: ['src/shared/*.{ts,tsx}', 'src/workflows/utils.ts', 'src/workflows/Workflow*.tsx', 'src/pages/*.tsx', 'src/panels/*.tsx', 'src/copilot/bridge.ts', 'src/copilot/Copilot*.tsx'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'warn',
       'react-hooks/immutability': 'warn',

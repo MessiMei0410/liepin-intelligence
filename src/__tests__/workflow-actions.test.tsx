@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { WorkflowPanel } from '../main'
+import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import { mockResponse, plannedWorkflow } from './helpers'
 
 const renderPanel = (reload = vi.fn()) => {

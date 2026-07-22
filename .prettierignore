@@ -1,8 +1,7 @@
 dist
 node_modules
 package-lock.json
-# R4 拆分前不格式化巨石文件，避免一次性重排污染 diff
-src/main.tsx
+# 压缩 CSS 不格式化，避免一次性重排污染 diff
 src/styles.css
 # R4 拆分 verbatim 搬运目标文件，保持字节等价，收口后再纳入格式化
 src/shared/format.ts
@@ -12,9 +11,18 @@ src/shared/errors.ts
 src/shared/tabs.tsx
 src/shared/primitives.tsx
 src/workflows/utils.ts
+src/workflows/WorkflowPanel.tsx
+src/workflows/WorkflowTarget.tsx
+src/workflows/WorkflowStrategy.tsx
+src/workflows/WorkflowCandidates.tsx
 src/pages/Overview.tsx
 src/pages/Jobs.tsx
 src/pages/Candidates.tsx
 src/pages/Progress.tsx
 src/panels/JobPanel.tsx
+src/panels/CandidatePanel.tsx
 src/copilot/bridge.ts
+src/copilot/Copilot.tsx
+src/copilot/CopilotSurface.tsx
+src/app/App.tsx
+src/app/Diagnostics.tsx

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { CandidatePanel } from '../main'
+import { CandidatePanel } from '../panels/CandidatePanel'
 import { candidateDetail, mockResponse } from './helpers'
 
 const preflightUrl = '/api/v1/candidate-actions/preflight'
