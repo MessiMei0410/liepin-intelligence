@@ -29,6 +29,14 @@ def db_path(tmp_path: Path) -> Path:
     finally:
         destination.close()
         source.close()
+    # R10 上线后生产库会产生真实 stop_reason 写入；本套测试的"历史数据"语义基于该列全 NULL，
+    # 在临时副本中清洗（绝不动源库）
+    conn = sqlite3.connect(target)
+    try:
+        conn.execute("UPDATE job_candidates SET stop_reason=NULL WHERE stop_reason IS NOT NULL")
+        conn.commit()
+    finally:
+        conn.close()
     return target
 
 

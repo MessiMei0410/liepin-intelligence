@@ -1536,6 +1536,14 @@ def asa_floating_html() -> str:
     .msg-actions { display:flex; gap:7px; flex-wrap:wrap; margin:8px 2px 0; }
     .msg-action { border-color:#d0d7e2; background:#fff; border-radius:999px; padding:5px 9px; font-size:12px; color:#1f2937; }
     .msg-action:hover { background:#f8fafc; }
+    .intent-card { margin:8px 2px 0; display:grid; gap:7px; padding:10px 11px; border:1px solid #d0d7e2; border-radius:10px; background:#fbfcfe; }
+    .intent-card.drift { border-color:#fecdca; background:#fff5f4; }
+    .intent-card-text { margin:0; font-size:13px; color:#1f2937; line-height:1.55; }
+    .intent-card-candidate { margin:0; font-size:12px; color:#475467; }
+    .intent-card-actions { display:flex; gap:7px; }
+    .intent-card-actions button { border-radius:999px; padding:5px 12px; font-size:12px; }
+    .intent-card-state { margin:0; font-size:12px; color:#667085; }
+    .intent-card.drift .intent-card-state { color:var(--red); }
     .goal-card { border:1px solid #d6e3ff; background:#f5f8ff; border-radius:12px; padding:10px; display:grid; gap:6px; }
     .composer { flex:0 0 auto; min-height:0; padding:10px 12px 12px; background:#fff; border-top:1px solid #edf1f7; display:grid; gap:7px; }
     .attachment-list { display:flex; gap:6px; flex-wrap:wrap; min-height:0; }
@@ -1627,7 +1635,7 @@ def asa_floating_html() -> str:
   </div>
 </div>
 <script>
-const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null };
+const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null, intentConfirmBusy:false };
 localStorage.setItem('asaFloatingSession', state.sessionId);
 function esc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function floatingInline(value){
@@ -1700,7 +1708,7 @@ function renderFloatingMarkdown(value){
   closeSection();
   return `<div class="msg-body">${html || '<p>暂无回复。</p>'}</div>`;
 }
-function renderFloatingMessage(message){
+function renderFloatingMessage(message, index){
   const role = message?.role === 'user' ? 'user' : 'assistant';
   if (role === 'user') return `<div class="msg user">${esc(message?.content || '')}</div>`;
   const actionList = Array.isArray(message?.suggested_actions) ? [...message.suggested_actions] : [];
@@ -1714,7 +1722,7 @@ function renderFloatingMessage(message){
     .slice(0, 3)
     .map(action => `<button class="msg-action" data-action-type="${esc(action.type || 'floating_action')}" data-action-id="${esc(action.id || action.action || '')}">${esc(action.label || action.title || '执行动作')}</button>`)
     .join('');
-  return `<div class="msg assistant">${renderFloatingMarkdown(message?.content || '')}${actions ? `<div class="msg-actions">${actions}</div>` : ''}</div>`;
+  return `<div class="msg assistant">${renderFloatingMarkdown(message?.content || '')}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${renderFloatingIntentCard(message, index)}</div>`;
 }
 function renderThinkingMessage(){
   return '<div class="msg assistant"><div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>ASA 正在分析当前上下文</span></div></div>';
@@ -1792,6 +1800,107 @@ async function postCopilotMessage(payload, idempotencyKey, requestId){
   }
 }
 // --- end asa-floating-copilot-transport ---
+// --- asa-floating-copilot-intent-confirm ---
+// R9 确认卡（R12-b 浮窗 parity，语义对齐已下线 React IntentCard 四态：pending/confirmed/cancelled/drift）：
+// copilot 响应与会话恢复消息携带 pending_intent 时，在对应消息下渲染确认卡
+// （confirm_text + 候选人摘要「姓名 · 阶段 / 客户 · 岗位」+ 确认/取消按钮）。
+// 确认打 POST /api/v1/copilot/intents/confirm：Idempotency-Key=floating-confirm-{sessionId}-{intentHash 前 12 位}，
+// request_id 同理派生，intent_hash/preflight_token/message 原样回传（后端签名校验）；成功把返回 answer
+// 追加为新消息，卡片进入「已确认，操作已执行。」终态（按钮卸载）。取消进入「已取消，未执行任何写操作。」
+// 终态，零写请求。409（状态漂移/签名不符）卡片红框展示服务端 detail；其他错误走 chatStatus 现有错误模式。
+// busy 期间按钮 disabled；终态幂等，重复点击不再发请求。全程零 JS 原生对话框。
+function floatingIntentConfirmIdempotencyKey(sessionId, intentHash){
+  return `floating-confirm-${sessionId}-${String(intentHash || '').slice(0, 12)}`;
+}
+function floatingIntentConfirmRequestId(sessionId, intentHash){
+  return `floating_confirm_req_${sessionId}_${String(intentHash || '').slice(0, 12)}`;
+}
+async function postCopilotIntentConfirm(intent, sessionId){
+  const intentHash = String(intent?.intent_hash || '');
+  const candidate = intent?.candidate || {};
+  const payload = {
+    request_id: floatingIntentConfirmRequestId(sessionId, intentHash),
+    intent: {kind:String(intent?.kind || ''), action:String(intent?.action || '')},
+    intent_hash: intentHash,
+    candidate_id: Number(candidate.id || 0),
+    preflight_token: String(intent?.preflight_token || ''),
+    message: String(intent?.message || ''),
+    session_id: String(sessionId || ''),
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
+  let res;
+  try {
+    res = await fetch('/api/v1/copilot/intents/confirm', {method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':floatingIntentConfirmIdempotencyKey(sessionId, intentHash)}, body:JSON.stringify(payload), signal:controller.signal});
+  } catch (err) {
+    throw new Error(err?.name === 'AbortError' ? '请求超时，请重试' : String(err?.message || '网络请求失败'));
+  } finally {
+    clearTimeout(timer);
+  }
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.ok === false) {
+    // 409 的 detail 是漂移/签名原因，需原样展示；error.status 供调用方按状态分流。
+    const error = new Error(String(json.detail || json.error || `HTTP ${res.status}`));
+    error.status = Number(res.status || 0);
+    throw error;
+  }
+  return json;
+}
+function floatingIntentCandidateLine(intent){
+  const candidate = intent?.candidate || {};
+  const person = [candidate.name, candidate.stage].filter(Boolean).join(' · ');
+  const position = [candidate.client, candidate.job].filter(Boolean).join(' · ');
+  return [person, position].filter(Boolean).join(' / ');
+}
+function renderFloatingIntentCard(message, index){
+  const intent = message?.pending_intent;
+  if (!intent || !intent.intent_hash) return '';
+  if (!message.intentCard) message.intentCard = {state:'pending', error:''};
+  const card = message.intentCard;
+  const candidateLine = floatingIntentCandidateLine(intent);
+  const disabled = state.intentConfirmBusy ? ' disabled' : '';
+  const buttons = card.state === 'pending'
+    ? `<div class="intent-card-actions"><button class="primary" type="button" data-intent-confirm="${index}"${disabled}>确认</button><button type="button" data-intent-cancel="${index}"${disabled}>取消</button></div>`
+    : '';
+  const stateText = card.state === 'confirmed' ? '已确认，操作已执行。'
+    : card.state === 'cancelled' ? '已取消，未执行任何写操作。'
+    : card.state === 'drift' ? String(card.error || '候选人状态已变化，意图签名不再有效，请重新发起指令。')
+    : '';
+  return `<div class="intent-card ${esc(card.state)}"><p class="intent-card-text">${esc(intent.confirm_text || '该操作需要确认后才会执行。')}</p>${candidateLine ? `<p class="intent-card-candidate">${esc(candidateLine)}</p>` : ''}${buttons}${stateText ? `<p class="intent-card-state">${esc(stateText)}</p>` : ''}</div>`;
+}
+async function confirmFloatingIntent(index){
+  const message = state.messages[index];
+  const intent = message?.pending_intent;
+  if (!intent?.intent_hash || state.intentConfirmBusy) return;
+  if (!message.intentCard) message.intentCard = {state:'pending', error:''};
+  if (message.intentCard.state !== 'pending') return;
+  state.intentConfirmBusy = true;
+  renderMessages();
+  try {
+    const result = await postCopilotIntentConfirm(intent, state.sessionId);
+    message.intentCard = {state:'confirmed', error:''};
+    state.messages.push({role:'assistant', content:String(result?.answer || '已确认，操作已执行。')});
+    document.getElementById('chatStatus').textContent = '';
+  } catch (err) {
+    if (Number(err?.status) === 409) {
+      message.intentCard = {state:'drift', error:String(err?.message || '候选人状态已变化，意图签名不再有效，请重新发起指令。')};
+    } else {
+      document.getElementById('chatStatus').textContent = err?.message || '意图确认失败，请重试。';
+    }
+  } finally {
+    state.intentConfirmBusy = false;
+    renderMessages();
+  }
+}
+function cancelFloatingIntent(index){
+  const message = state.messages[index];
+  if (!message?.pending_intent || state.intentConfirmBusy) return;
+  if (!message.intentCard) message.intentCard = {state:'pending', error:''};
+  if (message.intentCard.state !== 'pending') return;
+  message.intentCard = {state:'cancelled', error:''};
+  renderMessages();
+}
+// --- end asa-floating-copilot-intent-confirm ---
 function attachmentSize(bytes){
   const value = Number(bytes || 0);
   if (value < 1024) return `${value} B`;
@@ -2159,6 +2268,12 @@ function renderMessages(){
   document.querySelectorAll('[data-action-id]').forEach(button => {
     button.addEventListener('click', () => runMessageAction(button.dataset.actionType, button.dataset.actionId));
   });
+  document.querySelectorAll('[data-intent-confirm]').forEach(button => {
+    button.addEventListener('click', () => confirmFloatingIntent(Number(button.dataset.intentConfirm)));
+  });
+  document.querySelectorAll('[data-intent-cancel]').forEach(button => {
+    button.addEventListener('click', () => cancelFloatingIntent(Number(button.dataset.intentCancel)));
+  });
   const messages = document.getElementById('messages');
   messages.scrollTop = messages.scrollHeight;
   renderAttachments();
@@ -2450,7 +2565,7 @@ async function sendMessage(){
     state.sessionId = result.session_id || state.sessionId;
     localStorage.setItem('asaFloatingSession', state.sessionId);
     const workflowText = result.workflow_id ? `\n\n已生成目标计划：${result.workflow_id}` : '';
-    state.messages.push({role:'assistant', content:(result.answer || result.message || '已处理。') + workflowText, suggested_actions: result.suggested_actions || []});
+    state.messages.push({role:'assistant', content:(result.answer || result.message || '已处理。') + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null});
     state.attachments = [];
     document.getElementById('chatStatus').textContent = '';
     loadState();

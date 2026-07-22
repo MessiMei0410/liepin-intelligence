@@ -3550,6 +3550,9 @@ class AgentService:
                         "workflow": structured.get("workflow"),
                         "plan_summary": structured.get("plan_summary") or [],
                         "business_focus": structured.get("business_focus"),
+                        # R9/R12-b：透传持久化的 pending_intent，浮窗恢复会话时可重渲染确认卡
+                        #（确认/取消终态是 UI 本地态；过期或已执行的意图确认时会走 409 漂移路径）。
+                        "pending_intent": structured.get("pending_intent"),
                         "created_at": row["created_at"],
                     }
                 )

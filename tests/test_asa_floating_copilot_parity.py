@@ -1,6 +1,6 @@
-"""R12-a 浮窗 parity 补齐的回归守护。
+"""R12-a/R12-b 浮窗 parity 补齐的回归守护。
 
-覆盖两项浮窗侧改动（均为 additive，legacy 语义不变）：
+覆盖浮窗侧改动（均为 additive，legacy 语义不变）：
 1. business_focus 焦点条——浮窗渲染每条 copilot 响应与
    /api/agent/copilot/session 恢复响应里的 business_focus 字段，
    含 needs_clarification 冲突态（语义对齐 React Copilot 焦点卡）。
@@ -8,15 +8,22 @@
    /api/v1/copilot/messages，Idempotency-Key=floating-{sessionId}-{messageHash}
    （FNV-1a 32 位稳定散列），request_id 同理派生；v1 失败回退
    legacy /api/agent/copilot 一次并 console 留痕。
+3. R9 确认卡（R12-b）——响应/恢复消息携带 pending_intent 时在对应消息下
+   渲染确认卡（confirm_text + 候选人摘要 + 确认/取消），确认打
+   /api/v1/copilot/intents/confirm（Idempotency-Key=
+   floating-confirm-{sessionId}-{intentHash 前 12 位}），四态语义
+   （pending/confirmed/cancelled/drift）对齐已下线的 React IntentCard；
+   取消零写请求，409 红框展示服务端 detail，终态幂等防双击。
 
-幂等 key 派生函数的单测通过 node 真实执行浮窗 HTML 里的 JS 完成
-（tests 下既有 asa_floating_attachment_ui.spec.js 同款思路：直接验证
+幂等 key 派生函数与确认卡状态机的单测通过 node 真实执行浮窗 HTML 里的 JS
+完成（tests 下既有 asa_floating_attachment_ui.spec.js 同款思路：直接验证
 交付给浏览器的实际源码，而不是 Python 侧的重写版）。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -299,3 +306,300 @@ def test_focus_bar_label_semantics_match_react(transport_behavior: dict) -> None
     assert labels["empty"] == ""
     assert labels["nullFocus"] == ""
     assert labels["undefinedFocus"] == ""
+
+
+# ---------------------------------------------------------------------------
+# 4. R9 确认卡（R12-b）：源码契约
+# ---------------------------------------------------------------------------
+
+
+def _floating_html_source() -> str:
+    return _server_text().split("def asa_floating_html() -> str:", 1)[1].split("\ndef ", 1)[0]
+
+
+def _intent_confirm_section() -> str:
+    return _server_text().split("// --- asa-floating-copilot-intent-confirm ---", 1)[1].split(
+        "// --- end asa-floating-copilot-intent-confirm ---", 1
+    )[0]
+
+
+def test_floating_intent_card_rendering_contract() -> None:
+    source = _server_text()
+    for marker in [
+        "// --- asa-floating-copilot-intent-confirm ---",
+        "// --- end asa-floating-copilot-intent-confirm ---",
+        ".intent-card.drift",
+        ".intent-card-actions",
+        "renderFloatingIntentCard",
+        "floatingIntentCandidateLine",
+        "confirmFloatingIntent",
+        "cancelFloatingIntent",
+        "data-intent-confirm",
+        "data-intent-cancel",
+        "message.intentCard",
+        "intent.confirm_text || '该操作需要确认后才会执行。'",
+        "已确认，操作已执行。",
+        "已取消，未执行任何写操作。",
+        "候选人状态已变化，意图签名不再有效，请重新发起指令。",
+        "state.intentConfirmBusy",
+    ]:
+        assert marker in source, marker
+    # 候选人摘要格式「姓名 · 阶段 / 客户 · 岗位」
+    assert "[candidate.name, candidate.stage].filter(Boolean).join(' · ')" in source
+    assert "[candidate.client, candidate.job].filter(Boolean).join(' · ')" in source
+    # 零 JS 原生对话框（WKWebView 不实现对话框代理，与仓库B硬性约定一致）；
+    # confirmFloatingIntent 等自定义函数名不含 "confirm(" 调用形态。
+    assert not re.search(r"\b(?:window\.)?confirm\s*\(", _floating_html_source())
+
+
+def test_floating_intent_confirm_transport_contract() -> None:
+    section = _intent_confirm_section()
+    # 唯一的确认写出口：v1 确认端点，仅出现一次；不直连 legacy 做确认
+    assert section.count("fetch('/api/v1/copilot/intents/confirm'") == 1
+    assert "/api/agent/copilot" not in section
+    assert "'Idempotency-Key':floatingIntentConfirmIdempotencyKey(sessionId, intentHash)" in section
+    # 幂等键规格：floating-confirm-{sessionId}-{intentHash 前 12 位}；request_id 同理派生
+    assert "return `floating-confirm-${sessionId}-${String(intentHash || '').slice(0, 12)}`;" in section
+    assert "return `floating_confirm_req_${sessionId}_${String(intentHash || '').slice(0, 12)}`;" in section
+    # 提交体契约字段（WriteEnvelope.request_id + CopilotIntentConfirm 全字段）
+    for field in ["request_id:", "intent_hash:", "candidate_id:", "preflight_token:", "message:", "session_id:", "kind:", "action:"]:
+        assert field in section, field
+    # 409 的服务端 detail 必须可读展示；error.status 供调用方按状态分流
+    assert "json.detail" in section
+    assert "error.status" in section
+
+
+def test_floating_intent_card_data_wiring_contract() -> None:
+    source = _server_text()
+    send_message = source.split("async function sendMessage()", 1)[1].split("\nloadState();", 1)[0]
+    # sendMessage 响应的 pending_intent 挂到 assistant 消息（仅 intent_hash 存在时，对齐 React 判定）
+    assert "pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null" in send_message
+    # 渲染挂进消息流：renderFloatingMessage 追加卡片，renderMessages 接线按钮事件
+    assert "renderFloatingIntentCard(message, index)" in source
+    assert "state.messages.map(renderFloatingMessage)" in source
+    assert "confirmFloatingIntent(Number(button.dataset.intentConfirm))" in source
+    assert "cancelFloatingIntent(Number(button.dataset.intentCancel))" in source
+    # 恢复链：get_copilot_session 透传持久化的 pending_intent，
+    # restoreCurrentSession/loadSession 经统一 renderMessages 重渲染出卡
+    agent_service = (ROOT / "scripts" / "a_system_agent" / "service.py").read_text(encoding="utf-8")
+    assert '"pending_intent": structured.get("pending_intent"),' in agent_service
+
+
+# ---------------------------------------------------------------------------
+# 5. R9 确认卡：node 行为测试（执行真实交付源码，stub fetch/document/state）
+# ---------------------------------------------------------------------------
+
+_INTENT_NODE_HARNESS = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const section = src.match(/\/\/ --- asa-floating-copilot-intent-confirm ---([\s\S]*?)\/\/ --- end asa-floating-copilot-intent-confirm ---/)[1];
+const escFn = src.match(/function esc\(v\)\{[^\n]*\}/)[0];
+
+const INTENT = {
+  kind: 'candidate_action', action: 'stop', action_label: '停止推进',
+  target_scope: 'current_candidate', confidence: 0.91, reason: '用户明确要求停止推进',
+  candidate: { id: 7, name: '张三', stage: 'S1 待复核', client: 'ACME', job: '前端工程师' },
+  confirm_text: '将停止推进 张三，确认？',
+  intent_hash: 'hash-abc123def4567890',
+  preflight_token: 'tok-xyz',
+  expires_at: '2026-07-22 11:00',
+  message: '停止推进张三',
+};
+
+const calls = [];
+let fetchMode = 'success';
+globalThis.fetch = async (url, opts = {}) => {
+  calls.push({ url: String(url), opts });
+  if (fetchMode === 'success') return { ok: true, status: 200, json: async () => ({ ok: true, candidate_action: { action: 'stop' }, answer: '已确认并同步到 ASA：张三 停止推进。' }) };
+  if (fetchMode === 'drift') return { ok: false, status: 409, json: async () => ({ detail: '该人选已经停止推进，不能重复停止。' }) };
+  if (fetchMode === 'server-error') return { ok: false, status: 500, json: async () => ({ detail: 'boom' }) };
+  throw new Error(`unexpected fetchMode ${fetchMode}`);
+};
+const statusNode = { textContent: '' };
+globalThis.document = { getElementById: () => statusNode };
+let renderCount = 0;
+globalThis.renderMessages = () => { renderCount += 1; };
+globalThis.state = { sessionId: 'floating_test123', messages: [], intentConfirmBusy: false };
+
+const factory = new Function(`${escFn}\n${section}\nreturn { floatingIntentConfirmIdempotencyKey, floatingIntentConfirmRequestId, floatingIntentCandidateLine, renderFloatingIntentCard, confirmFloatingIntent, cancelFloatingIntent };`);
+const t = factory();
+
+const freshCard = () => {
+  state.messages = [{ role: 'assistant', content: `${INTENT.confirm_text}\n\n未确认前不会写入 ASA。`, pending_intent: INTENT }];
+  state.intentConfirmBusy = false;
+  statusNode.textContent = '';
+};
+
+(async () => {
+  const out = {};
+  out.idemKey = t.floatingIntentConfirmIdempotencyKey('floating_test123', INTENT.intent_hash);
+  out.requestId = t.floatingIntentConfirmRequestId('floating_test123', INTENT.intent_hash);
+  out.candidateLine = {
+    full: t.floatingIntentCandidateLine(INTENT),
+    noStage: t.floatingIntentCandidateLine({ candidate: { name: '张三', client: 'ACME', job: '前端工程师' } }),
+    noCandidate: t.floatingIntentCandidateLine({}),
+  };
+  // 卡片渲染：pending 含确认/取消按钮；busy 时按钮 disabled；无 intent_hash 不渲染
+  freshCard();
+  out.cardHtml = {
+    pending: t.renderFloatingIntentCard(state.messages[0], 0),
+    noHash: t.renderFloatingIntentCard({ role: 'assistant', content: 'x', pending_intent: { kind: 'candidate_action' } }, 0),
+    noIntent: t.renderFloatingIntentCard({ role: 'assistant', content: 'x' }, 0),
+  };
+  state.intentConfirmBusy = true;
+  out.cardHtml.busy = t.renderFloatingIntentCard(state.messages[0], 0);
+  state.intentConfirmBusy = false;
+
+  // 确认成功：提交体逐字段 + answer 追加 + confirmed 终态；终态后再点零新请求
+  freshCard(); calls.length = 0; renderCount = 0; fetchMode = 'success';
+  await t.confirmFloatingIntent(0);
+  out.confirm = {
+    callCount: calls.length,
+    url: calls[0] && calls[0].url,
+    method: calls[0] && calls[0].opts.method,
+    idemHeader: calls[0] && calls[0].opts.headers['Idempotency-Key'],
+    contentType: calls[0] && calls[0].opts.headers['Content-Type'],
+    body: calls[0] && JSON.parse(calls[0].opts.body),
+    cardState: state.messages[0].intentCard.state,
+    appended: state.messages[1] && state.messages[1].content,
+    statusText: statusNode.textContent,
+    renders: renderCount,
+  };
+  await t.confirmFloatingIntent(0);
+  out.confirm.afterTerminalExtraCalls = calls.length - out.confirm.callCount;
+
+  // 防双击：busy 期间第二次点击不发请求
+  freshCard(); calls.length = 0; fetchMode = 'success';
+  await Promise.all([t.confirmFloatingIntent(0), t.confirmFloatingIntent(0)]);
+  out.doubleClick = { callCount: calls.length, cardState: state.messages[0].intentCard.state };
+
+  // 取消：零写请求 + cancelled 终态文案
+  freshCard(); calls.length = 0; renderCount = 0;
+  t.cancelFloatingIntent(0);
+  out.cancel = { callCount: calls.length, cardState: state.messages[0].intentCard.state, renders: renderCount, html: t.renderFloatingIntentCard(state.messages[0], 0) };
+
+  // 409：drift 终态 + 红框 + 服务端 detail；不追加消息
+  freshCard(); calls.length = 0; fetchMode = 'drift';
+  statusNode.textContent = 'ASA 正在处理...';
+  await t.confirmFloatingIntent(0);
+  out.drift = {
+    callCount: calls.length,
+    cardState: state.messages[0].intentCard.state,
+    error: state.messages[0].intentCard.error,
+    messageCount: state.messages.length,
+    html: t.renderFloatingIntentCard(state.messages[0], 0),
+  };
+
+  // 其他错误：走 chatStatus 现有错误模式，卡片保持 pending
+  freshCard(); calls.length = 0; fetchMode = 'server-error';
+  await t.confirmFloatingIntent(0);
+  out.otherError = { cardState: state.messages[0].intentCard.state, statusText: statusNode.textContent, messageCount: state.messages.length };
+
+  console.log(JSON.stringify(out));
+})().catch(err => { console.error('HARNESS ERROR', err); process.exit(1); });
+"""
+
+
+@pytest.fixture(scope="module")
+def intent_behavior() -> dict:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 不可用，跳过浮窗确认卡 JS 行为测试")
+    with tempfile.TemporaryDirectory() as tmp:
+        harness = Path(tmp) / "harness.js"
+        harness.write_text(_INTENT_NODE_HARNESS, encoding="utf-8")
+        proc = subprocess.run(
+            [node, str(harness), str(SERVER_SOURCE)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_intent_confirm_key_derivation(intent_behavior: dict) -> None:
+    # intent_hash 'hash-abc123def4567890' 前 12 位 = 'hash-abc123d'
+    assert intent_behavior["idemKey"] == "floating-confirm-floating_test123-hash-abc123d"
+    assert intent_behavior["requestId"] == "floating_confirm_req_floating_test123_hash-abc123d"
+
+
+def test_intent_candidate_line_format(intent_behavior: dict) -> None:
+    lines = intent_behavior["candidateLine"]
+    assert lines["full"] == "张三 · S1 待复核 / ACME · 前端工程师"
+    assert lines["noStage"] == "张三 / ACME · 前端工程师"
+    assert lines["noCandidate"] == ""
+
+
+def test_intent_card_rendering_states(intent_behavior: dict) -> None:
+    html = intent_behavior["cardHtml"]
+    assert 'intent-card pending' in html["pending"]
+    assert "将停止推进 张三，确认？" in html["pending"]
+    assert "张三 · S1 待复核 / ACME · 前端工程师" in html["pending"]
+    assert 'data-intent-confirm="0"' in html["pending"]
+    assert 'data-intent-cancel="0"' in html["pending"]
+    assert "disabled" not in html["pending"]
+    assert html["busy"].count("disabled") == 2
+    # 无 intent_hash / 无 pending_intent 时不渲染卡片
+    assert html["noHash"] == ""
+    assert html["noIntent"] == ""
+
+
+def test_intent_confirm_success_body_and_terminal(intent_behavior: dict) -> None:
+    confirm = intent_behavior["confirm"]
+    assert confirm["callCount"] == 1
+    assert confirm["url"] == "/api/v1/copilot/intents/confirm"
+    assert confirm["method"] == "POST"
+    assert confirm["idemHeader"] == intent_behavior["idemKey"]
+    assert confirm["contentType"] == "application/json"
+    # 提交体逐字段（intent_hash/preflight_token/message 原样回传）
+    assert confirm["body"] == {
+        "request_id": intent_behavior["requestId"],
+        "intent": {"kind": "candidate_action", "action": "stop"},
+        "intent_hash": "hash-abc123def4567890",
+        "candidate_id": 7,
+        "preflight_token": "tok-xyz",
+        "message": "停止推进张三",
+        "session_id": "floating_test123",
+    }
+    assert confirm["cardState"] == "confirmed"
+    assert confirm["appended"] == "已确认并同步到 ASA：张三 停止推进。"
+    assert confirm["statusText"] == ""
+    assert confirm["renders"] == 2
+    # 终态幂等：confirmed 后再点确认零新请求
+    assert confirm["afterTerminalExtraCalls"] == 0
+
+
+def test_intent_confirm_double_click_single_request(intent_behavior: dict) -> None:
+    double_click = intent_behavior["doubleClick"]
+    assert double_click["callCount"] == 1
+    assert double_click["cardState"] == "confirmed"
+
+
+def test_intent_cancel_zero_write(intent_behavior: dict) -> None:
+    cancel = intent_behavior["cancel"]
+    assert cancel["callCount"] == 0
+    assert cancel["cardState"] == "cancelled"
+    assert cancel["renders"] == 1
+    assert "intent-card cancelled" in cancel["html"]
+    assert "已取消，未执行任何写操作。" in cancel["html"]
+    assert "data-intent-confirm" not in cancel["html"]
+
+
+def test_intent_confirm_409_drift(intent_behavior: dict) -> None:
+    drift = intent_behavior["drift"]
+    assert drift["callCount"] == 1
+    assert drift["cardState"] == "drift"
+    assert drift["error"] == "该人选已经停止推进，不能重复停止。"
+    # 不追加新消息；卡片红框 + 服务端 detail 原文
+    assert drift["messageCount"] == 1
+    assert "intent-card drift" in drift["html"]
+    assert "该人选已经停止推进，不能重复停止。" in drift["html"]
+    assert "data-intent-confirm" not in drift["html"]
+
+
+def test_intent_confirm_other_error_uses_chatstatus(intent_behavior: dict) -> None:
+    other = intent_behavior["otherError"]
+    assert other["cardState"] == "pending"
+    assert other["statusText"] == "boom"
+    assert other["messageCount"] == 1
