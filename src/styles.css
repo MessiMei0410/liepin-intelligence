@@ -131,3 +131,4 @@
   .relation-list>div{grid-template-columns:1fr;gap:5px}
   .relation-list small{max-width:none;text-align:left}
 }
+.candidate-more{width:100%;justify-content:center;margin-top:8px}

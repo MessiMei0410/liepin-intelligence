@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, Archive, Ban, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleGauge, Clock3, ExternalLink, ListChecks, LoaderCircle, MapPin, MessageSquareText, Route, Search, Send, ShieldAlert, ShieldCheck, SquarePen, Target, TriangleAlert, UserRoundSearch, UsersRound, X } from 'lucide-react'
 import { api, Bootstrap, BusinessFocus, Candidate, CandidateDetail, Dashboard, DashboardCounts, Job, JobDetail, Workflow } from './api'
-import { WorkflowCandidateRow } from './workflow/workflowModel'
+import { summarySignature, workflowDetailSignature, WorkflowCandidateItem } from './workflow/workflowSummary'
+import { useWorkflowEventStream } from './workflow/useWorkflowEventStream'
 import { RevisePlanDialog } from './components/RevisePlanDialog'
 import { mapWorkflowStatus, workflowStatusLabel } from './workflow/statusMapping'
 import './styles.css'
@@ -130,7 +131,7 @@ const openCopilotWindow = async (context: Record<string, unknown>) => {
   popup?.focus()
 }
 
-function App() {
+export function App() {
   const [tab, setTab] = useState<Tab>('overview')
   const [boot, setBoot] = useState<Bootstrap>()
   const [dashboard, setDashboard] = useState<Dashboard>()
@@ -179,6 +180,12 @@ function App() {
 
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
 
+  // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
+  // dashboard 计数由既有 2s 轮询自然收敛。
+  const refreshCandidateList = async () => {
+    try { setCandidates((await api.candidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
+  }
+
   useEffect(() => {
     const candidateId = candidate?.id
     if (!candidateId) return
@@ -196,7 +203,7 @@ function App() {
         if (changed) {
           candidateStateRef.current = fresh
           setCandidate(fresh)
-          setRefreshKey(value => value + 1)
+          void refreshCandidateList()
         }
       } catch {
         // Keep the current detail visible during a transient core restart.
@@ -232,7 +239,7 @@ function App() {
     const fresh = (await api.candidate(id)).candidate
     candidateStateRef.current = fresh
     setCandidate(fresh)
-    setRefreshKey(value => value + 1)
+    await refreshCandidateList()
   }
   const openJob = async (id: number) => {
     try { setCandidate(undefined); setWorkflow(undefined); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
@@ -428,25 +435,6 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
   const sourcingStep=value.steps.find(step=>step.capability_id==='multi_channel_sourcing')
   const externalResult=recordValue(recordValue(sourcingStep?.output).external_result)
   const appliedResult=recordValue(recordValue(recordValue(externalResult.intake).applied))
-  const stagedResult=recordValue(appliedResult.staged)
-  const acceptedCandidates=arrayValue(stagedResult.accepted)
-  const receipts=arrayValue(recordValue(appliedResult.intake).receipts)
-  const assessmentStep=value.steps.find(step=>step.capability_id==='candidate_batch_assessment')
-  const assessmentQueue=recordValue(recordValue(assessmentStep?.output).assessment_queue)
-  const completedAssessments=arrayValue(assessmentQueue.completed_items)
-  const assessmentByCandidate=new Map(completedAssessments.map(item=>[Number(recordValue(item).job_candidate_id),recordValue(item)]))
-  const newCandidates=acceptedCandidates.map((candidate,index)=>{
-    const item=recordValue(candidate)
-    const receipt=recordValue(receipts.find(entry=>recordValue(entry).name===item.name)||receipts[index])
-    const assessment=recordValue(assessmentByCandidate.get(Number(receipt.job_candidate_id)))
-    const raw=recordValue(item.raw)
-    return {...item,jobCandidateId:Number(receipt.job_candidate_id||0),searchScore:Number(raw.fit_score||0),searchLevel:String(raw.fit_level||''),assessmentScore:Number(assessment.fit_score||0),recommendation:String(assessment.recommendation||'')}
-  })
-  const assessedSource=arrayValue(assessmentQueue.assessed_items).length?arrayValue(assessmentQueue.assessed_items):completedAssessments
-  const assessedCandidates=assessedSource.map(entry=>{
-    const item=recordValue(entry)
-    return {...item,jobCandidateId:Number(item.job_candidate_id||0),assessmentScore:Number(item.fit_score||0),recommendation:String(item.recommendation||'')}
-  })
   const contextJobId=Number(value.goal.context?.id||strategy.job_id||0)
   const jobEntity=jobs.find(job=>job.id===contextJobId)
   const target={client:String(strategy.client||appliedResult.client||jobEntity?.client||'客户待确认'),job:String(strategy.job||appliedResult.job||jobEntity?.title||'岗位待确认'),location:jobEntity?.location||'',status:jobEntity?.status||'',priority:jobEntity?.priority||'',id:contextJobId}
@@ -455,31 +443,78 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
     if(status!=='waiting_approval'||pendingApprovals.length===0)setActionError('')
   },[status,pendingApprovals.length])
 
+  // R7 轮询减负：活跃工作流的轮询改打 summary 小路由（~2.5KB，原详情 ~195KB/次），
+  // status/progress/business_outcome/pending_approvals/最近事件 任一变化才 reload 完整详情；
+  // SSE 连接正常时轮询退化为 15s 兜底，事件到达即触发一次 summary 比对，断开自动回退 1.2s。
+  const summarySigRef=useRef('')
+  const summaryLockRef=useRef({running:false,pending:false})
+  const checkSummaryRef=useRef<()=>Promise<void>>(async()=>undefined)
+  const latestEventId=(value.events||[]).reduce((max,event)=>Math.max(max,event.id),0)
+  const streamConnected=useWorkflowEventStream(live?value.workflow.workflow_id:undefined,latestEventId,()=>{void checkSummaryRef.current()})
+  useEffect(()=>{summarySigRef.current=workflowDetailSignature(value)},[value])
+  const checkSummary=async()=>{
+    if(document.hidden)return
+    const lock=summaryLockRef.current
+    if(lock.running){lock.pending=true;return}
+    lock.running=true
+    try{
+      do{
+        lock.pending=false
+        try{
+          const next=await api.workflowSummary(value.workflow.workflow_id)
+          const sig=summarySignature(next)
+          if(sig!==summarySigRef.current){await reload();summarySigRef.current=sig}
+        }catch{/* Core 短暂不可达：保留当前面板，下一轮再试。 */}
+      }while(lock.pending)
+    }finally{lock.running=false}
+  }
+  useEffect(()=>{checkSummaryRef.current=checkSummary})
+
+  // R7 步骤详情按需：步骤区默认只渲染摘要级字段（标签/状态/时间/错误），展开某步时才调
+  // /steps/{id} 拉完整 output（audit stdout、assessed_items），以 updated_at+status 为缓存键。
+  const stepDetailsRef=useRef<Record<string,Workflow['steps'][number]>>({})
+  const stepInflightRef=useRef(new Set<string>())
+  const [stepDetails,setStepDetails]=useState<Record<string,Workflow['steps'][number]>>({})
+  const [expandedSteps,setExpandedSteps]=useState<ReadonlySet<number>>(new Set())
+  const stepCacheKey=(step:Workflow['steps'][number])=>`${step.id}:${step.updated_at||''}:${step.status}`
+  const loadStep=async(step:Workflow['steps'][number])=>{
+    const key=stepCacheKey(step)
+    if(stepDetailsRef.current[key]||stepInflightRef.current.has(key))return
+    stepInflightRef.current.add(key)
+    try{
+      const full=await api.workflowStep(value.workflow.workflow_id,step.id)
+      stepDetailsRef.current={...stepDetailsRef.current,[key]:full}
+    }catch{
+      // 拉取失败时退回摘要级渲染，不阻断展开交互。
+      stepDetailsRef.current={...stepDetailsRef.current,[key]:step}
+    }finally{
+      stepInflightRef.current.delete(key)
+      setStepDetails(stepDetailsRef.current)
+    }
+  }
+  useEffect(()=>{
+    value.steps.filter(step=>step.id===current?.id||step.status==='running'||expandedSteps.has(step.id)).forEach(step=>{void loadStep(step)})
+  },[value,expandedSteps])
+
   useEffect(()=>{
     if(!live)return
-    let refreshing=false
-    const refresh=async()=>{
-      if(refreshing || document.hidden)return
-      refreshing=true
-      try{await reload()}finally{refreshing=false}
-    }
-    const poll=window.setInterval(refresh,1200)
+    const poll=window.setInterval(()=>void checkSummaryRef.current(),streamConnected?15000:1200)
     const clock=window.setInterval(()=>setNow(Date.now()),1000)
-    const onVisible=()=>{if(!document.hidden)void refresh()}
+    const onVisible=()=>{if(!document.hidden)void checkSummaryRef.current()}
     document.addEventListener('visibilitychange',onVisible)
     return()=>{window.clearInterval(poll);window.clearInterval(clock);document.removeEventListener('visibilitychange',onVisible)}
-  },[value.workflow.workflow_id,status])
+  },[value.workflow.workflow_id,status,streamConnected])
 
   const action=async(name:string,payload:Record<string,unknown>={})=>{
     setBusy(name);setActionError('')
-    try{await api.workflowAction(value.workflow.workflow_id,name,payload);if(name==='archive')archived();else await reload()}
+    try{await api.workflowAction(value.workflow.workflow_id,name,payload);if(name==='archive')archived();else await checkSummary()}
     catch(e){setActionError(humanizeActionError(e,'工作流操作失败，请重试。'))}
     finally{setBusy('')}
   }
   const revise=(instruction:string)=>{setReviseOpen(false);action('revise',{instruction})}
   const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
-  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await reload()}catch(e){setActionError(humanizeActionError(e,'审批失败，请重试。'))}finally{setBusy('')}}
-  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await reload()}catch(e){setActionError(humanizeActionError(e,'重试失败，请稍后再试。'))}finally{setBusy('')}}
+  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'审批失败，请重试。'))}finally{setBusy('')}}
+  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'重试失败，请稍后再试。'))}finally{setBusy('')}}
   const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待批准寻访` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='planned' ? '计划已就绪，可以启动' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
   return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" onClick={()=>openCopilotWindow({type:'workflow',id:value.workflow.workflow_id})}><MessageSquareText/>Copilot</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{['planned','blocked','failed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}修改计划</button>}{!['cancelled','completed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'&&<LoaderCircle className="spin"/>}取消</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}启动</button>}</div></header><div className="workflow-body"><main>
     <section className={`workflow-progress ${progressTone}`} aria-live="polite">
@@ -490,9 +525,9 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
     {mapped.showNextActions&&<div className="workflow-next-actions" role="group" aria-label="下一步操作"><button className="button" disabled={!!busy} onClick={reviewCandidates}><UserRoundSearch/>复核现有人选</button><button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}调整条件再搜</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}结束本轮</button>}</div>}
     <WorkflowTarget target={target} objective={value.goal.objective}/>
     <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
-    <WorkflowCandidates ref={candidatesRef} newItems={newCandidates} assessedItems={assessedCandidates} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
+    <WorkflowCandidates ref={candidatesRef} workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
     <div className="workflow-section-label"><ListChecks/><b>执行步骤</b><span>{completed}/{total} 已完成</span></div>
-    <div className="step-list">{value.steps.map(s=>{const tone=stepTone(s.status);const result=stepBusinessResult(s);return <details className={`workflow-step ${tone}`} key={s.id} open={s.id===current?.id || s.status==='running'}><summary><span className={`step-no ${tone}`}><StepStatusIcon status={s.status} sequence={s.sequence}/></span><div><b>{s.business_label}</b><small>{s.reason}</small>{s.started_at&&<span className="step-time"><Clock3/>{s.status==='running'?`已执行 ${elapsed(s.started_at,s.finished_at,now)}`:`${date(s.started_at)}${s.finished_at?` · 用时 ${elapsed(s.started_at,s.finished_at,now)}`:''}`}</span>}</div><span className={`status-badge ${tone}`}>{s.risk_level} · {stepStatusLabel[s.status]||s.status}</span></summary><div className={`step-detail business-result ${result.error?'error':''}`}><b>{result.headline}</b>{result.facts.map((fact,index)=><span key={index}><Check/>{fact}</span>)}{s.status==='failed'&&<button className="button" disabled={!!busy} onClick={()=>retry(s.id)}>{busy===`retry-${s.id}`?<LoaderCircle className="spin"/>:<Activity/>}重试此步骤</button>}</div></details>})}</div>
+    <div className="step-list">{value.steps.map(s=>{const tone=stepTone(s.status);const detail=stepDetails[stepCacheKey(s)];const result=stepBusinessResult(detail||s);return <details className={`workflow-step ${tone}`} key={s.id} open={s.id===current?.id || s.status==='running'} onToggle={event=>{const isOpen=event.currentTarget.open;setExpandedSteps(prev=>{const next=new Set(prev);if(isOpen)next.add(s.id);else next.delete(s.id);return next});if(isOpen)void loadStep(s)}}><summary><span className={`step-no ${tone}`}><StepStatusIcon status={s.status} sequence={s.sequence}/></span><div><b>{s.business_label}</b><small>{s.reason}</small>{s.started_at&&<span className="step-time"><Clock3/>{s.status==='running'?`已执行 ${elapsed(s.started_at,s.finished_at,now)}`:`${date(s.started_at)}${s.finished_at?` · 用时 ${elapsed(s.started_at,s.finished_at,now)}`:''}`}</span>}</div><span className={`status-badge ${tone}`}>{s.risk_level} · {stepStatusLabel[s.status]||s.status}</span></summary><div className={`step-detail business-result ${result.error?'error':''}`}><b>{result.headline}</b>{result.facts.map((fact,index)=><span key={index}><Check/>{fact}</span>)}{!detail&&<span><LoaderCircle className="spin"/>完整执行详情加载中…</span>}{s.status==='failed'&&<button className="button" disabled={!!busy} onClick={()=>retry(s.id)}>{busy===`retry-${s.id}`?<LoaderCircle className="spin"/>:<Activity/>}重试此步骤</button>}</div></details>})}</div>
   </main><aside><SectionHead title="待审批" meta={`${pendingApprovals.length} 条`} />{pendingApprovals.length===0&&<div className="aside-empty"><ShieldCheck/><span>当前没有待审批动作</span></div>}{pendingApprovals.map(a=><div className={`approval ${a.status}`} key={a.approval_id}><div className="approval-title"><ShieldCheck/><div><b>{a.title}</b><span>{a.risk_level} · {a.preflight?.channel||'ASA'}</span></div></div>{a.preflight?.object_label&&<strong>{a.preflight.object_label}</strong>}{a.preflight?.before&&<p><span>批准前</span>{a.preflight.before}</p>}{a.preflight?.after&&<p><span>批准后</span>{a.preflight.after}</p>}<div className="approval-actions"><button disabled={!!busy} onClick={()=>decide(a.approval_id,'reject')}>拒绝</button><button className="approve" disabled={!!busy} onClick={()=>decide(a.approval_id,'approve')}>{busy===a.approval_id?<LoaderCircle className="spin"/>:<Check/>}批准寻访</button></div></div>)}
     <SectionHead title="执行动态" meta={`${events.length} 条`} />{events.length===0?<div className="aside-empty"><CircleDashed/><span>启动后将在这里显示过程</span></div>:<div className="workflow-events">{events.slice(0,12).map(e=><div key={e.id}><i className={stepTone(e.status)}/><span>{date(e.created_at)}</span><b>{humanizeWorkflowEvent(e)}</b></div>)}</div>}
     <SectionHead title="产物" meta={`${value.artifacts.length} 个`} />{value.artifacts.length===0&&<div className="aside-empty"><CircleDashed/><span>暂无执行产物</span></div>}{value.artifacts.map(a=><div className="aside-item" key={a.artifact_id}><b>{a.title}</b><small>{a.artifact_type} · {a.validation_status}</small></div>)}</aside></div></article>{reviseOpen&&<RevisePlanDialog onCancel={()=>setReviseOpen(false)} onSubmit={revise}/>}</div>
@@ -527,20 +562,35 @@ function StrategyRule({title,values,tone}:{title:string;values:unknown[];tone:st
   return <div className={`strategy-rule ${tone}`}><b>{title}</b><div>{values.map((value,index)=><span key={index}>{String(value)}</span>)}</div></div>
 }
 
-function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate,ref}:{newItems:WorkflowCandidateRow[];assessedItems:WorkflowCandidateRow[];sourcingStatus:string;openCandidate:(id:number)=>void;ref?:React.Ref<HTMLElement>}) {
+// R7：人选结果改走 /candidates 分页路由（摘要字段，total 在响应里），不再依赖详情大对象的 assessed_items。
+// 首开/切换工作流拉第一页，"加载更多"增量翻页；父面板按需重载详情（updatedAt 变化）时静默刷新已加载窗口。
+function WorkflowCandidates({workflowId,updatedAt,sourcingStatus,openCandidate,ref}:{workflowId:string;updatedAt:string;sourcingStatus:string;openCandidate:(id:number)=>void;ref?:React.Ref<HTMLElement>}) {
+  const PAGE_SIZE=20
   const finished=['completed','failed','blocked'].includes(sourcingStatus)
-  const newIds=new Set(newItems.map(item=>Number(item.jobCandidateId||0)).filter(Boolean))
-  const mergedById=new Map<number,WorkflowCandidateRow>()
-  assessedItems.forEach(item=>{if(item.jobCandidateId)mergedById.set(Number(item.jobCandidateId),item)})
-  newItems.forEach((item,index)=>{
-    const id=Number(item.jobCandidateId||0)
-    if(id)mergedById.set(id,{...mergedById.get(id),...item})
-    else mergedById.set(-(index+1),item)
-  })
-  const items=[...mergedById.values()]
+  const itemsRef=useRef<WorkflowCandidateItem[]>([])
+  const skipRefreshRef=useRef(true)
+  const [items,setItems]=useState<WorkflowCandidateItem[]>([])
+  const [total,setTotal]=useState(0)
+  const [loading,setLoading]=useState(false)
+  const fetchPage=async(offset:number,limit=PAGE_SIZE)=>{
+    setLoading(true)
+    try{
+      const page=await api.workflowCandidates(workflowId,limit,offset)
+      const next=offset?[...itemsRef.current,...page.items]:page.items
+      itemsRef.current=next;setItems(next);setTotal(page.total)
+    }catch{/* 接口暂不可用时保留已加载人选，下一次刷新再补。 */}
+    finally{setLoading(false)}
+  }
+  useEffect(()=>{skipRefreshRef.current=true;itemsRef.current=[];setItems([]);setTotal(0);void fetchPage(0)},[workflowId])
+  useEffect(()=>{
+    if(skipRefreshRef.current){skipRefreshRef.current=false;return}
+    void fetchPage(0,Math.min(200,Math.max(PAGE_SIZE,itemsRef.current.length)))
+  },[updatedAt])
+  const newCount=items.filter(item=>item.attribution?.from_workflow).length
   return <section ref={ref} className="workflow-insight workflow-candidates">
-    <header><span className="insight-icon"><UsersRound/></span><div><span>人选结果</span><b>{finished?`本轮新增 ${newItems.length} 人 · 岗位已评估 ${assessedItems.length} 人`:'等待渠道与评估结果'}</b></div>{items.length>0&&<span className="tag warn">点击查看详情</span>}</header>
-    {items.length?<div className="candidate-result-list">{items.map((candidate,index)=>{const score=Number(candidate.assessmentScore||candidate.searchScore||0);const recommendation=candidate.recommendation==='not_recommended'?'不推荐':candidate.recommendation==='verify_first'?'待补证据':score>=75?'推荐':'待复核';const isNew=newIds.has(Number(candidate.jobCandidateId||0));return <button key={`${candidate.jobCandidateId}-${index}`} disabled={!candidate.jobCandidateId} onClick={()=>candidate.jobCandidateId&&openCandidate(candidate.jobCandidateId)}><span className="candidate-result-icon"><UserRoundSearch/></span><div><b>{String(candidate.name||'姓名待补充')}</b><span>{String(candidate.company||'公司待补充')} · {String(candidate.title||'职位待补充')}</span><small>{isNew?'本轮新增':'历史入库'} · {sourceLabel(String(candidate.channel||candidate.source||''))} · {String(candidate.city||'城市待补充')} · {String(candidate.experience||'经验待补充')} · {String(candidate.education||'学历待补充')}</small></div><div className="candidate-score"><b>{score||'-'}</b><span>ASA 评估</span><small className={recommendation==='不推荐'?'bad':recommendation==='推荐'?'good':'warn'}>{recommendation}</small></div><ChevronRight/></button>})}</div>:<div className="insight-empty">{finished?'本轮没有新增人选，岗位也暂无评估结果。':'寻访执行并完成排重后，人选会显示在这里。'}</div>}
+    <header><span className="insight-icon"><UsersRound/></span><div><span>人选结果</span><b>{finished?`本轮新增 ${newCount} 人 · 岗位已评估 ${total} 人`:'等待渠道与评估结果'}</b></div>{items.length>0&&<span className="tag warn">点击查看详情</span>}</header>
+    {items.length?<div className="candidate-result-list">{items.map((candidate,index)=>{const score=Number(candidate.fit_score||0);const recommendation=candidate.recommendation==='not_recommended'?'不推荐':candidate.recommendation==='verify_first'?'待补证据':score>=75?'推荐':'待复核';return <button key={`${candidate.id}-${index}`} onClick={()=>openCandidate(candidate.id)}><span className="candidate-result-icon"><UserRoundSearch/></span><div><b>{candidate.name||'姓名待补充'}</b><span>{candidate.company||'公司待补充'} · {candidate.title||'职位待补充'}</span><small>{candidate.attribution?.from_workflow?'本轮新增':'历史入库'} · {sourceLabel(candidate.attribution?.channel||'')} · {candidate.fit_level||candidate.stage||'待评估'}</small></div><div className="candidate-score"><b>{score||'-'}</b><span>ASA 评估</span><small className={recommendation==='不推荐'?'bad':recommendation==='推荐'?'good':'warn'}>{recommendation}</small></div><ChevronRight/></button>})}</div>:<div className="insight-empty">{finished?'本轮没有新增人选，岗位也暂无评估结果。':'寻访执行并完成排重后，人选会显示在这里。'}</div>}
+    {items.length<total&&<button className="button candidate-more" disabled={loading} onClick={()=>void fetchPage(items.length)}>{loading?<LoaderCircle className="spin"/>:<ChevronDown/>}加载更多（剩余 {total-items.length} 人）</button>}
   </section>
 }
 

@@ -8,7 +8,8 @@ import { z } from 'zod'
 
 const recordValue = z.record(z.string(), z.unknown())
 
-const workflowStepSchema = z.looseObject({
+// R7：步骤 schema 导出复用——/steps/{step_id} 按需路由返回的单步与详情 steps[] 项同构。
+export const workflowStepSchema = z.looseObject({
   id: z.number(),
   sequence: z.number(),
   business_label: z.string(),

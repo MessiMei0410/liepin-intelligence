@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflow_id}/sourcing-funnel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Workflow Sourcing Funnel */
+        get: operations["workflow_sourcing_funnel_api_v1_workflows__workflow_id__sourcing_funnel_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit-events": {
         parameters: {
             query?: never;
@@ -236,6 +253,23 @@ export interface paths {
         put?: never;
         /** Copilot */
         post: operations["copilot_api_v1_copilot_messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/copilot/intents/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copilot Intent Confirm */
+        post: operations["copilot_intent_confirm_api_v1_copilot_intents_confirm_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -361,6 +395,40 @@ export interface components {
              * @default
              */
             preflight_token: string;
+        };
+        /** CopilotIntentConfirm */
+        CopilotIntentConfirm: {
+            /** Request Id */
+            request_id: string;
+            /** Intent */
+            intent?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Intent Hash
+             * @default
+             */
+            intent_hash: string;
+            /**
+             * Candidate Id
+             * @default 0
+             */
+            candidate_id: number;
+            /**
+             * Preflight Token
+             * @default
+             */
+            preflight_token: string;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
         };
         /** CopilotMessage */
         CopilotMessage: {
@@ -778,6 +846,39 @@ export interface operations {
             };
         };
     };
+    workflow_sourcing_funnel_api_v1_workflows__workflow_id__sourcing_funnel_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     audit_events_api_v1_audit_events_get: {
         parameters: {
             query?: {
@@ -867,6 +968,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_intent_confirm_api_v1_copilot_intents_confirm_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotIntentConfirm"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

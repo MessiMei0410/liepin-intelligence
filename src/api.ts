@@ -1,8 +1,11 @@
 import type { components, paths } from './generated/api'
 import { parseWorkflow } from './workflow/workflowModel'
 import type { Workflow } from './workflow/workflowModel'
+import { parseWorkflowCandidatesPage, parseWorkflowStepDetail, parseWorkflowSummary } from './workflow/workflowSummary'
+import type { WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 
 export type { Workflow } from './workflow/workflowModel'
+export type { WorkflowCandidateItem, WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 
 export type Job = {
   id: number; title: string; client: string; location?: string; status?: string;
@@ -55,10 +58,15 @@ export type BusinessFocus = {
 }
 
 // R5 typed client：dashboard / workflow / candidate-action 三个高频接口全链路类型化。
+// R7 增补：summary / steps / candidates 增量路由与 SSE events 路由同样入锚。
 // 契约锚点：Core 重命名或下线下列路由时 typecheck 直接报错（仅编译期，无运行时开销）。
 export type ContractAnchor = [
   paths['/api/v1/dashboard']['get'],
   paths['/api/v1/workflows/{workflow_id}']['get'],
+  paths['/api/v1/workflows/{workflow_id}/summary']['get'],
+  paths['/api/v1/workflows/{workflow_id}/steps/{step_id}']['get'],
+  paths['/api/v1/workflows/{workflow_id}/candidates']['get'],
+  paths['/api/v1/events']['get'],
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
 ]
@@ -106,6 +114,15 @@ export const api = {
   candidates: (q = '', jobId?: number) => json<{items: Candidate[]; total: number}>(`/api/v1/candidates?limit=200&q=${encodeURIComponent(q)}${jobId ? `&job_id=${jobId}` : ''}`),
   candidate: (id: number) => json<{candidate: CandidateDetail}>(`/api/v1/candidates/${id}`),
   workflow: async (id: string): Promise<Workflow> => parseWorkflow(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}`)),
+  // R7 增量路由：轮询打 summary，步骤完整 output 与人选列表按需分页拉取。
+  workflowSummary: async (id: string): Promise<WorkflowSummary> => parseWorkflowSummary(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/summary`)),
+  workflowStep: async (id: string, stepId: number): Promise<Workflow['steps'][number]> => {
+    const detail = parseWorkflowStepDetail(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/steps/${stepId}`))
+    if (!detail.step) throw new Error('步骤详情响应不完整')
+    return detail.step
+  },
+  workflowCandidates: async (id: string, limit = 20, offset = 0): Promise<WorkflowCandidatesPage> =>
+    parseWorkflowCandidatesPage(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/candidates?limit=${limit}&offset=${offset}`)),
   copilot: (message: string, context: Record<string, unknown>, session_id = '') => write<CopilotResponse>('/api/v1/copilot/messages', { message, context, session_id }),
   copilotSession: (sessionId: string) => json<{messages: Array<Record<string, unknown>>; business_focus?: BusinessFocus}>(`/api/agent/copilot/session?session_id=${encodeURIComponent(sessionId)}&limit=100`),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),

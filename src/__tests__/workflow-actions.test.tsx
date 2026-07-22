@@ -16,7 +16,10 @@ describe('工作流动作反馈', () => {
 
   it('点击启动后按钮立即进入 loading/disabled，完成后原地刷新', async () => {
     let release: (value: Response) => void = () => undefined
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { release = resolve })))
+    // R7：动作成功后先打 summary 再按需 reload；summary 调用立即应答，动作调用仍由 release 控制以覆盖 in-flight 状态。
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).includes('/summary')
+      ? Promise.resolve(mockResponse({ ok: true }))
+      : new Promise<Response>(resolve => { release = resolve })))
     const user = userEvent.setup()
     const { reload } = renderPanel()
     const start = screen.getByRole('button', { name: '启动' })
