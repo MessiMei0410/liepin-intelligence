@@ -35,6 +35,7 @@ from .privacy import sanitize_payload
 from .schema import ensure_schema
 from .scoring import normalize_assessment
 from .skills import SkillRegistry, SkillSpec
+from . import strategy_v2
 from .workflow import BUSINESS_OUTCOME_LABELS, WorkflowEngine, classify_business_outcome, sourcing_target_stats
 
 
@@ -3994,6 +3995,63 @@ class AgentService:
         }
         return grounded, goal_inputs, ""
 
+    def _pending_strategy_clarification(self, session_id: str) -> dict[str, Any]:
+        """本会话最近一条四锚点提问清单记录；仅 status=pending 时返回（S4-1）。"""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return {}
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT structured_json FROM agent_copilot_messages
+                WHERE session_id=? AND role='assistant' AND structured_json LIKE '%strategy_clarification%'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        data = _loads(row["structured_json"], {}) if row else {}
+        pending = data.get("strategy_clarification") if isinstance(data, dict) else None
+        if isinstance(pending, dict) and pending.get("status") == "pending" and pending.get("job_id"):
+            return pending
+        return {}
+
+    def _sourcing_strategy_gate(
+        self, goal_request: str, goal_context: dict[str, Any], *, floating_compact: bool = False
+    ) -> dict[str, Any]:
+        """S4-1 L3 提问门控（PRD §1 最高优先单点）：四锚点缺失 ≥2 且知识库无对应
+        岗位原型时，不创建寻访工作流，改为输出四锚点提问清单。仅作用于寻访类目标。"""
+        text = str(goal_request or "").lower()
+        sourcing_like = any(token in text for token in ("补充", "补池", "寻访", "找人", "搜索", "搜人", "再找", "继续找", "多找")) or any(
+            token in text for token in ("人选", "候选人")
+        )
+        if not sourcing_like or goal_context.get("type") != "job" or not goal_context.get("id"):
+            return {"action": "proceed"}
+        try:
+            job = self.capability_runtime._job(goal_context)
+        except ValueError:
+            return {"action": "proceed"}
+        archetype, match_trace = strategy_v2.match_job_archetype(job.get("client"), job.get("title"))
+        classification = strategy_v2.classify_strategy_input(job, archetype=archetype)
+        classification["trace"] = [*match_trace, *classification["trace"]]
+        if archetype or len(classification.get("missing_anchors") or []) < 2:
+            return {"action": "proceed"}
+        answer = strategy_v2.build_clarification_answer(job, classification, floating_compact=floating_compact)
+        pending = {
+            "status": "pending",
+            "job_id": int(goal_context["id"]),
+            "client": str(job.get("client") or ""),
+            "job": str(job.get("title") or ""),
+            "original_objective": " ".join(str(goal_request or "").split()),
+            "input_level": str(classification.get("input_level") or "L3"),
+            "missing_anchors": list(classification.get("missing_anchors") or []),
+            "questions": strategy_v2.build_anchor_questions(job, classification),
+            "trace": list(classification.get("trace") or [])[-12:],
+        }
+        return {"action": "ask", "answer": answer, "pending": pending}
+
     def _mentioned_client_names(self, message: str) -> list[str]:
         text = " ".join(str(message or "").split())
         if not text:
@@ -4565,23 +4623,81 @@ class AgentService:
         # suppress_goal_intent，此处不再路由工作流级目标（防止同一条
         # 消息既产生确认卡片又建立/启动工作流）。
         suppress_goal_intent = bool(raw_context.get("suppress_goal_intent"))
-        if not suppress_goal_intent and (auto_start_sourcing or any(re.search(pattern, message, re.I) for pattern in goal_patterns)):
-            goal_context, _, grounding_error = self._ground_copilot_goal(goal_request, selected, session_id)
+        # S4-1 L3 提问清单门控：上一轮若因四锚点缺失 ≥2 且无岗位原型而出过提问
+        # 清单，本轮顾问“直接搜/先搜”类回复视为放行（consultant_override，推断项
+        # 保持 inferred+confidence），锚点类回复并入策略上下文；两者都还原原始
+        # 寻访目标继续建工作流。
+        pending_clarification = self._pending_strategy_clarification(session_id)
+        strategy_gate_clarification: dict[str, Any] = {}
+        strategy_gate_pending_record: dict[str, Any] = {}
+        strategy_gate_force_goal = False
+        if pending_clarification and not suppress_goal_intent:
+            pending_job_id = int(pending_clarification.get("job_id") or 0)
+            selected_job_id = int(selected["id"]) if selected.get("type") == "job" and selected.get("id") else 0
+            focused_job_id = int(focus_context["id"]) if focus_context.get("type") == "job" and focus_context.get("id") else 0
+            targeted_job_id = selected_job_id or focused_job_id
+            same_job = not targeted_job_id or targeted_job_id == pending_job_id
+            override_reply = strategy_v2.is_direct_search_override(message) or (explicit_sourcing_confirmation and same_job)
+            new_goal_intent = any(re.search(pattern, message, re.I) for pattern in goal_patterns)
+            if override_reply and same_job:
+                strategy_gate_clarification = {
+                    "consultant_override": True,
+                    "asked_questions": True,
+                    "input_level": str(pending_clarification.get("input_level") or "L3"),
+                    "missing_anchors": list(pending_clarification.get("missing_anchors") or []),
+                    "original_objective": str(pending_clarification.get("original_objective") or ""),
+                }
+                if not auto_start_sourcing:
+                    goal_request = str(pending_clarification.get("original_objective") or message)
+                    strategy_gate_force_goal = True
+            elif (
+                same_job
+                and not auto_start_sourcing
+                and not new_goal_intent
+                and strategy_v2.looks_like_anchor_answer(message)
+            ):
+                strategy_gate_clarification = {
+                    "consultant_override": False,
+                    "consultant_answers": message,
+                    "asked_questions": True,
+                    "input_level": str(pending_clarification.get("input_level") or "L3"),
+                    "missing_anchors": list(pending_clarification.get("missing_anchors") or []),
+                    "original_objective": str(pending_clarification.get("original_objective") or ""),
+                }
+                goal_request = f"{pending_clarification.get('original_objective') or message}。顾问锚点补充：{message}"
+                strategy_gate_force_goal = True
+        if not suppress_goal_intent and (auto_start_sourcing or strategy_gate_force_goal or any(re.search(pattern, message, re.I) for pattern in goal_patterns)):
+            ground_base = selected
+            if strategy_gate_force_goal and pending_clarification.get("job_id"):
+                ground_base = {"type": "job", "id": int(pending_clarification["job_id"]), "page": "positions", "filters": {}}
+            goal_context, _, grounding_error = self._ground_copilot_goal(goal_request, ground_base, session_id)
             if grounding_error:
                 forced_answer = grounding_error
             else:
-                try:
-                    goal_workflow = self.create_goal(goal_request, goal_context)
-                    if auto_start_sourcing:
-                        goal_workflow = self.start_workflow(goal_workflow["workflow"]["workflow_id"])
-                    selected = self._normalize_copilot_context(goal_context)
-                    if selected.get("type") in {"job", "candidate"} and selected.get("id"):
-                        focus_conflicts = []
-                except ValueError as exc:
-                    forced_answer = (
-                        f"结论：未建立工作流，执行对象校验未通过。\n\n"
-                        f"下一步：{str(exc)[:180]}。"
-                    )
+                strategy_gate = (
+                    {"action": "proceed"}
+                    if strategy_gate_clarification
+                    else self._sourcing_strategy_gate(goal_request, goal_context, floating_compact=floating_compact)
+                )
+                if strategy_gate.get("action") == "ask":
+                    # 红线：提问清单场景不创建 workflow_id，不声称已启动，无任何外部执行。
+                    forced_answer = str(strategy_gate.get("answer") or "")
+                    strategy_gate_pending_record = strategy_gate.get("pending") or {}
+                else:
+                    if strategy_gate_clarification:
+                        goal_context["strategy_clarification"] = strategy_gate_clarification
+                    try:
+                        goal_workflow = self.create_goal(goal_request, goal_context)
+                        if auto_start_sourcing:
+                            goal_workflow = self.start_workflow(goal_workflow["workflow"]["workflow_id"])
+                        selected = self._normalize_copilot_context(goal_context)
+                        if selected.get("type") in {"job", "candidate"} and selected.get("id"):
+                            focus_conflicts = []
+                    except ValueError as exc:
+                        forced_answer = (
+                            f"结论：未建立工作流，执行对象校验未通过。\n\n"
+                            f"下一步：{str(exc)[:180]}。"
+                        )
         context_type = selected["type"]
         context_id = selected.get("id")
         dashboard = self.get_dashboard()
@@ -5112,6 +5228,17 @@ class AgentService:
             ] if goal_workflow else [],
             "business_focus": business_focus,
         }
+        if strategy_gate_pending_record:
+            assistant_structured["strategy_clarification"] = strategy_gate_pending_record
+        elif strategy_gate_clarification:
+            assistant_structured["strategy_clarification"] = {
+                "status": "resolved",
+                "job_id": int(pending_clarification.get("job_id") or 0) if pending_clarification else 0,
+                "consultant_override": bool(strategy_gate_clarification.get("consultant_override")),
+                "consultant_answers": str(strategy_gate_clarification.get("consultant_answers") or ""),
+                "input_level": str(strategy_gate_clarification.get("input_level") or ""),
+                "missing_anchors": list(strategy_gate_clarification.get("missing_anchors") or []),
+            }
         conn = self._connect()
         try:
             conn.executemany(

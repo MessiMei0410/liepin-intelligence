@@ -637,6 +637,15 @@ class WorkflowEngine:
                 key: value for key, value in grounding.items()
                 if key in {"source", "client", "job_id", "job", "directions", "attachment_names", "validated_against_v3"}
             }
+        # S4-1：Copilot L3 提问门控的顾问交互结果（放行/锚点回复）随工作流上下文
+        # 传递给 search_strategy 步骤，用于 strategy_v2 的 consultant_override 与 inferred 留痕。
+        clarification = raw_context.get("strategy_clarification") if isinstance(raw_context.get("strategy_clarification"), dict) else {}
+        if clarification:
+            selected["strategy_clarification"] = {
+                key: clarification[key]
+                for key in ("consultant_override", "consultant_answers", "asked_questions", "input_level", "missing_anchors", "original_objective")
+                if key in clarification
+            }
         steps = self._plan(objective, selected)
         for step in steps:
             step["inputs"]["objective"] = objective

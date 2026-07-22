@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
+from . import strategy_v2
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -1231,6 +1232,19 @@ class RecruitingCapabilityRuntime:
                 "source": "v3_fallback",
             }
         learning = self._strategy_learning_context(job)
+        # S4-1：策略生成前先定级（L1/L2/L3）并盘点四锚点；顾问在 Copilot 侧的
+        # 放行/锚点回复经工作流上下文 strategy_clarification 传入（ consultant_override /
+        # consultant_answers ），推断项按 PRD §1 保持 inferred:true + confidence。
+        clarification = context.get("strategy_clarification") if isinstance(context.get("strategy_clarification"), dict) else {}
+        consultant = {
+            "consultant_override": bool(clarification.get("consultant_override")),
+            "consultant_answers": str(clarification.get("consultant_answers") or ""),
+        }
+        archetype, archetype_trace = strategy_v2.match_job_archetype(job.get("client"), job.get("title"))
+        classification = strategy_v2.classify_strategy_input(
+            job, archetype=archetype, consultant_answers=consultant["consultant_answers"]
+        )
+        classification["trace"] = [*archetype_trace, *classification["trace"]]
         payload = {
             "canonical_position": {
                 "client": job["client"], "job": job["title"],
@@ -1246,6 +1260,16 @@ class RecruitingCapabilityRuntime:
                 "search_keywords": _loads((job.get("profile") or {}).get("search_keywords_json"), []),
                 "target_companies": _loads((job.get("profile") or {}).get("target_companies_json"), []),
             },
+            "input_classification": {
+                "input_level": classification["input_level"],
+                "anchors": classification["anchors"],
+                "missing_anchors": classification["missing_anchors"],
+            },
+            "job_archetype": {
+                key: archetype[key]
+                for key in ("archetype_id", "title", "client", "essence", "directions", "target_functions", "level_mapping", "keyword_groups")
+            } if archetype else {},
+            "consultant_input": consultant,
             **learning,
             "deterministic_fallback": fallback,
         }
@@ -1253,10 +1277,32 @@ class RecruitingCapabilityRuntime:
             generated = self.service.llm.generate_search_strategy(payload)
         except Exception:
             generated = {}
+        llm_v2_fragment = generated.pop("strategy_v2", None) if isinstance(generated, dict) else None
         plan = self._validate_model_strategy(generated, fallback, job, learning, max_queries)
-        content = "# 多渠道寻访策略\n\n```json\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n```"
-        return {"summary": "已由大模型基于岗位事实、历史实验和长期记忆生成寻访策略，并完成无依据关键词校验。", "strategy": plan,
-                "references": self._job_reference(job), "artifacts": [self._artifact("search_strategy", "多渠道寻访策略", content=content, metadata={"plan": plan})]}
+        plan["generation"]["input_level"] = classification["input_level"]
+        v2 = strategy_v2.build_strategy_v2(
+            plan, classification, archetype=archetype, consultant=consultant, llm_fragment=llm_v2_fragment
+        )
+        v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
+        result: dict[str, Any] = {
+            "summary": "已由大模型基于岗位事实、历史实验和长期记忆生成寻访策略，并完成无依据关键词校验。",
+            "strategy": plan,
+            "input_level": classification["input_level"],
+            "references": self._job_reference(job),
+        }
+        if v2_ok:
+            result["strategy_v2"] = v2
+            content = "# 多渠道寻访策略（strategy_v2）\n\n```json\n" + json.dumps(v2, ensure_ascii=False, indent=2) + "\n```"
+            result["artifacts"] = [
+                self._artifact(
+                    "search_strategy", "多渠道寻访策略", content=content,
+                    metadata={"plan": plan, "strategy_v2": v2, "schema_version": strategy_v2.STRATEGY_V2_VERSION},
+                )
+            ]
+        else:
+            # 硬性约束：缺必备键/版本号错误时不写库，留 error 供排查。
+            result["strategy_v2_error"] = {"errors": v2_errors, "trace": classification["trace"][-12:]}
+        return result
 
     def run_multi_channel_sourcing(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         job = self._job(context)
