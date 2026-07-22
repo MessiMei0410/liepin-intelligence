@@ -1571,6 +1571,13 @@ def asa_floating_html() -> str:
     .history-item { width:100%; text-align:left; display:grid; gap:3px; padding:9px; border-radius:10px; }
     .history-item.active { border-color:#b8ccff; background:#f5f8ff; }
     .history-item b { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .focus-bar { flex:0 0 auto; margin:10px 12px 0; display:flex; align-items:baseline; gap:6px; border:1px solid #d6e3ff; background:#f5f8ff; border-radius:10px; padding:6px 9px; font-size:12px; overflow:hidden; }
+    .focus-bar.empty { display:none; }
+    .focus-bar .focus-label { flex:0 0 auto; color:#1d4ed8; font-size:11px; font-weight:760; white-space:nowrap; }
+    .focus-bar .focus-title { flex:0 1 auto; min-width:0; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .focus-bar .focus-meta { flex:0 1 auto; min-width:0; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .focus-bar.conflict { border-color:#fedf89; background:#fffaeb; }
+    .focus-bar.conflict .focus-label { color:var(--amber); }
   </style>
 </head>
 <body>
@@ -1599,6 +1606,7 @@ def asa_floating_html() -> str:
   </header>
   <div class="chat-shell">
     <div id="historyPanel" class="history-panel"></div>
+    <div id="focusBar" class="focus-bar empty"></div>
     <div class="context-panels">
       <div id="contextActions" class="context-actions"></div>
       <div id="runSummary" class="run-summary empty"></div>
@@ -1619,7 +1627,7 @@ def asa_floating_html() -> str:
   </div>
 </div>
 <script>
-const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null };
+const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null };
 localStorage.setItem('asaFloatingSession', state.sessionId);
 function esc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function floatingInline(value){
@@ -1711,6 +1719,32 @@ function renderFloatingMessage(message){
 function renderThinkingMessage(){
   return '<div class="msg assistant"><div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>ASA 正在分析当前上下文</span></div></div>';
 }
+// business_focus 焦点条：与 React Copilot 焦点卡同语义——候选人姓名优先，
+// 其次「客户 / 岗位标题」；needs_clarification 为真时切冲突态，提示需要确认对象。
+// 数据来自每条 copilot 响应与 /api/agent/copilot/session 恢复响应的 business_focus 字段；
+// 响应没有该字段（旧 Core）时保持不渲染。
+const FOCUS_ACTION_LABELS = {job_archive:'归档岗位', job_split:'拆分岗位', job_publish:'发布岗位', candidate_sourcing:'寻访人选', candidate_outreach:'触达人选', candidate_review:'复核人选', recommendation:'客户推荐', salary:'谈薪处理'};
+function focusBarLabel(focus){
+  if (!focus || typeof focus !== 'object') return '';
+  return String(focus?.candidate?.name || [focus?.client, focus?.job?.title].filter(Boolean).join(' / ') || focus?.client || '').trim();
+}
+function renderFocusBar(){
+  const node = document.getElementById('focusBar');
+  if (!node) return;
+  const focus = state.businessFocus;
+  const title = focusBarLabel(focus);
+  if (!title) {
+    node.className = 'focus-bar empty';
+    node.innerHTML = '';
+    return;
+  }
+  const conflict = focus?.needs_clarification === true;
+  const action = String(focus?.action || '');
+  const directions = Array.isArray(focus?.directions) && focus.directions.length ? ` · ${focus.directions.join(' / ')}` : '';
+  const meta = action ? `${FOCUS_ACTION_LABELS[action] || action}${directions}` : '';
+  node.className = `focus-bar ${conflict ? 'conflict' : ''}`;
+  node.innerHTML = `<span class="focus-label">${conflict ? '需要确认' : '当前焦点'}</span><span class="focus-title">${esc(title)}</span>${meta ? `<span class="focus-meta">${esc(meta)}</span>` : ''}`;
+}
 async function api(path, opts={}){
   const timeoutMs = Number(opts.timeoutMs || 12000);
   const controller = new AbortController();
@@ -1729,6 +1763,35 @@ async function api(path, opts={}){
     clearTimeout(timer);
   }
 }
+// --- asa-floating-copilot-transport ---
+// 发送统一走 v1：POST /api/v1/copilot/messages，Idempotency-Key=floating-{sessionId}-{messageHash}
+// （FNV-1a 32 位稳定散列，同一 session 重发同一消息派生同一键，服务端 execute_idempotent 去重），
+// request_id 同理派生。v1 不可用（网络失败、旧版本无此路由、4xx/5xx）时回退 legacy
+// /api/agent/copilot 一次，并在 console 留痕；legacy 端点保持纯转发语义不变。
+function floatingMessageHash(text){
+  let hash = 0x811c9dc5;
+  const value = String(text || '');
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+function floatingCopilotIdempotencyKey(sessionId, text){
+  return `floating-${sessionId}-${floatingMessageHash(text)}`;
+}
+function floatingCopilotRequestId(sessionId, text){
+  return `floating_req_${sessionId}_${floatingMessageHash(text)}`;
+}
+async function postCopilotMessage(payload, idempotencyKey, requestId){
+  try {
+    return await api('/api/v1/copilot/messages', {method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':idempotencyKey}, body:JSON.stringify({...payload, request_id:requestId}), timeoutMs:45000});
+  } catch (err) {
+    console.warn(`[ASA floating] /api/v1/copilot/messages 不可用（${err?.message || err}），回退 /api/agent/copilot 重试一次`);
+    return await api('/api/agent/copilot', {method:'POST', body:JSON.stringify(payload), timeoutMs:45000});
+  }
+}
+// --- end asa-floating-copilot-transport ---
 function attachmentSize(bytes){
   const value = Number(bytes || 0);
   if (value < 1024) return `${value} B`;
@@ -2069,7 +2132,7 @@ window.addEventListener('asa-native-status', event => {
   if (message) document.getElementById('chatStatus').textContent = message;
   if (event.detail?.action === 'imageAnalysisReady') answerAfterNativeImage();
 });
-function newChat(){ state.sessionId = `floating_${Math.random().toString(16).slice(2)}`; localStorage.setItem('asaFloatingSession', state.sessionId); state.messages=[]; state.attachments=[]; state.historyOpen=false; renderHistory(); renderMessages(); }
+function newChat(){ state.sessionId = `floating_${Math.random().toString(16).slice(2)}`; localStorage.setItem('asaFloatingSession', state.sessionId); state.messages=[]; state.attachments=[]; state.historyOpen=false; state.businessFocus=null; renderHistory(); renderMessages(); }
 function bindComposer(){
   const input = document.getElementById('input');
   if (!input) return;
@@ -2099,6 +2162,7 @@ function renderMessages(){
   const messages = document.getElementById('messages');
   messages.scrollTop = messages.scrollHeight;
   renderAttachments();
+  renderFocusBar();
   const blockedByAttachment = state.attachments.some(item => ['uploading', 'analyzing', 'error'].includes(item.ui_status));
   const sendButton = document.getElementById('sendButton');
   if (sendButton) {
@@ -2294,6 +2358,7 @@ async function restoreCurrentSession(){
   try{
     const result = await api(`/api/agent/copilot/session?session_id=${encodeURIComponent(state.sessionId)}&limit=100`);
     state.messages = result.messages || [];
+    state.businessFocus = result.business_focus;
     renderMessages();
   }catch(_){}
 }
@@ -2323,6 +2388,7 @@ async function loadSession(sessionId){
     state.sessionId = sessionId;
     localStorage.setItem('asaFloatingSession', state.sessionId);
     state.messages = result.messages || [];
+    state.businessFocus = result.business_focus;
     state.historyOpen = false;
     document.getElementById('chatStatus').textContent = '';
     renderHistory();
@@ -2375,7 +2441,12 @@ async function sendMessage(){
   try{
     const context = floatingMessageContext();
     context.uploaded_attachments = readyAttachments.map(item => ({attachment_id:item.attachment_id, file_name:item.file_name, file_type:item.file_type, mime_type:item.mime_type, size_bytes:item.size_bytes, content_available:item.content_available, extracted_text:item.extracted_text || '', truncated:Boolean(item.truncated), status:item.status || '', is_image:Boolean(item.is_image), image_analysis:item.image_analysis || {}}));
-    const result = await api('/api/agent/copilot', {method:'POST', body:JSON.stringify({session_id:state.sessionId, message:text, context}), timeoutMs:45000});
+    const result = await postCopilotMessage(
+      {session_id:state.sessionId, message:text, context},
+      floatingCopilotIdempotencyKey(state.sessionId, text),
+      floatingCopilotRequestId(state.sessionId, text),
+    );
+    state.businessFocus = result.business_focus;
     state.sessionId = result.session_id || state.sessionId;
     localStorage.setItem('asaFloatingSession', state.sessionId);
     const workflowText = result.workflow_id ? `\n\n已生成目标计划：${result.workflow_id}` : '';
