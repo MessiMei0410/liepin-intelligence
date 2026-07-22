@@ -177,5 +177,60 @@ class ManifestFileTest(unittest.TestCase):
             self.assertTrue(comp.get("path") or comp.get("source_path"), f"{comp['id']} 缺路径")
 
 
+class LaunchAgentEvalTest(unittest.TestCase):
+    def test_all_running_ok(self) -> None:
+        probed = [
+            {"label": "ai.hermes.liepin-workbench", "loaded": True, "state": "running", "last_exit": None},
+            {"label": "ai.hermes.asa-v3-backup", "loaded": True, "state": "not running", "last_exit": "0"},
+            {"label": "ai.hermes.chrome-cdp", "loaded": True, "state": "running", "last_exit": "(never exited)"},
+        ]
+        levels = [c["level"] for c in asa_doctor.evaluate_launchagents(probed)]
+        self.assertEqual(levels, ["ok", "ok", "ok"])
+
+    def test_core_down_fails(self) -> None:
+        probed = [{"label": "ai.hermes.liepin-workbench", "loaded": True, "state": "not running", "last_exit": "1"}]
+        self.assertEqual(asa_doctor.evaluate_launchagents(probed)[0]["level"], "fail")
+
+    def test_core_active_ok(self) -> None:
+        probed = [{"label": "ai.hermes.liepin-workbench", "loaded": True, "state": "active", "last_exit": None}]
+        self.assertEqual(asa_doctor.evaluate_launchagents(probed)[0]["level"], "ok")
+
+    def test_not_loaded_levels(self) -> None:
+        probed = [
+            {"label": "ai.hermes.liepin-workbench", "loaded": False},
+            {"label": "ai.hermes.asa-v3-backup", "loaded": False},
+        ]
+        levels = [c["level"] for c in asa_doctor.evaluate_launchagents(probed)]
+        self.assertEqual(levels, ["fail", "warn"])
+
+    def test_backup_bad_exit_warns(self) -> None:
+        probed = [{"label": "ai.hermes.asa-v3-backup", "loaded": True, "state": "not running", "last_exit": "1"}]
+        self.assertEqual(asa_doctor.evaluate_launchagents(probed)[0]["level"], "warn")
+
+
+class CdpEvalTest(unittest.TestCase):
+    def test_reachable_ok(self) -> None:
+        self.assertEqual(asa_doctor.evaluate_cdp({"reachable": True})["level"], "ok")
+
+    def test_unreachable_warns_only(self) -> None:
+        self.assertEqual(asa_doctor.evaluate_cdp({"reachable": False, "error": "refused"})["level"], "warn")
+
+
+class GitEvalTest(unittest.TestCase):
+    def test_clean_ok(self) -> None:
+        probed = [{"repo": str(asa_doctor.REPO_ROOT), "dirty": 0, "sample": []}]
+        self.assertEqual(asa_doctor.evaluate_git(probed)[0]["level"], "ok")
+
+    def test_dirty_warns_with_sample(self) -> None:
+        probed = [{"repo": str(asa_doctor.REPO_ROOT), "dirty": 2, "sample": ["M src/api.ts", "?? e2e/x.ts"]}]
+        check = asa_doctor.evaluate_git(probed)[0]
+        self.assertEqual(check["level"], "warn")
+        self.assertIn("src/api.ts", check["detail"])
+
+    def test_error_warns(self) -> None:
+        probed = [{"repo": "/nonexistent", "error": "not a git repository"}]
+        self.assertEqual(asa_doctor.evaluate_git(probed)[0]["level"], "warn")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,9 @@
 4. backup_freshness   R13 备份新鲜度：~/.hermes/backups/asa_v3/ 最新备份距今 ≤ 24h
 5. disk_space         v3 库所在卷剩余空间（WARN < 20GB / FAIL < 5GB）
 6. log_size           Core 与备份日志大小（WARN > 200MB / FAIL > 1GB 单文件）
+7. launchagents       Core/每日备份/Chrome CDP 三个 LaunchAgent 状态（Core 未运行 FAIL，余 WARN）
+8. cdp_port           Chrome CDP 9223 可连（仅 WARN，Chrome 可能未开）
+9. git_status         前后端两仓库工作区是否干净（有改动 WARN 并列样例）
 
 用法:
     python3 scripts/asa_doctor.py                  # 人类可读报告；有 FAIL 退出码 1
@@ -23,6 +26,8 @@ import argparse
 import json
 import os
 import plistlib
+import socket
+import subprocess
 import sys
 import urllib.request
 from datetime import datetime
@@ -296,6 +301,94 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# ---------- 扩展探针与求值（LaunchAgent / CDP / git，全部只读） ----------
+
+AGENT_LABELS = (
+    ("ai.hermes.liepin-workbench", "Core 服务", "fail"),
+    ("ai.hermes.asa-v3-backup", "每日备份", "warn"),
+    ("ai.hermes.chrome-cdp", "Chrome CDP", "warn"),
+)
+GIT_REPOS = (("前端", REPO_ROOT), ("后端", LIEPIN_ROOT))
+
+
+def probe_launchagent(label: str) -> dict:
+    out = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if out.returncode != 0:
+        return {"label": label, "loaded": False}
+    state = last_exit = None
+    for line in out.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("state ="):
+            state = stripped.split("=", 1)[1].strip()
+        elif stripped.startswith("last exit code ="):
+            last_exit = stripped.split("=", 1)[1].strip()
+    return {"label": label, "loaded": True, "state": state, "last_exit": last_exit}
+
+
+def evaluate_launchagents(probed: list[dict]) -> list[dict]:
+    titles = {label: (title, level) for label, title, level in AGENT_LABELS}
+    results = []
+    for item in probed:
+        title, level = titles[item["label"]]
+        cid = f"agent.{item['label']}"
+        headline = f"LaunchAgent · {title}"
+        if not item.get("loaded"):
+            results.append(_check(cid, headline, level, "未加载"))
+            continue
+        state, last_exit = item.get("state"), item.get("last_exit")
+        if item["label"] == "ai.hermes.liepin-workbench":
+            ok = state in ("running", "active")
+            results.append(_check(cid, headline, "ok" if ok else "fail", f"state={state}"))
+        else:
+            bad_exit = last_exit not in (None, "0", "(never exited)")
+            results.append(_check(cid, headline, "warn" if bad_exit else "ok", f"state={state} last exit={last_exit}"))
+    return results
+
+
+def probe_cdp(port: int = 9223) -> dict:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            return {"reachable": True}
+    except OSError as exc:
+        return {"reachable": False, "error": str(exc)}
+
+
+def evaluate_cdp(probed: dict) -> dict:
+    if probed.get("reachable"):
+        return _check("cdp.port", "CDP 9223", "ok", "可连接")
+    return _check("cdp.port", "CDP 9223", "warn", f"不可连（Chrome 未开？）: {probed.get('error', '')}")
+
+
+def probe_git_dirty(repo: Path) -> dict:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if out.returncode != 0:
+        return {"repo": str(repo), "error": out.stderr.strip()[:200]}
+    lines = [line for line in out.stdout.splitlines() if line.strip()]
+    return {"repo": str(repo), "dirty": len(lines), "sample": lines[:5]}
+
+
+def evaluate_git(probed: list[dict]) -> list[dict]:
+    names = {str(path): name for name, path in GIT_REPOS}
+    results = []
+    for item in probed:
+        name = names.get(item["repo"], item["repo"])
+        cid = f"git.{name}"
+        headline = f"git · {name}仓库"
+        if item.get("error"):
+            results.append(_check(cid, headline, "warn", f"status 失败: {item['error']}"))
+        elif item.get("dirty"):
+            results.append(_check(cid, headline, "warn", f"{item['dirty']} 项未提交改动: {'; '.join(item['sample'][:3])}"))
+        else:
+            results.append(_check(cid, headline, "ok", "工作区干净"))
+    return results
+
+
 def run_checks(manifest: dict, *, core_timeout: float = 4.0) -> list[dict]:
     checks: list[dict] = []
     core = _manifest_component(manifest, "asa_core")
@@ -317,6 +410,19 @@ def run_checks(manifest: dict, *, core_timeout: float = 4.0) -> list[dict]:
     checks.append(evaluate_backup_freshness(backup_dir))
     checks.append(evaluate_disk(db_path.parent if db_path.exists() else Path("/")))
     checks.append(evaluate_logs(LOG_DIR))
+
+    try:
+        checks.extend(evaluate_launchagents([probe_launchagent(label) for label, _, _ in AGENT_LABELS]))
+    except Exception as exc:
+        checks.append(_check("agent.probe", "LaunchAgent", "warn", f"探测异常: {type(exc).__name__}: {exc}"))
+    try:
+        checks.append(evaluate_cdp(probe_cdp()))
+    except Exception as exc:
+        checks.append(_check("cdp.port", "CDP 9223", "warn", f"探测异常: {type(exc).__name__}: {exc}"))
+    try:
+        checks.extend(evaluate_git([probe_git_dirty(repo) for _, repo in GIT_REPOS]))
+    except Exception as exc:
+        checks.append(_check("git.probe", "git 仓库", "warn", f"探测异常: {type(exc).__name__}: {exc}"))
     return checks
 
 
