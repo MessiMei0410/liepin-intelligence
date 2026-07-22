@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import secrets
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -105,6 +106,16 @@ def _candidate_action_already_applied(detail: dict[str, Any], action: str) -> bo
     if action == "recommend":
         return stage_number >= 7
     return False
+
+
+def _funnel_detail(complete: int, partial: int, failed: int) -> dict[str, Any]:
+    total = complete + partial + failed
+    return {
+        "complete": complete,
+        "partial": partial,
+        "failed": failed,
+        "complete_rate": round(complete / total, 4) if total else None,
+    }
 
 
 class CoreService:
@@ -686,6 +697,74 @@ class CoreService:
         if self.agent_service:
             return self.agent_service.get_workflow_candidates(workflow_id, limit, offset)
         raise RuntimeError("workflow service unavailable")
+
+    def workflow_sourcing_funnel(self, workflow_id: str) -> dict[str, Any]:
+        conn = connect(self.db_path)
+        try:
+            try:
+                rows = [_row(row) for row in conn.execute(
+                    """
+                    SELECT * FROM agent_sourcing_funnel
+                    WHERE workflow_id=? ORDER BY created_at DESC, id DESC
+                    """,
+                    (workflow_id,),
+                )]
+            except sqlite3.OperationalError:
+                rows = []
+        finally:
+            conn.close()
+        sum_keys = (
+            "recall_count", "extracted_count", "dedupe_count", "unique_count",
+            "intake_duplicate_count", "intake_new_count", "assessed_count", "high_score_count",
+        )
+        channels: dict[str, dict[str, Any]] = {}
+        runs: list[dict[str, Any]] = []
+        for row in rows:
+            detail = _funnel_detail(
+                int(row.get("detail_complete") or 0),
+                int(row.get("detail_partial") or 0),
+                int(row.get("detail_failed") or 0),
+            )
+            queries = json_value(row.get("queries_json"), [])
+            runs.append({
+                "run_id": row.get("run_id"),
+                "channel": row.get("channel"),
+                "status": row.get("status"),
+                "query_count": int(row.get("query_count") or 0),
+                "queries": queries if isinstance(queries, list) else [],
+                **{key: int(row.get(key) or 0) for key in sum_keys},
+                "detail": detail,
+                "zero_attribution": row.get("zero_attribution") or None,
+                "error": row.get("error") or None,
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            })
+            channel = str(row.get("channel") or "unknown")
+            agg = channels.get(channel)
+            if agg is None:
+                agg = channels[channel] = {
+                    "channel": channel,
+                    "runs": 0,
+                    "status": row.get("status"),
+                    **{key: 0 for key in sum_keys},
+                    "detail": {"complete": 0, "partial": 0, "failed": 0},
+                    "zero_attribution": None,
+                }
+            agg["runs"] += 1
+            for key in sum_keys:
+                agg[key] += int(row.get(key) or 0)
+            for key in ("complete", "partial", "failed"):
+                agg["detail"][key] += detail[key]
+            # rows 按时间倒序，第一个非空归因即最新归因
+            if agg["zero_attribution"] is None and row.get("zero_attribution"):
+                agg["zero_attribution"] = row.get("zero_attribution")
+        channel_items = []
+        for agg in channels.values():
+            detail = agg.pop("detail")
+            totals = _funnel_detail(detail["complete"], detail["partial"], detail["failed"])
+            channel_items.append({**agg, "detail": totals})
+        channel_items.sort(key=lambda item: str(item.get("channel") or ""))
+        return {"ok": True, "workflow_id": workflow_id, "channels": channel_items, "runs": runs}
 
     def audit_events(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         conn = connect(self.db_path)

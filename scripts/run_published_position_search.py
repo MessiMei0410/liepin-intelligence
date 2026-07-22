@@ -1483,6 +1483,16 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
         "dry_run": args.dry_run,
         "candidates": all_candidates,
         "detail_capture": detail_capture,
+        "rounds": [
+            {
+                "name": search_round.name,
+                "query": search_round.query,
+                "result_count": search_round.result_count,
+                "extracted_count": search_round.extracted_count,
+                "recommended_count": search_round.recommended_count,
+            }
+            for search_round in rounds
+        ],
         "ws": ws,
     }
 
@@ -1668,6 +1678,7 @@ def main() -> int:
                 "a_candidates": sum(1 for item in result["candidates"] if int(item.get("fit_score") or 0) >= 78),
                 "b_candidates": sum(1 for item in result["candidates"] if 65 <= int(item.get("fit_score") or 0) < 78),
                 "detail_capture": result.get("detail_capture") or {},
+                "rounds": result.get("rounds") or [],
                 "opened_links": len(opened_links),
                 "report": str(report),
                 "json_output": str(Path(args.json_output).expanduser().resolve()) if args.json_output else "",

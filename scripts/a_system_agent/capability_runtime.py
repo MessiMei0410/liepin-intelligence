@@ -47,6 +47,58 @@ def _row(row: sqlite3.Row | None) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()} if row else {}
 
 
+ZERO_RESULT_ATTRIBUTIONS = (
+    "no_results",
+    "session_expired",
+    "parse_failure",
+    "page_structure_changed",
+    "loading_incomplete",
+    "unknown",
+)
+
+
+def _round_int(entry: Any, key: str) -> int:
+    if not isinstance(entry, dict):
+        return 0
+    try:
+        return int(entry.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> str:
+    """用 runner 输出里的既有信号为 0 候选的渠道结果归因。
+
+    信号来源（不改浏览器 runner 逻辑）：
+    - 失败/阻断时 error 文本：X-SaaS 的 ``X-SAAS_LOGIN_REQUIRED``、猎聘的“登录已过期/登录态失效”
+      → session_expired；“加载超时/未加载” → loading_incomplete。
+    - per-query rounds：search_controls_missing（X-SaaS SEARCH_JS 返回的 reason）→ page_structure_changed；
+      stale_query（查询未生效）→ loading_incomplete；平台有结果数但抓取 0 条 → parse_failure；
+      全部查询平台返回 0 条，或抓到了但全部被评分门槛/排重过滤 → no_results。
+    信号不足一律 unknown。
+    """
+    error = str(result.get("error") or "")
+    if "LOGIN_REQUIRED" in error or "登录已过期" in error or "登录态失效" in error:
+        return "session_expired"
+    if "加载超时" in error or "未加载" in error:
+        return "loading_incomplete"
+    rounds = [entry for entry in result.get("rounds") or [] if isinstance(entry, dict)]
+    if rounds:
+        if any(str(entry.get("reason") or "") == "search_controls_missing" for entry in rounds):
+            return "page_structure_changed"
+        if any(str(entry.get("status") or "") == "stale_query" for entry in rounds):
+            return "loading_incomplete"
+        recall = sum(_round_int(entry, "result_count") for entry in rounds)
+        extracted = sum(_round_int(entry, "extracted_count") for entry in rounds)
+        if recall > 0 and extracted <= 0:
+            return "parse_failure"
+        return "no_results"
+    if status == "completed" and result.get("ok") is True and not error:
+        # 查询成功但没有 per-query 明细（旧版 runner 输出），无法进一步区分。
+        return "unknown"
+    return "unknown"
+
+
 def _slug(value: Any) -> str:
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "-", str(value or "").strip())
     return text.strip("-.")[:80] or "artifact"
@@ -131,7 +183,18 @@ class RecruitingCapabilityRuntime:
             "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
             "--queries-json", str(liepin_queries_path),
         ]
-        search = self._run_json(command, 900)
+        try:
+            search = self._run_json(command, 900)
+        except Exception as exc:
+            self._record_sourcing_funnel_failure(
+                run_id=f"asa-source-{stamp}",
+                workflow_id=str(request.get("workflow_id") or ""),
+                client=client,
+                job=job,
+                channel="liepin",
+                error=str(exc)[:1000],
+            )
+            raise
         try:
             xsaas = self._run_json([self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path), "--output", str(xsaas_path), "--port", str(int(request.get("cdp_port") or 9223)), "--max-rows", str(max(12, target * 2))], 300)
         except Exception as exc:
@@ -149,27 +212,45 @@ class RecruitingCapabilityRuntime:
             xsaas_path=xsaas_path,
             artifact_path=candidates_path.with_name(candidates_path.stem + "-opencli-shadow.json"),
         )
-        combined = _loads(liepin_path.read_text(encoding="utf-8"), []) + _loads(xsaas_path.read_text(encoding="utf-8"), [])
+        liepin_candidates = _loads(liepin_path.read_text(encoding="utf-8"), [])
+        xsaas_candidates = _loads(xsaas_path.read_text(encoding="utf-8"), [])
+        combined = liepin_candidates + xsaas_candidates
         candidates_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
         dry = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path)], 120)
         applied = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180)
+        workflow_id = str(request.get("workflow_id") or "")
         attributions = self._persist_sourcing_attributions(
             applied, request.get("strategy") if isinstance(request.get("strategy"), dict) else {},
-            str(request.get("workflow_id") or ""), client, job,
+            workflow_id, client, job,
         )
+        channel_runs = [
+            {"channel": "liepin", "status": "completed", "result": search},
+            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "result": xsaas},
+        ]
+        try:
+            funnel = self._persist_sourcing_funnel(
+                run_id=f"asa-source-{stamp}",
+                workflow_id=workflow_id,
+                client=client,
+                job=job,
+                channel_runs=channel_runs,
+                channel_candidates={"liepin": liepin_candidates, "xsaas": xsaas_candidates},
+                applied=applied,
+                attributions=attributions,
+            )
+        except Exception as exc:
+            funnel = {"ok": False, "stored": 0, "error": str(exc)[:500]}
         sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
         sync = self._run([self.python, str(sync_script), "--client", client, "--job", job, "--no-open"], 300)
         learning = self._capture_search_learning(client, job, [*liepin_queries, *xsaas_queries])
         return {
             "verified": True,
             "run_id": f"asa-source-{stamp}",
-            "channel_runs": [
-                {"channel": "liepin", "status": "completed", "result": search},
-                {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "result": xsaas},
-            ],
+            "channel_runs": channel_runs,
             "opencli_shadow": opencli_shadow,
             "intake": {"dry_run": dry, "applied": applied, "source_file": str(candidates_path)},
             "attributions": attributions,
+            "sourcing_funnel": funnel,
             "audit": {"ok": sync.returncode == 0, "summary": (sync.stdout or "")[-4000:]},
             "learning": learning,
         }
@@ -273,6 +354,7 @@ class RecruitingCapabilityRuntime:
         strategy_hash = hashlib.sha256(json.dumps(strategy, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() if strategy else ""
         strategy_model = str((strategy.get("generation") or {}).get("model") or "") if isinstance(strategy.get("generation"), dict) else ""
         stored = 0
+        channel_new: dict[str, int] = {}
         conn = self.service._connect()
         try:
             for index, candidate in enumerate(accepted):
@@ -308,10 +390,168 @@ class RecruitingCapabilityRuntime:
                     ),
                 )
                 stored += 1
+                channel_new[channel] = channel_new.get(channel, 0) + 1
             conn.commit()
         finally:
             conn.close()
-        return {"stored": stored, "strategy_hash": strategy_hash, "workflow_id": workflow_id}
+        return {"stored": stored, "strategy_hash": strategy_hash, "workflow_id": workflow_id, "channel_new": channel_new}
+
+    def _persist_sourcing_funnel(
+        self,
+        *,
+        run_id: str,
+        workflow_id: str,
+        client: str,
+        job: str,
+        channel_runs: list[dict[str, Any]],
+        channel_candidates: dict[str, list[Any]],
+        applied: dict[str, Any],
+        attributions: dict[str, Any],
+    ) -> dict[str, Any]:
+        """每个 run×channel 落一行寻访漏斗，并把 0 结果归因回写到 channel_runs 条目上。"""
+        staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
+        intake_dups: dict[str, int] = {}
+        for key in ("existing", "batch_duplicates"):
+            entries = staged.get(key) if isinstance(staged.get(key), list) else []
+            for entry in entries:
+                item = entry if isinstance(entry, dict) else {}
+                dup_channel = str(item.get("channel") or item.get("source") or "unknown").lower()
+                intake_dups[dup_channel] = intake_dups.get(dup_channel, 0) + 1
+        channel_new = attributions.get("channel_new") if isinstance(attributions.get("channel_new"), dict) else {}
+        job_id = self._job_id(client, job)
+        rows: list[dict[str, Any]] = []
+        for run in channel_runs:
+            channel = str(run.get("channel") or "unknown").lower()
+            status = str(run.get("status") or "completed")
+            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            candidates = [item for item in channel_candidates.get(channel) or [] if isinstance(item, dict)]
+            rounds = [entry for entry in result.get("rounds") or [] if isinstance(entry, dict)]
+            detail = result.get("detail_capture") if isinstance(result.get("detail_capture"), dict) else {}
+            recall = sum(_round_int(entry, "result_count") for entry in rounds)
+            extracted = sum(_round_int(entry, "extracted_count") for entry in rounds)
+            if extracted <= 0 and not rounds:
+                extracted = len(candidates)
+            scored = [item for item in candidates if item.get("fit_score") is not None]
+            high_score = 0
+            for item in scored:
+                try:
+                    if int(item.get("fit_score") or 0) >= 65:
+                        high_score += 1
+                except (TypeError, ValueError):
+                    continue
+            zero_attribution = ""
+            if not candidates:
+                zero_attribution = classify_zero_result(channel, status, result)
+                run["zero_attribution"] = zero_attribution
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "workflow_id": workflow_id or None,
+                    "job_id": job_id,
+                    "client": client,
+                    "job": job,
+                    "channel": channel,
+                    "status": status,
+                    "query_count": len(rounds),
+                    "queries_json": json.dumps(rounds, ensure_ascii=False),
+                    "recall_count": recall,
+                    "extracted_count": extracted,
+                    "dedupe_count": max(0, extracted - len(candidates)),
+                    "unique_count": len(candidates),
+                    "detail_complete": _round_int(detail, "complete"),
+                    "detail_partial": _round_int(detail, "partial"),
+                    "detail_failed": _round_int(detail, "failed"),
+                    "intake_duplicate_count": int(intake_dups.get(channel, 0)),
+                    "intake_new_count": int(channel_new.get(channel, 0) or 0),
+                    "assessed_count": len(scored),
+                    "high_score_count": high_score,
+                    "zero_attribution": zero_attribution or None,
+                    "error": str(result.get("error") or "")[:1000] or None,
+                }
+            )
+        conn = self.service._connect()
+        try:
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO agent_sourcing_funnel
+                    (run_id,workflow_id,job_id,client,job,channel,status,query_count,queries_json,
+                     recall_count,extracted_count,dedupe_count,unique_count,
+                     detail_complete,detail_partial,detail_failed,
+                     intake_duplicate_count,intake_new_count,assessed_count,high_score_count,
+                     zero_attribution,error)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(run_id,channel) DO UPDATE SET
+                      workflow_id=COALESCE(excluded.workflow_id,workflow_id),
+                      job_id=excluded.job_id,
+                      status=excluded.status,
+                      query_count=excluded.query_count,
+                      queries_json=excluded.queries_json,
+                      recall_count=excluded.recall_count,
+                      extracted_count=excluded.extracted_count,
+                      dedupe_count=excluded.dedupe_count,
+                      unique_count=excluded.unique_count,
+                      detail_complete=excluded.detail_complete,
+                      detail_partial=excluded.detail_partial,
+                      detail_failed=excluded.detail_failed,
+                      intake_duplicate_count=excluded.intake_duplicate_count,
+                      intake_new_count=excluded.intake_new_count,
+                      assessed_count=excluded.assessed_count,
+                      high_score_count=excluded.high_score_count,
+                      zero_attribution=excluded.zero_attribution,
+                      error=excluded.error,
+                      updated_at=datetime('now','localtime')
+                    """,
+                    (
+                        row["run_id"], row["workflow_id"], row["job_id"], row["client"], row["job"],
+                        row["channel"], row["status"], row["query_count"], row["queries_json"],
+                        row["recall_count"], row["extracted_count"], row["dedupe_count"], row["unique_count"],
+                        row["detail_complete"], row["detail_partial"], row["detail_failed"],
+                        row["intake_duplicate_count"], row["intake_new_count"],
+                        row["assessed_count"], row["high_score_count"],
+                        row["zero_attribution"], row["error"],
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "stored": len(rows), "run_id": run_id}
+
+    def _record_sourcing_funnel_failure(
+        self,
+        *,
+        run_id: str,
+        workflow_id: str,
+        client: str,
+        job: str,
+        channel: str,
+        error: str,
+    ) -> None:
+        """渠道 runner 在合并前直接失败时，尽力留下一行失败漏斗（绝不掩盖原始异常）。"""
+        try:
+            conn = self.service._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO agent_sourcing_funnel
+                    (run_id,workflow_id,job_id,client,job,channel,status,zero_attribution,error)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(run_id,channel) DO UPDATE SET
+                      status=excluded.status,
+                      zero_attribution=excluded.zero_attribution,
+                      error=excluded.error,
+                      updated_at=datetime('now','localtime')
+                    """,
+                    (
+                        run_id, workflow_id or None, self._job_id(client, job), client, job,
+                        channel, "failed", classify_zero_result(channel, "failed", {"error": error}), error[:1000],
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
     def _run(self, command: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)

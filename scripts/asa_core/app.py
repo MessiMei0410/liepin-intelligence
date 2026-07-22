@@ -171,6 +171,11 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
 
+    @app.get("/api/v1/workflows/{workflow_id}/sourcing-funnel")
+    def workflow_sourcing_funnel(workflow_id: str) -> dict[str, Any]:
+        # 无寻访运行时返回空结构（channels/runs 为空数组），不抛 404
+        return core.workflow_sourcing_funnel(workflow_id)
+
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
         return core.audit_events(limit, offset)

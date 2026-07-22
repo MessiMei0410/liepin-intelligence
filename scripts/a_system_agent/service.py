@@ -942,6 +942,22 @@ class AgentService:
                 raise ValueError("寻访结果缺少排重入库统计")
             if not isinstance(result.get("audit"), dict) or result["audit"].get("ok") is not True:
                 raise ValueError("寻访结果未通过 A 系统同步审计")
+            # additive 质量标记：ok 但 0 候选的渠道结果区分“已归因/未归因”，不改变 ok/status 流转。
+            # 通过就地修改 result 让 complete_external_step 落库的 output_json 带上标记。
+            for run in result["channel_runs"]:
+                if not isinstance(run, dict):
+                    continue
+                channel_result = run.get("result") if isinstance(run.get("result"), dict) else {}
+                if channel_result.get("ok") is not True:
+                    continue
+                try:
+                    produced = int(channel_result.get("candidates") or 0)
+                except (TypeError, ValueError):
+                    produced = 0
+                if produced > 0:
+                    continue
+                attribution = str(run.get("zero_attribution") or "").strip()
+                run["quality"] = "zero_attributed" if attribution and attribution != "unknown" else "zero_unknown"
         if capability_id == "client_recommendation":
             required = ("channel", "status", "document_hash", "sent_at")
             if any(not result.get(key) for key in required):

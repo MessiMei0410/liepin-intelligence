@@ -323,6 +323,41 @@ CREATE TABLE IF NOT EXISTS agent_sourcing_attributions (
 CREATE INDEX IF NOT EXISTS idx_agent_sourcing_attribution_job
 ON agent_sourcing_attributions(job_id,channel,source_query);
 
+CREATE TABLE IF NOT EXISTS agent_sourcing_funnel (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    workflow_id TEXT,
+    job_id INTEGER NOT NULL DEFAULT 0,
+    client TEXT NOT NULL DEFAULT '',
+    job TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    query_count INTEGER NOT NULL DEFAULT 0,
+    queries_json TEXT NOT NULL DEFAULT '[]',
+    recall_count INTEGER NOT NULL DEFAULT 0,
+    extracted_count INTEGER NOT NULL DEFAULT 0,
+    dedupe_count INTEGER NOT NULL DEFAULT 0,
+    unique_count INTEGER NOT NULL DEFAULT 0,
+    detail_complete INTEGER NOT NULL DEFAULT 0,
+    detail_partial INTEGER NOT NULL DEFAULT 0,
+    detail_failed INTEGER NOT NULL DEFAULT 0,
+    intake_duplicate_count INTEGER NOT NULL DEFAULT 0,
+    intake_new_count INTEGER NOT NULL DEFAULT 0,
+    assessed_count INTEGER NOT NULL DEFAULT 0,
+    high_score_count INTEGER NOT NULL DEFAULT 0,
+    zero_attribution TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(run_id,channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sourcing_funnel_workflow
+ON agent_sourcing_funnel(workflow_id,channel,created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sourcing_funnel_job
+ON agent_sourcing_funnel(job_id,channel,created_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_sourcing_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dedupe_key TEXT NOT NULL UNIQUE,
