@@ -12,12 +12,14 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
-    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract"
+    "check:api-drift": "node scripts/check-api-drift.mjs",
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run check:api-drift"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

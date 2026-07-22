@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, Archive, Ban, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleCheck, CircleDashed, CircleGauge, Clock3, ExternalLink, ListChecks, LoaderCircle, MapPin, MessageSquareText, Route, Search, Send, ShieldAlert, ShieldCheck, SquarePen, Target, TriangleAlert, UserRoundSearch, UsersRound, X } from 'lucide-react'
-import { api, BusinessFocus, Candidate, CandidateDetail, Job, JobDetail, Workflow } from './api'
+import { api, Bootstrap, BusinessFocus, Candidate, CandidateDetail, Dashboard, DashboardCounts, Job, JobDetail, Workflow } from './api'
+import { WorkflowCandidateRow } from './workflow/workflowModel'
 import { RevisePlanDialog } from './components/RevisePlanDialog'
 import { mapWorkflowStatus, workflowStatusLabel } from './workflow/statusMapping'
 import './styles.css'
@@ -38,7 +39,7 @@ const stepStatusLabel: Record<string,string> = {
 const activeWorkflowStatuses = new Set(['queued','running','waiting_approval','waiting_external'])
 const stepTone = (status='') => ['completed','skipped'].includes(status) ? 'done' : ['running','queued','waiting_external'].includes(status) ? 'active' : status==='waiting_approval' ? 'needs-approval' : ['failed','blocked'].includes(status) ? 'error' : ['cancelled'].includes(status) ? 'muted' : 'pending'
 const recordValue = (value: unknown): Record<string,any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string,any> : {}
-const arrayValue = (value: unknown): any[] => Array.isArray(value) ? value : []
+const arrayValue = (value: unknown): unknown[] => Array.isArray(value) ? value : []
 const textList = (...values: unknown[]): string[] => [...new Set(values.flatMap(value => {
   if(Array.isArray(value))return value.map(String)
   const text=String(value||'').trim()
@@ -131,8 +132,8 @@ const openCopilotWindow = async (context: Record<string, unknown>) => {
 
 function App() {
   const [tab, setTab] = useState<Tab>('overview')
-  const [boot, setBoot] = useState<any>()
-  const [dashboard, setDashboard] = useState<any>()
+  const [boot, setBoot] = useState<Bootstrap>()
+  const [dashboard, setDashboard] = useState<Dashboard>()
   const [jobs, setJobs] = useState<Job[]>([])
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [query, setQuery] = useState('')
@@ -225,7 +226,7 @@ function App() {
   }, [])
 
   const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e: any) { setError(e.message) }
+    try { setJob(undefined); setWorkflow(undefined); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
@@ -234,14 +235,14 @@ function App() {
     setRefreshKey(value => value + 1)
   }
   const openJob = async (id: number) => {
-    try { setCandidate(undefined); setWorkflow(undefined); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e: any) { setError(e.message) }
+    try { setCandidate(undefined); setWorkflow(undefined); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const archiveWorkflow = async (id: string) => {
     try { await api.workflowAction(id, 'archive'); setRefreshKey(value => value + 1) }
-    catch (e: any) { setError(humanizeActionError(e?.message, '归档失败，请重试。')) }
+    catch (e) { setError(humanizeActionError(e, '归档失败，请重试。')) }
   }
   const openWorkflow = async (id: string) => {
-    try { setJob(undefined); setCandidate(undefined); setWorkflow(await api.workflow(id)); location.hash = `workflow=${id}` } catch (e: any) { setError(e.message) }
+    try { setJob(undefined); setCandidate(undefined); setWorkflow(await api.workflow(id)); location.hash = `workflow=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); history.replaceState(null, '', location.pathname) }
   const visibleJobs = jobs.filter(j => !query || `${j.id} ${j.client} ${j.title} ${j.status}`.toLowerCase().includes(query.toLowerCase()))
@@ -281,8 +282,8 @@ function App() {
   </div>
 }
 
-function Overview({ dashboard, jobs, candidates, openWorkflow, openCandidate, archiveWorkflow }: any) {
-  const counts = dashboard?.counts || {}
+function Overview({ dashboard, jobs, candidates, openWorkflow, openCandidate, archiveWorkflow }: { dashboard?: Dashboard; jobs: Job[]; candidates: Candidate[]; openWorkflow: (id: string) => void | Promise<void>; openCandidate: (id: number) => void | Promise<void>; archiveWorkflow: (id: string) => void | Promise<void> }) {
+  const counts: DashboardCounts = dashboard?.counts || {}
   return <>
     <section className="metrics">
       <Metric label="在推岗位" value={counts.active_jobs ?? '-'} detail="规范岗位实体" />
@@ -292,7 +293,7 @@ function Overview({ dashboard, jobs, candidates, openWorkflow, openCandidate, ar
     </section>
     <div className="overview-grid">
       <section className="section"><SectionHead title="当前工作流" meta={`${dashboard?.workflows?.length || 0} 条`} />
-        <div className="rows">{dashboard?.workflows?.map((w: any) => <div className="work-row-shell" key={w.workflow_id}><button className="work-row" onClick={() => openWorkflow(w.workflow_id)}><span className={`dot ${stageTone(w.status)}`}/><div><b>{w.title}</b><small>{w.workflow_id} · {w.current_stage || '未开始'}</small></div><span className="tag">{workflowStatusLabel[w.status]||w.status}</span></button>{!activeWorkflowStatuses.has(w.status)&&<button className="row-icon-action" title="归档工作流" aria-label={`归档工作流 ${w.title}`} onClick={()=>archiveWorkflow(w.workflow_id)}><Archive/></button>}</div>)}</div>
+        <div className="rows">{dashboard?.workflows?.map((w) => <div className="work-row-shell" key={w.workflow_id}><button className="work-row" onClick={() => openWorkflow(w.workflow_id)}><span className={`dot ${stageTone(w.status)}`}/><div><b>{w.title}</b><small>{w.workflow_id} · {w.current_stage || '未开始'}</small></div><span className="tag">{workflowStatusLabel[w.status]||w.status}</span></button>{!activeWorkflowStatuses.has(w.status)&&<button className="row-icon-action" title="归档工作流" aria-label={`归档工作流 ${w.title}`} onClick={()=>archiveWorkflow(w.workflow_id)}><Archive/></button>}</div>)}</div>
       </section>
       <section className="section"><SectionHead title="优先岗位" meta="按活跃人选排序" />
         <div className="rows">{jobs.slice(0, 6).map((j: Job) => <div className="compact-row" key={j.id}><div><b>{j.title}</b><small>{j.client} · {j.priority || j.status}</small></div><strong>{j.active_candidate_count || 0}</strong></div>)}</div>
@@ -301,8 +302,8 @@ function Overview({ dashboard, jobs, candidates, openWorkflow, openCandidate, ar
     <section className="section"><SectionHead title="最近更新人选" meta="实时数据库" /><Candidates items={candidates.slice(0, 8)} openCandidate={openCandidate} compact /></section>
   </>
 }
-const Metric = ({label,value,detail}: any) => <div className="metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
-const SectionHead = ({title,meta}: any) => <div className="section-head"><h2>{title}</h2><span>{meta}</span></div>
+const Metric = ({label,value,detail}: {label:string;value:React.ReactNode;detail:string}) => <div className="metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+const SectionHead = ({title,meta}: {title:string;meta:string}) => <div className="section-head"><h2>{title}</h2><span>{meta}</span></div>
 
 function Jobs({items,onSelect}:{items:Job[],onSelect:(id:number)=>void}) { const [mode,setMode]=useState<'p0'|'pipeline'|'all'>('p0'); const shown=items.filter(j=>mode==='all'||(mode==='p0'?(j.priority||'').includes('P0'):['sourcing','published','active_pipeline','client_feedback','offer'].includes(j.lifecycle_stage||''))); const open=(event:React.KeyboardEvent,id:number)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();onSelect(id)}}; return <section className="section table-section"><div className="section-head"><h2>岗位</h2><div className="detail-actions" role="group" aria-label="岗位范围"><button className={`button ${mode==='p0'?'primary':''}`} onClick={()=>setMode('p0')}>P0</button><button className={`button ${mode==='pipeline'?'primary':''}`} onClick={()=>setMode('pipeline')}>在推</button><button className={`button ${mode==='all'?'primary':''}`} onClick={()=>setMode('all')}>全部</button></div><span>{shown.length} 个结果</span></div><div className="table-wrap"><table><thead><tr><th>客户 / 岗位</th><th>优先级 / 阶段</th><th>地点</th><th className="num">活跃人选</th><th>更新</th></tr></thead><tbody>{shown.map(j => <tr key={j.id} tabIndex={0} aria-label={`打开岗位 ${j.client} ${j.title}`} onKeyDown={e=>open(e,j.id)} onClick={() => onSelect(j.id)}><td><b>{j.title}</b><small>{j.client}</small></td><td>{j.priority?.includes('P0-最急') && <span className="tag warn">P0 最急</span>}<small>{j.status || j.lifecycle_stage || '待启动'}</small></td><td>{j.location || '-'}</td><td className="num">{j.active_candidate_count || 0}</td><td>{date(j.updated_at)}</td></tr>)}{shown.length===0&&<tr><td colSpan={5}><div className="empty">没有符合当前条件的岗位。</div></td></tr>}</tbody></table></div></section> }
 
@@ -355,8 +356,8 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
   const [pendingAction,setPendingAction]=useState<CandidateActionPreflight>()
   const [actionNote,setActionNote]=useState('')
   const [view,setView]=useState<'overview'|'resume'|'activity'>('overview')
-  const act=async(action:CandidateAction)=>{ setBusy(`preflight:${action}`); setFeedback(undefined); try { const pre=await api.preflight(value.id,action); setActionNote(''); setPendingAction({action,token:pre.token,impact:pre.impact,expires_at:pre.expires_at}) } catch(e:any) { setFeedback({tone:'error',text:copilotText(e?.message)||'操作预检失败，请重试。'}) } finally { setBusy('') } }
-  const commitAction=async()=>{ if(!pendingAction)return; const {action,token}=pendingAction; setBusy(`commit:${action}`); setFeedback(undefined); try { await api.commit(value.id,action,token,actionNote.trim()); setPendingAction(undefined); await changed(); setFeedback({tone:'success',text:`${candidateActionLabels[action]}已完成，候选人状态已更新。`}) } catch(e:any) { setFeedback({tone:'error',text:copilotText(e?.message)||'操作提交失败，请重试。'}) } finally { setBusy('') } }
+  const act=async(action:CandidateAction)=>{ setBusy(`preflight:${action}`); setFeedback(undefined); try { const pre=await api.preflight(value.id,action); setActionNote(''); setPendingAction({action,token:pre.token,impact:pre.impact,expires_at:pre.expires_at}) } catch(e) { setFeedback({tone:'error',text:copilotText(e)||'操作预检失败，请重试。'}) } finally { setBusy('') } }
+  const commitAction=async()=>{ if(!pendingAction)return; const {action,token}=pendingAction; setBusy(`commit:${action}`); setFeedback(undefined); try { await api.commit(value.id,action,token,actionNote.trim()); setPendingAction(undefined); await changed(); setFeedback({tone:'success',text:`${candidateActionLabels[action]}已完成，候选人状态已更新。`}) } catch(e) { setFeedback({tone:'error',text:copilotText(e)||'操作提交失败，请重试。'}) } finally { setBusy('') } }
   const resume=value.resume
   const links=[...new Map(value.source_links.filter(x=>x.source_url).map(link=>[sourceLinkLabel(link.source_system),link])).values()]
   const stage=value.clean_stage||''
@@ -472,13 +473,13 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
   const action=async(name:string,payload:Record<string,unknown>={})=>{
     setBusy(name);setActionError('')
     try{await api.workflowAction(value.workflow.workflow_id,name,payload);if(name==='archive')archived();else await reload()}
-    catch(e:any){setActionError(humanizeActionError(e?.message,'工作流操作失败，请重试。'))}
+    catch(e){setActionError(humanizeActionError(e,'工作流操作失败，请重试。'))}
     finally{setBusy('')}
   }
   const revise=(instruction:string)=>{setReviseOpen(false);action('revise',{instruction})}
   const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
-  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'审批失败，请重试。'))}finally{setBusy('')}}
-  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await reload()}catch(e:any){setActionError(humanizeActionError(e?.message,'重试失败，请稍后再试。'))}finally{setBusy('')}}
+  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await reload()}catch(e){setActionError(humanizeActionError(e,'审批失败，请重试。'))}finally{setBusy('')}}
+  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await reload()}catch(e){setActionError(humanizeActionError(e,'重试失败，请稍后再试。'))}finally{setBusy('')}}
   const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待批准寻访` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='planned' ? '计划已就绪，可以启动' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
   return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" onClick={()=>openCopilotWindow({type:'workflow',id:value.workflow.workflow_id})}><MessageSquareText/>Copilot</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{['planned','blocked','failed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}修改计划</button>}{!['cancelled','completed'].includes(status)&&<button className="button" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'&&<LoaderCircle className="spin"/>}取消</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}启动</button>}</div></header><div className="workflow-body"><main>
     <section className={`workflow-progress ${progressTone}`} aria-live="polite">
@@ -506,12 +507,12 @@ function WorkflowTarget({target,objective}:{target:{client:string;job:string;loc
   </section>
 }
 
-function WorkflowStrategy({strategy,channels,gates,open,toggle}:{strategy:Record<string,any>;channels:Record<string,any>;gates:Record<string,any>;open:boolean;toggle:()=>void}) {
+function WorkflowStrategy({strategy,channels,gates,open,toggle}:{strategy:Record<string,unknown>;channels:Record<string,unknown>;gates:Record<string,unknown>;open:boolean;toggle:()=>void}) {
   const liepin=arrayValue(channels.liepin)
   const xsaas=arrayValue(channels.xsaas)
   const hasStrategy=liepin.length+xsaas.length>0
   const generation=recordValue(strategy.generation)
-  const renderQueries=(items:any[],label:string)=>{
+  const renderQueries=(items:unknown[],label:string)=>{
     const visible=open?items:items.slice(0,3)
     return <div className="strategy-channel"><div className="strategy-channel-head"><b>{label}</b><span>{items.length} 组关键词</span></div><div className="strategy-queries">{visible.map((entry,index)=>{const item=recordValue(entry);return <div key={`${item.query}-${index}`}><b>{String(item.query||'关键词待补充')}</b><span>{String(item.purpose||'按岗位画像检索')}</span></div>})}</div>{!open&&items.length>3&&<small>另有 {items.length-3} 组关键词</small>}</div>
   }
@@ -521,15 +522,15 @@ function WorkflowStrategy({strategy,channels,gates,open,toggle}:{strategy:Record
   </section>
 }
 
-function StrategyRule({title,values,tone}:{title:string;values:any[];tone:string}) {
+function StrategyRule({title,values,tone}:{title:string;values:unknown[];tone:string}) {
   if(!values.length)return null
   return <div className={`strategy-rule ${tone}`}><b>{title}</b><div>{values.map((value,index)=><span key={index}>{String(value)}</span>)}</div></div>
 }
 
-function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate,ref}:{newItems:Array<Record<string,any>>;assessedItems:Array<Record<string,any>>;sourcingStatus:string;openCandidate:(id:number)=>void;ref?:React.Ref<HTMLElement>}) {
+function WorkflowCandidates({newItems,assessedItems,sourcingStatus,openCandidate,ref}:{newItems:WorkflowCandidateRow[];assessedItems:WorkflowCandidateRow[];sourcingStatus:string;openCandidate:(id:number)=>void;ref?:React.Ref<HTMLElement>}) {
   const finished=['completed','failed','blocked'].includes(sourcingStatus)
   const newIds=new Set(newItems.map(item=>Number(item.jobCandidateId||0)).filter(Boolean))
-  const mergedById=new Map<number,Record<string,any>>()
+  const mergedById=new Map<number,WorkflowCandidateRow>()
   assessedItems.forEach(item=>{if(item.jobCandidateId)mergedById.set(Number(item.jobCandidateId),item)})
   newItems.forEach((item,index)=>{
     const id=Number(item.jobCandidateId||0)
@@ -592,8 +593,8 @@ function Copilot({context,openWorkflow,standalone=false}:{context:Record<string,
         setMessages(m=>[...m,{role:'asa',text:'已启动工作流，正在打开计划面板。'}])
       }
       await openWorkflow(id)
-    }catch(e:any){
-      setMessages(m=>[...m,{role:'asa',text:copilotText(e?.message)||'工作流操作失败，请重试。'}])
+    }catch(e){
+      setMessages(m=>[...m,{role:'asa',text:copilotText(e)||'工作流操作失败，请重试。'}])
     }finally{
       setActionBusy('')
     }
@@ -626,8 +627,8 @@ function Copilot({context,openWorkflow,standalone=false}:{context:Record<string,
       setFocus(r.business_focus)
       const answer=copilotText(r.answer) || copilotText(r.message) || copilotText(r.response) || copilotText(r.summary)
       setMessages(m=>[...m,{role:'asa',text:answer||'已完成分析，请查看关联工作流与产物。',actions:actionsFrom(r.suggested_actions)}])
-    }catch(e:any){
-      setMessages(m=>[...m,{role:'asa',text:copilotText(e?.message)||'Copilot 请求失败，请稍后重试。'}])
+    }catch(e){
+      setMessages(m=>[...m,{role:'asa',text:copilotText(e)||'Copilot 请求失败，请稍后重试。'}])
     }finally{
       setBusy(false)
     }
