@@ -313,5 +313,52 @@ class BusinessOutcomeMigrationTest(unittest.TestCase):
                 conn.close()
 
 
+class BusinessOutcomeContractFreezeTest(BusinessOutcomeTest):
+    """T5：business_outcome 四枚举冻结为接口契约。
+
+    新增枚举值必须三处同步：workflow.py 判定（BUSINESS_OUTCOMES/classify）、
+    前端 statusMapping.ts、本测试。前端遇未知值回落 status 原逻辑（仓外
+    status-mapping.test.ts / overview-status.test.ts 已固化该行为）。
+    """
+
+    FROZEN = {
+        "completed_target_met",
+        "completed_needs_review",
+        "completed_pool_insufficient",
+        "failed_technical",
+    }
+
+    def test_outcomes_are_exactly_the_frozen_four(self) -> None:
+        from a_system_agent.workflow import BUSINESS_OUTCOME_LABELS, BUSINESS_OUTCOMES
+        self.assertEqual(set(BUSINESS_OUTCOMES), self.FROZEN)
+        # 中文语义单一来源，覆盖率必须恰好等于枚举集（防新增枚举忘配文案）
+        self.assertEqual(set(BUSINESS_OUTCOME_LABELS), self.FROZEN)
+        for value in BUSINESS_OUTCOMES:
+            self.assertTrue(BUSINESS_OUTCOME_LABELS[value].strip())
+
+    def test_read_surfaces_emit_only_frozen_values_or_null(self) -> None:
+        workflow_id, state = self.drive_sourcing_to_terminal("给长越科技机械高级工程师补充10位合适人选")
+        allowed = self.FROZEN | {None}
+        detail = self.service.get_workflow(workflow_id)
+        summary = self.service.get_workflow_summary(workflow_id)
+        for surface in (
+            state["business_outcome"],
+            state["workflow"]["business_outcome"],
+            state["goal"]["business_outcome"],
+            detail["business_outcome"],
+            detail["workflow"]["business_outcome"],
+            detail["goal"]["business_outcome"],
+            summary["business_outcome"],
+        ):
+            self.assertIn(surface, allowed)
+        # 库内全部工作流（含 NULL 的非终局行）的读出同样只在枚举集 ∪ {NULL} 内
+        conn = sqlite3.connect(self.db_path)
+        try:
+            values = {row[0] for row in conn.execute("SELECT DISTINCT business_outcome FROM agent_workflows")}
+        finally:
+            conn.close()
+        self.assertLessEqual(values, allowed)
+
+
 if __name__ == "__main__":
     unittest.main()
