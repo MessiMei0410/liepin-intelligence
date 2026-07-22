@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/stop-reasons/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stop Reasons Summary */
+        get: operations["stop_reasons_summary_api_v1_candidates_stop_reasons_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/{candidate_id}": {
         parameters: {
             query?: never;
@@ -391,6 +408,11 @@ export interface components {
              */
             note: string;
             /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /**
              * Preflight Token
              * @default
              */
@@ -673,6 +695,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_reasons_summary_api_v1_candidates_stop_reasons_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

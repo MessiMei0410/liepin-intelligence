@@ -132,8 +132,8 @@ export const api = {
     const body: CandidateActionRequest = { request_id: requestId(), candidate_id, action }
     return json<PreflightResult>('/api/v1/candidate-actions/preflight', { method: 'POST', body: JSON.stringify(body) })
   },
-  commit: (candidate_id: number, action: string, preflight_token: string, note = '') => {
-    const body: Omit<CandidateActionBody, 'request_id'> = { candidate_id, action, preflight_token, note }
+  commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string) => {
+    const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}) }
     return write('/api/v1/candidate-actions/commit', body)
   },
 }
