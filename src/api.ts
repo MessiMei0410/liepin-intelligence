@@ -36,6 +36,8 @@ export type Candidate = {
 
 export type CandidateDetail = Candidate & {
   is_stopped: boolean; stop_reason?: string;
+  // R10：停止原因枚举回显，code 为 8 枚举之一（未知值后端降级 other），label 为中文文案。
+  stop_reason_code?: string; stop_reason_label?: string;
   resume: { summary: string; full_text: string; work_text: string; project_text: string; education_text: string; raw: Record<string, unknown> };
   source_links: Array<{ source_system: string; source_entity_type: string; source_entity_id: string; source_url?: string }>;
   events: Array<{ id: number; event_type: string; event_status?: string; event_time?: string; summary?: string }>;
@@ -69,6 +71,9 @@ export type ContractAnchor = [
   paths['/api/v1/events']['get'],
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
+  // R9/R10 增补：copilot 意图确认与停止原因摘要路由入锚。
+  paths['/api/v1/copilot/intents/confirm']['post'],
+  paths['/api/v1/candidates/stop-reasons/summary']['get'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -93,7 +98,21 @@ export type Bootstrap = {
   counts?: DashboardCounts; features?: Record<string, boolean>;
 }
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
-export type CopilotResponse = Record<string, unknown> & { session_id?: string; business_focus?: BusinessFocus }
+// R9：copilot 响应可能携带 pending_intent，确认前不落地任何写操作；
+// intent_hash / preflight_token 为后端签名，确认时必须原样回传，409 表示状态漂移或签名不符。
+export type CopilotPendingIntent = {
+  kind: string; action: string; action_label?: string; target_scope?: string;
+  confidence?: number; reason?: string;
+  candidate?: { id?: number; name?: string; stage?: string; job?: string; client?: string };
+  confirm_text?: string; intent_hash: string; preflight_token: string;
+  expires_at?: string; message?: string;
+}
+export type CopilotIntentConfirmRequest = {
+  intent: { kind: string; action: string }; intent_hash: string; candidate_id: number;
+  preflight_token: string; message: string; session_id: string;
+}
+export type CopilotIntentConfirmResult = { ok?: boolean; candidate_action?: Record<string, unknown>; answer?: unknown }
+export type CopilotResponse = Record<string, unknown> & { session_id?: string; business_focus?: BusinessFocus; pending_intent?: CopilotPendingIntent }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
 
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
@@ -101,7 +120,10 @@ const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const body: unknown = await response.json().catch(() => ({ error: response.statusText }))
   if (!response.ok) {
     const record = body && typeof body === 'object' ? body as Record<string, unknown> : {}
-    throw new Error((record.detail || record.error || `请求失败 (${response.status})`) as string)
+    // 携带 HTTP status：调用方需区分 409（状态漂移/签名不符）等可读错误。
+    const error = new Error((record.detail || record.error || `请求失败 (${response.status})`) as string) as Error & { status?: number }
+    error.status = response.status
+    throw error
   }
   return body as T
 }
@@ -124,6 +146,11 @@ export const api = {
   workflowCandidates: async (id: string, limit = 20, offset = 0): Promise<WorkflowCandidatesPage> =>
     parseWorkflowCandidatesPage(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/candidates?limit=${limit}&offset=${offset}`)),
   copilot: (message: string, context: Record<string, unknown>, session_id = '') => write<CopilotResponse>('/api/v1/copilot/messages', { message, context, session_id }),
+  // R9 意图确认：请求体锚定生成的 CopilotIntentConfirm schema；Idempotency-Key 走 write 统一派生。
+  confirmIntent: (payload: CopilotIntentConfirmRequest) => {
+    const body: Omit<components['schemas']['CopilotIntentConfirm'], 'request_id'> = payload
+    return write<CopilotIntentConfirmResult>('/api/v1/copilot/intents/confirm', body)
+  },
   copilotSession: (sessionId: string) => json<{messages: Array<Record<string, unknown>>; business_focus?: BusinessFocus}>(`/api/agent/copilot/session?session_id=${encodeURIComponent(sessionId)}&limit=100`),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
