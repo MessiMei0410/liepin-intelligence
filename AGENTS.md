@@ -4,9 +4,10 @@ ASA App 前端（React 19 + Vite 8 + TS strict），由 ASA Core（127.0.0.1:876
 
 ## 常用命令
 
-- `npm run ci` — 本地 CI 一键：typecheck && lint && test && build && test:contract && check:api-drift。改动后必须全绿。
+- `npm run ci` — 本地 CI 一键：typecheck && lint && test && build && test:contract && test:e2e && check:api-drift。改动后必须全绿。
 - `npm run test` — Vitest + React Testing Library（`src/__tests__/`）。
 - `npm run test:contract` — Python 源码契约测试（`tests/`，unittest）。
+- `npm run test:e2e` — Playwright E2E + 截图回归（`e2e/`）。global setup 把正式库**只读**复制到 /tmp 新鲜副本，拉起隔离 Core（127.0.0.1:8876，`A_SYSTEM_DB`/`--db` 双指向副本），跑完回收；正式 Core（8765）与正式库绝不作为目标。缺依赖（后端仓库/python/dist）时整套降级 skip。基线在 `e2e/snapshots/`（桌面 1440×900 + 浮窗 390×700 两组），变更 UI 后用 `npx playwright test --project=shots-desktop --project=shots-floating --update-snapshots` 重生成。
 - `npm run generate:api` — 从运行中的 Core 重新生成 `src/generated/api.d.ts`（需 Core 在 8765）。
 
 ## 硬性约定

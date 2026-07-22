@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
     "check:api-drift": "node scripts/check-api-drift.mjs",
-    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run check:api-drift"
+    "test:e2e": "playwright test --project=functional && playwright test --project=shots-desktop --project=shots-floating",
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run test:e2e && npm run check:api-drift"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",
