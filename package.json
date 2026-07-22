@@ -7,19 +7,29 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "generate:api": "openapi-typescript http://127.0.0.1:8765/openapi.json -o src/generated/api.d.ts",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "ci": "npm run typecheck && npm run lint && npm run build && npm run test:contract"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "openapi-typescript": "latest",
-    "typescript": "latest",
-    "vite": "latest"
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "^10.7.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "openapi-typescript": "^7.13.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^8.1.5"
   }
 }

@@ -1,0 +1,6 @@
+dist
+node_modules
+package-lock.json
+# R4 拆分前不格式化巨石文件，避免一次性重排污染 diff
+src/main.tsx
+src/styles.css
