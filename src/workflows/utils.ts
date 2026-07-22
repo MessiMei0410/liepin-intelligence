@@ -1,10 +1,13 @@
 import { Workflow } from '../api'
 import { recordValue, arrayValue } from '../shared/records'
+import { zeroAttributionLabel } from '../workflow/statusMapping'
 
 export const stepStatusLabel: Record<string,string> = {
   pending:'待执行', queued:'排队中', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
   completed:'已完成', skipped:'已跳过', blocked:'已阻塞', failed:'失败', cancelled:'已取消',
 }
+// 渠道 ID → 中文名（猎聘/X-SaaS），utils 与 WorkflowFunnel 共用，不再各自内联。
+export const channelLabel = (name: string) => name==='liepin'?'猎聘':name==='xsaas'?'X-SaaS':name||'渠道'
 export const activeWorkflowStatuses = new Set(['queued','running','waiting_approval','waiting_external'])
 export const stepTone = (status='') => ['completed','skipped'].includes(status) ? 'done' : ['running','queued','waiting_external'].includes(status) ? 'active' : status==='waiting_approval' ? 'needs-approval' : ['failed','blocked'].includes(status) ? 'error' : ['cancelled'].includes(status) ? 'muted' : 'pending'
 export const humanizeWorkflowError = (error?: string) => {
@@ -39,7 +42,20 @@ export const stepBusinessResult = (step:Workflow['steps'][number]) => {
   if(Object.keys(readyChannels).length){const ready=Object.entries(readyChannels).filter(([,item])=>recordValue(item).ready).map(([name])=>name==='liepin'?'猎聘':name==='xsaas'?'X-SaaS':name);facts.push(`渠道已就绪：${ready.join('、')||'等待浏览器连接'}。`)}
   const external=recordValue(data.external_result)
   const runs=arrayValue(external.channel_runs)
-  if(runs.length)facts.push(`渠道结果：${runs.map(item=>`${recordValue(item).channel||'渠道'} ${recordValue(item).status||'已返回'}`).join('，')}。`)
+  if(runs.length){
+    // R8：0 候选的渠道不得只显示 completed——有质量标记/归因时展示“0 条候选 · 归因”，否则回落原状态文案。
+    const labels=runs.map(item=>{
+      const run=recordValue(item)
+      const channel=channelLabel(String(run.channel||''))
+      const produced=Number(recordValue(run.result).candidates||0)
+      const quality=String(run.quality||'')
+      const attribution=zeroAttributionLabel(String(run.zero_attribution||''))
+      if(produced>0)return `${channel} ${produced} 条候选`
+      if(quality.startsWith('zero')||attribution)return `${channel} 0 条候选 · ${attribution||'质量未知，原因待排查'}`
+      return `${channel} ${String(run.status||'已返回')}`
+    })
+    facts.push(`渠道结果：${labels.join('，')}。`)
+  }
   const shadow=recordValue(external.opencli_shadow)
   const shadowChannels=arrayValue(shadow.channels)
   if(shadow.enabled&&shadowChannels.length){

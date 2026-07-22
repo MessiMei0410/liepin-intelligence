@@ -3,9 +3,12 @@ import { parseWorkflow } from './workflow/workflowModel'
 import type { Workflow } from './workflow/workflowModel'
 import { parseWorkflowCandidatesPage, parseWorkflowStepDetail, parseWorkflowSummary } from './workflow/workflowSummary'
 import type { WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
+import { parseSourcingFunnel } from './workflow/sourcingFunnel'
+import type { SourcingFunnel } from './workflow/sourcingFunnel'
 
 export type { Workflow } from './workflow/workflowModel'
 export type { WorkflowCandidateItem, WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
+export type { SourcingFunnel, SourcingFunnelChannel, SourcingFunnelRun } from './workflow/sourcingFunnel'
 
 export type Job = {
   id: number; title: string; client: string; location?: string; status?: string;
@@ -59,6 +62,8 @@ export type ContractAnchor = [
   paths['/api/v1/workflows/{workflow_id}/summary']['get'],
   paths['/api/v1/workflows/{workflow_id}/steps/{step_id}']['get'],
   paths['/api/v1/workflows/{workflow_id}/candidates']['get'],
+  // R8 增补：渠道寻访漏斗路由入锚。
+  paths['/api/v1/workflows/{workflow_id}/sourcing-funnel']['get'],
   paths['/api/v1/events']['get'],
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
@@ -120,6 +125,9 @@ export const api = {
   },
   workflowCandidates: async (id: string, limit = 20, offset = 0): Promise<WorkflowCandidatesPage> =>
     parseWorkflowCandidatesPage(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/candidates?limit=${limit}&offset=${offset}`)),
+  // R8 渠道漏斗：独立按需路由（面板挂载/详情刷新时拉取），不进 /summary 轮询签名，轮询负载不回升。
+  workflowSourcingFunnel: async (id: string): Promise<SourcingFunnel> =>
+    parseSourcingFunnel(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/sourcing-funnel`)),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
