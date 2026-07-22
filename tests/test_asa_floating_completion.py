@@ -122,13 +122,15 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIn("panel.titleVisibility = .hidden", source)
 
     def test_agent_publishes_selected_context_before_showing_copilot(self) -> None:
-        source = Path("/Users/messi/Documents/ASA/src/main.tsx").read_text(encoding="utf-8")
-        self.assertIn("const publishCopilotContext = async", source)
-        self.assertIn("await publishCopilotContext(context, 'copilot', true)", source)
-        self.assertIn("publishCopilotContext(copilotContext, 'selection', true)", source)
+        # R4 拆分后：定义与 openCopilotWindow 在 copilot/bridge.ts，selection 上报在 app/App.tsx
+        bridge = Path("/Users/messi/Documents/ASA/src/copilot/bridge.ts").read_text(encoding="utf-8")
+        app = Path("/Users/messi/Documents/ASA/src/app/App.tsx").read_text(encoding="utf-8")
+        self.assertIn("const publishCopilotContext = async", bridge)
+        self.assertIn("await publishCopilotContext(context, 'copilot', true)", bridge)
+        self.assertIn("publishCopilotContext(copilotContext, 'selection', true)", app)
         self.assertLess(
-            source.index("await publishCopilotContext(context, 'copilot', true)"),
-            source.index("nativeBridge.postMessage({ type: 'showFloating' })"),
+            bridge.index("await publishCopilotContext(context, 'copilot', true)"),
+            bridge.index("nativeBridge.postMessage({ type: 'showFloating' })"),
         )
 
     def test_floating_header_has_stable_brand_actions_and_context_rows(self) -> None:
