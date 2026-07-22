@@ -18,6 +18,7 @@ from .intent import (
     parse_candidate_intent,
 )
 from .stop_reasons import STOP_REASON_LABELS, UNLABELED_STOP_REASON_LABEL, normalize_stop_reason
+from a_system_agent import knowledge_base as kb_consumption
 
 
 STOP_TOKENS = ("停止", "淘汰", "不推进", "拒绝", "关闭")
@@ -578,6 +579,23 @@ class CoreService:
                     (item["client"], item["title"]),
                 ).fetchall()
             ]
+            # S4-2：客户画像挂载（PRD §3.1）。只注入白名单六类（赛道/卖点/面试流程/
+            # 用人偏好/目标池/注意事项）；知识库缺失或异常一律降级为未挂载，绝不影响岗位详情。
+            try:
+                match, _trace = kb_consumption.match_client_profile(item.get("client"))
+                item["client_profile"] = (
+                    {
+                        "matched": True,
+                        "name": match["name"],
+                        "rule": match["rule"],
+                        "needs_confirmation": match["needs_confirmation"],
+                        "context": kb_consumption.profile_context(match["profile"]),
+                    }
+                    if match
+                    else {"matched": False}
+                )
+            except Exception:
+                item["client_profile"] = {"matched": False}
             return {"ok": True, "job": item}
         finally:
             conn.close()

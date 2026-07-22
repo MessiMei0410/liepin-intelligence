@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
-from . import strategy_v2
+from . import knowledge_base, strategy_v2
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -1245,6 +1245,45 @@ class RecruitingCapabilityRuntime:
             job, archetype=archetype, consultant_answers=consultant["consultant_answers"]
         )
         classification["trace"] = [*archetype_trace, *classification["trace"]]
+        # S4-2：知识库消费 —— 客户画像挂载（精确/别名/模糊需确认）、公司图谱召回、
+        # restricted 白名单约束。画像与图谱进 LLM 输入；restricted 键值不进任何生成
+        # 上下文，仅由运行时并入 negative_rules（source=restricted_client）。
+        profile_match, profile_trace = knowledge_base.match_client_profile(job.get("client"))
+        restricted_info, restricted_trace = knowledge_base.load_restricted_constraints(job.get("client"))
+        graph, graph_trace = knowledge_base.load_company_graph()
+        graph_query = " ".join(
+            part
+            for part in (
+                str(job.get("title") or ""),
+                str(job.get("ability_keywords") or ""),
+                knowledge_base.profile_context(profile_match["profile"]).get("track", "") if profile_match else "",
+            )
+            if part
+        )
+        graph_pool, graph_pool_trace = knowledge_base.derive_graph_pool(graph, query_text=graph_query)
+        # 目标池不得含客户本公司（图谱按赛道召回时本公司常高分命中）
+        client_raw = " ".join(str(job.get("client") or "").split())
+        client_norm = knowledge_base.normalize_client_name(client_raw)
+        before = len(graph_pool)
+        graph_pool = [
+            company
+            for company in graph_pool
+            if not knowledge_base.name_match_rule(client_raw, client_norm, company["name"])[0]
+        ]
+        if len(graph_pool) < before:
+            graph_pool_trace.append(f"已从图谱池剔除客户本公司 {before - len(graph_pool)} 家")
+        classification["trace"] = [
+            *classification["trace"], *profile_trace, *restricted_trace, *graph_trace, *graph_pool_trace,
+        ]
+        client_profile_payload: dict[str, Any] = {"matched": False}
+        if profile_match:
+            client_profile_payload = {
+                "matched": True,
+                "name": profile_match["name"],
+                "rule": profile_match["rule"],
+                "needs_confirmation": profile_match["needs_confirmation"],
+                "context": knowledge_base.profile_context(profile_match["profile"]),
+            }
         payload = {
             "canonical_position": {
                 "client": job["client"], "job": job["title"],
@@ -1270,6 +1309,8 @@ class RecruitingCapabilityRuntime:
                 for key in ("archetype_id", "title", "client", "essence", "directions", "target_functions", "level_mapping", "keyword_groups")
             } if archetype else {},
             "consultant_input": consultant,
+            "client_profile": client_profile_payload,
+            "kb_graph_candidates": graph_pool,
             **learning,
             "deterministic_fallback": fallback,
         }
@@ -1281,7 +1322,10 @@ class RecruitingCapabilityRuntime:
         plan = self._validate_model_strategy(generated, fallback, job, learning, max_queries)
         plan["generation"]["input_level"] = classification["input_level"]
         v2 = strategy_v2.build_strategy_v2(
-            plan, classification, archetype=archetype, consultant=consultant, llm_fragment=llm_v2_fragment
+            plan, classification, archetype=archetype, consultant=consultant, llm_fragment=llm_v2_fragment,
+            profile_match=knowledge_base.profile_matched_info(profile_match),
+            graph_pool=graph_pool,
+            restricted_rules=knowledge_base.restricted_negative_rules(restricted_info),
         )
         v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
         result: dict[str, Any] = {

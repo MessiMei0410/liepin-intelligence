@@ -5,8 +5,9 @@
 - docs/ASA_sourcing_strategy_capability_2026-07-23.md §0.1（四锚点）与 §1.1-1.2
 - knowledge_base/seed_silan_tme_v1.json（岗位原型 tme_computing_power）
 
-边界：本模块只读取知识库 JSON 的 job_archetype/校准字段，绝不消费 restricted 层；
-匹配逻辑集中在 match_job_archetype 一处，S4-2 在此基础上扩展。
+边界：本模块只读取知识库 JSON 的 job_archetype/校准字段；S4-2 的客户画像/公司图谱/
+restricted 层统一由 knowledge_base 模块读取（restricted 仅白名单出库），以参数形式传入
+build_strategy_v2 组装，本模块不直接触碰 restricted 文件。
 """
 
 from __future__ import annotations
@@ -433,14 +434,20 @@ def build_strategy_v2(
     archetype: dict[str, Any] | None = None,
     consultant: dict[str, Any] | None = None,
     llm_fragment: dict[str, Any] | None = None,
+    profile_match: dict[str, Any] | None = None,
+    graph_pool: list[dict[str, Any]] | None = None,
+    restricted_rules: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """组装 strategy_v2：LLM 填充各步，运行时兜底必备键并强制版本号/定级/顾问留痕。
 
     consultant_override=True 时，所有推断锚点保持 inferred:true + confidence（PRD §1）。
+    S4-2：profile_match（客户画像挂载留痕）、graph_pool（kb_graph 公司，只用于召回排序）、
+    restricted_rules（禁挖/竞业白名单，source=restricted_client）由运行时传入并合。
     """
     consultant = consultant or {}
     fragment = llm_fragment if isinstance(llm_fragment, dict) else {}
     override = bool(consultant.get("consultant_override"))
+    assembly_trace: list[str] = []
 
     fallback_essence = str(
         (archetype or {}).get("essence") or plan.get("strategy_summary") or "围绕岗位硬门槛、应用场景与目标公司分层寻访。"
@@ -468,10 +475,14 @@ def build_strategy_v2(
                 if isinstance(company, dict) and str(company.get("name") or "").strip()
             ]
             if companies:
+                rationale = str(entry.get("rationale") or "")
+                # llm_inferred 公司必须始终标“待确认”（PRD §3.2）
+                if any(company["source"] == "llm_inferred" for company in companies) and "待确认" not in rationale:
+                    rationale = f"{rationale}（含 llm_inferred 公司，待确认）" if rationale else "含 llm_inferred 公司，待确认"
                 step2.append(
                     _pool_entry(
                         str(entry.get("path") or "same_layer"), str(entry.get("tier") or "T2"),
-                        companies, str(entry.get("rationale") or ""),
+                        companies, rationale,
                     )
                 )
     if not step2 and archetype:
@@ -488,6 +499,27 @@ def build_strategy_v2(
                     "由模型/岗位画像推导的目标池，全部按待确认处理" + ("（顾问放行直接搜）" if override else ""),
                 )
             ]
+
+    # S4-2：公司图谱池并入 step2（source=kb_graph + confidence，按公司名去重）。
+    # governance：图谱命中只用于召回与排序，必须回候选人详情核验本人证据。
+    graph_companies = [
+        {"name": str(company.get("name") or ""), "source": "kb_graph", "confidence": str(company.get("confidence") or "low")}
+        for company in graph_pool or []
+        if isinstance(company, dict) and str(company.get("name") or "").strip()
+    ]
+    if graph_companies:
+        existing_names = {company["name"] for entry in step2 for company in entry["companies"]}
+        new_companies = [company for company in graph_companies if company["name"] not in existing_names]
+        if new_companies:
+            step2.append(
+                _pool_entry(
+                    "same_layer", "T2", new_companies,
+                    "知识库公司图谱按赛道/主营业务召回；只用于召回与排序，须回候选人详情核验本人证据",
+                )
+            )
+            assembly_trace.append(f"step2 并入图谱公司 {len(new_companies)} 家（source=kb_graph）")
+        else:
+            assembly_trace.append("图谱召回公司已在池内，step2 不重复并入")
 
     step3_raw = fragment.get("step3_level_mapping") if isinstance(fragment.get("step3_level_mapping"), dict) else {}
     archetype_levels = ((archetype or {}).get("level_mapping") or {})
@@ -546,9 +578,44 @@ def build_strategy_v2(
             for rule in archetype.get("negative_rules") or []
             if str(rule or "").strip()
         ]
+    # S4-2：restricted 层白名单约束（禁挖名单/竞业限制）并入 negative_rules，
+    # source=restricted_client；费率/手机号/offer 金额/话术红线永远不进入此对象。
+    existing_rule_texts = {str(rule.get("rule") or "") for rule in negative_rules}
+    for rule in restricted_rules or []:
+        text = str(rule.get("rule") or "").strip() if isinstance(rule, dict) else ""
+        if text and text not in existing_rule_texts:
+            negative_rules.append(
+                {
+                    "type": str(rule.get("type") or "restricted约束"),
+                    "rule": text,
+                    "source": "restricted_client",
+                }
+            )
+            existing_rule_texts.add(text)
+            assembly_trace.append(f"negative_rules 并入 restricted 约束：{str(rule.get('type') or '')}")
 
     edits = fragment.get("consultant_edits")
     consultant_edits = [dict(item) for item in edits if isinstance(item, dict)] if isinstance(edits, list) else []
+
+    # 池内公司来源分布留痕（PRD §3.2）
+    source_distribution: dict[str, int] = {}
+    for entry in step2:
+        for company in entry["companies"]:
+            source_distribution[company["source"]] = source_distribution.get(company["source"], 0) + 1
+    if source_distribution:
+        assembly_trace.append(
+            "step2 公司池来源分布：" + "、".join(f"{source}={count}" for source, count in sorted(source_distribution.items()))
+        )
+
+    matched = profile_match if isinstance(profile_match, dict) else {}
+    profile_name = str(matched.get("name") or "")
+    if profile_name:
+        assembly_trace.append(
+            f"客户画像已挂载：{profile_name}（{matched.get('rule')}）"
+            + ("，模糊匹配需人工确认" if matched.get("needs_confirmation") else "")
+        )
+    else:
+        assembly_trace.append("客户画像未挂载（无命中）")
 
     v2 = {
         "schema_version": STRATEGY_V2_VERSION,
@@ -563,8 +630,14 @@ def build_strategy_v2(
         "consultant_override": override,
         "anchors": classification.get("anchors") or {},
         "missing_anchors": list(classification.get("missing_anchors") or []),
-        "classification_trace": list(classification.get("trace") or []),
+        "classification_trace": [*list(classification.get("trace") or []), *assembly_trace],
         "archetype_id": str(classification.get("archetype_id") or ""),
+        "profile_matched": {
+            "name": profile_name,
+            "rule": str(matched.get("rule") or "none"),
+            "needs_confirmation": bool(matched.get("needs_confirmation")),
+        },
+        "step2_source_distribution": source_distribution,
     }
     if consultant.get("consultant_answers"):
         v2["consultant_answers"] = str(consultant["consultant_answers"])[:800]
