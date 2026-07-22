@@ -244,6 +244,18 @@ MIGRATIONS: list[tuple[int, str, str]] = [
 ]
 
 
+def ensure_stop_reason_schema(conn: sqlite3.Connection) -> None:
+    """job_candidates.stop_reason（PRD 阶段 4 R10 停止原因标准化）。
+
+    走 _ensure_column 幂等模式而非 MIGRATIONS：standalone legacy 与 ASA Core
+    都可能先启动，Python 级 PRAGMA 检查保证任一方先加列后另一方安全跳过；
+    历史数据不迁移，存量行保持 NULL（统计口径归入"未标注"）。
+    """
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(job_candidates)")}
+    if "stop_reason" not in columns:
+        conn.execute("ALTER TABLE job_candidates ADD COLUMN stop_reason TEXT")
+
+
 def _backup(db_path: Path) -> Path:
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -312,6 +324,7 @@ def migrate(db_path: Path = DEFAULT_DB, *, backup: bool = True) -> dict[str, Any
             )
             conn.commit()
             applied.append(version)
+        ensure_stop_reason_schema(conn)
         _backfill_source_links(conn)
         _integrity(conn)
         fk_issues = [dict(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]

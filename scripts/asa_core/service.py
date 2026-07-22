@@ -17,6 +17,7 @@ from .intent import (
     intent_signature,
     parse_candidate_intent,
 )
+from .stop_reasons import STOP_REASON_LABELS, UNLABELED_STOP_REASON_LABEL, normalize_stop_reason
 
 
 STOP_TOKENS = ("停止", "淘汰", "不推进", "拒绝", "关闭")
@@ -773,6 +774,10 @@ class CoreService:
             )]
             item["sourcing_attributions"] = attributions
             item["is_stopped"] = _is_stopped(item.get("clean_stage"), item.get("raw_status"))
+            # stop_reason 保留旧语义（备注文本）；R10 新增 stop_reason_code/label 枚举视图。
+            stop_reason_code = str(item.get("stop_reason") or "").strip()
+            item["stop_reason_code"] = stop_reason_code if item["is_stopped"] else ""
+            item["stop_reason_label"] = STOP_REASON_LABELS.get(stop_reason_code, "") if item["is_stopped"] else ""
             item["stop_reason"] = item.get("clean_reason") if item["is_stopped"] else ""
             for internal_key in ("legacy_profile_text", "legacy_notes", "legacy_source", "legacy_xsaas_id"):
                 item.pop(internal_key, None)
@@ -878,6 +883,38 @@ class CoreService:
             return {"ok": True, "items": items}
         finally:
             conn.close()
+
+    def stop_reasons_summary(self) -> dict[str, Any]:
+        """停止原因统计（PRD 阶段 4 R10）：8 枚举计数 + 中文标签。
+
+        停止判定与 _is_stopped 同口径；stop_reason 为 NULL/空/未知值的
+        历史行单独归入"未标注"，不并入任何枚举。
+        """
+        stage_clause = " OR ".join("clean_stage LIKE ?" for _ in STOP_STAGES)
+        status_clause = ",".join("?" for _ in STOP_STATUSES)
+        where = f"({stage_clause}) OR lower(COALESCE(raw_status,'')) IN ({status_clause})"
+        params: list[Any] = [f"%{token}%" for token in STOP_STAGES] + sorted(STOP_STATUSES)
+        conn = connect(self.db_path)
+        try:
+            rows = conn.execute(
+                f"""SELECT COALESCE(NULLIF(trim(stop_reason),''),'') AS code, COUNT(*) AS n
+                      FROM job_candidates WHERE {where} GROUP BY code""",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+        counts = {str(row["code"]): int(row["n"]) for row in rows}
+        items = [
+            {"reason": code, "label": label, "count": counts.pop(code, 0)}
+            for code, label in STOP_REASON_LABELS.items()
+        ]
+        unlabeled = sum(counts.values())
+        return {
+            "ok": True,
+            "total_stopped": unlabeled + sum(item["count"] for item in items),
+            "items": items,
+            "unlabeled": {"label": UNLABELED_STOP_REASON_LABEL, "count": unlabeled},
+        }
 
     def execute_idempotent(
         self,
@@ -1046,7 +1083,7 @@ class CoreService:
             "impact": "候选人关系状态将更新，并写入业务时间线和统一审计。",
         }
 
-    def candidate_commit(self, candidate_id: int, action: str, note: str, preflight_token: str) -> dict[str, Any]:
+    def candidate_commit(self, candidate_id: int, action: str, note: str, preflight_token: str, *, reason: str = "") -> dict[str, Any]:
         with self._preflight_lock:
             grant = self._preflight_tokens.pop(preflight_token, None)
         if not grant or grant[0] != candidate_id or grant[1] != action or grant[2] <= datetime.now():
@@ -1095,16 +1132,32 @@ class CoreService:
                 ),
             }
             stage, bucket, event_type, event_status, raw_status, learning_signal, candidate_status = mapping[action]
-            reason = note or stage
-            conn.execute(
-                """
-                UPDATE job_candidates
-                   SET clean_stage=?,flow_bucket=?,raw_status=?,raw_stage=?,clean_reason=?,
-                       updated_at=datetime('now','localtime')
-                 WHERE id=?
-                """,
-                (stage, bucket, raw_status, stage, reason, candidate_id),
-            )
+            stop_reason = ""
+            if action == "stop":
+                # R10 停止原因标准化：reason 命中 8 枚举→存枚举值；缺失/未知/自由
+                # 文本→存 'other' 并把原文并入备注（不报错阻断，note-only 旧载荷不变）。
+                stop_reason, note = normalize_stop_reason(reason, note)
+            event_reason = note or stage
+            if stop_reason:
+                conn.execute(
+                    """
+                    UPDATE job_candidates
+                       SET clean_stage=?,flow_bucket=?,raw_status=?,raw_stage=?,clean_reason=?,
+                           stop_reason=?,updated_at=datetime('now','localtime')
+                     WHERE id=?
+                    """,
+                    (stage, bucket, raw_status, stage, event_reason, stop_reason, candidate_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE job_candidates
+                       SET clean_stage=?,flow_bucket=?,raw_status=?,raw_stage=?,clean_reason=?,
+                           updated_at=datetime('now','localtime')
+                     WHERE id=?
+                    """,
+                    (stage, bucket, raw_status, stage, event_reason, candidate_id),
+                )
             source_candidate_id = str(row["source_candidate_id"] or "").strip()
             if source_candidate_id.isdigit():
                 conn.execute(
@@ -1121,11 +1174,15 @@ class CoreService:
                     """,
                     (candidate_status, note, note, note, int(source_candidate_id)),
                 )
+            event_raw: dict[str, Any] = {"action": action, "note": note, "actor": "user"}
+            if stop_reason:
+                event_raw["stop_reason"] = stop_reason
+                event_raw["stop_reason_label"] = STOP_REASON_LABELS[stop_reason]
             cursor = conn.execute(
                 """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table)
                    VALUES (?,?,?,?,?,datetime('now','localtime'),?,?,'api_v1')""",
-                (candidate_id, row["person_id"], row["job_id"], event_type, event_status, reason,
-                 json.dumps({"action": action, "note": note, "actor": "user"}, ensure_ascii=False)),
+                (candidate_id, row["person_id"], row["job_id"], event_type, event_status, event_reason,
+                 json.dumps(event_raw, ensure_ascii=False)),
             )
         learning = None
         if learning_signal and self.agent_service:
@@ -1133,4 +1190,13 @@ class CoreService:
                 candidate_id, learning_signal, actor_type="user", note=note or stage,
                 source_type="candidate_event", source_id=cursor.lastrowid,
             )
-        return {"ok": True, "candidate_id": candidate_id, "action": action, "stage": stage, "business_event_id": cursor.lastrowid, "sourcing_learning": learning}
+        return {
+            "ok": True,
+            "candidate_id": candidate_id,
+            "action": action,
+            "stage": stage,
+            "stop_reason": stop_reason,
+            "stop_reason_label": STOP_REASON_LABELS.get(stop_reason, ""),
+            "business_event_id": cursor.lastrowid,
+            "sourcing_learning": learning,
+        }

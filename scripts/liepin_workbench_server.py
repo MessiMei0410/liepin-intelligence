@@ -35,6 +35,7 @@ from a_system_agent.native_attachments import (
     visible_wechat_attachment_path,
 )
 from a_system_agent.schema import ensure_schema as ensure_agent_schema
+from asa_core.stop_reasons import normalize_stop_reason
 
 from confirm_project_assignment import (
     DEFAULT_DB as CONFIRM_DEFAULT_DB,
@@ -4103,6 +4104,12 @@ def build_talent_action(data: dict[str, Any]) -> dict[str, Any]:
                 },
             }
         )
+        if result == "stop":
+            # R10 停止原因标准化：枚举命中保留；缺失/未知/自由文本降级 other
+            # 并把原文并入 stop_reason_note（保持转发给同步引擎的语义不变）。
+            action["stop_reason_code"], action["stop_reason_note"] = normalize_stop_reason(
+                action.get("stop_reason_code"), action.get("stop_reason_note") or ""
+            )
         stage_after = first_present(data, "stage_after", "")
         if stage_after:
             action["stage_after"] = stage_after
@@ -4161,6 +4168,12 @@ def build_talent_action(data: dict[str, Any]) -> dict[str, Any]:
                 },
             }
         )
+        if result == "stop":
+            # R10：与 xsaas_review 同一停止原因归一规则（该分支字段在 raw 内）。
+            raw_stop = action["raw"]
+            raw_stop["stop_reason_code"], raw_stop["stop_reason_note"] = normalize_stop_reason(
+                raw_stop.get("stop_reason_code"), raw_stop.get("stop_reason_note") or ""
+            )
         stage_after = first_present(data, "stage_after", "")
         if stage_after:
             action["stage_after"] = stage_after
@@ -4951,8 +4964,16 @@ def apply_talent_action_batch(data: dict[str, Any]) -> dict[str, Any]:
         and int(sync_summary.get("written") or 0) == 0
         and int(sync_summary.get("would_write") or 0) == 0
     )
-    return {
-        "ok": proc.returncode == 0 and not blocked_write,
+    ok = proc.returncode == 0 and not blocked_write
+    stop_reason_error = ""
+    if write and ok:
+        try:
+            persist_talent_action_stop_reason(data)
+        except Exception as exc:
+            # 停止原因列回填失败不阻断已成功的同步写入，仅在响应里留痕。
+            stop_reason_error = str(exc)[:300]
+    result = {
+        "ok": ok,
         "dry_run": not write,
         "batch_path": str(batch_path),
         "lookup": data.get("_talent_lookup"),
@@ -4961,6 +4982,44 @@ def apply_talent_action_batch(data: dict[str, Any]) -> dict[str, Any]:
         "stderr": proc.stderr.strip() or ("talent action write blocked by pending_review" if blocked_write else ""),
         "sync": parsed,
     }
+    if stop_reason_error:
+        result["stop_reason_error"] = stop_reason_error
+    return result
+
+
+def ensure_stop_reason_schema(conn: sqlite3.Connection) -> None:
+    """job_candidates.stop_reason（PRD 阶段 4 R10），幂等加列；历史数据不迁移。"""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(job_candidates)")}
+    if "stop_reason" not in columns:
+        conn.execute("ALTER TABLE job_candidates ADD COLUMN stop_reason TEXT")
+
+
+def persist_talent_action_stop_reason(data: dict[str, Any]) -> None:
+    """talent-action 停止写入成功后，把标准化停止原因回填到 job_candidates.stop_reason。
+
+    同步引擎（talent_system_sync.py）只把 stop_reason_code 写进 candidate_events.raw_json，
+    本函数在 legacy 侧补落关系级列，供 Core 统计端点按列聚合；可重复调用（幂等）。
+    """
+    kind = first_present(data, "kind") or first_present(data, "action_type", "")
+    if kind not in {"xsaas_review", "xsaas_resume_review", "resume_review", "review"}:
+        return
+    review_result = first_present(data, "review_result", "") or first_present(data, "result", "")
+    if review_result != "stop":
+        return
+    lookup = data.get("_talent_lookup") if isinstance(data.get("_talent_lookup"), dict) else {}
+    job_candidate_id = data.get("job_candidate_id") or lookup.get("job_candidate_id")
+    if not str(job_candidate_id or "").isdigit():
+        return
+    stop_reason, _note = normalize_stop_reason(
+        first_present(data, "stop_reason_code", ""), first_present(data, "stop_reason_note", "")
+    )
+    conn = sqlite3.connect(str(TALENT_DB))
+    try:
+        ensure_stop_reason_schema(conn)
+        conn.execute("UPDATE job_candidates SET stop_reason=? WHERE id=?", (stop_reason, int(job_candidate_id)))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def talent_flow_state(data: dict[str, Any]) -> dict[str, Any]:
@@ -7552,6 +7611,7 @@ def ensure_workbench_runtime_schema(db_path: Path) -> None:
         ensure_reply_schema(conn)
         ensure_effective_candidate_events_schema(conn)
         ensure_agent_schema(conn)
+        ensure_stop_reason_schema(conn)
         conn.commit()
     finally:
         conn.close()

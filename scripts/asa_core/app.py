@@ -74,6 +74,7 @@ class CandidateAction(BaseModel):
     candidate_id: int
     action: str
     note: str = ""
+    reason: str = ""
     preflight_token: str = ""
 
 
@@ -152,6 +153,9 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.get("/api/v1/candidates")
     def candidates(q: str = "", job_id: int | None = None, stage: str = "", limit: int = Query(100, le=200), offset: int = 0) -> dict[str, Any]:
         return core.candidates(query=q, job_id=job_id, stage=stage, limit=limit, offset=offset)
+
+    @app.get("/api/v1/candidates/stop-reasons/summary")
+    def stop_reasons_summary() -> dict[str, Any]: return core.stop_reasons_summary()
 
     @app.get("/api/v1/candidates/{candidate_id}")
     def candidate(candidate_id: int) -> dict[str, Any]: return core.candidate(candidate_id)
@@ -268,7 +272,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         if not body.preflight_token:
             raise HTTPException(400, "preflight_token is required")
         return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id),
-                    lambda: core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token))
+                    lambda: core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason))
 
     def app_ui_allowed(request: Request) -> bool:
         return request.headers.get("user-agent", "").startswith(ASA_APP_USER_AGENT_PREFIX)
