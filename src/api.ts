@@ -50,15 +50,6 @@ export type CandidateDetail = Candidate & {
   }>;
 }
 
-export type BusinessFocus = {
-  session_id?: string; revision?: number; client?: string; action?: string; confidence?: number;
-  context?: { type?: string; id?: number | null };
-  job?: { id?: number; title?: string; status?: string };
-  candidate?: { id?: number; name?: string };
-  directions?: string[]; attachments?: string[]; constraints?: string[];
-  conflicts?: Array<Record<string, unknown>>; needs_clarification?: boolean; updated_at?: string;
-}
-
 // R5 typed client：dashboard / workflow / candidate-action 三个高频接口全链路类型化。
 // R7 增补：summary / steps / candidates 增量路由与 SSE events 路由同样入锚。
 // 契约锚点：Core 重命名或下线下列路由时 typecheck 直接报错（仅编译期，无运行时开销）。
@@ -71,8 +62,7 @@ export type ContractAnchor = [
   paths['/api/v1/events']['get'],
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
-  // R9/R10 增补：copilot 意图确认与停止原因摘要路由入锚。
-  paths['/api/v1/copilot/intents/confirm']['post'],
+  // R10 增补：停止原因摘要路由入锚。
   paths['/api/v1/candidates/stop-reasons/summary']['get'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
@@ -98,21 +88,6 @@ export type Bootstrap = {
   counts?: DashboardCounts; features?: Record<string, boolean>;
 }
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
-// R9：copilot 响应可能携带 pending_intent，确认前不落地任何写操作；
-// intent_hash / preflight_token 为后端签名，确认时必须原样回传，409 表示状态漂移或签名不符。
-export type CopilotPendingIntent = {
-  kind: string; action: string; action_label?: string; target_scope?: string;
-  confidence?: number; reason?: string;
-  candidate?: { id?: number; name?: string; stage?: string; job?: string; client?: string };
-  confirm_text?: string; intent_hash: string; preflight_token: string;
-  expires_at?: string; message?: string;
-}
-export type CopilotIntentConfirmRequest = {
-  intent: { kind: string; action: string }; intent_hash: string; candidate_id: number;
-  preflight_token: string; message: string; session_id: string;
-}
-export type CopilotIntentConfirmResult = { ok?: boolean; candidate_action?: Record<string, unknown>; answer?: unknown }
-export type CopilotResponse = Record<string, unknown> & { session_id?: string; business_focus?: BusinessFocus; pending_intent?: CopilotPendingIntent }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
 
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
@@ -145,13 +120,6 @@ export const api = {
   },
   workflowCandidates: async (id: string, limit = 20, offset = 0): Promise<WorkflowCandidatesPage> =>
     parseWorkflowCandidatesPage(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/candidates?limit=${limit}&offset=${offset}`)),
-  copilot: (message: string, context: Record<string, unknown>, session_id = '') => write<CopilotResponse>('/api/v1/copilot/messages', { message, context, session_id }),
-  // R9 意图确认：请求体锚定生成的 CopilotIntentConfirm schema；Idempotency-Key 走 write 统一派生。
-  confirmIntent: (payload: CopilotIntentConfirmRequest) => {
-    const body: Omit<components['schemas']['CopilotIntentConfirm'], 'request_id'> = payload
-    return write<CopilotIntentConfirmResult>('/api/v1/copilot/intents/confirm', body)
-  },
-  copilotSession: (sessionId: string) => json<{messages: Array<Record<string, unknown>>; business_focus?: BusinessFocus}>(`/api/agent/copilot/session?session_id=${encodeURIComponent(sessionId)}&limit=100`),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),

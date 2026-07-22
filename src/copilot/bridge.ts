@@ -23,7 +23,8 @@ export const openCopilotWindow = async (context: Record<string, unknown>) => {
     nativeBridge.postMessage({ type: 'showFloating' })
     return
   }
-  const params = new URLSearchParams({ surface: 'copilot', context: JSON.stringify(context) })
+  // R12-b：浏览器环境不再经 URL 投递上下文（通道 B 已拆除），打开的 surface 页是纯转发器/只读提示。
+  const params = new URLSearchParams({ surface: 'copilot' })
   const popup = window.open(`${location.pathname}?${params}`, 'asa-copilot', 'popup=yes,width=390,height=680,resizable=yes,scrollbars=no')
   popup?.focus()
 }

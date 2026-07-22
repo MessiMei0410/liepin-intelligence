@@ -1,21 +1,27 @@
-import { Copilot } from './Copilot'
+import { useEffect, useRef } from 'react'
+import { nativeCopilotBridge, publishCopilotContext } from './bridge'
 
+// R12-b：surface=copilot 降级为纯转发器——原生浮窗是唯一 Copilot 交互界面，
+// 本页不再渲染任何对话 UI，也不调用 Copilot 写接口。
 export function CopilotSurface() {
-  let context: Record<string, unknown> = { type: 'page', page: 'overview' }
-  try {
-    const value = JSON.parse(new URLSearchParams(location.search).get('context') || '{}')
-    if (value && typeof value === 'object') context = value
-  } catch { /* Keep the safe default context. */ }
-  const openWorkflow = async (id: string) => {
-    if (window.opener && !window.opener.closed) {
-      window.opener.location.hash = `workflow=${id}`
-      window.opener.focus()
-      return
-    }
-    const agentUrl = new URL(location.href)
-    agentUrl.search = ''
-    agentUrl.hash = `workflow=${id}`
-    window.open(agentUrl, 'asa-agent')
-  }
-  return <main className="copilot-surface"><Copilot context={context} openWorkflow={openWorkflow} standalone /></main>
+  const bridge = nativeCopilotBridge()
+  const forwardedRef = useRef(false)
+  useEffect(() => {
+    if (!bridge || forwardedRef.current) return
+    forwardedRef.current = true
+    // 上下文只走服务端仲裁一条通道（通道 B/URL 投递已随 R12-b 拆除），这里发布默认页上下文后唤起浮窗。
+    void publishCopilotContext({ type: 'page', page: 'overview' }, 'copilot', true).finally(() => {
+      bridge.postMessage({ type: 'showFloating' })
+      window.close()
+    })
+  }, [bridge])
+  if (bridge) return null
+  return (
+    <main className="copilot-surface">
+      <div className="copilot-forward-note">
+        <b>请在 ASA App 中使用浮窗</b>
+        <span>浏览器页面不再提供 Copilot 对话；请打开 ASA App，通过顶栏 Copilot 按钮唤起浮窗继续。</span>
+      </div>
+    </main>
+  )
 }
