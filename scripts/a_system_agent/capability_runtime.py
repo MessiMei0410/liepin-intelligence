@@ -56,6 +56,17 @@ ZERO_RESULT_ATTRIBUTIONS = (
     "unknown",
 )
 
+# 0 召回归因的中文解释（与 classify_zero_result 的枚举一一对应，单一来源）。
+# 前端映射在仓外，含义必须与这里保持一致。
+ZERO_RESULT_ATTRIBUTION_LABELS = {
+    "session_expired": "登录态失效，需重新登录该渠道",
+    "loading_incomplete": "页面加载未完成或查询未生效",
+    "page_structure_changed": "页面结构变化，解析器需要适配",
+    "parse_failure": "平台有结果但解析抓取失败",
+    "no_results": "该渠道真实无匹配结果",
+    "unknown": "原因待排查",
+}
+
 
 def _round_int(entry: Any, key: str) -> int:
     if not isinstance(entry, dict):

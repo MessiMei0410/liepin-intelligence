@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config, public_config
-from .capability_runtime import RecruitingCapabilityRuntime
+from .capability_runtime import RecruitingCapabilityRuntime, ZERO_RESULT_ATTRIBUTION_LABELS
 from .context import build_candidate_context
 from .evaluation import compute_evaluation
 from .job_status import job_status_intake_allowed
@@ -35,7 +35,7 @@ from .privacy import sanitize_payload
 from .schema import ensure_schema
 from .scoring import normalize_assessment
 from .skills import SkillRegistry, SkillSpec
-from .workflow import WorkflowEngine
+from .workflow import BUSINESS_OUTCOME_LABELS, WorkflowEngine, classify_business_outcome, sourcing_target_stats
 
 
 ASSESSMENT_VERSION = "candidate-assessment-v1"
@@ -3377,6 +3377,151 @@ class AgentService:
             }, []
         return dict(selected), []
 
+    def _copilot_workflow_outcome_context(
+        self,
+        message: str,
+        selected: dict[str, Any],
+        mentioned_jobs: list[dict[str, Any]],
+        existing_focus: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """为 Copilot 注入所涉岗位的寻访轮次业务终态与渠道漏斗（全部 DB 实读）。
+
+        岗位解析顺序：当前页面岗位 → 消息唯一提及岗位 → 会话焦点岗位。
+        每轮给出 business_outcome 中文语义（复用 classify_business_outcome 口径）
+        与 agent_sourcing_funnel 行；历史无漏斗行时标注"该轮未记录渠道明细"，
+        不向 LLM 提供任何可编造数字的空间。
+        """
+        job_id: int | None = None
+        if str(selected.get("type") or "") == "job":
+            try:
+                job_id = int(selected.get("id") or 0) or None
+            except (TypeError, ValueError):
+                job_id = None
+        if job_id is None and len(mentioned_jobs) == 1:
+            try:
+                job_id = int(mentioned_jobs[0].get("id") or 0) or None
+            except (TypeError, ValueError):
+                job_id = None
+        if job_id is None and existing_focus:
+            focus_context = existing_focus.get("context") if isinstance(existing_focus.get("context"), dict) else {}
+            if (
+                focus_context.get("type") == "job"
+                and float(existing_focus.get("confidence") or 0) >= 0.7
+            ):
+                try:
+                    job_id = int(focus_context.get("id") or 0) or None
+                except (TypeError, ValueError):
+                    job_id = None
+        if job_id is None:
+            return {}
+
+        asked_round: int | None = None
+        round_match = re.search(r"第\s*(\d+)\s*轮", str(message or ""))
+        if round_match:
+            asked_round = int(round_match.group(1))
+
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT w.workflow_id,w.status,w.business_outcome,w.created_at,w.updated_at,
+                       g.objective,g.context_json
+                FROM agent_workflows w JOIN agent_goals g ON g.goal_id=w.goal_id
+                WHERE g.context_type='job' AND g.context_id=?
+                  AND w.status NOT IN ('cancelled','superseded')
+                ORDER BY w.created_at ASC, w.id ASC
+                """,
+                (job_id,),
+            ).fetchall()
+            rounds: list[dict[str, Any]] = []
+            for row in rows:
+                workflow_id = str(row["workflow_id"])
+                context = _loads(row["context_json"], {})
+                # 轮次编号按用户可见时间线（取消/被取代不计）；classify_business_outcome
+                # 的寻访判定只用于标注 is_sourcing，不用于剔除轮次——
+                # 否则"再多找些人选"这类措辞的寻访轮会被跳过，编号与用户口径错位。
+                is_sourcing = sourcing_target_stats(conn, row["objective"], context, workflow_id) is not None
+                outcome = str(row["business_outcome"] or "") or classify_business_outcome(conn, workflow_id)
+                funnel_rows = conn.execute(
+                    """
+                    SELECT channel,status,query_count,recall_count,extracted_count,dedupe_count,
+                           unique_count,detail_complete,detail_partial,detail_failed,
+                           intake_duplicate_count,intake_new_count,assessed_count,high_score_count,
+                           zero_attribution,error
+                    FROM agent_sourcing_funnel WHERE workflow_id=? ORDER BY channel ASC, id ASC
+                    """,
+                    (workflow_id,),
+                ).fetchall()
+                channels: list[dict[str, Any]] = []
+                channel_segments: list[str] = []
+                for funnel in funnel_rows:
+                    attribution = str(funnel["zero_attribution"] or "") or None
+                    attribution_label = ZERO_RESULT_ATTRIBUTION_LABELS.get(attribution or "")
+                    error_text = str(funnel["error"] or "").strip()
+                    channel = {
+                        "channel": str(funnel["channel"] or ""),
+                        "status": str(funnel["status"] or ""),
+                        "query_count": int(funnel["query_count"] or 0),
+                        "recall_count": int(funnel["recall_count"] or 0),
+                        "extracted_count": int(funnel["extracted_count"] or 0),
+                        "dedupe_count": int(funnel["dedupe_count"] or 0),
+                        "unique_count": int(funnel["unique_count"] or 0),
+                        "detail_complete": int(funnel["detail_complete"] or 0),
+                        "detail_partial": int(funnel["detail_partial"] or 0),
+                        "detail_failed": int(funnel["detail_failed"] or 0),
+                        "intake_duplicate_count": int(funnel["intake_duplicate_count"] or 0),
+                        "intake_new_count": int(funnel["intake_new_count"] or 0),
+                        "assessed_count": int(funnel["assessed_count"] or 0),
+                        "high_score_count": int(funnel["high_score_count"] or 0),
+                        "zero_attribution": attribution,
+                        "zero_attribution_label": attribution_label or None,
+                        "error": error_text[-160:] or None,
+                    }
+                    channels.append(channel)
+                    # 与前端漏斗展示同一行文格式（T2），逐轮绑定数字，防止跨轮引用
+                    segment = (
+                        f"{channel['channel']}：查询 {channel['query_count']} 组 → 召回 {channel['recall_count']}"
+                        f" → 抽取 {channel['extracted_count']} → 排重后 {channel['unique_count']}"
+                        f" → 详情（完整 {channel['detail_complete']} / 部分 {channel['detail_partial']} / 失败 {channel['detail_failed']}）"
+                        f" → 入库新增 {channel['intake_new_count']}（排重命中 {channel['intake_duplicate_count']}）"
+                        f" → 评估 {channel['assessed_count']}（高分 {channel['high_score_count']}）"
+                    )
+                    if attribution_label:
+                        segment += f"；0 召回归因：{attribution_label}"
+                    channel_segments.append(segment)
+                round_index = len(rounds) + 1
+                outcome_label = BUSINESS_OUTCOME_LABELS.get(outcome or "")
+                headline = outcome_label or ("寻访轮次" if is_sourcing else "非寻访类工作流")
+                detail_text = "；".join(channel_segments) if channel_segments else "该轮未记录渠道明细"
+                rounds.append(
+                    {
+                        "round_index": round_index,
+                        "workflow_id": workflow_id,
+                        "status": str(row["status"] or ""),
+                        "is_sourcing": is_sourcing,
+                        "business_outcome": outcome,
+                        "business_outcome_label": outcome_label or None,
+                        "updated_at": str(row["updated_at"] or ""),
+                        "channels": channels,
+                        "funnel_note": "" if channels else "该轮未记录渠道明细",
+                        "summary_text": f"第 {round_index} 轮（{str(row['updated_at'] or '')}）：{headline}；{detail_text}",
+                    }
+                )
+        finally:
+            conn.close()
+        if not rounds:
+            return {}
+        return {
+            "job_id": job_id,
+            "asked_round": asked_round,
+            "rounds": rounds[-8:],
+            "semantics": (
+                "completed_target_met/completed_needs_review/completed_pool_insufficient 均为本轮完成（仅达标情况不同），"
+                "只有 failed_technical 是技术失败；每轮 summary_text 是该轮的完整事实，"
+                "回答某一轮时只能用该轮的数字，funnel_note 标注未记录渠道明细的轮次不得借用其他轮次数字"
+            ),
+        }
+
     def _persist_copilot_focus(
         self,
         session_id: str,
@@ -4763,6 +4908,9 @@ class AgentService:
                 references.append(
                     {"type": "job", "id": item.get("id"), "label": item.get("job"), "subtitle": item.get("client")}
                 )
+        workflow_outcome_context = self._copilot_workflow_outcome_context(
+            message, selected, mentioned_jobs, existing_focus
+        )
         if not references:
             references = [
                 {"type": item["type"], "id": item["id"], "label": item["label"], "subtitle": item["project"]}
@@ -4821,6 +4969,8 @@ class AgentService:
         }
         if memories.get("mode") == "active":
             payload["approved_memories"] = memories.get("memories") or []
+        if workflow_outcome_context:
+            payload["workflow_outcome"] = workflow_outcome_context
         capture_run = next(
             (
                 item for item in skill_runs

@@ -51,6 +51,16 @@ BUSINESS_OUTCOMES = (
     "failed_technical",
 )
 
+# 业务终态的中文语义（与 classify_business_outcome 判定口径一一对应，单一来源）。
+# 前端 statusMapping.ts 在仓外另有文案，含义必须与这里保持一致：
+# completed_* 三态都是"本轮完成"（仅达标情况不同），只有 failed_technical 是技术失败。
+BUSINESS_OUTCOME_LABELS = {
+    "completed_target_met": "本轮完成，达成目标人数",
+    "completed_needs_review": "本轮完成，合格人数不足，有待复核人选",
+    "completed_pool_insufficient": "本轮完成，合格人数不足",
+    "failed_technical": "技术失败（执行过程中断，未完成本轮寻访）",
+}
+
 
 def sourcing_target_stats(conn: Any, objective: Any, context: dict[str, Any], workflow_id: str) -> dict[str, int] | None:
     """寻访类目标的达标信号（score_75_plus/verify_first 等）；非寻访目标返回 None。"""
