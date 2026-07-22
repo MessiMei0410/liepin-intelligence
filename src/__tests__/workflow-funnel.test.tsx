@@ -27,6 +27,22 @@ const liepinChannel = {
   detail: { complete: 12, partial: 4, failed: 2, complete_rate: 0.6667 },
   zero_attribution: null,
 }
+// 第二条渠道 fixture（非零结果），用于“两行渠道行”渲染与逐行数字断言。
+const xsaasChannel = {
+  channel: 'xsaas', runs: 1, status: 'completed',
+  recall_count: 30, extracted_count: 20, dedupe_count: 4, unique_count: 16,
+  intake_duplicate_count: 4, intake_new_count: 8, assessed_count: 9, high_score_count: 4,
+  detail: { complete: 10, partial: 2, failed: 1, complete_rate: 0.7692 },
+  zero_attribution: null,
+}
+const xsaasRun = {
+  run_id: 'r2', channel: 'xsaas', status: 'completed', query_count: 1,
+  queries: [{ query: 'PC电源 市场', result_count: 30, extracted_count: 20 }],
+  recall_count: 30, extracted_count: 20, dedupe_count: 4, unique_count: 16,
+  intake_duplicate_count: 4, intake_new_count: 8, assessed_count: 9, high_score_count: 4,
+  detail: { complete: 10, partial: 2, failed: 1, complete_rate: 0.7692 },
+  zero_attribution: null, error: null, created_at: '2026-07-22 10:05:00',
+}
 const zeroChannel = (code: string) => ({
   channel: 'xsaas', runs: 1, status: 'completed',
   recall_count: 0, extracted_count: 0, dedupe_count: 0, unique_count: 0,
@@ -58,28 +74,98 @@ const renderFunnel = () => render(<WorkflowFunnel workflowId="wf-1" updatedAt="2
 describe('R8 渠道寻访漏斗', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
-  it('正常渲染：每个渠道一行完整漏斗数字与查询明细', async () => {
-    stubFunnel({ ok: true, workflow_id: 'wf-1', channels: [liepinChannel], runs: [liepinRun] })
-    renderFunnel()
+  it('正常渲染：两行渠道行，每行完整漏斗数字逐项出现', async () => {
+    const fetchMock = stubFunnel({ ok: true, workflow_id: 'wf-1', channels: [liepinChannel, xsaasChannel], runs: [liepinRun, xsaasRun] })
+    const { container } = renderFunnel()
     await screen.findByText('猎聘')
-    const line = document.querySelector('.funnel-line')!
-    expect(line).toHaveTextContent('查询 2 组')
-    expect(line).toHaveTextContent('召回 60')
-    expect(line).toHaveTextContent('抽取 24')
-    expect(line).toHaveTextContent('排重后 18')
-    expect(line).toHaveTextContent('详情 完整 12 / 部分 4 / 失败 2')
-    expect(line).toHaveTextContent('入库新增 5（排重命中 13）')
-    expect(line).toHaveTextContent('评估 12（高分 3）')
+    // api 层路由锚定：打的是 /sourcing-funnel 按需路由
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/workflows/wf-1/sourcing-funnel')
+    const rows = container.querySelectorAll('.funnel-channel')
+    expect(rows).toHaveLength(2)
+    const liepinLine = rows[0].querySelector('.funnel-line')!
+    expect(rows[0]).toHaveTextContent('猎聘')
+    expect(liepinLine).toHaveTextContent('查询 2 组')
+    expect(liepinLine).toHaveTextContent('召回 60')
+    expect(liepinLine).toHaveTextContent('抽取 24')
+    expect(liepinLine).toHaveTextContent('排重后 18')
+    expect(liepinLine).toHaveTextContent('详情（完整 12 / 部分 4 / 失败 2）')
+    expect(liepinLine).toHaveTextContent('入库新增 5（排重命中 13）')
+    expect(liepinLine).toHaveTextContent('评估 12（高分 3）')
+    const xsaasLine = rows[1].querySelector('.funnel-line')!
+    expect(rows[1]).toHaveTextContent('X-SaaS')
+    expect(xsaasLine).toHaveTextContent('查询 1 组')
+    expect(xsaasLine).toHaveTextContent('召回 30')
+    expect(xsaasLine).toHaveTextContent('详情（完整 10 / 部分 2 / 失败 1）')
+    expect(xsaasLine).toHaveTextContent('入库新增 8（排重命中 4）')
+    expect(xsaasLine).toHaveTextContent('评估 9（高分 4）')
     // 查询明细折叠展开后可见每组 query 与召回数
     await userEvent.click(screen.getByText('查询明细（2 组）'))
     expect(screen.getByText('PC电源 技术市场')).toBeInTheDocument()
     expect(screen.getByText('召回 40 · 抽取 16')).toBeInTheDocument()
   })
 
-  it('数字守恒（fixture 口径）：详情三态合计 ≤ 抽取数；入库新增 ≤ 详情完整数', () => {
+  // 渲染行数字链：查询 N 组 → 召回 X → 抽取 Y → 排重后 Z → 详情（完整 a / 部分 b / 失败 c）→ 入库新增 e（排重命中 d）→ 评估 f（高分 g）
+  const FUNNEL_LINE_PATTERN = /查询 (\d+) 组\s*→\s*召回 (\d+)\s*→\s*抽取 (\d+)\s*→\s*排重后 (\d+)\s*→\s*详情（完整 (\d+) \/ 部分 (\d+) \/ 失败 (\d+)）\s*→\s*入库新增 (\d+)（排重命中 (\d+)）\s*→\s*评估 (\d+)（高分 (\d+)）/
+
+  it('数字守恒（渲染侧）：详情三态合计 ≤ 抽取数；入库新增 ≤ 详情完整数', async () => {
+    stubFunnel({ ok: true, workflow_id: 'wf-1', channels: [liepinChannel, xsaasChannel], runs: [liepinRun, xsaasRun] })
+    const { container } = renderFunnel()
+    await screen.findByText('猎聘')
+    const lines = container.querySelectorAll('.funnel-line')
+    expect(lines).toHaveLength(2)
+    for (const line of lines) {
+      const match = line.textContent.match(FUNNEL_LINE_PATTERN)
+      expect(match, `漏斗行格式不符：${line.textContent}`).not.toBeNull()
+      const [, , , extracted, , complete, partial, failed, intakeNew] = match!.map(Number)
+      expect(complete + partial + failed).toBeLessThanOrEqual(extracted)
+      expect(intakeNew).toBeLessThanOrEqual(complete)
+    }
+    // fixture 口径自证：合法 fixture 自身必须满足守恒，否则上面的渲染断言失去意义
     const detailSum = liepinChannel.detail.complete + liepinChannel.detail.partial + liepinChannel.detail.failed
     expect(detailSum).toBeLessThanOrEqual(liepinChannel.extracted_count)
     expect(liepinChannel.intake_new_count).toBeLessThanOrEqual(liepinChannel.detail.complete)
+  })
+
+  it('非法 fixture：违反守恒的数字原样透出（组件不做数值截断），不白屏不抛错', async () => {
+    // 架构约定（sourcingFunnel.ts）：边界 parse 只归一化结构，渲染层信任口径、不做语义截断——
+    // 语义违规（详情三态合计 > 抽取数、入库新增 > 完整数、负计数）原样渲染，让数据 bug 在面板上可见，
+    // 而不是被前端静默掩盖；守恒保障由上一用例的渲染侧断言 + 后端写入口径承担。
+    const broken = {
+      ...liepinChannel,
+      recall_count: -5,
+      extracted_count: 10,
+      intake_new_count: 15,
+      detail: { complete: 9, partial: 9, failed: 9, complete_rate: 0.3333 },
+    }
+    stubFunnel({ ok: true, channels: [broken], runs: [liepinRun] })
+    const { container } = renderFunnel()
+    await screen.findByText('猎聘')
+    expect(container.querySelector('.funnel-line')).toHaveTextContent('详情（完整 9 / 部分 9 / 失败 9）')
+    expect(container.querySelector('.funnel-line')).toHaveTextContent('入库新增 15')
+  })
+
+  it('边界防御：detail 缺失归一化为 0，channels 非数组归一化为空明细', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    stubFunnel({ ok: true, channels: [{ channel: 'liepin', runs: 1, recall_count: 3, extracted_count: 2, unique_count: 2, intake_duplicate_count: 0, intake_new_count: 1, assessed_count: 1, high_score_count: 0 }], runs: [] })
+    const { container, unmount } = renderFunnel()
+    await screen.findByText('猎聘')
+    expect(container.querySelector('.funnel-line')).toHaveTextContent('详情（完整 0 / 部分 0 / 失败 0）')
+    expect(warn).toHaveBeenCalled()
+    unmount()
+    stubFunnel({ ok: true, channels: null, runs: 'oops' })
+    renderFunnel()
+    expect(await screen.findAllByText(/该轮未记录渠道明细/)).not.toHaveLength(0)
+  })
+
+  it('0 结果归因映射与 ROUND2 T2 映射表逐字一致（六枚举冻结）', () => {
+    expect(zeroAttributionLabels).toEqual({
+      session_expired: '登录态失效，需重新登录该渠道',
+      loading_incomplete: '页面加载未完成或查询未生效',
+      page_structure_changed: '页面结构变化，解析器需要适配',
+      parse_failure: '平台有结果但解析抓取失败',
+      no_results: '该渠道真实无匹配结果',
+      unknown: '原因待排查',
+    })
   })
 
   it('0 结果归因：六类枚举都有中文解释，不渲染英文原形', async () => {

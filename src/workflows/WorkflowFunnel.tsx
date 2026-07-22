@@ -50,7 +50,7 @@ function ChannelBlock({funnel,channel}:{funnel:SourcingFunnel;channel:SourcingFu
       <span>召回 <b>{channel.recall_count}</b></span><i>→</i>
       <span>抽取 <b>{channel.extracted_count}</b></span><i>→</i>
       <span>排重后 <b>{channel.unique_count}</b></span><i>→</i>
-      <span>详情 完整 <b>{channel.detail.complete}</b> / 部分 <b>{channel.detail.partial}</b> / 失败 <b>{channel.detail.failed}</b></span><i>→</i>
+      <span>详情（完整 <b>{channel.detail.complete}</b> / 部分 <b>{channel.detail.partial}</b> / 失败 <b>{channel.detail.failed}</b>）</span><i>→</i>
       <span>入库新增 <b>{channel.intake_new_count}</b>（排重命中 {channel.intake_duplicate_count}）</span><i>→</i>
       <span>评估 <b>{channel.assessed_count}</b>（高分 {channel.high_score_count}）</span>
     </div>

@@ -33,5 +33,7 @@ test('工作流详情（blocked + completed_needs_review）', async ({ page }) =
   // 人选结果加载完成（本轮评估 6 人）+ 执行步骤 5 步全部渲染
   await expect(panel.locator('.workflow-candidates')).toContainText('岗位已评估 6 人')
   await expect(panel.locator('.workflow-step')).toHaveCount(5)
+  // 渠道漏斗加载完成（该历史轮次无明细，显示回落文案，避免拍到加载中状态）
+  await expect(panel.locator('.workflow-funnel')).toContainText('该轮未记录渠道明细')
   await expect(page).toHaveScreenshot('workflow.png')
 })

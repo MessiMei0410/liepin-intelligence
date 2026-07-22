@@ -51,7 +51,7 @@ export const stepBusinessResult = (step:Workflow['steps'][number]) => {
       const quality=String(run.quality||'')
       const attribution=zeroAttributionLabel(String(run.zero_attribution||''))
       if(produced>0)return `${channel} ${produced} 条候选`
-      if(quality.startsWith('zero')||attribution)return `${channel} 0 条候选 · ${attribution||'质量未知，原因待排查'}`
+      if(quality.startsWith('zero')||attribution)return `${channel} 0 条候选 · ${attribution||zeroAttributionLabel('unknown')}`
       return `${channel} ${String(run.status||'已返回')}`
     })
     facts.push(`渠道结果：${labels.join('，')}。`)
