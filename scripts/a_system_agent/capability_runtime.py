@@ -66,6 +66,16 @@ def _round_int(entry: Any, key: str) -> int:
         return 0
 
 
+def _trim_error(text: Any, limit: int = 1000) -> str:
+    """错误文本截断：超长时保留尾部。
+
+    traceback 的诊断行（异常类型 + 消息）在末尾，头部截断会把 ``X-SAAS_LOGIN_REQUIRED``
+    这类归因信号切掉，使 classify_zero_result 系统性落到 unknown（T3 实战发现）。
+    """
+    value = str(text or "").strip()
+    return value if len(value) <= limit else value[-limit:]
+
+
 def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> str:
     """用 runner 输出里的既有信号为 0 候选的渠道结果归因。
 
@@ -192,13 +202,13 @@ class RecruitingCapabilityRuntime:
                 client=client,
                 job=job,
                 channel="liepin",
-                error=str(exc)[:1000],
+                error=_trim_error(exc),
             )
             raise
         try:
             xsaas = self._run_json([self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path), "--output", str(xsaas_path), "--port", str(int(request.get("cdp_port") or 9223)), "--max-rows", str(max(12, target * 2))], 300)
         except Exception as exc:
-            xsaas = {"ok": False, "status": "blocked", "error": str(exc)[:1000]}
+            xsaas = {"ok": False, "status": "blocked", "error": _trim_error(exc)}
             xsaas_path.write_text("[]", encoding="utf-8")
         opencli_shadow = self._run_opencli_shadow(
             request=request,
@@ -311,7 +321,7 @@ class RecruitingCapabilityRuntime:
                     "channel": channel,
                     "status": "blocked",
                     "query": query,
-                    "error": str(exc)[:1000],
+                    "error": _trim_error(exc),
                     "affects_intake": False,
                 })
         payload = {
@@ -466,7 +476,7 @@ class RecruitingCapabilityRuntime:
                     "assessed_count": len(scored),
                     "high_score_count": high_score,
                     "zero_attribution": zero_attribution or None,
-                    "error": str(result.get("error") or "")[:1000] or None,
+                    "error": _trim_error(result.get("error")) or None,
                 }
             )
         conn = self.service._connect()
@@ -544,7 +554,7 @@ class RecruitingCapabilityRuntime:
                     """,
                     (
                         run_id, workflow_id or None, self._job_id(client, job), client, job,
-                        channel, "failed", classify_zero_result(channel, "failed", {"error": error}), error[:1000],
+                        channel, "failed", classify_zero_result(channel, "failed", {"error": _trim_error(error)}), _trim_error(error),
                     ),
                 )
                 conn.commit()
@@ -557,7 +567,7 @@ class RecruitingCapabilityRuntime:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         if proc.returncode != 0:
             message = (proc.stderr or proc.stdout or f"命令退出码 {proc.returncode}").strip()
-            raise RuntimeError(message[:2000])
+            raise RuntimeError(_trim_error(message, 2000))
         return proc
 
     def _run_json(self, command: list[str], timeout: int = 300) -> dict[str, Any]:

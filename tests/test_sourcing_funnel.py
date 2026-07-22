@@ -337,6 +337,28 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         assert rows[0]["zero_attribution"] == "session_expired"
         assert "登录已过期" in rows[0]["error"]
 
+    def test_long_traceback_keeps_tail_so_login_signal_survives(self) -> None:
+        # T3 实战回归：traceback 超 1000 字符时头部截断会丢掉末尾异常行（归因信号），
+        # X-SAAS_LOGIN_REQUIRED 会被系统性误判为 unknown；_trim_error 尾部保留修复。
+        traceback_text = (
+            "Traceback (most recent call last):\n"
+            + "".join(f'  File "/x/frame_{i}.py", line {i}, in frame\n    call_{i}()\n' for i in range(40))
+            + '  File "/x/xsaas_candidate_search.py", line 50, in choose_authenticated_tab\n'
+            '    raise RuntimeError("X-SAAS_LOGIN_REQUIRED: 未找到已登录的 X-SaaS 页面")\n'
+            "RuntimeError: X-SAAS_LOGIN_REQUIRED: 未找到已登录的 X-SaaS 页面"
+        )
+        assert len(traceback_text) > 1000
+        self._install_runners(
+            liepin_result={"ok": True, "candidates": [], "rounds": []},
+            xsaas_result=RuntimeError(traceback_text),
+        )
+        self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
+        rows = self._funnel_rows()
+        xsaas = next(row for row in rows if row["channel"] == "xsaas")
+        assert xsaas["status"] == "blocked"
+        assert xsaas["zero_attribution"] == "session_expired"
+        assert "X-SAAS_LOGIN_REQUIRED" in xsaas["error"]
+
     def test_funnel_upsert_keeps_one_row_per_run_channel(self) -> None:
         runtime = self.service.capability_runtime
         base = dict(run_id="run-fixed", workflow_id="wf-test", client="长越科技", job="机械高级工程师")
