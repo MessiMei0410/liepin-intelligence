@@ -75,7 +75,7 @@ export type DashboardCounts = {
   active_jobs?: number; candidates?: number; pending_candidates?: number; pending_approvals?: number;
 }
 export type DashboardWorkflow = {
-  workflow_id: string; status: string; title?: string; current_stage?: string; updated_at?: string; progress?: number;
+  workflow_id: string; status: string; business_outcome?: string | null; title?: string; current_stage?: string; updated_at?: string; progress?: number;
 }
 export type Dashboard = {
   ok?: boolean; counts?: DashboardCounts; workflows?: DashboardWorkflow[];
