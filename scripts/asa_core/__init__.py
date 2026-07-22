@@ -1,0 +1,2 @@
+"""ASA Core FastAPI application."""
+

@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "猎聘专业回复助手",
+  "version": "0.3.11",
+  "description": "在猎聘职聊页生成专业回复草稿，并在简历详情页显示人岗匹配度和匹配点。",
+  "permissions": [
+    "storage",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "*://*.liepin.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://h.liepin.com/im/showmsgnewpage*",
+        "*://*.liepin.com/im/showmsgnewpage*",
+        "*://h.liepin.com/resume/showresumedetail*",
+        "*://*.liepin.com/resume/showresumedetail*"
+      ],
+      "js": [
+        "match-profiles.js",
+        "recommendation-copy.js",
+        "message-evidence.js",
+        "content.js"
+      ],
+      "css": [
+        "style.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

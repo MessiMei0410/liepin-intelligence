@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "X-SaaS 人选推进助手",
+  "version": "0.1.22",
+  "description": "在 X-SaaS 候选人页入库、复核推进或停止，并同步到 A 系统 v3。",
+  "permissions": [
+    "storage",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "*://headhunt.x-saas.com.cn/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://headhunt.x-saas.com.cn/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "style.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

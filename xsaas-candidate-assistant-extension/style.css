@@ -1,0 +1,795 @@
+#xsaas-candidate-assistant-root,
+#xsaas-candidate-assistant-root * {
+  box-sizing: border-box !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
+  letter-spacing: 0 !important;
+}
+
+#xsaas-candidate-assistant-root {
+  position: fixed !important;
+  right: 10px !important;
+  bottom: 18px !important;
+  z-index: 2147483647 !important;
+  width: min(390px, calc(100vw - 20px)) !important;
+  color: #172033 !important;
+  font-size: 13px !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] {
+  width: auto !important;
+  right: 14px !important;
+  bottom: 18px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-card {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  border: 1px solid #d8dee9 !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  box-shadow: 0 18px 54px rgba(32, 45, 70, 0.24) !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] .xsa-card {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-head {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  padding: 12px 14px !important;
+  border-bottom: 1px solid #e6eaf1 !important;
+  background: #f6f8fb !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] .xsa-head {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] .xsa-head > div:first-child,
+#xsaas-candidate-assistant-root[data-collapsed="true"] .xsa-body {
+  display: none !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] #xsa-toggle {
+  width: 52px !important;
+  height: 52px !important;
+  min-height: 52px !important;
+  border-radius: 999px !important;
+  border-color: #2f6fed !important;
+  background: #2f6fed !important;
+  color: #ffffff !important;
+  box-shadow: 0 12px 28px rgba(47, 111, 237, 0.28) !important;
+  font-size: 13px !important;
+  font-weight: 800 !important;
+  padding: 0 !important;
+}
+
+#xsaas-candidate-assistant-root[data-collapsed="true"] #xsa-toggle[data-bridge="disconnected"] {
+  border-color: #b54708 !important;
+  background: #b54708 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-title {
+  color: #172033 !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-subtitle {
+  margin-top: 4px !important;
+  color: #667085 !important;
+  font-size: 11px !important;
+  line-height: 1.2 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-body {
+  display: grid !important;
+  min-width: 0 !important;
+  gap: 7px !important;
+  padding: 10px !important;
+}
+
+#xsaas-candidate-assistant-root button {
+  overflow: hidden !important;
+  max-width: 100% !important;
+  min-height: 28px !important;
+  border: 1px solid #c9d2e2 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  color: #27364f !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  line-height: 1.2 !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#xsaas-candidate-assistant-root button:hover {
+  background: #f1f5f9 !important;
+}
+
+#xsaas-candidate-assistant-root button:disabled {
+  border-color: #d8dee9 !important;
+  background: #eef2f7 !important;
+  color: #8a94a6 !important;
+  cursor: not-allowed !important;
+  opacity: 0.72 !important;
+  box-shadow: none !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-primary {
+  border-color: #2f6fed !important;
+  background: #2f6fed !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 14px rgba(47, 111, 237, 0.18) !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-good {
+  border-color: #169457 !important;
+  background: #169457 !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 14px rgba(22, 148, 87, 0.16) !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-danger,
+#xsaas-candidate-assistant-root .xsa-warn {
+  border-color: #c77700 !important;
+  background: #c77700 !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 14px rgba(199, 119, 0, 0.16) !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-accept {
+  border-color: #0e7490 !important;
+  background: #0e7490 !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 14px rgba(14, 116, 144, 0.16) !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-project-picker {
+  display: grid !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  gap: 5px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 8px !important;
+  background: #fbfcfe !important;
+  padding: 6px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-project-picker label,
+#xsaas-candidate-assistant-root .xsa-detail label {
+  color: #667085 !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-project-picker select,
+#xsaas-candidate-assistant-root .xsa-project-picker input,
+#xsaas-candidate-assistant-root .xsa-detail select,
+#xsaas-candidate-assistant-root .xsa-detail input,
+#xsaas-candidate-assistant-root .xsa-detail textarea {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  min-height: 28px !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  color: #172033 !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  line-height: 1.3 !important;
+  text-overflow: ellipsis !important;
+  outline: none !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-project-picker select:focus,
+#xsaas-candidate-assistant-root .xsa-project-picker input:focus,
+#xsaas-candidate-assistant-root .xsa-detail select:focus,
+#xsaas-candidate-assistant-root .xsa-detail input:focus,
+#xsaas-candidate-assistant-root .xsa-detail textarea:focus {
+  border-color: #2f6fed !important;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.1) !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-project-grid,
+#xsaas-candidate-assistant-root .xsa-grid {
+  display: grid !important;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr) !important;
+  min-width: 0 !important;
+  gap: 6px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-meta-line {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  min-width: 0 !important;
+  gap: 8px !important;
+}
+
+#xsa-assistant-score {
+  display: inline-flex !important;
+  align-items: center !important;
+  min-height: 24px !important;
+  border-radius: 999px !important;
+  padding: 4px 8px !important;
+  background: #eef2ff !important;
+  color: #24418f !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+#xsa-assistant-status,
+#xsaas-candidate-assistant-root .xsa-status {
+  overflow: hidden !important;
+  color: #667085 !important;
+  font-size: 12px !important;
+  text-align: right !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-status[data-kind="ok"],
+#xsa-assistant-status[data-kind="ok"] {
+  color: #146c3f !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-status[data-kind="err"],
+#xsa-assistant-status[data-kind="err"] {
+  color: #b42318 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-meta {
+  min-height: 20px !important;
+  color: #465369 !important;
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-talent-progress {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+  align-items: center !important;
+  min-height: 28px !important;
+  border: 1px solid #d9e2ef !important;
+  border-radius: 8px !important;
+  background: #fbfcfe !important;
+  padding: 5px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-field-quality {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+  align-items: center !important;
+  min-height: 26px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 8px !important;
+  background: #fbfcfe !important;
+  padding: 4px 5px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-field-quality span {
+  display: inline-flex !important;
+  align-items: center !important;
+  max-width: 100% !important;
+  min-height: 20px !important;
+  border-radius: 999px !important;
+  background: #f2f4f7 !important;
+  color: #5b6473 !important;
+  padding: 3px 7px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-field-quality[data-kind="ok"] span {
+  background: #e8f6ee !important;
+  color: #146c3f !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-field-quality[data-kind="err"] span {
+  background: #fff1ef !important;
+  color: #b42318 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-talent-progress span,
+#xsaas-candidate-assistant-root .xsa-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  max-width: 100% !important;
+  min-height: 20px !important;
+  border-radius: 999px !important;
+  background: #eef2ff !important;
+  color: #24418f !important;
+  padding: 3px 7px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  line-height: 1.2 !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-talent-progress[data-state="reviewed"] span {
+  background: #e8f6ee !important;
+  color: #146c3f !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-talent-progress[data-state="pending"] span {
+  background: #fff4dc !important;
+  color: #915b00 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-talent-progress[data-state="idle"] span {
+  background: #f2f4f7 !important;
+  color: #5b6473 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-next-step {
+  min-height: 22px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 7px !important;
+  background: #fbfcfe !important;
+  color: #465369 !important;
+  padding: 4px 7px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  line-height: 1.25 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-location-line {
+  overflow: hidden !important;
+  min-height: 22px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  color: #5b6473 !important;
+  padding: 4px 7px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  line-height: 1.25 !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-location-line[data-kind="ok"] {
+  border-color: #b9e6c9 !important;
+  background: #f6fdf8 !important;
+  color: #146c3f !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-location-line[data-kind="warn"] {
+  border-color: #f4d08a !important;
+  background: #fffdfa !important;
+  color: #915b00 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-location-line[data-kind="err"] {
+  border-color: #f3b6ad !important;
+  background: #fff8f7 !important;
+  color: #b42318 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-next-step[data-kind="ok"] {
+  border-color: #b9e6c9 !important;
+  background: #edf9f1 !important;
+  color: #146c3f !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-next-step[data-kind="warn"] {
+  border-color: #f4d08a !important;
+  background: #fff8e8 !important;
+  color: #915b00 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-next-step[data-kind="err"] {
+  border-color: #f3b6ad !important;
+  background: #fff1ef !important;
+  color: #b42318 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-pillrow {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 5px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-actions {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-actions button {
+  min-width: 0 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-more-actions {
+  grid-column: 1 / -1 !important;
+  width: 100% !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-more-actions summary,
+#xsaas-candidate-assistant-root .xsa-detail summary {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 28px !important;
+  border: 1px solid #c9d2e2 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  color: #27364f !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  list-style: none !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-more-actions summary::-webkit-details-marker,
+#xsaas-candidate-assistant-root .xsa-detail summary::-webkit-details-marker {
+  display: none !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-more-actions-body {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+  padding-top: 6px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-detail {
+  display: grid !important;
+  gap: 8px !important;
+  border: 1px solid #cfd9e8 !important;
+  border-radius: 8px !important;
+  background: #f8fafc !important;
+  max-height: 430px !important;
+  overflow: hidden auto !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-detail summary {
+  border: 0 !important;
+  border-radius: 0 !important;
+  justify-content: flex-start !important;
+  background: #f8fafc !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-detail .xsa-grid {
+  padding: 0 8px 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-detail label {
+  display: grid !important;
+  gap: 3px !important;
+  min-width: 0 !important;
+  font-size: 11px !important;
+}
+
+#xsaas-candidate-assistant-root textarea {
+  min-height: 58px !important;
+  resize: vertical !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-wide {
+  grid-column: 1 / -1 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-diagnostics {
+  max-height: 280px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-diagnostics-body {
+  display: grid !important;
+  gap: 7px !important;
+  padding: 0 8px 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-diagnostics-title {
+  color: #27364f !important;
+  font-size: 11px !important;
+  font-weight: 800 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit,
+#xsaas-candidate-assistant-root .xsa-candidate-matches {
+  display: grid !important;
+  gap: 5px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit div,
+#xsaas-candidate-assistant-root .xsa-match-row,
+#xsaas-candidate-assistant-root .xsa-empty {
+  display: grid !important;
+  gap: 2px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  padding: 5px 7px !important;
+  min-width: 0 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit div[data-kind="ok"] {
+  border-color: #b9e6c9 !important;
+  background: #f6fdf8 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit div[data-kind="warn"] {
+  border-color: #f4d08a !important;
+  background: #fffdfa !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit div[data-kind="err"] {
+  border-color: #f3b6ad !important;
+  background: #fff8f7 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit b,
+#xsaas-candidate-assistant-root .xsa-match-row b {
+  color: #27364f !important;
+  font-size: 11px !important;
+  font-weight: 800 !important;
+  line-height: 1.25 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit span,
+#xsaas-candidate-assistant-root .xsa-match-row span {
+  color: #1f2a3d !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.25 !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-extraction-audit em,
+#xsaas-candidate-assistant-root .xsa-match-row em,
+#xsaas-candidate-assistant-root .xsa-empty {
+  color: #667085 !important;
+  font-size: 11px !important;
+  font-style: normal !important;
+  line-height: 1.3 !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-layer {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483647 !important;
+  display: grid !important;
+  place-items: center !important;
+  background: rgba(15, 23, 42, 0.34) !important;
+  padding: 18px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-panel {
+  display: grid !important;
+  gap: 12px !important;
+  width: min(420px, calc(100vw - 36px)) !important;
+  max-height: calc(100vh - 36px) !important;
+  overflow: auto !important;
+  border: 1px solid #cfd9e8 !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.28) !important;
+  padding: 14px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-head {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-head strong {
+  color: #102033 !important;
+  font-size: 15px !important;
+  line-height: 1.25 !important;
+}
+
+#xsaas-candidate-assistant-root button.xsa-confirm-close {
+  width: 28px !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  padding: 0 !important;
+  border-radius: 7px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-summary {
+  display: grid !important;
+  gap: 7px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-summary div {
+  display: grid !important;
+  gap: 2px !important;
+  border: 1px solid #e3e8f1 !important;
+  border-radius: 7px !important;
+  background: #f8fafc !important;
+  padding: 7px 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-summary span {
+  color: #667085 !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-summary b {
+  color: #1f2a3d !important;
+  font-size: 13px !important;
+  line-height: 1.3 !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-guard {
+  display: grid !important;
+  gap: 4px !important;
+  border: 1px solid #f4d08a !important;
+  border-radius: 7px !important;
+  background: #fff8e8 !important;
+  padding: 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-guard strong {
+  color: #915b00 !important;
+  font-size: 12px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-guard p {
+  margin: 0 !important;
+  color: #684200 !important;
+  font-size: 12px !important;
+  line-height: 1.35 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-stop {
+  display: grid !important;
+  gap: 8px !important;
+  border: 1px solid #f4d08a !important;
+  border-radius: 7px !important;
+  background: #fff8e8 !important;
+  padding: 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-stop > span {
+  color: #915b00 !important;
+  font-size: 12px !important;
+  font-weight: 800 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-reasons {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-reason {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  min-width: 0 !important;
+  border: 1px solid #efd39a !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  color: #4d3300 !important;
+  padding: 6px 7px !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  cursor: pointer !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-reason input {
+  width: 13px !important;
+  height: 13px !important;
+  margin: 0 !important;
+  flex: 0 0 auto !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-reason span {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#xsaas-candidate-assistant-root #xsa-stop-confirm-note {
+  width: 100% !important;
+  min-height: 34px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-confirm-actions {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#xsaas-candidate-assistant-root button.xsa-confirm-submit.xsa-warn {
+  background: #b54708 !important;
+  border-color: #b54708 !important;
+  color: #ffffff !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-current,
+#xsaas-candidate-assistant-root .xsa-identity-preflight {
+  display: grid !important;
+  gap: 5px !important;
+  border: 1px solid #d8e1ed !important;
+  border-radius: 7px !important;
+  background: #f8fafc !important;
+  padding: 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-current span,
+#xsaas-candidate-assistant-root .xsa-identity-preflight span {
+  color: #667085 !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-current b,
+#xsaas-candidate-assistant-root .xsa-identity-preflight b {
+  color: #1f2a3d !important;
+  font-size: 12px !important;
+  overflow-wrap: anywhere !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-options {
+  display: grid !important;
+  gap: 6px !important;
+  max-height: 260px !important;
+  overflow: auto !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option {
+  display: grid !important;
+  grid-template-columns: 18px minmax(0, 1fr) !important;
+  gap: 7px !important;
+  align-items: start !important;
+  border: 1px solid #d8e1ed !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  padding: 8px !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option[data-allowed="false"] {
+  background: #f5f6f8 !important;
+  opacity: 0.68 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option input {
+  margin: 2px 0 0 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option span {
+  display: grid !important;
+  gap: 3px !important;
+  min-width: 0 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option b,
+#xsaas-candidate-assistant-root .xsa-identity-option em,
+#xsaas-candidate-assistant-root .xsa-identity-option small {
+  overflow-wrap: anywhere !important;
+  font-style: normal !important;
+  line-height: 1.3 !important;
+}
+
+#xsaas-candidate-assistant-root .xsa-identity-option b { color: #1f2a3d !important; font-size: 12px !important; }
+#xsaas-candidate-assistant-root .xsa-identity-option em { color: #475467 !important; font-size: 11px !important; }
+#xsaas-candidate-assistant-root .xsa-identity-option small { color: #667085 !important; font-size: 10px !important; }
+#xsaas-candidate-assistant-root .xsa-identity-preflight p { margin: 2px 0 0 !important; color: #475467 !important; font-size: 11px !important; line-height: 1.4 !important; }

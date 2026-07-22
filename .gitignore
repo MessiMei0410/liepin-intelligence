@@ -1,0 +1,34 @@
+# 运行产物与数据（红线：不提交 DB、简历明文、Cookie、CDP 会话值、密钥）
+outputs/
+backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 构建产物
+asa-floating-app/build/
+a-system-portable/dist/
+dist/
+
+# 运行工作区与截图
+work/
+screenshots/
+sketches/
+*.log
+
+# 环境/缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+$CODEX_HOME/
+
+# 系统与密钥
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
