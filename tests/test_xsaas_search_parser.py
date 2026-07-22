@@ -12,8 +12,20 @@ OPENCLI_ADAPTER = ASA_ROOT / "opencli" / "clis" / "xsaas" / "candidate-search.js
 
 
 class XsaasSearchParserRegressionTest(unittest.TestCase):
+    def _readers(self) -> list[Path]:
+        """仓内适配器必查；生产 runner 仅在本机存在时并入（缺失见 test_production_runner_present_or_skipped）。"""
+        paths = [OPENCLI_ADAPTER]
+        if PRODUCTION_RUNNER.exists():
+            paths.insert(0, PRODUCTION_RUNNER)
+        return paths
+
+    def test_production_runner_present_or_skipped(self) -> None:
+        if not PRODUCTION_RUNNER.exists():
+            self.skipTest(f"生产 runner 不在本机，降级为仅仓内适配器断言: {PRODUCTION_RUNNER}")
+        self.assertTrue(PRODUCTION_RUNNER.read_text(encoding="utf-8").strip())
+
     def test_both_readers_support_linkless_angular_rows(self) -> None:
-        for path in (PRODUCTION_RUNNER, OPENCLI_ADAPTER):
+        for path in self._readers():
             source = path.read_text(encoding="utf-8")
             self.assertIn("angular.element(row).scope()?.candidate", source)
             self.assertIn("ipersonid", source)
@@ -22,7 +34,7 @@ class XsaasSearchParserRegressionTest(unittest.TestCase):
             self.assertIn("sposition", source)
 
     def test_candidate_url_is_reconstructed_from_person_id(self) -> None:
-        for path in (PRODUCTION_RUNNER, OPENCLI_ADAPTER):
+        for path in self._readers():
             source = path.read_text(encoding="utf-8")
             self.assertIn("/app/candidate/info/${personId}", source)
 
