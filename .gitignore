@@ -2,6 +2,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+coverage/
 
 # 运行产物与临时目录
 work/
@@ -9,18 +10,26 @@ work/
 .cache/
 tmp/
 screenshots/
+playwright-report/
+test-results/
+*.har
 
-# opencli 运行时浏览器登录资料（含 Cookie / 会话，绝不提交）
+# opencli 运行时浏览器登录资料（含 Cookie / CDP 会话，绝不提交）
 opencli/chrome-profile/
 
 # Python 缓存
 __pycache__/
 *.pyc
 
-# 敏感配置
+# 敏感配置与密钥（模板文件除外）
 .env
 .env.*
+!.env.example
+!.env.sample
 *.pem
+*.key
+*.crt
+*.p12
 
 # 系统文件
 .DS_Store
