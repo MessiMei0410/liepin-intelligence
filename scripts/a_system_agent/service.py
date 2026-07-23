@@ -1074,6 +1074,57 @@ class AgentService:
         finally:
             conn.close()
 
+    def update_mapping_candidate(
+        self,
+        artifact_id: str,
+        index: int,
+        *,
+        status: str | None = None,
+        consultant_note: str | None = None,
+    ) -> dict[str, Any]:
+        """S5-2：任务卡候选状态机 PATCH（状态/备注）。confirmed 迁移自动生成破冰素材。
+
+        artifact/index 不存在抛 LookupError（404）；未知态/非法迁移/终态变更/直接置 intaken
+        抛 ValueError（409）。artifact version 不 bump，content 同步重生成。
+        """
+        from . import mapping_task
+
+        conn = self._connect()
+        try:
+            result = mapping_task.apply_candidate_update(
+                conn, artifact_id, int(index), status=status, consultant_note=consultant_note
+            )
+            conn.commit()
+            return result
+        finally:
+            conn.close()
+
+    def regenerate_mapping_icebreaker(self, artifact_id: str, index: int) -> dict[str, Any]:
+        """S5-2：重新生成破冰素材（仅已确认及之后状态）。质量不合格抛 ValueError（409）不写入。"""
+        from . import mapping_task
+
+        conn = self._connect()
+        try:
+            result = mapping_task.regenerate_icebreaker(conn, artifact_id, int(index))
+            conn.commit()
+            return result
+        finally:
+            conn.close()
+
+    def intake_mapping_candidate(self, artifact_id: str, index: int) -> dict[str, Any]:
+        """S5-2：Mapping 候选入库（仅 confirmed）。复用现有 intake 写入口径，同一事务；
+        不写第二条 job_candidates；禁挖/无来源/已停止关系抛 ValueError（409）。
+        """
+        from . import mapping_task
+
+        conn = self._connect()
+        try:
+            result = mapping_task.intake_candidate(conn, artifact_id, int(index))
+            conn.commit()
+            return result
+        finally:
+            conn.close()
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 

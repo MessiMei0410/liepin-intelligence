@@ -22,6 +22,18 @@ JS 渲染页/反爬/页面变动/超时一律记入 stats.failures（原因分�
 全局共享源不可达时熔断（首失败留痕 + 后续公司记 skipped_after_failure，防重复打满超时）。
 人脉/姓名提取保守（宁缺毋滥）：只取结构化字段（专利发明人/论文作者单位标注）或显式
 "联系人/作者"标注，每条候选必须能回指具体来源 URL。脉脉本期只做接口预留（MaimaiCollector 不接实现）。
+
+S5-2（任务卡 docs/TASKCARD_S5-2_任务卡视图与破冰素材_20260723.md）：
+- 候选状态机 PATCH（第 6 节）：七态枚举，pending→confirmed→contacted→replied→intaken 主链，
+  parked 可恢复、rejected 软删终态、intaken 终态不倒退；intaken 只能经入库动作到达。
+  状态/备注/破冰/入库回执全部原位更新（version 不 bump、history 不动），整批先校验后落库。
+- 破冰素材（icebreaker）：规则版生成（不依赖 LLM），hooks 必须引用该候选真实线索实词
+  （论文题/单位/团队名/职务）；反模板硬约束——全部 hooks 不含任何线索关键词判不合格并拒绝写入；
+  费率/话术红线/手机号永不进 hooks。素材只存不送，发送动作永远由顾问本人执行。
+- 入库（intake）：仅 confirmed 可入库；复用 MULTICHANNEL intake 的写入口径（candidates/people/
+  source_profiles/entity_source_links/job_candidates/candidate_events 同一事务，不写第二条
+  job_candidates）；遮罩名合并按 §6.4 既有口径（遮罩名须公司+职位双匹配才可互证）；禁挖名单
+  入库前再校验一次；已停止推进的关系不重复入库。
 """
 
 from __future__ import annotations
@@ -188,6 +200,26 @@ def validate_mapping_task(doc: Any) -> list[str]:
                 errors.append(f"candidates[{index}].confidence 必须是 high/medium/low")
             if candidate.get("status") not in CANDIDATE_STATUSES:
                 errors.append(f"candidates[{index}].status 非法：{candidate.get('status')}")
+            icebreaker = candidate.get("icebreaker")
+            # S5-2：icebreaker 为可选键；一旦存在必须是任务卡 ② 结构（hooks≤3/angle 枚举/时间戳/线索回指）
+            if icebreaker is not None:
+                if not isinstance(icebreaker, dict):
+                    errors.append(f"candidates[{index}].icebreaker 必须是对象")
+                else:
+                    hooks = icebreaker.get("hooks")
+                    if (
+                        not isinstance(hooks, list)
+                        or not 1 <= len(hooks) <= 3
+                        or not all(isinstance(hook, str) and hook.strip() for hook in hooks)
+                    ):
+                        errors.append(f"candidates[{index}].icebreaker.hooks 必须是 1-3 条非空口播句")
+                    if icebreaker.get("angle") not in ICEBREAKER_ANGLES:
+                        errors.append(
+                            f"candidates[{index}].icebreaker.angle 必须是 {'/'.join(ICEBREAKER_ANGLES)}"
+                        )
+                    for key in ("generated_at", "source_ref"):
+                        if not str(icebreaker.get(key) or "").strip():
+                            errors.append(f"candidates[{index}].icebreaker.{key} 必须非空")
 
     stats = doc.get("stats")
     if not isinstance(stats, dict):
@@ -954,7 +986,8 @@ def _task_content(doc: dict[str, Any]) -> str:
         f"- 发起方式：{TRIGGER_LABELS.get(str(doc.get('trigger')), doc.get('trigger'))}",
         f"- 生成时间：{doc.get('generated_at')}",
         f"- 目标团队 {stats.get('teams', 0)} 个；候选目标人 {stats.get('candidates', 0)} 位"
-        f"（线索 {stats.get('clues', 0)} 条，禁挖过滤 {stats.get('banned_filtered', 0)} 条，"
+        f"（已确认 {stats.get('confirmed', 0)}、已入库 {stats.get('intaken', 0)}；"
+        f"线索 {stats.get('clues', 0)} 条，禁挖过滤 {stats.get('banned_filtered', 0)} 条，"
         f"无来源拒收 {stats.get('rejected_no_source', 0)} 条）",
         f"- 采集留痕：抓取页面 {stats.get('pages_fetched', 0)} 个，失败 {stats.get('failures_count', 0)} 次（明细见 stats.failures）",
         "",
@@ -972,10 +1005,25 @@ def _task_content(doc: dict[str, Any]) -> str:
         teams = doc.get("target_teams") or []
         if 0 <= team_ref < len(teams):
             company = str(teams[team_ref].get("company") or "")
-        lines.append(
-            f"- {candidate.get('name')}｜{company}｜{candidate.get('current_role')}｜"
+        status = str(candidate.get("status") or "")
+        status_label = CANDIDATE_STATUS_LABELS.get(status, status)
+        line = (
+            f"- {candidate.get('name')}｜{company}｜{candidate.get('current_role')}｜状态：{status_label}｜"
             f"来源：{'；'.join(candidate.get('source_urls') or [])}｜{candidate.get('reason')}"
         )
+        note = str(candidate.get("consultant_note") or "").strip()
+        if note:
+            line += f"｜备注：{note}"
+        lines.append(line)
+        icebreaker = candidate.get("icebreaker")
+        # S5-2：开场白要点只展示不发送（发送动作永远由顾问本人执行）
+        if isinstance(icebreaker, dict):
+            lines.append(f"  - 开场白要点（{icebreaker.get('angle')}，只读不发送）：")
+            for hook in icebreaker.get("hooks") or []:
+                lines.append(f"    - {hook}")
+        intake = candidate.get("intake")
+        if isinstance(intake, dict) and intake.get("job_candidate_id"):
+            lines.append(f"  - 已入库：job_candidate_id={intake.get('job_candidate_id')}（{intake.get('intaken_at')}）")
     lines.extend(["", "```json", json.dumps(doc, ensure_ascii=False, indent=2), "```"])
     return "\n".join(lines)
 
@@ -1065,4 +1113,873 @@ def get_mapping_task(conn: Any, artifact_id: str) -> dict[str, Any] | None:
         "content": str(row["content"] or ""),
         "mapping_task": doc,
         "created_at": str(row["created_at"] or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. S5-2：候选状态机 PATCH + 逐人破冰素材 + 入库动作
+# ---------------------------------------------------------------------------
+
+# 七态业务标签（前端契约：业务语言，UX-1）
+CANDIDATE_STATUS_LABELS = {
+    "pending": "待确认",
+    "confirmed": "已确认",
+    "contacted": "已接触",
+    "replied": "已回复",
+    "intaken": "已入库",
+    "parked": "已搁置",
+    "rejected": "已淘汰",
+}
+
+# 状态机迁移表（PATCH 允许的目标态集合）：
+# - 主链只许前进：pending→confirmed→contacted→replied；intaken 只能经入库动作到达（不开旁路）；
+# - intaken/rejected 为终态：intaken 禁止倒退，rejected 是软删终态，均不再变更；
+# - parked 是旁路：主链各态可搁置，搁置后只能恢复 pending 或淘汰；
+# - 同态 PATCH 视为幂等无操作（放行，便于前端重试）。
+STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "pending": ("confirmed", "parked", "rejected"),
+    "confirmed": ("contacted", "parked", "rejected"),
+    "contacted": ("replied", "parked", "rejected"),
+    "replied": ("parked", "rejected"),
+    "intaken": (),
+    "parked": ("pending", "rejected"),
+    "rejected": (),
+}
+_TERMINAL_STATUSES = ("intaken", "rejected")
+
+
+def validate_status_transition(current: Any, target: Any) -> str | None:
+    """校验一次状态迁移；合法返回 None，非法返回中文错误（人话，供 409 透出）。"""
+    current_text = str(current or "")
+    target_text = str(target or "").strip()
+    if target_text not in CANDIDATE_STATUSES:
+        return f"未知状态：{target_text}（七态：{'/'.join(CANDIDATE_STATUSES)}）"
+    if target_text == current_text:
+        return None  # 同态幂等无操作
+    if target_text == "intaken":
+        return "intaken 只能经入库动作（intake）到达，PATCH 不支持直接置入库"
+    if current_text in _TERMINAL_STATUSES:
+        return f"{current_text} 是终态，禁止状态变更（intaken 不倒退，rejected 为软删终态）"
+    allowed = STATUS_TRANSITIONS.get(current_text, ())
+    if target_text not in allowed:
+        return f"非法状态迁移：{current_text} → {target_text}（允许：{'/'.join(allowed) or '无'}）"
+    return None
+
+
+def _sync_stats(doc: dict[str, Any]) -> None:
+    """状态变更后同步 stats：confirmed=曾被确认（confirmed/contacted/replied/intaken），intaken=已入库。"""
+    stats = doc.get("stats") if isinstance(doc.get("stats"), dict) else {}
+    candidates = doc.get("candidates") or []
+    stats["candidates"] = len(candidates)
+    stats["confirmed"] = sum(
+        1 for item in candidates if item.get("status") in ("confirmed", "contacted", "replied", "intaken")
+    )
+    stats["intaken"] = sum(1 for item in candidates if item.get("status") == "intaken")
+    doc["stats"] = stats
+
+
+def save_mapping_task_in_place(conn: Any, artifact_id: str, doc: dict[str, Any]) -> None:
+    """状态机/备注/破冰/入库回执的原位更新：整批先校验后落库；version 不 bump、history 不动。"""
+    errors = validate_mapping_task(doc)
+    if errors:
+        raise ValueError("mapping_task 校验失败，拒绝写入：" + "；".join(errors))
+    conn.execute(
+        """
+        UPDATE agent_artifacts SET content=?,metadata_json=?,validation_status='passed'
+        WHERE artifact_id=? AND artifact_type=?
+        """,
+        (_task_content(doc), _dumps(doc), str(artifact_id), ARTIFACT_TYPE),
+    )
+
+
+def _candidate_team(doc: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    teams = doc.get("target_teams") or []
+    team_ref = candidate.get("team_ref")
+    if isinstance(team_ref, int) and 0 <= team_ref < len(teams) and isinstance(teams[team_ref], dict):
+        return teams[team_ref]
+    return {}
+
+
+# ---- 破冰素材（规则版：不依赖 LLM；hooks 必须引用真实线索实词，反模板硬约束）----
+
+ICEBREAKER_ANGLES = ("技术共鸣", "职业发展", "地域", "客户平台")
+MAX_ICEBREAKER_HOOKS = 3
+
+# 话术红线（restricted 边界）：费率/红线/承诺类措辞与手机号永不进 hooks
+_ICEBREAKER_FORBIDDEN_TOKENS = ("费率", "话术红线", "红线", "保底", "承诺", "代您")
+_PHONE_PATTERN = re.compile(r"1[3-9]\d{9}")
+
+_ICE_ASCII_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+.#/-]{1,}")
+_ICE_CHINESE_RUN = re.compile(r"[一-龥]{2,}")
+# 英文虚词/泛词不进关键词（防模板判定被 "of/the/company" 之类稀释）
+_ICE_ASCII_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "for", "to", "in", "on", "at", "by", "with", "from",
+    "into", "using", "based", "via", "new", "their", "its", "this", "that", "without", "between",
+    "need", "needs", "inc", "ltd", "corp", "corporation", "company", "co", "llc", "gmbh",
+    "university", "college", "institute", "china", "usa",
+    "analysis", "analytical", "study", "design", "method", "methods", "model", "modeling", "approach",
+}
+# 中文泛词不进关键词（行业通称谁都能说，不构成"该候选的真实线索"）
+_ICE_CHINESE_GENERIC = {
+    "相关", "公开", "论文", "作者", "单位", "标注", "方向", "团队", "发明人", "专利", "联系人",
+    "页面", "公司", "有限", "股份", "半导体", "微电子", "技术", "研发", "工程师", "一种",
+}
+_ICE_TEAM_FILLER = ("方向", "团队", "相关")
+
+
+def _reason_clues(reason: Any) -> dict[str, str]:
+    """从候选 reason 抽取结构化线索：论文/专利题《》、单位标注、专利公开号、线索类型。"""
+    text = str(reason or "")
+    clues = {"paper_title": "", "affiliation": "", "patent_no": "", "clue_kind": ""}
+    title = re.search(r"《([^》]+)》", text)
+    if title:
+        clues["paper_title"] = title.group(1).strip()
+    affiliation = re.search(r"单位标注[：:]\s*([^）)]+)", text)
+    if affiliation:
+        clues["affiliation"] = affiliation.group(1).strip()
+    patent = re.search(r"（([A-Z]{2}\d{4,}[A-Z0-9]*)）", text)
+    if patent:
+        clues["patent_no"] = patent.group(1)
+    # 线索类型：带公开号或文本含"专利" → 专利；否则按论文（官网联系人线索无《》则为空）
+    if clues["paper_title"]:
+        clues["clue_kind"] = "专利" if (clues["patent_no"] or "专利" in text) else "论文"
+    return clues
+
+
+def _icebreaker_clues(candidate: dict[str, Any], team: dict[str, Any]) -> dict[str, Any]:
+    """汇集该候选可用于破冰的真实线索与关键词集合（论文题/单位/团队名/职务实词）。"""
+    team = team if isinstance(team, dict) else {}
+    company = str(team.get("company") or "").strip()
+    team_label = str(team.get("team") or "").strip()
+    location = str(team.get("location") or "").strip()
+    role = str(candidate.get("current_role") or "").strip()
+    reason_clues = _reason_clues(candidate.get("reason"))
+
+    keywords: list[str] = []
+
+    def add(value: str) -> None:
+        word = str(value or "").strip()
+        if word and word not in keywords:
+            keywords.append(word)
+
+    add(company)
+    if location:
+        add(location)
+    for token in re.split(r"[/、\s（()）]+", team_label):
+        token = token.strip()
+        if token and token not in _ICE_TEAM_FILLER:
+            add(token)
+    paper_text = f"{reason_clues['paper_title']} {reason_clues['affiliation']} {role}"
+    for word in _ICE_ASCII_TOKEN.findall(paper_text):
+        if len(word) >= 3 and word.lower() not in _ICE_ASCII_STOPWORDS:
+            add(word)
+        elif word.upper() in ("PC", "AE", "DC", "AC", "IC", "3D"):
+            add(word)
+    for run in _ICE_CHINESE_RUN.findall(f"{paper_text} {team_label}"):
+        run = re.sub(r"^一种", "", run)
+        if len(run) >= 2 and run not in _ICE_CHINESE_GENERIC:
+            add(run)
+
+    # 论文题专属关键词（hook 1 选用：优先词中/词尾带大写、连字符或数字的实词，其次最长词）
+    paper_keywords: list[str] = []
+    for word in _ICE_ASCII_TOKEN.findall(reason_clues["paper_title"]):
+        if len(word) >= 3 and word.lower() not in _ICE_ASCII_STOPWORDS:
+            paper_keywords.append(word)
+    for run in _ICE_CHINESE_RUN.findall(reason_clues["paper_title"]):
+        run = re.sub(r"^一种", "", run)
+        if len(run) >= 2 and run not in _ICE_CHINESE_GENERIC:
+            paper_keywords.append(run)
+    paper_keywords.sort(
+        key=lambda item: (not (re.search(r"[A-Z]", item[1:]) or re.search(r"[0-9-]", item)), -len(item))
+    )
+
+    return {
+        "company": company,
+        "team_label": team_label,
+        "location": location,
+        "role": role,
+        "paper_title": reason_clues["paper_title"],
+        "affiliation": reason_clues["affiliation"],
+        "patent_no": reason_clues["patent_no"],
+        "clue_kind": reason_clues["clue_kind"],
+        "keywords": keywords,
+        "paper_keywords": paper_keywords,
+    }
+
+
+def _hook_cites_clue(hook: str, keywords: list[str]) -> bool:
+    lowered = hook.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def icebreaker_quality_errors(
+    icebreaker: Any, candidate: dict[str, Any], team: dict[str, Any]
+) -> list[str]:
+    """破冰素材质量门禁（反模板硬约束）。返回错误列表（空=合格）。
+
+    - 结构：hooks 1-3 条非空口播句、angle 四选一、generated_at/source_ref 非空；
+    - 反模板：全部 hooks 不含该候选任何线索关键词（论文题/单位/团队实词）→ 判不合格；
+    - 红线：费率/红线/承诺类措辞、手机号 → 判不合格。
+    """
+    if not isinstance(icebreaker, dict):
+        return ["icebreaker 必须是对象"]
+    errors: list[str] = []
+    hooks = icebreaker.get("hooks")
+    hooks_ok = (
+        isinstance(hooks, list)
+        and 1 <= len(hooks) <= MAX_ICEBREAKER_HOOKS
+        and all(isinstance(hook, str) and hook.strip() for hook in hooks)
+    )
+    if not hooks_ok:
+        errors.append(f"hooks 必须是 1-{MAX_ICEBREAKER_HOOKS} 条非空口播句")
+        hooks = []
+    if icebreaker.get("angle") not in ICEBREAKER_ANGLES:
+        errors.append(f"angle 必须是 {'/'.join(ICEBREAKER_ANGLES)}")
+    if not str(icebreaker.get("generated_at") or "").strip():
+        errors.append("generated_at 必须非空")
+    if not str(icebreaker.get("source_ref") or "").strip():
+        errors.append("source_ref 必须非空（回指所用线索）")
+    keywords = _icebreaker_clues(candidate, team)["keywords"]
+    if not keywords:
+        errors.append("该候选没有可引用的真实线索关键词（论文题/单位/团队/职务缺失）")
+    if hooks and keywords and not any(_hook_cites_clue(hook, keywords) for hook in hooks):
+        errors.append("hooks 不含该候选任何线索关键词（论文题/单位/团队实词），判为泛泛模板，拒绝写入")
+    for hook in hooks:
+        if any(token in hook for token in _ICEBREAKER_FORBIDDEN_TOKENS) or _PHONE_PATTERN.search(hook):
+            errors.append("hooks 触碰话术红线（费率/红线/承诺/电话），拒绝写入")
+            break
+    return errors
+
+
+def build_icebreaker(
+    candidate: dict[str, Any], team: dict[str, Any], *, client: str = "", now: str = ""
+) -> dict[str, Any]:
+    """规则版破冰素材：hooks 全部由该候选真实线索拼装（口语句，顾问可直接念）。
+
+    无线索关键词或质量门禁不过 → 抛 ValueError（判不合格并拒绝写入）。
+    只产素材不触达：发送动作永远由顾问本人执行。
+    """
+    clues = _icebreaker_clues(candidate, team)
+    if not clues["keywords"]:
+        raise ValueError("该候选没有可引用的真实线索（论文题/单位/团队/职务关键词缺失），无法生成开场白要点")
+    hooks: list[str] = []
+    company = clues["company"]
+    if clues["paper_title"] and clues["clue_kind"] == "专利":
+        tech = clues["paper_keywords"][0] if clues["paper_keywords"] else ""
+        direction = f"{tech}这个方向" if tech else "这个方向"
+        hooks.append(f"注意到您名下的公开专利《{clues['paper_title']}》，{direction}跟我们客户在做的贴得很近，想跟您请教两句")
+    elif clues["paper_title"]:
+        tech = clues["paper_keywords"][0] if clues["paper_keywords"] else ""
+        direction = f"{tech}这个方向" if tech else "这个方向"
+        hooks.append(f"看到您发的《{clues['paper_title']}》，{direction}我们客户这边正好在重点投入，想跟您请教两句")
+    if company:
+        team_tokens = [
+            token
+            for token in re.split(r"[/、\s（()）]+", clues["team_label"])
+            if token.strip() and token.strip() not in _ICE_TEAM_FILLER
+        ]
+        team_core = f"{'/'.join(team_tokens[:3])}团队" if team_tokens else "团队"
+        hooks.append(f"您现在在{company} {team_core}这块，到我们客户这个平台是平移还是往上走，想听听您的判断")
+    if clues["location"]:
+        hooks.append(f"看您base在{clues['location']}，客户团队也在{clues['location']}，真有机会动起来同城聊也方便")
+    if clues["patent_no"] and clues["clue_kind"] != "专利" and len(hooks) < MAX_ICEBREAKER_HOOKS:
+        hooks.append(f"注意到您名下{clues['patent_no']}这篇公开专利，跟我们客户在做的方向贴得很近")
+    deduped: list[str] = []
+    for hook in hooks:
+        if hook not in deduped:
+            deduped.append(hook)
+    hooks = deduped[:MAX_ICEBREAKER_HOOKS]
+    if not hooks:
+        raise ValueError("该候选没有可拼装的真实线索，无法生成开场白要点")
+    if clues["paper_title"] or clues["patent_no"]:
+        angle = "技术共鸣"
+    elif clues["location"]:
+        angle = "地域"
+    else:
+        angle = "职业发展"
+    source_urls = [str(url).strip() for url in candidate.get("source_urls") or [] if str(url or "").strip()]
+    source_ref = source_urls[0] if source_urls else ""
+    if clues["paper_title"]:
+        source_ref += f"（{clues['clue_kind'] or '线索'}《{clues['paper_title']}》）"
+    elif clues["patent_no"]:
+        source_ref += f"（专利 {clues['patent_no']}）"
+    icebreaker = {
+        "hooks": hooks,
+        "angle": angle,
+        "generated_at": now or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_ref": source_ref,
+    }
+    errors = icebreaker_quality_errors(icebreaker, candidate, team)
+    if errors:
+        raise ValueError("破冰素材质量不合格，拒绝写入：" + "；".join(errors))
+    return icebreaker
+
+
+# ---- 状态机 PATCH（整批先校验后落库；confirmed 触发自动生成破冰素材）----
+
+def apply_candidate_update(
+    conn: Any,
+    artifact_id: str,
+    index: int,
+    *,
+    status: str | None = None,
+    consultant_note: str | None = None,
+) -> dict[str, Any]:
+    """PATCH 候选状态/备注。artifact 不存在或 index 越界抛 LookupError（404）；
+    未知态/非法迁移/终态变更/直接置 intaken 抛 ValueError（409）。
+    confirmed 迁移成功时自动生成破冰素材；素材质量不合格不阻断状态变更，
+    但不写入 icebreaker（错误进响应 icebreaker_errors，由前端提示顾问）。
+    """
+    if status is None and consultant_note is None:
+        raise ValueError("PATCH 至少需要 status 或 consultant_note 之一")
+    payload = get_mapping_task(conn, artifact_id)
+    if payload is None:
+        raise LookupError(f"Mapping 任务卡不存在：{artifact_id}")
+    doc = payload["mapping_task"]
+    candidates = doc.get("candidates") or []
+    if not isinstance(index, int) or not 0 <= index < len(candidates):
+        raise LookupError(f"候选不存在：index={index}")
+    candidate = dict(candidates[index])
+    current = str(candidate.get("status") or "")
+    icebreaker_generated = False
+    icebreaker_errors: list[str] = []
+    if status is not None:
+        error = validate_status_transition(current, status)
+        if error:
+            raise ValueError(error)
+        candidate["status"] = str(status).strip()
+        if candidate["status"] == "confirmed" and current != "confirmed":
+            team = _candidate_team(doc, candidate)
+            try:
+                candidate["icebreaker"] = build_icebreaker(candidate, team, client=str(doc.get("client") or ""))
+                icebreaker_generated = True
+            except ValueError as exc:
+                icebreaker_errors.append(str(exc))
+    if consultant_note is not None:
+        candidate["consultant_note"] = str(consultant_note)
+    candidates[index] = candidate
+    _sync_stats(doc)
+    save_mapping_task_in_place(conn, artifact_id, doc)
+    return {
+        "ok": True,
+        "artifact_id": str(artifact_id),
+        "index": index,
+        "candidate": candidate,
+        "status": candidate["status"],
+        "status_label": CANDIDATE_STATUS_LABELS.get(candidate["status"], candidate["status"]),
+        "stats": doc["stats"],
+        "icebreaker_generated": icebreaker_generated,
+        "icebreaker_errors": icebreaker_errors,
+    }
+
+
+def regenerate_icebreaker(conn: Any, artifact_id: str, index: int) -> dict[str, Any]:
+    """重新生成破冰素材（人选卡"重新生成"按钮）。仅已确认及之后状态可用；
+    质量不合格抛 ValueError（409），不写入。"""
+    payload = get_mapping_task(conn, artifact_id)
+    if payload is None:
+        raise LookupError(f"Mapping 任务卡不存在：{artifact_id}")
+    doc = payload["mapping_task"]
+    candidates = doc.get("candidates") or []
+    if not isinstance(index, int) or not 0 <= index < len(candidates):
+        raise LookupError(f"候选不存在：index={index}")
+    candidate = dict(candidates[index])
+    if candidate.get("status") not in ("confirmed", "contacted", "replied", "intaken"):
+        raise ValueError(f"仅已确认及之后状态的人选可生成开场白要点，当前状态：{candidate.get('status')}")
+    team = _candidate_team(doc, candidate)
+    icebreaker = build_icebreaker(candidate, team, client=str(doc.get("client") or ""))
+    candidate["icebreaker"] = icebreaker
+    candidates[index] = candidate
+    save_mapping_task_in_place(conn, artifact_id, doc)
+    return {
+        "ok": True,
+        "artifact_id": str(artifact_id),
+        "index": index,
+        "icebreaker": icebreaker,
+        "candidate": candidate,
+    }
+
+
+# ---- 入库动作（复用 MULTICHANNEL intake 写入口径；不写第二条 job_candidates）----
+
+def _table_columns(conn: Any, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    except Exception:  # noqa: BLE001 表不存在按空列集处理（跳过该面写入）
+        return set()
+
+
+def _table_exists(conn: Any, table: str) -> bool:
+    return bool(_table_columns(conn, table))
+
+
+def _next_id(conn: Any, table: str) -> int:
+    row = conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}").fetchone()
+    return int(row[0])
+
+
+def _insert_dynamic(conn: Any, table: str, values: dict[str, Any]) -> Any:
+    """按表实际列动态插入（与 MULTICHANNEL apply_intake 同口径）。"""
+    allowed = _table_columns(conn, table)
+    payload = {key: value for key, value in values.items() if key in allowed}
+    if not payload:
+        raise ValueError(f"表 {table} 没有可写字段")
+    columns = list(payload)
+    placeholders = ",".join("?" for _ in columns)
+    return conn.execute(
+        f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})",
+        [payload[column] for column in columns],
+    )
+
+
+def _normalize_text(value: Any) -> str:
+    """与 MULTICHANNEL _normalize_text 同口径（小写/全角括号归一/去空白）。"""
+    text = str(value or "").strip().lower()
+    text = text.replace("（", "(").replace("）", ")")
+    return re.sub(r"\s+", "", text)
+
+
+def _identity_key(name: Any, company: Any, title: Any) -> str:
+    values = [_normalize_text(name), _normalize_text(company), _normalize_text(title)]
+    if not all(values):
+        return ""
+    return "|".join(values)
+
+
+# 遮罩名合并口径（§6.4，与 liepin_workbench_server 既有函数同规则）：
+# 遮罩名（含*/某/先生/女士/老师）与全名互证须同姓；合并还须公司+职位双匹配。
+
+def _normalize_person_name(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    return text.replace("老师", "").strip()
+
+
+def _is_masked_name(value: Any) -> bool:
+    text = _normalize_person_name(value)
+    return bool(text) and (
+        "*" in text or "某" in text or text.endswith(("先生", "女士", "老师"))
+    )
+
+
+def _names_can_correspond(left: Any, right: Any) -> bool:
+    left_text = _normalize_person_name(left).replace("先生", "").replace("女士", "").strip()
+    right_text = _normalize_person_name(right).replace("先生", "").replace("女士", "").strip()
+    if not left_text or not right_text:
+        return False
+    if left_text == right_text:
+        return True
+    if (_is_masked_name(left) or _is_masked_name(right)) and left_text[:1] and left_text[:1] == right_text[:1]:
+        return True
+    return False
+
+
+def _identity_text_matches(left: Any, right: Any) -> bool:
+    left_text = " ".join(str(left or "").split())
+    right_text = " ".join(str(right or "").split())
+    return bool(left_text and right_text and (left_text in right_text or right_text in left_text))
+
+
+def _person_fingerprint(name: Any, company: Any, title: Any) -> str:
+    """与 MULTICHANNEL apply_intake 同口径：name|company|normalize(title)。"""
+    return f"{name}|{company}|{_normalize_text(title)}"
+
+
+def _relation_is_stopped(clean_stage: Any, raw_status: Any) -> bool:
+    """与 MULTICHANNEL load_exclusion_set 的 stopped 判定同口径（H5/拒绝态不重复入库）。"""
+    stage = str(clean_stage or "")
+    status = str(raw_status or "").strip().lower()
+    return stage.startswith("H5") or status in {"screen_rejected", "rejected", "client_rejected", "stopped"}
+
+
+def _find_person(conn: Any, *, name: str, company: str, title: str) -> int | None:
+    """people 去重：fingerprint 精确 → §6.4 遮罩互证（同姓遮罩名 + 公司 + 职位双匹配）。"""
+    if not _table_exists(conn, "people"):
+        return None
+    columns = _table_columns(conn, "people")
+    if "fingerprint" in columns:
+        row = conn.execute(
+            "SELECT id FROM people WHERE fingerprint=? ORDER BY id LIMIT 1",
+            (_person_fingerprint(name, company, title),),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    rows = conn.execute(
+        """
+        SELECT id,display_name,current_company,current_title FROM people
+        WHERE (instr(COALESCE(current_company,''), ?) > 0 AND ? <> '')
+           OR (instr(?, COALESCE(current_company,'')) > 0 AND COALESCE(current_company,'') <> '')
+        """,
+        (company, company, company),
+    ).fetchall()
+    for row in rows:
+        # §6.4：遮罩名互证必须公司+职位双匹配（不放松）
+        if (
+            _names_can_correspond(name, row[1])
+            and _identity_text_matches(company, row[2])
+            and _identity_text_matches(title, row[3])
+        ):
+            return int(row[0])
+    return None
+
+
+def _find_candidate_row(
+    conn: Any, *, client: str, position: str, name: str, company: str, title: str
+) -> int | None:
+    """candidates 去重（client+position 作用域，与 MULTICHANNEL _existing_candidate_id 同口径，
+    叠加 §6.4 遮罩互证：遮罩名须公司+职位双匹配才可复用已有行）。"""
+    if not _table_exists(conn, "candidates"):
+        return None
+    rows = conn.execute(
+        "SELECT id,name,company,title FROM candidates WHERE client=? AND position=?",
+        (client, position),
+    ).fetchall()
+    target_identity = _identity_key(name, company, title)
+    for row in rows:
+        if target_identity and target_identity == _identity_key(row[1], row[2], row[3]):
+            return int(row[0])
+    for row in rows:
+        if (
+            _names_can_correspond(name, row[1])
+            and _identity_text_matches(company, row[2])
+            and _identity_text_matches(title, row[3])
+        ):
+            return int(row[0])
+    return None
+
+
+def intake_candidate(
+    conn: Any,
+    artifact_id: str,
+    index: int,
+    *,
+    banned: list[str] | tuple[str, ...] | None = None,
+    kb_dir: str | None = None,
+) -> dict[str, Any]:
+    """Mapping 候选入库：仅 confirmed 可用；复用现有 intake 写入口径（同一事务写
+    candidates/candidate_clients/candidate_profiles/candidate_intelligence/people/
+    source_profiles/entity_source_links/job_candidates/candidate_events）。
+
+    红线：
+    - 不写第二条 job_candidates（job_id+person_id+raw_position 已存在 → 复用原 id）；
+    - 禁挖名单入库前再校验（restricted 白名单出库，费率/话术红线不出库）；
+    - 无公开来源 URL 的人名不得入库（防编造硬约束，与写入口径一致）；
+    - 已停止推进（H5/拒绝态）的关系不重复入库；
+    - 遮罩名原样存储，合并按 §6.4 既有规则（不放松）。
+    """
+    payload = get_mapping_task(conn, artifact_id)
+    if payload is None:
+        raise LookupError(f"Mapping 任务卡不存在：{artifact_id}")
+    doc = payload["mapping_task"]
+    candidates = doc.get("candidates") or []
+    if not isinstance(index, int) or not 0 <= index < len(candidates):
+        raise LookupError(f"候选不存在：index={index}")
+    candidate = dict(candidates[index])
+    status = str(candidate.get("status") or "")
+    if status == "intaken":
+        receipt = candidate.get("intake") if isinstance(candidate.get("intake"), dict) else None
+        if receipt and receipt.get("job_candidate_id"):
+            return {
+                "ok": True,
+                "artifact_id": str(artifact_id),
+                "index": index,
+                "status": "intaken",
+                "already_intaken": True,
+                "relation_existed": True,
+                "job_candidate_id": int(receipt["job_candidate_id"]),
+                "candidate_id": int(receipt.get("candidate_id") or 0),
+                "person_id": int(receipt.get("person_id") or 0),
+                "intaken_at": str(receipt.get("intaken_at") or ""),
+            }
+        raise ValueError("该人选已标记入库（缺入库回执），不重复写入")
+    if status != "confirmed":
+        raise ValueError(f"仅已确认（confirmed）人选可入库，当前状态：{status}")
+    source_urls = [str(url).strip() for url in candidate.get("source_urls") or [] if str(url or "").strip()]
+    if not source_urls:
+        raise ValueError("无公开来源 URL 的人名不得入库（防编造硬约束）")
+
+    team = _candidate_team(doc, candidate)
+    company = str(team.get("company") or "").strip()
+    client = str(doc.get("client") or "").strip()
+    job_title = str(doc.get("job_title") or "").strip()
+    job_id = int(doc.get("job_id") or 0)
+    name = str(candidate.get("name") or "").strip()
+    title = str(candidate.get("current_role") or "").strip()
+    location = str(team.get("location") or "").strip()
+
+    # 禁挖名单入库前再校验一次（restricted 只白名单出库）
+    if banned is None:
+        restricted, _restricted_trace = knowledge_base.load_restricted_constraints(client, kb_dir=kb_dir)
+        constraints = (restricted or {}).get("constraints") if isinstance(restricted, dict) else {}
+        banned = [str(item) for item in (constraints or {}).get("banned_companies") or [] if str(item or "").strip()]
+    if _is_banned(company, banned):
+        raise ValueError(f"{company} 在禁挖名单内，该人选不得入库")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = now[:10]
+
+    # people（fingerprint 精确 → §6.4 遮罩互证）
+    person_id = _find_person(conn, name=name, company=company, title=title)
+    person_existed = person_id is not None
+    if person_id is None:
+        cursor = _insert_dynamic(
+            conn,
+            "people",
+            {
+                "display_name": name,
+                "current_company": company,
+                "current_title": title,
+                "city": location,
+                "education": "",
+                "experience": "",
+                "fingerprint": _person_fingerprint(name, company, title),
+                "created_at": now,
+            },
+        )
+        person_id = int(cursor.lastrowid)
+
+    # candidates（client+position 作用域去重）
+    candidate_id = _find_candidate_row(
+        conn, client=client, position=job_title, name=name, company=company, title=title
+    )
+    candidate_existed = candidate_id is not None
+    if candidate_id is None:
+        iteration_row = conn.execute(
+            "SELECT COALESCE(MAX(iteration),0)+1 FROM candidates WHERE client=? AND position=?",
+            (client, job_title),
+        ).fetchone()
+        candidate_id = _next_id(conn, "candidates")
+        _insert_dynamic(
+            conn,
+            "candidates",
+            {
+                "id": candidate_id,
+                "name": name,
+                "company": company,
+                "title": title,
+                "education": "",
+                "experience": "",
+                "skills": str(candidate.get("reason") or "")[:1200],
+                "level": "未分层",
+                "city": location,
+                "client": client,
+                "position": job_title,
+                "search_date": today,
+                "status": "new",
+                "notes": f"S1 新增寻访/待复核｜mapping={artifact_id}",
+                "iteration": int(iteration_row[0]) if iteration_row else 1,
+                "created_at": now,
+                "updated_at": now,
+                "source": "mapping",
+                "xsaas_id": "",
+            },
+        )
+
+    # 辅助面（与 apply_intake 同一事务口径；表存在才写）
+    if _table_exists(conn, "candidate_clients"):
+        _insert_dynamic(
+            conn,
+            "candidate_clients",
+            {
+                "id": _next_id(conn, "candidate_clients"),
+                "candidate_name": name,
+                "candidate_company": company,
+                "client": client,
+                "source": "mapping",
+                "position_tag": job_title,
+                "created_at": now,
+            },
+        )
+    if _table_exists(conn, "candidate_profiles"):
+        _insert_dynamic(
+            conn,
+            "candidate_profiles",
+            {
+                "id": _next_id(conn, "candidate_profiles"),
+                "candidate_id": candidate_id,
+                "candidate_name": name,
+                "candidate_company": company,
+                "client": client,
+                "position": job_title,
+                "industry_tags_json": "[]",
+                "function_tags_json": "[]",
+                "risk_tags_json": "[]",
+                "profile_summary": str(candidate.get("reason") or "")[:1200],
+                "updated_at": now,
+            },
+        )
+    if _table_exists(conn, "candidate_intelligence"):
+        _insert_dynamic(
+            conn,
+            "candidate_intelligence",
+            {
+                "id": _next_id(conn, "candidate_intelligence"),
+                "candidate_id": candidate_id,
+                "candidate_name": name,
+                "candidate_company": company,
+                "client": client,
+                "position": job_title,
+                "fit_score": 0,
+                "fit_level": "unrated",
+                "evidence_json": "{}",
+                "risk_json": "{}",
+                "next_action": "沿来源链接打开公开资料，按岗位硬门槛人工复核",
+                "last_evaluated_at": now,
+                "model_version": "mapping-task-s5",
+                "created_at": now,
+                "updated_at": now,
+                "strong_matches_json": "[]",
+                "weak_matches_json": "[]",
+                "verification_questions_json": "[]",
+                "recommendation_decision": "pending_review",
+            },
+        )
+    if _table_exists(conn, "source_profiles"):
+        existing_profile = conn.execute(
+            """
+            SELECT id FROM source_profiles
+            WHERE person_id=? AND lower(COALESCE(source_type,''))='mapping'
+            ORDER BY id LIMIT 1
+            """,
+            (person_id,),
+        ).fetchone()
+        if existing_profile is None:
+            _insert_dynamic(
+                conn,
+                "source_profiles",
+                {
+                    "person_id": person_id,
+                    "source_type": "mapping",
+                    "source_candidate_id": None,
+                    "source_date": today,
+                    "raw_status": "mapping_intake",
+                    "raw_client": client,
+                    "raw_position": job_title,
+                    "raw_json": _dumps(
+                        {
+                            "name": name,
+                            "company": company,
+                            "title": title,
+                            "source_url": source_urls[0],
+                            "source_urls": source_urls,
+                            "reason": str(candidate.get("reason") or ""),
+                            "mapping_artifact": str(artifact_id),
+                        }
+                    ),
+                },
+            )
+    if _table_exists(conn, "entity_source_links"):
+        for url in source_urls:
+            conn.execute(
+                """
+                INSERT INTO entity_source_links
+                    (canonical_type,canonical_id,source_system,source_entity_type,
+                     source_entity_id,source_url,metadata_json,updated_at)
+                VALUES ('person',?,?,?,?,?,?,?)
+                ON CONFLICT(source_system,source_entity_type,source_entity_id,
+                            canonical_type,canonical_id)
+                DO UPDATE SET source_url=excluded.source_url,
+                              metadata_json=excluded.metadata_json,
+                              updated_at=excluded.updated_at
+                """,
+                (
+                    str(person_id),
+                    "mapping",
+                    "external_profile",
+                    url,
+                    url,
+                    _dumps({"backfilled_from": "mapping_task_intake", "mapping_artifact": str(artifact_id)}),
+                    now,
+                ),
+            )
+
+    # job_candidates：同人选同岗位已存在关系 → 复用原 id，绝不写第二条
+    relation = conn.execute(
+        """
+        SELECT id,clean_stage,raw_status FROM job_candidates
+        WHERE job_id=? AND person_id=? AND raw_position=?
+        ORDER BY id LIMIT 1
+        """,
+        (job_id, person_id, job_title),
+    ).fetchone()
+    relation_existed = relation is not None
+    if relation_existed:
+        if _relation_is_stopped(relation[1], relation[2]):
+            raise ValueError("该人选在此岗位的关系已停止推进，不重复入库（如需重启请走人工状态纠正）")
+        job_candidate_id = int(relation[0])
+    else:
+        cursor = _insert_dynamic(
+            conn,
+            "job_candidates",
+            {
+                "job_id": job_id,
+                "person_id": person_id,
+                "raw_client": client,
+                "raw_position": job_title,
+                "raw_status": "mapping_intake",
+                "raw_stage": "S1 新增寻访/待复核",
+                "clean_stage": "S1 新增寻访/待复核",
+                "flow_bucket": "待复核",
+                "clean_reason": "Mapping 直挖入库，待完整简历复核",
+                "recent_hunting": 1,
+                "search_date": today,
+                "updated_at": now,
+                "source_candidate_id": str(candidate_id),
+            },
+        )
+        job_candidate_id = int(cursor.lastrowid)
+
+    # 业务时间线（与 intake 同口径：新增事件 pending_review，source_table 标 mapping_task）
+    _insert_dynamic(
+        conn,
+        "candidate_events",
+        {
+            "job_candidate_id": job_candidate_id,
+            "person_id": person_id,
+            "job_id": job_id,
+            "event_type": "mapping_intake",
+            "event_status": "pending_review",
+            "event_time": now,
+            "summary": f"Mapping 直挖入库：{name}｜{company}｜{title}（任务卡 {artifact_id}）",
+            "raw_json": _dumps(
+                {
+                    "mapping_artifact": str(artifact_id),
+                    "candidate_index": index,
+                    "source_urls": source_urls,
+                    "reason": str(candidate.get("reason") or ""),
+                    "relation_existed": relation_existed,
+                    "actor": "user",
+                }
+            ),
+            "source_table": "mapping_task",
+            "source_id": str(artifact_id),
+        },
+    )
+
+    # 任务卡回写：status→intaken + 入库回执（整批校验后原位落库，version 不 bump）
+    candidate["status"] = "intaken"
+    candidate["intake"] = {
+        "job_candidate_id": job_candidate_id,
+        "candidate_id": candidate_id,
+        "person_id": person_id,
+        "intaken_at": now,
+        "relation_existed": relation_existed,
+    }
+    candidates[index] = candidate
+    _sync_stats(doc)
+    save_mapping_task_in_place(conn, artifact_id, doc)
+
+    return {
+        "ok": True,
+        "artifact_id": str(artifact_id),
+        "index": index,
+        "status": "intaken",
+        "already_intaken": False,
+        "relation_existed": relation_existed,
+        "job_candidate_id": job_candidate_id,
+        "candidate_id": candidate_id,
+        "person_id": person_id,
+        "candidate_existed": candidate_existed,
+        "person_existed": person_existed,
+        "intaken_at": now,
+        "stats": doc["stats"],
     }

@@ -843,6 +843,30 @@ class CoreService:
             return self.agent_service.get_mapping_task(job_id, artifact_id)
         raise RuntimeError("workflow service unavailable")
 
+    def update_mapping_candidate(
+        self,
+        artifact_id: str,
+        index: int,
+        *,
+        status: str | None = None,
+        consultant_note: str | None = None,
+    ) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.update_mapping_candidate(
+                artifact_id, index, status=status, consultant_note=consultant_note
+            )
+        raise RuntimeError("workflow service unavailable")
+
+    def regenerate_mapping_icebreaker(self, artifact_id: str, index: int) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.regenerate_mapping_icebreaker(artifact_id, index)
+        raise RuntimeError("workflow service unavailable")
+
+    def intake_mapping_candidate(self, artifact_id: str, index: int) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.intake_mapping_candidate(artifact_id, index)
+        raise RuntimeError("workflow service unavailable")
+
     def apply_strategy_review_diff_decisions(self, workflow_id: str, decisions: list[dict[str, Any]]) -> dict[str, Any]:
         if self.agent_service:
             return self.agent_service.apply_strategy_review_diff_decisions(workflow_id, decisions)

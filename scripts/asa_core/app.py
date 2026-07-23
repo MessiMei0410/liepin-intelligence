@@ -83,6 +83,13 @@ class MappingTaskCreate(WriteEnvelope):
     trigger: str = "manual"
 
 
+class MappingCandidatePatch(WriteEnvelope):
+    # S5-2：状态机 PATCH；status/consultant_note 至少其一（路由侧校验，缺省 → 422）。
+    # 七态枚举 + 合法迁移由状态机校验（非法 → 409）；intaken 只能经 intake 动作到达。
+    status: str | None = None
+    consultant_note: str | None = None
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -233,6 +240,31 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 重放返回首次响应；岗位不存在 → 404，无 strategy_v2/trigger 非法 → 409。
         return idem("job.mapping_task_create", body, idempotency_key, "job", str(job_id),
                     lambda: core.create_mapping_task(job_id, trigger=body.trigger))
+
+    @app.patch("/api/v1/mapping-tasks/{artifact_id}/candidates/{index}")
+    def mapping_candidate_patch(artifact_id: str, index: int, body: MappingCandidatePatch, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S5-2：任务卡候选状态机 PATCH（状态/备注）。走 execute_idempotent 幂等 + 审计；
+        # 404=artifact/候选不存在；409=未知态/非法迁移/终态变更/直接置 intaken；422=body 缺字段。
+        # confirmed 迁移成功自动生成破冰素材（质量不合格不阻断状态变更，素材不写入）。
+        if body.status is None and body.consultant_note is None:
+            raise HTTPException(422, "PATCH 至少需要 status 或 consultant_note 之一")
+        return idem("mapping_task.candidate_update", body, idempotency_key, "mapping_task", f"{artifact_id}#{index}",
+                    lambda: core.update_mapping_candidate(
+                        artifact_id, index, status=body.status, consultant_note=body.consultant_note))
+
+    @app.post("/api/v1/mapping-tasks/{artifact_id}/candidates/{index}/icebreaker")
+    def mapping_candidate_icebreaker(artifact_id: str, index: int, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S5-2：重新生成破冰素材（人选卡"重新生成"按钮）。幂等；未确认人选 → 409；
+        # 素材只存不送（发送动作永远由顾问本人执行）。
+        return idem("mapping_task.icebreaker_regenerate", body, idempotency_key, "mapping_task", f"{artifact_id}#{index}",
+                    lambda: core.regenerate_mapping_icebreaker(artifact_id, index))
+
+    @app.post("/api/v1/mapping-tasks/{artifact_id}/candidates/{index}/intake")
+    def mapping_candidate_intake(artifact_id: str, index: int, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S5-2：入库动作（仅 confirmed）。复用现有 intake 写入口径，幂等 + 审计；
+        # 不写第二条 job_candidates（已有关系复用原 id）；禁挖/无来源/已停止关系 → 409。
+        return idem("mapping_task.candidate_intake", body, idempotency_key, "mapping_task", f"{artifact_id}#{index}",
+                    lambda: core.intake_mapping_candidate(artifact_id, index))
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
