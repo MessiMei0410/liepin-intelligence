@@ -133,6 +133,7 @@ class ClassifyZeroResultTest(unittest.TestCase):
                 ("xsaas", "blocked", {"ok": False, "error": "X-SaaS 候选人列表加载超时"}),
                 ("xsaas", "completed", {"ok": True, "rounds": [{"query": "q", "status": "stale_query", "result_count": 8, "extracted_count": 0}]}),
                 ("xsaas", "completed", {"ok": True, "rounds": [{"query": "q", "status": "failed", "reason": "settle_timeout"}]}),
+                ("xsaas", "completed", {"ok": True, "rounds": [{"query": "q", "status": "skipped", "reason": "settle_timeout", "attempts": 2}]}),
             ],
             "page_structure_changed": [
                 ("xsaas", "completed", {"ok": True, "rounds": [{"query": "q", "status": "failed", "reason": "search_controls_missing"}]}),

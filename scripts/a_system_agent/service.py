@@ -915,7 +915,7 @@ class AgentService:
                 raise LookupError(f"工作流不存在：{workflow_id}")
             payload = strategy_review.get_strategy_review(conn, workflow_id)
             if payload is None:
-                raise LookupError(f"该工作流暂无策略复盘：{workflow_id}")
+                raise LookupError(f"该工作流还没生成原因分析：{workflow_id}")
             return {"ok": True, **payload}
         finally:
             conn.close()
@@ -3535,7 +3535,7 @@ class AgentService:
                         f" → 评估 {channel['assessed_count']}（高分 {channel['high_score_count']}）"
                     )
                     if attribution_label:
-                        segment += f"；0 召回归因：{attribution_label}"
+                        segment += f"；0 召回原因：{attribution_label}"
                     channel_segments.append(segment)
                 round_index = len(rounds) + 1
                 outcome_label = BUSINESS_OUTCOME_LABELS.get(outcome or "")

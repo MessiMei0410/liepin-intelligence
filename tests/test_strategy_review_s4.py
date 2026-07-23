@@ -21,6 +21,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from fastapi.testclient import TestClient  # noqa: E402
+from a_system_agent.capability_runtime import ZERO_RESULT_ATTRIBUTION_LABELS  # noqa: E402
 
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment  # noqa: E402
 from a_system_agent import AgentService, FakeLLM  # noqa: E402
@@ -172,7 +173,8 @@ class VerdictBranchTest(unittest.TestCase):
                 assert review["escalation"] is None
                 finding = next(item for item in review["per_channel_findings"] if item["channel"] == "xsaas")
                 assert finding["finding"] == "execution_issue"
-                assert attribution in finding["note"]
+                # 任务卡 UX-1：note 面向顾问展示中文原因标签，不再裸露归因枚举码
+                assert ZERO_RESULT_ATTRIBUTION_LABELS[attribution] in finding["note"]
 
     def test_execution_channel_detail_failed_ratio(self) -> None:
         rows = [
@@ -227,7 +229,7 @@ class VerdictBranchTest(unittest.TestCase):
         rows = [_funnel_row("liepin", recall=30, unique=5, intake_new=5, assessed=5, high=2, detail=(5, 0, 0))]
         review = _build(rows, strategy=None)
         assert review["verdict"] == "insufficient_data"
-        assert "无 strategy_v2" in review["verdict_reason"]
+        assert "没有可对照的寻访策略记录" in review["verdict_reason"]
         assert review["revision_diff"] == []
         assert review["degraded"] is True, "有漏斗行但无策略对象：降级保留证据"
 

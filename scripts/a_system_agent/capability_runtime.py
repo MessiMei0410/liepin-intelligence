@@ -68,7 +68,7 @@ ZERO_RESULT_ATTRIBUTION_LABELS = {
     "parse_failure": "平台有结果但解析抓取失败",
     "no_results": "该渠道真实无匹配结果",
     "query_build_error": "查询构造异常",
-    "pool_saturated": "本地池枯竭（排重率过高）",
+    "pool_saturated": "本地人才库基本找遍了（重复率太高）",
     "unknown": "原因待排查",
 }
 

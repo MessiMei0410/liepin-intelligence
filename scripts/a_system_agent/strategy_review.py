@@ -80,6 +80,7 @@ from datetime import datetime
 from typing import Any
 
 from . import knowledge_base, strategy_v2
+from .capability_runtime import ZERO_RESULT_ATTRIBUTION_LABELS
 
 REVIEW_SCHEMA_VERSION = "strategy_review_v1"
 ARTIFACT_TYPE = "strategy_review"
@@ -291,7 +292,7 @@ def build_expansion_decision_tree(
             "proposal": "",
             "cost": "",
             "source": "none",
-            "note": "strategy_v2 未记录年限门槛，当前值取不到；放宽幅度由顾问定",
+            "note": "策略里没记录年限门槛，当前值取不到；放宽幅度由顾问定",
         },
         {
             "field": "职级",
@@ -353,18 +354,18 @@ def build_expansion_decision_tree(
         4, "rebalance_channel", "渠道再平衡（向高效渠道倾斜）",
         f"按本轮漏斗转化率倾斜查询配额：{stats_text}。"
         + (f"建议向 {best['channel']} 倾斜。" if best else "暂无可倾斜渠道，先执行前 3 步。")
-        + (f"渠道效能学习：{downweight_text}。" if downweights else ""),
+        + (f"哪个渠道出人多：{downweight_text}。" if downweights else ""),
         {"channel_stats": channel_stats,
          "recommended_channel": best["channel"] if best else None,
          "basis": "intake_new_count/unique_count（本轮漏斗转化率）",
          "downweights": downweights},
     )
 
-    # ---- 5. 转 Mapping 直挖 / 与客户校准方向（升级项）----
+    # ---- 5. 转 Mapping 直挖 / 与客户确认方向（升级项）----
     step5 = _tree_step(
-        5, "escalate_mapping", "转 Mapping 直挖 / 与客户校准方向（升级项）",
+        5, "escalate_mapping", "转 Mapping 直挖 / 与客户确认方向（升级项）",
         f"{rate_text}：本地池与渠道池均已尽，继续原样重搜无增量。建议转 Mapping 直挖"
-        "（按目标公司组织架构定点挖人），或与客户校准寻访方向（岗位本质/目标池是否需重新定义）。"
+        "（按目标公司组织架构定点挖人），或与客户确认寻访方向（岗位本质/目标池是否需重新定义）。"
         "本步为升级项，须顾问决策后执行。",
         {"actions": ["mapping_direct_sourcing", "client_direction_calibration"],
          "reason": f"{rate_text}，本地池+渠道池已尽"},
@@ -448,7 +449,7 @@ def build_strategy_review(
         note = "渠道各环节未见异常"
         if attribution in EXECUTION_ZERO_ATTRIBUTIONS:
             finding = "execution_issue"
-            note = f"0 召回归因 {attribution}（执行/渠道类）"
+            note = f"0 召回：{ZERO_RESULT_ATTRIBUTION_LABELS.get(attribution, attribution)}（执行/渠道类）"
             execution_channels.append(channel)
         elif row_failed_ratio is not None and row_failed_ratio >= detail_failed_ratio_threshold:
             finding = "execution_issue"
@@ -460,7 +461,7 @@ def build_strategy_review(
             execution_channels.append(channel)
         elif recall == 0:
             finding = "zero_recall"
-            note = "渠道 0 召回且非执行类归因"
+            note = "渠道 0 召回且非执行类问题"
         elif assessed >= 5 and high / assessed < high_score_threshold:
             finding = "low_high_rate"
             note = f"渠道高分率 {high}/{assessed} 低于阈值 {high_score_threshold:.0%}"
@@ -509,18 +510,18 @@ def build_strategy_review(
     degraded = False
     if not has_strategy:
         verdict = "insufficient_data"
-        verdict_reason = "无 strategy_v2 策略对象，无法对照预期与产出修订建议，不硬判"
+        verdict_reason = "没有可对照的寻访策略记录，无法给出修订建议，不硬下结论"
         degraded = bool(funnel_rows)
         if funnel_rows:
             notes.append("存在渠道漏斗行但缺策略对象，仅保留执行证据不做策略判定")
     elif not funnel_rows:
         verdict = "insufficient_data"
-        verdict_reason = "该轮未记录渠道漏斗明细，无法判定策略/执行归因，不硬判"
+        verdict_reason = "该轮未记录各渠道漏斗明细，无法判断是策略问题还是执行问题，不硬下结论"
         if isinstance(assessment, dict) and _int(assessment.get("assessed")) > 0:
             degraded = True
             notes.append(
                 f"可得证据（评估表）：评估 {assessed_total} 人、高分 {high_total} 人"
-                "；仅作参考，不足以支撑策略/执行归因"
+                "；仅作参考，不足以判断是策略问题还是执行问题"
             )
     elif execution_channels:
         verdict = "execution_channel_issue"
@@ -576,7 +577,7 @@ def build_strategy_review(
         signals.append(
             {
                 "signal": POOL_SATURATED_SIGNAL,
-                "label": "池枯竭（排重率过高）",
+                "label": "本地人才库快搜完了（重复率太高）",
                 "scope": "round",
                 "dedupe_rate": dedupe_rate,
                 "dedupe_count": dedupe_total,
@@ -584,15 +585,16 @@ def build_strategy_review(
                 "threshold": dedupe_rate_threshold,
                 "channels": saturated_channels,
                 "detail": (
-                    f"本轮抽取 {extracted_total} 条、排重 {dedupe_total} 条，轮次排重率 {dedupe_rate:.1%}"
-                    f" > 阈值 {dedupe_rate_threshold:.0%}：本地候选池已枯竭，须换打法而非原样重搜"
+                    f"本轮抓取 {extracted_total} 条，其中 {dedupe_total} 条与库内已有重复"
+                    f"（重复率 {dedupe_rate:.1%}，超过 {dedupe_rate_threshold:.0%} 警戒线）："
+                    "本地人才库基本找遍了，要换打法而不是原样重搜"
                 ),
                 "semantics": "轮次级复盘信号（>80%，可配置）；区别于渠道级 0 归因 zero_attribution=pool_saturated（>90%），两者并存、语义分层",
             }
         )
         verdict_reason += (
-            f"；轮次信号 {POOL_SATURATED_SIGNAL}：排重率 {dedupe_rate:.0%}（{dedupe_total}/{extracted_total}）"
-            f" > 阈值 {dedupe_rate_threshold:.0%}，本地池已枯竭，已生成扩池决策树（信号与判定正交）"
+            f"；本轮重复率 {dedupe_rate:.0%}（{dedupe_total}/{extracted_total}）"
+            f" 超过 {dedupe_rate_threshold:.0%} 警戒线，本地人才库基本找遍了，已给出扩圈建议（与上面的结论互不影响）"
         )
         expansion_decision_tree, tree_notes = build_expansion_decision_tree(
             strategy_doc=strategy_doc,
@@ -613,7 +615,7 @@ def build_strategy_review(
             f"{item.get('channel')}×{item.get('archetype_id')} 连续 {item.get('streak')} 轮 0 召回（非渠道故障）"
             for item in downweights
         )
-        verdict_reason += f"；渠道效能学习：{downweight_text}，已产出降权建议（留痕 strategy_v2.channel_downweights，配额调整待顾问确认）"
+        verdict_reason += f"；哪个渠道出人多：{downweight_text}，已给出降权建议（配额调整待顾问确认）"
         notes.append(
             "N4 渠道降权（仅建议不执行）：" + "；".join(str(item.get("recommendation") or "") for item in downweights)
         )
@@ -628,7 +630,7 @@ def build_strategy_review(
             "assessed_total": assessed_total,
             "high_score_total": high_total,
             "items": items,
-            "note": "复核结论请在被否人选详情页以「评分复核」记录，写回候选人事件供校准回看",
+            "note": "复核结论请在被否人选详情页以「评分复核」记录，写回候选人事件供后续回看核对",
         }
         verdict_reason += (
             f"；评估尺度复核：评估 {assessed_total} 人、高分 0，已附 {len(items)} 个被否人选评分证据链"
@@ -837,7 +839,7 @@ def compute_channel_downweights(
                 "rounds": _int(row.get("rounds")),
                 "recall_total": _int(row.get("recall_total")),
                 "reason": (
-                    f"{channel}×{archetype_id} 连续 {streak} 轮 0 召回且归因非渠道故障"
+                    f"{channel}×{archetype_id} 连续 {streak} 轮 0 召回且不是渠道故障"
                     f"（累计 {_int(row.get('rounds'))} 轮、总召回 {_int(row.get('recall_total'))}）"
                 ),
                 "recommendation": (
@@ -1207,7 +1209,7 @@ def generate_for_workflow(
 
 def _review_content(review: dict[str, Any]) -> str:
     lines = [
-        f"# 策略复盘（{review.get('generator')}）：{review.get('verdict_label')}",
+        f"# 没成的原因（{review.get('generator')}）：{review.get('verdict_label')}",
         "",
         f"- 工作流：{review.get('workflow_id')}（第 {review.get('round_index')} 轮，{review.get('client')}｜{review.get('job')}）",
         f"- 判定：{review.get('verdict_reason')}",
@@ -1218,7 +1220,7 @@ def _review_content(review: dict[str, Any]) -> str:
         lines.append(f"- 信号（{signal.get('signal')}）：{signal.get('detail')}")
     tree = review.get("expansion_decision_tree") or []
     if tree:
-        lines.append("- 扩池决策树（按序执行，逐项可采纳/拒绝）：")
+        lines.append("- 人不够时的扩圈建议（按顺序做，逐项可采纳/拒绝）：")
         for step in tree:
             lines.append(
                 f"  {step.get('order')}. [{step.get('action_type')}] {step.get('title')}：{step.get('detail')}"
@@ -1284,7 +1286,7 @@ def upsert_strategy_review(conn: Any, review: dict[str, Any]) -> str:
             (
                 _review_content(review),
                 _dumps(review),
-                f"策略复盘 v{review['version']}：{review.get('verdict_label')}",
+                f"没成的原因 v{review['version']}：{review.get('verdict_label')}",
                 artifact_id,
             ),
         )
@@ -1304,7 +1306,7 @@ def upsert_strategy_review(conn: Any, review: dict[str, Any]) -> str:
             workflow_id,
             None,
             ARTIFACT_TYPE,
-            f"策略复盘 v1：{review.get('verdict_label')}",
+            f"没成的原因 v1：{review.get('verdict_label')}",
             "text/markdown",
             None,
             _review_content(review),
@@ -1554,7 +1556,7 @@ def apply_diff_decisions(conn: Any, workflow_id: str, decisions: list[dict[str, 
         (workflow_id, ARTIFACT_TYPE),
     ).fetchone()
     if row is None:
-        raise LookupError(f"该工作流暂无策略复盘：{workflow_id}")
+        raise LookupError(f"该工作流还没生成原因分析：{workflow_id}")
     review = _loads(row["metadata_json"], {})
     revision_diff = [item for item in review.get("revision_diff") or [] if isinstance(item, dict)]
     diffs_by_id = {str(item.get("diff_id") or ""): item for item in revision_diff}

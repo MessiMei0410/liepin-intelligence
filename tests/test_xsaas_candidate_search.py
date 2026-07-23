@@ -3,7 +3,21 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from xsaas_candidate_search import DETAIL_JS, capture_candidate_details
+from xsaas_candidate_search import DETAIL_JS, capture_candidate_details, query_matches
+
+
+class XsaasQueryRoundBindingTest(unittest.TestCase):
+    """任务卡 UX-1 问题 B：每轮关键词与结果集做轮次绑定，防止串词错配。"""
+
+    def test_binding_accepts_exact_and_contained_selection(self) -> None:
+        self.assertTrue(query_matches("MPS 工程师", "MPS 工程师"))
+        self.assertTrue(query_matches("MPS", "MPS 工程师 深圳"))
+        self.assertTrue(query_matches("  MPS   工程师 ", "MPS 工程师"))
+
+    def test_binding_rejects_stale_or_empty_selection(self) -> None:
+        self.assertFalse(query_matches("MPS", ""))
+        self.assertFalse(query_matches("MPS", "DrMOS 驱动"))
+        self.assertFalse(query_matches("", "MPS"))
 
 
 class XsaasCandidateDetailCaptureTest(unittest.TestCase):

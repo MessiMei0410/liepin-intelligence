@@ -35,15 +35,15 @@ export function StrategyCoverage({ report }: { report: unknown }) {
   const percent = Math.round(parsed.coverageRate * 100)
   return <div className="strategy-coverage">
     <div className="strategy-coverage-head">
-      <b>种子要素消费</b>
-      <span>覆盖率 {percent}% · 已消费 {parsed.consumed.length} 项{parsed.unused.length ? ` · 未使用 ${parsed.unused.length} 项` : ''}</span>
+      <b>这些信息用上了吗</b>
+      <span>已采用 {parsed.consumed.length} 项（占 {percent}%）{parsed.unused.length ? ` · ${parsed.unused.length} 项没用上` : ''}</span>
     </div>
     {parsed.consumed.length > 0 && <details className="strategy-coverage-consumed">
-      <summary>已消费 {parsed.consumed.length} 项（点击展开）</summary>
+      <summary>已采用 {parsed.consumed.length} 项（点击展开）</summary>
       <div>{parsed.consumed.map(element => <span key={element}>{element}</span>)}</div>
     </details>}
     {parsed.unused.length > 0 && <div className="strategy-coverage-unused">
-      <b>未使用：{parsed.unused.map(item => item.element).join('、')}</b>
+      <b>没用上（附原因）：{parsed.unused.map(item => item.element).join('、')}</b>
       <ul>{parsed.unused.map(item => <li key={item.element}><b>{item.element}</b><span>{item.reason}</span></li>)}</ul>
     </div>}
   </div>

@@ -18,7 +18,7 @@ export function StrategyReviewExpansion({ workflowId, signals, tree }: { workflo
       </div>)}
     </div>}
     {steps.length > 0 && <div className="review-tree">
-      <div className="review-diffs-head"><b>扩池决策树</b><span>按序执行，逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
+      <div className="review-diffs-head"><b>人不够时的扩圈建议</b><span>按序执行，逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
       {steps.map(step => {
         const status = decisions[step.step_id] || step.status || 'pending'
         const summary = treeStepSummary(step)

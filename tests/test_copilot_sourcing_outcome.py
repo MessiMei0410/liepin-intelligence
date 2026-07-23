@@ -55,7 +55,7 @@ class OutcomeEchoLLM(FakeLLM):
                 f"入库新增 {channel['intake_new_count']}，评估 {channel['assessed_count']}"
             )
             if channel.get("zero_attribution_label"):
-                segment += f"；0 召回归因：{channel['zero_attribution_label']}"
+                segment += f"；0 召回原因：{channel['zero_attribution_label']}"
             parts.append(f"依据：{segment}。")
         return "\n".join(parts)
 

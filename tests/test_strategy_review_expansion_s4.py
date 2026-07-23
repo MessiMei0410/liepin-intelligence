@@ -133,9 +133,9 @@ class PoolSaturatedSignalTest(unittest.TestCase):
         assert signal["channels"][0]["channel"] == "liepin"
         # 口径分层留痕：轮次信号（>80%）与渠道级 0 归因（>90%）语义不同层
         assert "zero_attribution" in signal["semantics"]
-        # 信号写入 verdict 决策依据，且声明与判定正交
-        assert "pool_saturated" in review["verdict_reason"]
-        assert "正交" in review["verdict_reason"]
+        # 信号写入 verdict 决策依据（业务语言），且声明与结论互不影响
+        assert "重复率" in review["verdict_reason"]
+        assert "互不影响" in review["verdict_reason"]
         assert review["thresholds"]["pool_saturated_dedupe_rate"] == 0.8
 
     def test_79_percent_does_not_trigger(self) -> None:
@@ -365,7 +365,7 @@ class ExpansionTreePersistenceTest(ExpansionDbCase):
         assert loaded["review"]["signals"][0]["signal"] == "pool_saturated"
         assert len(loaded["review"]["expansion_decision_tree"]) == 5
         assert loaded["review"]["thresholds"]["pool_saturated_dedupe_rate"] == 0.8
-        assert "扩池决策树" in loaded["content"]
+        assert "人不够时的扩圈建议" in loaded["content"]
         assert "swap_keywords" in loaded["content"]
 
         # restricted 边界：策略对象含禁挖名单字面量，复盘输出（含决策树）绝不回泄

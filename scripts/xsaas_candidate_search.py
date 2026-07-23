@@ -120,14 +120,22 @@ SEARCH_JS = r"""
 """
 
 
+# 渲染完成信号与本轮关键词绑定（任务卡 UX-1 问题 B）：新标签页默认列表自带"N 条记录"，
+# 只看 hasCount && !loading 会在 Angular 提交查询前误判就绪，读到上一轮/默认列表（串词）。
+# 必须同时满足：已选条件出现本轮关键词 + 结果计数就绪 + loading 消失。
 SETTLE_JS = r"""
-(() => {
+(expected => {
+  const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
   const bodyText = document.body ? document.body.innerText || '' : '';
+  const selected = norm((bodyText.match(/已选条件\s+关键字：([^\n]+)/) || [])[1] || '');
+  const want = norm(expected);
   return {
     loading: bodyText.includes('loading...'),
     hasCount: /[0-9,]+条记录/.test(bodyText),
+    selected,
+    queryMatch: !!want && !!selected && (selected === want || selected.indexOf(want) >= 0),
   };
-})()
+})
 """
 
 
@@ -258,6 +266,16 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
     return stats
 
 
+def query_matches(query: str, selected: str) -> bool:
+    """轮次绑定校验：结果集的已选条件必须覆盖本轮关键词（归一化空白后相等或包含）。
+
+    防止串词：页面仍展示上一轮/默认列表时，已选条件不含本轮关键词，该轮结果不得并入。
+    """
+    want = " ".join(str(query or "").split())
+    got = " ".join(str(selected or "").split())
+    return bool(want) and bool(got) and (got == want or want in got)
+
+
 def run_search(port: int, queries: list[str], max_rows: int, capture_details: bool = True) -> dict[str, Any]:
     source = choose_authenticated_tab(port)
     browser_ws = load_json(f"http://127.0.0.1:{port}/json/version")["webSocketDebuggerUrl"]
@@ -274,37 +292,62 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             # 每组独立克隆标签页：X-SaaS 是 hash 路由 SPA，已选条件（筛选 chips）保留在页面内存态，
             # hash 跳转/location.reload 均无法可靠清零（round3/5/7/8 四次实证），
             # 只有全新标签页能保证每组在干净条件下执行（第 1 组历来干净即为此理）。
-            if cdp:
-                cdp.close()
-            if target_id:
-                browser.send("Target.closeTarget", {"targetId": target_id})
-            cdp, target_id = clone_authenticated_tab(port, source)
-            wait_for_list(cdp)
-            started = evaluate(cdp, f"({SEARCH_JS})({json_expr(query)})") or {}
-            if not started.get("ok"):
-                rounds.append({"query": query, "status": "failed", "reason": started.get("reason")})
-                continue
-            # 等待搜索结果渲染完成：固定 3.5s 会读到加载中间态（MPS 165 条实证渲染 >4s），
-            # 误判为 0 召回（round3/5/7/8 的 loading 未完成形态，R8 归因清单预言过）。
-            settled = False
-            deadline = time.time() + 15
-            while time.time() < deadline:
-                settle_state = evaluate(cdp, SETTLE_JS) or {}
-                if settle_state.get("hasCount") and not settle_state.get("loading"):
-                    settled = True
+            # 竞态硬门（任务卡 UX-1 问题 B）：渲染完成信号与本轮关键词绑定后才允许读结果；
+            # 20s 超时兜底并重试一次（全新标签页重来），仍失败记日志并标记"跳过"，不静默丢失。
+            round_entry: dict[str, Any] | None = None
+            round_candidates: list[dict[str, Any]] = []
+            attempts = 0
+            while attempts < 2 and round_entry is None:
+                attempts += 1
+                if cdp:
+                    cdp.close()
+                if target_id:
+                    browser.send("Target.closeTarget", {"targetId": target_id})
+                cdp, target_id = clone_authenticated_tab(port, source)
+                wait_for_list(cdp)
+                started = evaluate(cdp, f"({SEARCH_JS})({json_expr(query)})") or {}
+                if not started.get("ok"):
+                    # 搜索控件缺失：重试无意义，直接记录失败（非静默，进 rounds 日志）。
+                    round_entry = {"query": query, "status": "failed", "reason": started.get("reason"), "attempts": attempts}
                     break
-                time.sleep(0.8)
-            if not settled:
-                rounds.append({"query": query, "status": "failed", "reason": "settle_timeout"})
-                continue
-            extracted = evaluate(cdp, EXTRACT_JS) or {}
-            selected = str(extracted.get("selected_query") or "")
-            status = "completed" if query in selected else "stale_query"
-            candidates = extracted.get("candidates") if isinstance(extracted.get("candidates"), list) else []
-            for candidate in candidates[:max_rows]:
-                candidate["query"] = query
+                # 等待搜索结果渲染完成且属于本轮关键词：固定 sleep/只看计数会读到加载中间态或
+                # 默认列表（MPS 165 条实证渲染 >4s），误判 0 召回或把上一轮结果并入本轮。
+                settled = False
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    settle_state = evaluate(cdp, f"({SETTLE_JS})({json_expr(query)})") or {}
+                    if settle_state.get("queryMatch") and settle_state.get("hasCount") and not settle_state.get("loading"):
+                        settled = True
+                        break
+                    time.sleep(0.8)
+                if not settled:
+                    if attempts < 2:
+                        print(f"[xsaas_candidate_search] 关键词「{query}」第 {attempts} 次等待渲染超时（20s），换新标签页重试一次", file=sys.stderr)
+                        continue
+                    print(f"[xsaas_candidate_search] 关键词「{query}」重试后仍等待渲染超时，标记跳过（settle_timeout）", file=sys.stderr)
+                    round_entry = {"query": query, "status": "skipped", "reason": "settle_timeout", "attempts": attempts}
+                    break
+                extracted = evaluate(cdp, EXTRACT_JS) or {}
+                selected = str(extracted.get("selected_query") or "")
+                candidates = extracted.get("candidates") if isinstance(extracted.get("candidates"), list) else []
+                if not query_matches(query, selected):
+                    # 轮次绑定校验失败：结果集不属于本轮关键词（串词），不得并入，重试一次。
+                    if attempts < 2:
+                        print(f"[xsaas_candidate_search] 关键词「{query}」第 {attempts} 次结果与本轮不匹配（页面已选条件：{selected or '空'}），换新标签页重试一次", file=sys.stderr)
+                        continue
+                    print(f"[xsaas_candidate_search] 关键词「{query}」重试后结果仍不匹配（页面已选条件：{selected or '空'}），标记跳过（stale_query），结果不并入", file=sys.stderr)
+                    round_entry = {"query": query, "status": "stale_query", "selected_query": selected, "attempts": attempts}
+                    break
+                for candidate in candidates[:max_rows]:
+                    candidate["query"] = query
+                round_candidates = candidates[:max_rows]
+                round_entry = {"query": query, "status": "completed", "selected_query": selected, "result_count": int(extracted.get("result_count") or 0), "extracted_count": len(round_candidates), "attempts": attempts}
+            if round_entry is None:  # 防御：循环异常退出也不静默丢失该词
+                print(f"[xsaas_candidate_search] 关键词「{query}」未取得结果，标记跳过", file=sys.stderr)
+                round_entry = {"query": query, "status": "skipped", "reason": "settle_timeout", "attempts": attempts}
+            for candidate in round_candidates:
                 dedup.setdefault(str(candidate.get("xsaas_id")), candidate)
-            rounds.append({"query": query, "status": status, "selected_query": selected, "result_count": int(extracted.get("result_count") or 0), "extracted_count": len(candidates[:max_rows])})
+            rounds.append(round_entry)
         candidates = list(dedup.values())[:max_rows]
         detail_capture = capture_candidate_details(cdp, candidates, capture_details)
         return {"ok": True, "channel": "xsaas", "rounds": rounds, "detail_capture": detail_capture, "candidates": candidates}

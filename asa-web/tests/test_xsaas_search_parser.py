@@ -75,6 +75,15 @@ class XsaasSearchParserRegressionTest(unittest.TestCase):
         settle_loop = source.index("settled = False", loop)
         extract = source.index("EXTRACT_JS) or {}", loop)
         self.assertLess(settle_loop, extract)
+        # 任务卡 UX-1 问题 B 竞态硬门：渲染完成信号必须与本轮关键词绑定（queryMatch），
+        # 防止默认列表/上一轮结果被当作本轮结果（串词错配）。
+        self.assertIn("queryMatch", source)
+        self.assertIn("query_matches(query, selected)", source)
+        # 超时兜底 20s + 该词重试一次，仍失败记日志并标记"跳过"（skipped），不得静默丢失。
+        self.assertIn("time.time() + 20", source[settle_loop:extract])
+        self.assertIn("attempts < 2", source[loop:])
+        self.assertIn('"skipped"', source[loop:])
+        self.assertIn("file=sys.stderr", source[loop:])
 
 
 if __name__ == "__main__":

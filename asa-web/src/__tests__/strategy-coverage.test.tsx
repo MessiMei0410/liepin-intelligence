@@ -44,11 +44,11 @@ describe('parseStrategyCoverage', () => {
 describe('策略要素消费区（StrategyCoverage）', () => {
   it('渲染覆盖率头部、已消费折叠计数与未使用显式清单', () => {
     render(<StrategyCoverage report={coverageReport} />)
-    expect(screen.getByText('种子要素消费')).toBeInTheDocument()
-    expect(screen.getByText('覆盖率 67% · 已消费 4 项 · 未使用 2 项')).toBeInTheDocument()
-    expect(screen.getByText('已消费 4 项（点击展开）')).toBeInTheDocument()
-    // 未使用清单：N6 要求的“未使用：T2 客户整机厂、杭州优先”式标题 + 逐项原因
-    expect(screen.getByText('未使用：T2 客户整机厂、杭州优先')).toBeInTheDocument()
+    expect(screen.getByText('这些信息用上了吗')).toBeInTheDocument()
+    expect(screen.getByText('已采用 4 项（占 67%） · 2 项没用上')).toBeInTheDocument()
+    expect(screen.getByText('已采用 4 项（点击展开）')).toBeInTheDocument()
+    // 没用上清单：要素名单标题 + 逐项原因
+    expect(screen.getByText('没用上（附原因）：T2 客户整机厂、杭州优先')).toBeInTheDocument()
     expect(screen.getByText(/仅部分消费：1\/11 进入 step2/)).toBeInTheDocument()
     expect(screen.getByText(/schema 无地点策略落点/)).toBeInTheDocument()
     // 已消费折叠在 details 内，展开后可见全部要素
@@ -62,8 +62,8 @@ describe('策略要素消费区（StrategyCoverage）', () => {
 
   it('全部消费时无未使用区', () => {
     render(<StrategyCoverage report={{ consumed: ['T1 竞对原厂', '杭州优先'], unused: [], coverage_rate: 1 }} />)
-    expect(screen.getByText(/覆盖率 100%/)).toBeInTheDocument()
-    expect(screen.queryByText(/^未使用：/)).not.toBeInTheDocument()
+    expect(screen.getByText(/占 100%/)).toBeInTheDocument()
+    expect(screen.queryByText(/^没用上（附原因）：/)).not.toBeInTheDocument()
   })
 
   it('coverage_report 为 null（旧策略/无原型）时不渲染任何内容', () => {
@@ -79,14 +79,14 @@ describe('工作流策略区接线（WorkflowStrategy + coverage）', () => {
   it('传入 coverage_report 时策略区内出现消费检查区', () => {
     render(<WorkflowStrategy strategy={strategy} channels={channels} gates={{}} coverage={coverageReport} open={false} toggle={() => undefined} />)
     const section = document.querySelector('.workflow-strategy') as HTMLElement
-    expect(within(section).getByText('种子要素消费')).toBeInTheDocument()
-    expect(within(section).getByText('未使用：T2 客户整机厂、杭州优先')).toBeInTheDocument()
+    expect(within(section).getByText('这些信息用上了吗')).toBeInTheDocument()
+    expect(within(section).getByText('没用上（附原因）：T2 客户整机厂、杭州优先')).toBeInTheDocument()
   })
 
   it('不传 coverage（旧策略/无原型）时策略区照常渲染且无消费检查区', () => {
     render(<WorkflowStrategy strategy={strategy} channels={channels} gates={{}} open={false} toggle={() => undefined} />)
     const section = document.querySelector('.workflow-strategy') as HTMLElement
     expect(within(section).getByText('多渠道寻访策略')).toBeInTheDocument()
-    expect(within(section).queryByText('种子要素消费')).not.toBeInTheDocument()
+    expect(within(section).queryByText('这些信息用上了吗')).not.toBeInTheDocument()
   })
 })

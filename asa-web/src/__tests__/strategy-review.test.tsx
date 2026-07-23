@@ -15,8 +15,8 @@ const reviewPayload = {
   ok: true,
   artifact_id: 'strategy_review_wf-1',
   workflow_id: 'wf-1',
-  title: '策略复盘 v1：策略问题：关键词/目标池太窄',
-  content: '# 策略复盘',
+  title: '没成的原因 v1：策略问题：关键词/目标池太窄',
+  content: '# 没成的原因',
   review: {
     verdict: 'strategy_too_narrow',
     verdict_label: '策略问题：关键词/目标池太窄',
@@ -39,7 +39,7 @@ const reviewPayload = {
         channel: 'xsaas', status: 'completed', recall_count: 0, unique_count: 0, intake_new_count: 0,
         assessed_count: 0, high_score_count: 0, detail_complete: 0, detail_partial: 0, detail_failed: 0,
         detail_failed_ratio: null, zero_attribution: 'session_expired', finding: 'execution_issue',
-        note: '0 召回归因 session_expired（执行/渠道类）',
+        note: '0 召回：登录态失效，需重新登录该渠道（执行/渠道类）',
       },
     ],
     revision_diff: [
@@ -66,16 +66,16 @@ const reviewPayload = {
 
 const insufficientPayload = {
   ...reviewPayload,
-  title: '策略复盘 v1：数据不足，不硬判',
+  title: '没成的原因 v1：数据不足，不硬判',
   review: {
     ...reviewPayload.review,
     verdict: 'insufficient_data',
     verdict_label: '数据不足，不硬判',
-    verdict_reason: '该轮未记录渠道漏斗明细，无法判定策略/执行归因，不硬判',
+    verdict_reason: '该轮未记录渠道漏斗明细，无法判断是策略问题还是执行问题，不硬下结论',
     degraded: true,
     per_channel_findings: [],
     revision_diff: [],
-    notes: ['可得证据（评估表）：评估 6 人、高分 2 人；仅作参考，不足以支撑策略/执行归因'],
+    notes: ['可得证据（评估表）：评估 6 人、高分 2 人；仅作参考，不足以判断是策略问题还是执行问题'],
   },
 }
 
@@ -98,7 +98,7 @@ describe('策略复盘展示（StrategyReview）', () => {
     window.localStorage.setItem(decisionsKey, JSON.stringify({ 'diff-1': 'accepted' }))
     stubReviewFetch()
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 10:05" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     // 判定与理由
     expect(within(section).getByText('策略问题：关键词/目标池太窄')).toBeInTheDocument()
     expect(within(section).getByText(/本轮总召回 12 < step5 预期总量 40/)).toBeInTheDocument()
@@ -112,7 +112,7 @@ describe('策略复盘展示（StrategyReview）', () => {
     expect(within(section).getByText('X-SaaS')).toBeInTheDocument()
     expect(within(section).getByText('召回 12 · 入库 8 · 评估 6 · 高分 2')).toBeInTheDocument()
     expect(within(section).getByText('执行/渠道')).toBeInTheDocument()
-    expect(within(section).getByText('0 召回归因 session_expired（执行/渠道类）')).toBeInTheDocument()
+    expect(within(section).getByText('0 召回：登录态失效，需重新登录该渠道（执行/渠道类）')).toBeInTheDocument()
     // 修订 diff 列表：step 中文名 + 操作 + 内容 + reason
     expect(within(section).getByText('目标公司池 · 增列')).toBeInTheDocument()
     expect(within(section).getByText('T2：甲公司、乙公司')).toBeInTheDocument()
@@ -130,14 +130,14 @@ describe('策略复盘展示（StrategyReview）', () => {
   it('insufficient_data + degraded 如实呈现，不夸大结论', async () => {
     stubReviewFetch(insufficientPayload)
     render(<StrategyReview workflowId="wf-1" status="completed" updatedAt="" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     expect(within(section).getByText('数据不足，不硬判')).toBeInTheDocument()
-    expect(within(section).getByText(/无法判定策略\/执行归因，不硬判/)).toBeInTheDocument()
+    expect(within(section).getByText(/无法判断是策略问题还是执行问题/)).toBeInTheDocument()
     expect(within(section).getByText('证据不完整，结论仅供参考')).toBeInTheDocument()
     expect(within(section).queryByText('修订建议')).not.toBeInTheDocument()
   })
 
-  it('404 显示“该轮未生成策略复盘”，点击生成复盘调 rebuild 后重新拉取', async () => {
+  it('404 显示“这轮还没分析没成的原因”，点击分析按钮调 rebuild 后重新拉取', async () => {
     const user = userEvent.setup()
     let gets = 0
     const fetchMock = vi.fn<typeof fetch>(async input => {
@@ -146,12 +146,12 @@ describe('策略复盘展示（StrategyReview）', () => {
         return mockResponse({ ok: true, workflow_id: 'wf-1', artifact_id: 'strategy_review_wf-1', review: reviewPayload.review })
       }
       gets += 1
-      return gets === 1 ? mockResponse({ detail: '该工作流暂无策略复盘：wf-1' }, false, 404) : mockResponse(reviewPayload)
+      return gets === 1 ? mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404) : mockResponse(reviewPayload)
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
-    expect(await screen.findByText('该轮未生成策略复盘。可基于本轮渠道漏斗与评估结果补生成。')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '生成复盘' }))
+    expect(await screen.findByText('这轮还没分析没成的原因。可以基于本轮各渠道的结果和评估情况补一份。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '分析没成的原因' }))
     const rebuildCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/strategy-review/rebuild'))
     expect(rebuildCall).toBeDefined()
     expect((rebuildCall?.[1] as RequestInit).method).toBe('POST')
@@ -172,7 +172,7 @@ describe('策略复盘展示（StrategyReview）', () => {
 
 describe('typed client：strategyReview / rebuildStrategyReview', () => {
   it('404 返回 null，其余错误携带 status 抛出', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ detail: '该工作流暂无策略复盘：wf-1' }, false, 404)))
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404)))
     await expect(api.strategyReview('wf-1')).resolves.toBeNull()
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ detail: 'boom' }, false, 500)))
     await expect(api.strategyReview('wf-1')).rejects.toMatchObject({ status: 500 })
@@ -194,7 +194,7 @@ describe('修改计划对话框接 revision_diff（RevisePlanDialog）', () => {
   const openDialog = (onSubmit: (instruction: string) => void) => {
     stubReviewFetch()
     render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={onSubmit} />)
-    return screen.findByLabelText('策略复盘修订建议')
+    return screen.findByLabelText('修订建议')
   }
 
   it('对话框上部展示 diff 条目：step 中文名 + 操作 + 内容 + reason', async () => {
@@ -252,7 +252,7 @@ describe('修改计划对话框接 revision_diff（RevisePlanDialog）', () => {
     const onSubmit = vi.fn()
     const fetchMock = stubReviewFetch()
     render(<RevisePlanDialog onCancel={() => undefined} onSubmit={onSubmit} />)
-    expect(screen.queryByLabelText('策略复盘修订建议')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('修订建议')).not.toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
     await user.type(screen.getByRole('textbox'), '  提高学历门槛 ')
     await user.click(screen.getByRole('button', { name: '确认修改' }))
@@ -264,7 +264,7 @@ describe('修改计划对话框接 revision_diff（RevisePlanDialog）', () => {
     const onSubmit = vi.fn()
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => { throw new Error('network down') }))
     render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={onSubmit} />)
-    expect(screen.queryByLabelText('策略复盘修订建议')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('修订建议')).not.toBeInTheDocument()
     await user.type(screen.getByRole('textbox'), '提高学历门槛')
     await user.click(screen.getByRole('button', { name: '确认修改' }))
     expect(onSubmit).toHaveBeenCalledWith('提高学历门槛')
@@ -283,7 +283,7 @@ describe('工作流面板：调整条件再搜 → diff 采纳 → revise 提交
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
     await user.click(screen.getByRole('button', { name: '修改计划' }))
     const dialog = await screen.findByRole('dialog')
-    const region = await within(dialog).findByLabelText('策略复盘修订建议')
+    const region = await within(dialog).findByLabelText('修订建议')
     await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
     await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
@@ -300,7 +300,7 @@ describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => 
     const user = userEvent.setup()
     const fetchMock = stubReviewFetch()
     render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
-    const region = await screen.findByLabelText('策略复盘修订建议')
+    const region = await screen.findByLabelText('修订建议')
     await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
     const patchCall = fetchMock.mock.calls.find(
       ([input, init]) => String(input).includes('/strategy-review/diffs') && (init as RequestInit | undefined)?.method === 'PATCH',
@@ -323,7 +323,7 @@ describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => 
       return mockResponse(reviewPayload)
     }))
     render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
-    const region = await screen.findByLabelText('策略复盘修订建议')
+    const region = await screen.findByLabelText('修订建议')
     await user.click(within(region).getAllByRole('button', { name: '拒绝' })[1])
     // API 失败不阻断：按钮态、标记与本地缓存照常
     expect(within(region).getAllByRole('button', { name: '拒绝' })[1]).toHaveAttribute('aria-pressed', 'true')
@@ -345,7 +345,7 @@ describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => 
     }
     stubReviewFetch(serverPayload)
     render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
-    const region = await screen.findByLabelText('策略复盘修订建议')
+    const region = await screen.findByLabelText('修订建议')
     // 后端 diff-1=rejected 覆盖本地 accepted；diff-2 后端 pending 保留本地 rejected 暂存
     await waitFor(() => expect(within(region).getAllByRole('button', { name: '拒绝' })[0]).toHaveAttribute('aria-pressed', 'true'))
     expect(within(region).getAllByRole('button', { name: '采纳' })[0]).toHaveAttribute('aria-pressed', 'false')
@@ -383,7 +383,7 @@ describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => 
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
     await user.click(screen.getByRole('button', { name: '修改计划' }))
     const dialog = await screen.findByRole('dialog')
-    const region = await within(dialog).findByLabelText('策略复盘修订建议')
+    const region = await within(dialog).findByLabelText('修订建议')
     await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
     await user.click(within(region).getAllByRole('button', { name: '拒绝' })[1])
     fetchMock.mockClear()

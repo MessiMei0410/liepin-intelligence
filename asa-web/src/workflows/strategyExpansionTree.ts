@@ -46,14 +46,14 @@ const ACTION_LABELS: Record<string, string> = {
   expand_pool: '扩池',
   relax_condition: '放宽条件',
   rebalance_channel: '渠道再平衡',
-  escalate_mapping: '转 Mapping 校准',
+  escalate_mapping: '转 Mapping 直挖',
 }
 
 export const expansionActionLabel = (actionType: string): string => ACTION_LABELS[actionType] || actionType
 
 const ESCALATE_ACTION_LABELS: Record<string, string> = {
   mapping_direct_sourcing: 'Mapping 直挖',
-  client_direction_calibration: '与客户校准方向',
+  client_direction_calibration: '与客户确认方向',
 }
 
 // params 缺省占位：后端只取真实值、取不到留空，前端如实显示待补充，不编造。

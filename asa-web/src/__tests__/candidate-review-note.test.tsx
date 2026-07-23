@@ -57,14 +57,14 @@ describe('评分复核快捷记录（S4-5 N5）', () => {
   it('点选快捷结论后 commit 携带结论 note（经既有 commit 链路）', async () => {
     const { user, changed, dialog } = await openDialog()
     await user.click(within(dialog).getByRole('button', { name: '尺太严' }))
-    expect(within(dialog).getByRole('textbox', { name: '结论备注' })).toHaveValue('【评分复核】结论：尺太严，建议校准放宽')
+    expect(within(dialog).getByRole('textbox', { name: '结论备注' })).toHaveValue('【评分复核】结论：尺太严，建议放宽尺度')
     await user.click(within(dialog).getByRole('button', { name: '确认评分复核' }))
     expect(await screen.findByText('评分复核结论已记录到候选人事件。')).toBeInTheDocument()
     expect(commitBody()).toMatchObject({
       candidate_id: 1,
       action: 'review',
       preflight_token: 'tok-review',
-      note: '【评分复核】结论：尺太严，建议校准放宽',
+      note: '【评分复核】结论：尺太严，建议放宽尺度',
     })
     expect(changed).toHaveBeenCalledTimes(1)
   })

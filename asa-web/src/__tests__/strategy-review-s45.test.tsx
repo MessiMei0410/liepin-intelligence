@@ -12,8 +12,8 @@ const reviewPayload = {
   ok: true,
   artifact_id: 'strategy_review_wf-1',
   workflow_id: 'wf-1',
-  title: '策略复盘 v1：高分率偏低',
-  content: '# 策略复盘',
+  title: '没成的原因 v1：高分率偏低',
+  content: '# 没成的原因',
   review: {
     verdict: 'quality_gap',
     verdict_label: '高分率偏低：画像偏差（策略）或评分偏差（评估）',
@@ -38,7 +38,7 @@ const reviewPayload = {
     channel_downweights: [
       {
         channel: 'xsaas', archetype_id: 'tme_computing_power', streak: 2, rounds: 2, recall_total: 0,
-        reason: 'xsaas×tme_computing_power 连续 2 轮 0 召回且归因非渠道故障（累计 2 轮、总召回 0）',
+        reason: 'xsaas×tme_computing_power 连续 2 轮 0 召回且不是渠道故障（累计 2 轮、总召回 0）',
         recommendation: '建议 xsaas 在原型 tme_computing_power 下查询配额降权（如下轮 queries 减半），配额让给高效渠道；执行待顾问确认',
       },
     ],
@@ -62,7 +62,7 @@ const reviewPayload = {
           deductions: [],
         },
       ],
-      note: '复核结论请在被否人选详情页以「评分复核」记录，写回候选人事件供校准回看',
+      note: '复核结论请在被否人选详情页以「评分复核」记录，写回候选人事件供后续回看核对',
     },
     notes: [],
     generated_at: '2026-07-23 10:00:00',
@@ -86,12 +86,12 @@ describe('S4-5 复盘卡：N4 渠道降权建议', () => {
   it('渲染降权建议：渠道×原型、连续轮次、原因与仅建议不执行提示', async () => {
     stubReviewFetch()
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 10:05" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     const block = await within(section).findByLabelText('渠道降权建议')
     expect(within(block).getByText(/连续 0 召回（非渠道故障）≥2 轮 · 仅建议不执行/)).toBeInTheDocument()
     expect(within(block).getByText('X-SaaS × tme_computing_power')).toBeInTheDocument()
     expect(within(block).getByText('连续 2 轮 0 召回')).toBeInTheDocument()
-    expect(within(block).getByText(/归因非渠道故障（累计 2 轮、总召回 0）/)).toBeInTheDocument()
+    expect(within(block).getByText(/不是渠道故障（累计 2 轮、总召回 0）/)).toBeInTheDocument()
     expect(within(block).getByText(/queries 减半/)).toBeInTheDocument()
     // 头部"仅建议不执行"提示与条目建议各出现一次
     expect(within(block).getAllByText(/待顾问确认/)).toHaveLength(2)
@@ -100,7 +100,7 @@ describe('S4-5 复盘卡：N4 渠道降权建议', () => {
   it('无降权（空数组）不渲染降权区', async () => {
     stubReviewFetch({ ...reviewPayload, review: { ...reviewPayload.review, channel_downweights: [] } })
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     await within(section).findByText('高分率偏低：画像偏差（策略）或评分偏差（评估）')
     expect(within(section).queryByLabelText('渠道降权建议')).not.toBeInTheDocument()
   })
@@ -110,7 +110,7 @@ describe('S4-5 复盘卡：N5 评估尺度复核', () => {
   it('渲染被否人选名单与评分证据链摘要，并附"尺度复核"提示', async () => {
     stubReviewFetch()
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 10:05" openCandidate={() => undefined} />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     const block = await within(section).findByLabelText('评估尺度复核')
     // 头部：评估数 · 高分 0 · prompt
     expect(within(block).getByText(/评估 5 人 · 高分 0 · 是尺严还是人不行/)).toBeInTheDocument()
@@ -136,7 +136,7 @@ describe('S4-5 复盘卡：N5 评估尺度复核', () => {
     const openCandidate = vi.fn()
     stubReviewFetch()
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" openCandidate={openCandidate} />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     const block = await within(section).findByLabelText('评估尺度复核')
     await user.click(within(block).getAllByRole('button', { name: /尺度复核/ })[0])
     expect(openCandidate).toHaveBeenCalledTimes(1)
@@ -152,7 +152,7 @@ describe('S4-5 复盘卡：N5 评估尺度复核', () => {
       },
     })
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     const block = await within(section).findByLabelText('评估尺度复核')
     expect(within(block).getByText('未取到被否人选评分证据链，请在候选人列表人工抽查。')).toBeInTheDocument()
   })
@@ -160,7 +160,7 @@ describe('S4-5 复盘卡：N5 评估尺度复核', () => {
   it('未触发（evaluation_review 为 null）不渲染复核区', async () => {
     stubReviewFetch({ ...reviewPayload, review: { ...reviewPayload.review, evaluation_review: null } })
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
-    const section = await screen.findByRole('region', { name: '策略复盘' })
+    const section = await screen.findByRole('region', { name: '没成的原因' })
     await within(section).findByText('高分率偏低：画像偏差（策略）或评分偏差（评估）')
     expect(within(section).queryByLabelText('评估尺度复核')).not.toBeInTheDocument()
   })

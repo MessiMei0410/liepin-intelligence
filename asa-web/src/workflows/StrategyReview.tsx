@@ -44,7 +44,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate }:
       setMissing(result === null)
       setError('')
     } catch {
-      setError('复盘加载失败，稍后自动重试')
+      setError('原因分析加载失败，稍后自动重试')
     }
   }, [workflowId, reviewable])
 
@@ -64,7 +64,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate }:
   const evaluationReview = review?.evaluation_review || null
   const notes = review?.notes || []
   const decisions = loadDiffDecisions(workflowId)
-  const headSummary = error && !review ? '复盘加载失败' : review ? review.verdict_label : missing ? '该轮未生成策略复盘' : '复盘加载中…'
+  const headSummary = error && !review ? '原因分析加载失败' : review ? review.verdict_label : missing ? '这轮还没分析没成的原因' : '正在分析…'
 
   const rebuild = async () => {
     setBuilding(true)
@@ -73,17 +73,17 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate }:
       await api.rebuildStrategyReview(workflowId)
       await load()
     } catch (cause) {
-      setError(humanizeActionError(cause, '生成复盘失败，请重试。'))
+      setError(humanizeActionError(cause, '分析失败，请重试。'))
     } finally {
       setBuilding(false)
     }
   }
 
-  return <section className="workflow-insight workflow-review" aria-label="策略复盘">
+  return <section className="workflow-insight workflow-review" aria-label="没成的原因">
     <header>
       <span className="insight-icon"><ClipboardCheck /></span>
       <div>
-        <span>策略复盘</span>
+        <span>没成的原因</span>
         <b>{headSummary}</b>
         {review && <small>{`v${review.version || 1} · 生成于 ${review.generated_at || '未知时间'}`}</small>}
       </div>
@@ -91,12 +91,12 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate }:
       {error && <span className="tag warn">{error}</span>}
     </header>
     {missing && !error && <div className="insight-empty">
-      <span>该轮未生成策略复盘。可基于本轮渠道漏斗与评估结果补生成。</span>
+      <span>这轮还没分析没成的原因。可以基于本轮各渠道的结果和评估情况补一份。</span>
       <button className="button" disabled={building} onClick={() => void rebuild()}>
-        {building ? <LoaderCircle className="spin" /> : <RefreshCw />}生成复盘
+        {building ? <LoaderCircle className="spin" /> : <RefreshCw />}分析没成的原因
       </button>
     </div>}
-    {!review && !missing && !error && <div className="insight-empty"><LoaderCircle className="spin" />复盘加载中…</div>}
+    {!review && !missing && !error && <div className="insight-empty"><LoaderCircle className="spin" />正在分析…</div>}
     {review && <>
       <div className="review-verdict">
         <p>{review.verdict_reason}</p>

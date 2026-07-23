@@ -195,11 +195,11 @@ class DownweightTraceTest(ReviewDbCase):
         assert entry["channel"] == "xsaas" and entry["archetype_id"] == "a1"
         assert entry["streak"] == 2 and entry["rounds"] == 2
         assert "连续 2 轮 0 召回" in entry["reason"]
-        assert "非渠道故障" in entry["reason"]
+        assert "不是渠道故障" in entry["reason"]
         assert "降权" in entry["recommendation"] and "顾问确认" in entry["recommendation"], (
             "本期仅建议不执行：配额调整待顾问确认"
         )
-        assert "渠道效能学习" in second["verdict_reason"], "降权写入判定依据"
+        assert "哪个渠道出人多" in second["verdict_reason"], "降权写入判定依据"
         # 高效渠道（liepin 有召回）不降权
         assert all(item["channel"] != "liepin" for item in downweights)
         # 复盘暴露累积快照（X-SaaS × a1 累计数据可见）
@@ -272,7 +272,7 @@ class DownweightPureFunctionTest(unittest.TestCase):
             row["dedupe_count"] = 85 if row["channel"] == "liepin" else 0
         review = _build(rows, channel_downweights=downweights)
         assert review["channel_downweights"] == downweights
-        assert "渠道效能学习" in review["verdict_reason"]
+        assert "哪个渠道出人多" in review["verdict_reason"]
         rebalance = next(step for step in review["expansion_decision_tree"] if step["action_type"] == "rebalance_channel")
         assert rebalance["params"]["downweights"][0]["streak"] == 2
         assert review["thresholds"]["zero_streak_downweight"] == 2
@@ -280,7 +280,7 @@ class DownweightPureFunctionTest(unittest.TestCase):
     def test_build_review_without_downweights_keeps_empty_list(self) -> None:
         review = _build([_funnel_row("liepin", recall=35, unique=20, intake_new=20, assessed=10, high=5, detail=(20, 0, 0))])
         assert review["channel_downweights"] == []
-        assert "渠道效能学习" not in review["verdict_reason"]
+        assert "哪个渠道出人多" not in review["verdict_reason"]
 
 
 if __name__ == "__main__":

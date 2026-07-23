@@ -94,8 +94,8 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
         </header>
         <div className="action-dialog-body">
           {diffs.length > 0 && (
-            <div className="revise-diffs" aria-label="策略复盘修订建议">
-              <div className="revise-diffs-head"><b>策略复盘修订建议</b><span>采纳将预填进修改意见，决策随提交进入学习信号</span></div>
+            <div className="revise-diffs" aria-label="修订建议">
+              <div className="revise-diffs-head"><b>修订建议</b><span>采纳将预填进修改意见，决策随提交进入学习信号</span></div>
               {diffs.map(diff => {
                 const decision = decisions[diff.diff_id]
                 const content = diffContentText(diff)
@@ -127,8 +127,8 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
             </div>
           )}
           {treeSteps.length > 0 && (
-            <div className="revise-diffs revise-tree" aria-label="扩池决策树">
-              <div className="revise-diffs-head"><b>扩池决策树</b><span>采纳将预填进修改意见，决策随提交并入指令</span></div>
+            <div className="revise-diffs revise-tree" aria-label="人不够时的扩圈建议">
+              <div className="revise-diffs-head"><b>人不够时的扩圈建议</b><span>采纳将预填进修改意见，决策随提交并入指令</span></div>
               {treeSteps.map(step => {
                 const decision = treeDecisions[step.step_id]
                 const summary = treeStepSummary(step)
