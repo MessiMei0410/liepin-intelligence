@@ -1,0 +1,609 @@
+{
+  "meta": {
+    "version": "v1.2",
+    "created": "2026-07-23",
+    "case_id": "case_changyue_equipment",
+    "source": "长越需求-to猎头.xlsx（客户 JD，无锚点资料）",
+    "input_level": "L3（仅 JD；友商/客户锚点全部缺失，按 L3 流程推断并标注待确认）",
+    "contrast_with": "case_silan_tme（L1 输入，器件原厂市场岗）——本 case 用于校准 L3 推断流程与研发岗迁移路径优先级",
+    "usage": "case 库第二个样本；演示锚点缺失时的主动提问清单与推断标记",
+    "calibrated": "2026-07-23 顾问口头校准 4 项全部确认",
+    "v1.2_note": "T1 国产池并入公司图谱（SEMICON 2025 江浙沪 589 家）数据支撑版名单；与 v1.1 顾问名单互补，执行时合并去重"
+  },
+  "client_profile": {
+    "client": "长越",
+    "inferred_track": "先进封装键合设备（flip-chip bonding / die bonding）",
+    "inference_evidence": "JD 关键词：X/Y/θ/Z 多轴精密平台、纳米级重复定位、键合生产周期、倒装芯片键合、化学品供应系统（甲酸等腐蚀性流体）、SEMI S2/S8",
+    "inference_confidence": "high（设备类型）；medium（具体产品线边界）——待顾问确认"
+  },
+  "positions": [
+    {
+      "title": "自动化软件高级工程师",
+      "salary_band": "25-35k×16薪",
+      "location": "杭州",
+      "headcount": 1,
+      "experience": "5年以上",
+      "age_limit": "40岁以内",
+      "essence": "键合设备整机运动控制软件负责人：多轴实时运动控制、PID/自适应闭环（压力/高度/温控）、纳米级定位、时序同步、节拍优化、诊断校准",
+      "hard_requirements": [
+        "实时运动控制/机器人控制 5 年+",
+        "C/C++、Python",
+        "IEC 61131-3 PLC（TwinCAT/Codesys）",
+        "EtherCAT",
+        "RTOS",
+        "多轴运动学与参数整定"
+      ],
+      "anchor_analysis": {
+        "customer_of_client": "封测厂/先进封装产线（买键合设备的人）——JD 未给，推断",
+        "product_tech": [
+          "运动控制",
+          "EtherCAT",
+          "TwinCAT",
+          "RTOS",
+          "多轴平台",
+          "闭环控制"
+        ],
+        "competitors": "缺失，见 target_company_pool.T1（推断，待校准）",
+        "scene": "半导体封装设备"
+      },
+      "target_company_pool": {
+        "T1_same_layer": {
+          "path": "同层迁移：键合/封装设备同行的运动控制软件工程师",
+          "confidence": "medium-high（v1.1 顾问确认方向：增补国产厂商；具体名单可在执行中再增删）",
+          "rationale": "技术栈完全对口（多轴平台+EtherCAT+实时控制），设备场景一致",
+          "companies_international": [
+            "ASMPT",
+            "K&S（库力索法）",
+            "BESI",
+            "新益昌",
+            "凯格精机",
+            "华封科技",
+            "其他 die bonder/wire bonder 设备商"
+          ],
+          "companies_domestic_added_v1.1": [
+            {
+              "name": "恩纳基智能装备",
+              "note": "flip-chip 键合设备（无锡），来自嘉驰协同簿客户名单"
+            },
+            {
+              "name": "华封科技",
+              "note": "国产 flip-chip 键合设备"
+            },
+            {
+              "name": "普莱信",
+              "note": "国产固晶/键合设备"
+            },
+            {
+              "name": "大族封测",
+              "note": "大族激光旗下封测设备"
+            },
+            {
+              "name": "快克智能",
+              "note": "精密焊接/半导体封装设备"
+            },
+            {
+              "name": "拓荆科技",
+              "note": "混合键合（hybrid bonding）方向"
+            },
+            {
+              "name": "晶盛机电",
+              "note": "有键合设备产品线（嘉驰簿内有键合设备机械经理岗）"
+            },
+            {
+              "name": "世禹/景焱",
+              "note": "国产封装设备（嘉驰簿客户目标池中出现）"
+            }
+          ],
+          "companies_domestic_databacked_v1.2": [
+            {
+              "name": "浙江达仕科技",
+              "note": "TCB 热压覆晶键合，覆盖 CoS/CoW/Big Die/HBM 先进封装量产——与长越方向最接近"
+            },
+            {
+              "name": "上海光键",
+              "note": "临时/永久/晶圆级键合、Hybrid Bonding"
+            },
+            {
+              "name": "苏州艾科瑞思",
+              "note": "装片机/固晶机/分选机及晶圆级混合键合"
+            },
+            {
+              "name": "常州铭赛机器人",
+              "note": "键合固晶+晶圆搬运 AMHS"
+            },
+            {
+              "name": "芯钛科（上海）",
+              "note": "贴膜、临时键合/解键合、EFEM/Sorter"
+            },
+            {
+              "name": "博纳半导体（浙江）",
+              "note": "晶圆键合、解键合、清洗和先进封装设备"
+            },
+            {
+              "name": "嘉兴景焱",
+              "note": "FO/FC 固晶、超薄芯片堆叠（v1.1 已列，图谱确认）"
+            }
+          ]
+        },
+        "T2_adjacent": {
+          "path": "相邻迁移：其他精密设备/半导体设备的运动控制岗",
+          "companies": [
+            "拓荆/中微/北方华创等设备商运动控制岗",
+            "机器人/直线电机平台公司",
+            "精密测量设备公司"
+          ],
+          "confidence": "medium",
+          "rationale": "技术栈对口但需补封装工艺场景"
+        },
+        "T3_reverse": {
+          "path": "逆向迁移：封测厂设备/工艺工程师转设备商研发",
+          "companies": [
+            "长电科技",
+            "通富微电",
+            "华天科技",
+            "甬矽电子"
+          ],
+          "confidence": "low——研发岗逆向迁移成功率通常低，待顾问确认是否启用",
+          "rationale": "懂设备使用端，但实时控制软件研发能力未必够",
+          "enabled": "per_position_decision",
+          "v1.1_rule": "默认关闭；有的岗位可逆向、有的只能同行，开工时顾问逐岗裁决"
+        }
+      },
+      "keyword_groups": [
+        {
+          "group": "motion_control_core",
+          "targets": "T1/T2",
+          "terms": [
+            "运动控制",
+            "EtherCAT",
+            "TwinCAT",
+            "Codesys",
+            "多轴",
+            "RTOS",
+            "闭环控制",
+            "键合",
+            "固晶",
+            "贴片机"
+          ]
+        },
+        {
+          "group": "equipment_scene",
+          "targets": "T1",
+          "terms": [
+            "键合机",
+            "固晶机",
+            "die bonder",
+            "封装设备",
+            "半导体设备",
+            "运动控制"
+          ]
+        }
+      ],
+      "location_policy": "杭州（设备公司研发岗通常要求 onsite，异地迁移意愿是主要变数）",
+      "risks": [
+        "ASMPT/K&S 等外资在杭州无研发中心，T1 池主要在苏州/深圳/上海，异地沟通成本是本案核心难点——待顾问确认"
+      ],
+      "priority_v1.1": 1,
+      "location_policy_v1.1": "异地可以（relocation 细节面议）；杭州本地优先沟通，异地人选正常推进"
+    },
+    {
+      "title": "电气高级工程师（化学品供应系统）",
+      "salary_band": "20-30k×16薪",
+      "location": "杭州",
+      "headcount": 1,
+      "experience": "5年以上",
+      "age_limit": "40岁以内",
+      "essence": "化学品/危险气体输送系统的电气与控制设计：防爆、SIS 安全联锁、PLC/HMI、SEMI S2/S8 合规、腐蚀性流体材料兼容",
+      "hard_requirements": [
+        "化学品供给/危险气体系统电气设计 5 年+",
+        "PLC/HMI（TIA Portal/Studio 5000）",
+        "防爆 ATEX/Ex",
+        "SEMI S2",
+        "SIS/安全联锁"
+      ],
+      "target_company_pool": {
+        "T1_same_layer": {
+          "path": "同层迁移：特气/化学品输送系统公司",
+          "confidence": "medium-high（v1.1 顾问确认方向：增补国产厂商；具体名单可在执行中再增删）",
+          "companies_international": [
+            "至纯科技",
+            "正帆科技",
+            "亚翔集成",
+            "其他 gas/chemical delivery 系统商"
+          ],
+          "companies_domestic_added_v1.1": [
+            {
+              "name": "恩纳基智能装备",
+              "note": "flip-chip 键合设备（无锡），来自嘉驰协同簿客户名单"
+            },
+            {
+              "name": "华封科技",
+              "note": "国产 flip-chip 键合设备"
+            },
+            {
+              "name": "普莱信",
+              "note": "国产固晶/键合设备"
+            },
+            {
+              "name": "大族封测",
+              "note": "大族激光旗下封测设备"
+            },
+            {
+              "name": "快克智能",
+              "note": "精密焊接/半导体封装设备"
+            },
+            {
+              "name": "拓荆科技",
+              "note": "混合键合（hybrid bonding）方向"
+            },
+            {
+              "name": "晶盛机电",
+              "note": "有键合设备产品线（嘉驰簿内有键合设备机械经理岗）"
+            },
+            {
+              "name": "世禹/景焱",
+              "note": "国产封装设备（嘉驰簿客户目标池中出现）"
+            }
+          ],
+          "companies_domestic_databacked_v1.2": [
+            {
+              "name": "浙江达仕科技",
+              "note": "TCB 热压覆晶键合，覆盖 CoS/CoW/Big Die/HBM 先进封装量产——与长越方向最接近"
+            },
+            {
+              "name": "上海光键",
+              "note": "临时/永久/晶圆级键合、Hybrid Bonding"
+            },
+            {
+              "name": "苏州艾科瑞思",
+              "note": "装片机/固晶机/分选机及晶圆级混合键合"
+            },
+            {
+              "name": "常州铭赛机器人",
+              "note": "键合固晶+晶圆搬运 AMHS"
+            },
+            {
+              "name": "芯钛科（上海）",
+              "note": "贴膜、临时键合/解键合、EFEM/Sorter"
+            },
+            {
+              "name": "博纳半导体（浙江）",
+              "note": "晶圆键合、解键合、清洗和先进封装设备"
+            },
+            {
+              "name": "嘉兴景焱",
+              "note": "FO/FC 固晶、超薄芯片堆叠（v1.1 已列，图谱确认）"
+            }
+          ]
+        },
+        "T2_adjacent": {
+          "path": "相邻迁移：fab 厂务/二次配、半导体设备公司电气岗",
+          "companies": [
+            "晶圆厂厂务电气",
+            "设备商电气设计岗"
+          ],
+          "confidence": "medium"
+        }
+      },
+      "keyword_groups": [
+        {
+          "group": "chem_delivery",
+          "targets": "T1",
+          "terms": [
+            "化学品供应",
+            "特气",
+            "gas delivery",
+            "CDS",
+            "防爆",
+            "SEMI S2",
+            "SIS",
+            "二次配"
+          ]
+        },
+        {
+          "group": "electrical_control",
+          "targets": "T1/T2",
+          "terms": [
+            "EPLAN",
+            "TIA Portal",
+            "PLC",
+            "安全联锁",
+            "急停回路"
+          ]
+        }
+      ],
+      "location_policy_v1.1": "异地可以（relocation 细节面议）；杭州本地优先沟通，异地人选正常推进"
+    },
+    {
+      "title": "高级失效分析工程师",
+      "salary_band": "25-35k×16薪",
+      "location": "杭州",
+      "headcount": 1,
+      "experience": "5年以上",
+      "age_limit": "40岁以内",
+      "essence": "先进封装（倒装芯片键合/焊点回流）失效分析与根因定位：OM/切片/SAM/SEM-EDS/3D X-Ray 表征、FA 报告与 CAPA、可靠性测试基础",
+      "hard_requirements": [
+        "倒装芯片键合 C2W/C4、焊点回流工艺",
+        "焊点失效实操分析",
+        "IMC 机理",
+        "FA 设备（OM/X-Ray/切片/SEM/EDS/SAM）",
+        "uHAST/TCT/Drop"
+      ],
+      "target_company_pool": {
+        "T1_same_layer": {
+          "path": "同层迁移：封测厂 FA/可靠性工程师（先进封装方向）",
+          "confidence": "medium-high（v1.1 顾问确认方向：增补国产厂商；具体名单可在执行中再增删）",
+          "companies_international": [
+            "长电科技",
+            "通富微电",
+            "华天科技",
+            "甬矽电子",
+            "晶方科技"
+          ],
+          "companies_domestic_added_v1.1": [
+            {
+              "name": "恩纳基智能装备",
+              "note": "flip-chip 键合设备（无锡），来自嘉驰协同簿客户名单"
+            },
+            {
+              "name": "华封科技",
+              "note": "国产 flip-chip 键合设备"
+            },
+            {
+              "name": "普莱信",
+              "note": "国产固晶/键合设备"
+            },
+            {
+              "name": "大族封测",
+              "note": "大族激光旗下封测设备"
+            },
+            {
+              "name": "快克智能",
+              "note": "精密焊接/半导体封装设备"
+            },
+            {
+              "name": "拓荆科技",
+              "note": "混合键合（hybrid bonding）方向"
+            },
+            {
+              "name": "晶盛机电",
+              "note": "有键合设备产品线（嘉驰簿内有键合设备机械经理岗）"
+            },
+            {
+              "name": "世禹/景焱",
+              "note": "国产封装设备（嘉驰簿客户目标池中出现）"
+            }
+          ],
+          "v1.1_note": "FA 职能的主产地就是封测厂+第三方实验室，属同层而非逆向",
+          "companies_domestic_databacked_v1.2": [
+            {
+              "name": "浙江达仕科技",
+              "note": "TCB 热压覆晶键合，覆盖 CoS/CoW/Big Die/HBM 先进封装量产——与长越方向最接近"
+            },
+            {
+              "name": "上海光键",
+              "note": "临时/永久/晶圆级键合、Hybrid Bonding"
+            },
+            {
+              "name": "苏州艾科瑞思",
+              "note": "装片机/固晶机/分选机及晶圆级混合键合"
+            },
+            {
+              "name": "常州铭赛机器人",
+              "note": "键合固晶+晶圆搬运 AMHS"
+            },
+            {
+              "name": "芯钛科（上海）",
+              "note": "贴膜、临时键合/解键合、EFEM/Sorter"
+            },
+            {
+              "name": "博纳半导体（浙江）",
+              "note": "晶圆键合、解键合、清洗和先进封装设备"
+            },
+            {
+              "name": "嘉兴景焱",
+              "note": "FO/FC 固晶、超薄芯片堆叠（v1.1 已列，图谱确认）"
+            }
+          ]
+        },
+        "T2_adjacent": {
+          "path": "相邻迁移：第三方分析实验室 FA 工程师",
+          "companies": [
+            "宜特（iST）",
+            "闳康（MA-tek）",
+            "胜科纳米",
+            "苏试宜特等"
+          ],
+          "confidence": "high"
+        },
+        "T3_reverse": {
+          "path": "设备商/器件厂质量或 FA 岗互迁",
+          "companies": [
+            "其他封装设备商",
+            "功率器件厂 FA"
+          ],
+          "confidence": "medium",
+          "enabled": "per_position_decision",
+          "v1.1_rule": "默认关闭；有的岗位可逆向、有的只能同行，开工时顾问逐岗裁决"
+        }
+      },
+      "keyword_groups": [
+        {
+          "group": "fa_core",
+          "targets": "T1/T2",
+          "terms": [
+            "失效分析",
+            "FA工程师",
+            "倒装芯片",
+            "flip chip",
+            "焊点",
+            "回流",
+            "SEM",
+            "SAM",
+            "X-Ray",
+            "切片",
+            "IMC",
+            "枕头效应"
+          ]
+        },
+        {
+          "group": "reliability",
+          "targets": "T1",
+          "terms": [
+            "可靠性",
+            "uHAST",
+            "TCT",
+            "封装"
+          ]
+        }
+      ],
+      "risks": [
+        "FA 池集中在封测厂所在地（江阴/南通/天水/苏州/上海），杭州本地池薄——异地迁移意愿是主要变数"
+      ],
+      "priority_v1.1": 4,
+      "location_policy_v1.1": "异地可以（relocation 细节面议）；杭州本地优先沟通，异地人选正常推进"
+    },
+    {
+      "title": "机械高级工程师",
+      "salary_band": "25-35k×16薪",
+      "location": "杭州",
+      "headcount": 1,
+      "experience": "7年以上（4年+ 微米/亚微米级精密设备）",
+      "age_limit": "40岁以内",
+      "essence": "精密设备整机结构设计：刚性/热变形/振动抑制、有限元仿真优化、紧固件防松、精密元器件选型（电机/丝杠/导轨/光栅尺）",
+      "hard_requirements": [
+        "7年+（4年+ 微米级精密设备）",
+        "有限元仿真（强度/振动/热变形）",
+        "紧固件设计",
+        "电机/丝杠/导轨/轴承/光栅尺选型"
+      ],
+      "target_company_pool": {
+        "T1_same_layer": {
+          "path": "同层迁移：键合/封装/精密设备商机械设计岗",
+          "confidence": "medium-high（v1.1 顾问确认方向：增补国产厂商；具体名单可在执行中再增删）",
+          "companies_international": [
+            "ASMPT",
+            "K&S",
+            "BESI",
+            "新益昌",
+            "凯格精机",
+            "精密点胶/贴片/检测设备商"
+          ],
+          "companies_domestic_added_v1.1": [
+            {
+              "name": "恩纳基智能装备",
+              "note": "flip-chip 键合设备（无锡），来自嘉驰协同簿客户名单"
+            },
+            {
+              "name": "华封科技",
+              "note": "国产 flip-chip 键合设备"
+            },
+            {
+              "name": "普莱信",
+              "note": "国产固晶/键合设备"
+            },
+            {
+              "name": "大族封测",
+              "note": "大族激光旗下封测设备"
+            },
+            {
+              "name": "快克智能",
+              "note": "精密焊接/半导体封装设备"
+            },
+            {
+              "name": "拓荆科技",
+              "note": "混合键合（hybrid bonding）方向"
+            },
+            {
+              "name": "晶盛机电",
+              "note": "有键合设备产品线（嘉驰簿内有键合设备机械经理岗）"
+            },
+            {
+              "name": "世禹/景焱",
+              "note": "国产封装设备（嘉驰簿客户目标池中出现）"
+            }
+          ],
+          "companies_domestic_databacked_v1.2": [
+            {
+              "name": "浙江达仕科技",
+              "note": "TCB 热压覆晶键合，覆盖 CoS/CoW/Big Die/HBM 先进封装量产——与长越方向最接近"
+            },
+            {
+              "name": "上海光键",
+              "note": "临时/永久/晶圆级键合、Hybrid Bonding"
+            },
+            {
+              "name": "苏州艾科瑞思",
+              "note": "装片机/固晶机/分选机及晶圆级混合键合"
+            },
+            {
+              "name": "常州铭赛机器人",
+              "note": "键合固晶+晶圆搬运 AMHS"
+            },
+            {
+              "name": "芯钛科（上海）",
+              "note": "贴膜、临时键合/解键合、EFEM/Sorter"
+            },
+            {
+              "name": "博纳半导体（浙江）",
+              "note": "晶圆键合、解键合、清洗和先进封装设备"
+            },
+            {
+              "name": "嘉兴景焱",
+              "note": "FO/FC 固晶、超薄芯片堆叠（v1.1 已列，图谱确认）"
+            }
+          ]
+        },
+        "T2_adjacent": {
+          "path": "相邻迁移：其他微米级精密设备（半导体前道设备、精密机床、光学设备、3C 自动化设备）机械岗",
+          "companies": [
+            "前道设备商",
+            "精密机床/光学平台公司",
+            "3C 精密自动化公司"
+          ],
+          "confidence": "medium-high——精密机械能力可迁移性在四个岗位中最强"
+        }
+      },
+      "keyword_groups": [
+        {
+          "group": "precision_mech",
+          "targets": "T1/T2",
+          "terms": [
+            "精密设备",
+            "结构设计",
+            "有限元",
+            "热变形",
+            "振动",
+            "光栅尺",
+            "直线导轨",
+            "丝杠",
+            "键合",
+            "固晶",
+            "贴片"
+          ]
+        }
+      ],
+      "priority_v1.1": 3,
+      "location_policy_v1.1": "异地可以（relocation 细节面议）；杭州本地优先沟通，异地人选正常推进"
+    }
+  ],
+  "cross_position_insights": {
+    "salary_band_seed": {
+      "自动化软件": "25-35k×16",
+      "电气": "20-30k×16",
+      "FA": "25-35k×16",
+      "机械": "25-35k×16",
+      "note": "杭州半导体设备商 5-7 年高级工程师带，可入知识库薪酬层第一条数据"
+    },
+    "common_risk": "四个岗位共同难点是杭州本地 T1 池薄、主力池在苏州/上海/深圳/江阴——异地迁移意愿判断将决定本案成败，建议策略自带'杭州本地优先词 + 异地意愿话术'",
+    "migration_path_priority_for_rd": "v1.1 修正：研发岗默认只保留同行+精密设备相邻池；逆向迁移默认关闭，按岗位逐个裁决（有的岗位可逆向、有的只能同行）",
+    "execution_priority_v1.1": "软件 > 电气 > 机械 > FA（顾问确认）"
+  },
+  "questions_for_consultant": [
+    "【已确认】T1 增补国产厂商：恩纳基/华封/普莱信/大族封测/快克/拓荆/晶盛/世禹/景焱（v1.1）",
+    "【已确认】逆向迁移默认关闭、逐岗裁决（v1.1）",
+    "【已确认】优先级：软件 > 电气 > 机械 > FA（v1.1）",
+    "【已确认】异地可以，relocation 面议（v1.1）",
+    "【遗留】各岗位'可逆向/只能同行'的逐岗裁决，在开工时由顾问点选"
+  ]
+}

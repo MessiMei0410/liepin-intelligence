@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "generated_at": "2026-07-22T23:16:35+08:00",
+  "generated_by": "scripts/asa_doctor.py --update-manifest",
+  "components": [
+    {
+      "id": "native_app",
+      "name": "ASA 原生 macOS App",
+      "path": "/Users/messi/Applications/ASA.app",
+      "source_path": "/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/asa-floating-app",
+      "version_source": "Info.plist CFBundleShortVersionString/CFBundleVersion",
+      "version": "0.2.18",
+      "build": "41"
+    },
+    {
+      "id": "react_app",
+      "name": "React 前端（asa-web）",
+      "path": "/Users/messi/Documents/ASA",
+      "version_source": "package.json version",
+      "version": "1.0.0"
+    },
+    {
+      "id": "asa_core",
+      "name": "ASA Core",
+      "source_path": "/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/scripts/asa_core",
+      "launchagent": "ai.hermes.liepin-workbench",
+      "base_url": "http://127.0.0.1:8765",
+      "version_source": "GET /api/v1/health version",
+      "version": "1.0.0",
+      "ok": true
+    },
+    {
+      "id": "liepin_extension",
+      "name": "猎聘专业回复助手扩展",
+      "path": "/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/liepin-reply-assistant-extension",
+      "version_source": "manifest.json version",
+      "version": "0.3.11"
+    },
+    {
+      "id": "xsaas_extension",
+      "name": "X-SaaS 人选推进助手扩展",
+      "path": "/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/xsaas-candidate-assistant-extension",
+      "version_source": "manifest.json version",
+      "version": "0.1.22"
+    },
+    {
+      "id": "opencli_extension",
+      "name": "OpenCLI 私有扩展",
+      "path": "/Users/messi/Documents/ASA/opencli/opencli-extension-v1.0.22",
+      "version_source": "manifest.json version",
+      "version": "1.0.22"
+    },
+    {
+      "id": "v3_db",
+      "name": "A 系统 v3 SQLite（唯一业务事实源，只读）",
+      "path": "/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db",
+      "version_source": "文件名日期标签",
+      "backup_dir": "/Users/messi/.hermes/backups/asa_v3",
+      "backup_launchagent": "ai.hermes.asa-v3-backup",
+      "version": "20260629",
+      "size_bytes": 144236544,
+      "modified_at": "2026-07-22T23:13:46"
+    }
+  ]
+}

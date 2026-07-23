@@ -1,0 +1,48 @@
+{
+  "name": "asa-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "generate:api": "openapi-typescript http://127.0.0.1:8765/openapi.json -o src/generated/api.d.ts",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:contract": "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "backup:db": "python3 scripts/asa_v3_backup.py",
+    "drill:db": "python3 scripts/asa_v3_restore_drill.py --fresh",
+    "doctor": "python3 scripts/asa_doctor.py",
+    "check:api-drift": "node scripts/check-api-drift.mjs",
+    "test:e2e": "playwright test --project=functional && playwright test --project=shots-desktop --project=shots-floating",
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run test:e2e && npm run check:api-drift"
+  },
+  "dependencies": {
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "^10.7.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}
