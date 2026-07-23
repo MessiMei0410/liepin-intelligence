@@ -5,6 +5,7 @@ import type { StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPa
 import { humanizeActionError } from '../shared/errors'
 import { channelLabel } from './utils'
 import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, loadDiffDecisions, mergeReviewDecisions } from './strategyReviewDiff'
+import { StrategyReviewExpansion } from './StrategyReviewExpansion'
 
 // S4-3 策略复盘：终局工作流（completed/blocked/failed）展示规则版复盘结论与修订建议 diff。
 // 独立按需路由 /strategy-review，面板挂载与详情刷新（updatedAt 变化）时拉取，不进 /summary 轮询签名。
@@ -13,6 +14,7 @@ import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, load
 // 逐项采纳/拒绝在"调整条件再搜"对话框（RevisePlanDialog）内操作，此处只回显决策标记；
 // S4-3c 起决策以后端 revision_diff[].status 为事实源（每次拉取后合并进本地缓存），
 // localStorage 仅作 API 失败时的缓存回退，变更事件到达即刷新。
+// S4-3c-3：池枯竭信号与扩池决策树扩区在 StrategyReviewExpansion（树决策本期仅 localStorage，无后端回写）。
 
 const REVIEWABLE_STATUSES = new Set(['completed', 'blocked', 'failed'])
 
@@ -108,6 +110,7 @@ export function StrategyReview({ workflowId, status, updatedAt }: { workflowId: 
         <div className="review-diffs-head"><b>修订建议</b><span>逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
         {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} decision={decisions[diff.diff_id]} />)}
       </div>}
+      <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} />
       {review.escalation && <p className="review-escalation">转评估问题单：{review.escalation.reason || '评分口径待复核'}</p>}
       {notes.length > 0 && <ul className="review-notes">{notes.map((note, index) => <li key={index}>{note}</li>)}</ul>}
     </>}

@@ -121,6 +121,43 @@ export type StrategyReviewDiff = {
   status: 'pending' | 'accepted' | 'rejected'
   decided_at?: string
 }
+// S4-3c-3（N3）池枯竭信号与扩池决策树：dedupe_rate > 阈值（0.80，可配置）触发 pool_saturated
+// 信号，并按序输出固定 5 步扩池决策树（order 即执行优先级）。树决策本期无后端回写接口
+// （PATCH /strategy-review/diffs 仅收 revision_diff 条目），前端逐项采纳/拒绝走 localStorage，
+// revise 提交时以 "【采纳步骤】…【拒绝步骤】…" 后缀并入 instruction。
+export type StrategyReviewSignal = {
+  signal: string
+  label?: string
+  scope?: string
+  dedupe_rate?: number | null
+  dedupe_count?: number
+  extracted_count?: number
+  threshold?: number
+  channels?: Array<{ channel?: string; extracted_count?: number; dedupe_count?: number; dedupe_rate?: number | null }>
+  detail?: string
+  semantics?: string
+}
+export type ExpansionActionType = 'swap_keywords' | 'expand_pool' | 'relax_condition' | 'rebalance_channel' | 'escalate_mapping'
+export type ExpansionKeywordGroup = { group?: string; targets?: string; terms?: string[] }
+export type ExpansionRelaxItem = { field?: string; current?: string | string[] | null; proposal?: string; cost?: string; note?: string; source?: string }
+export type ExpansionChannelStat = { channel?: string; recall_count?: number; unique_count?: number; intake_new_count?: number; intake_conversion?: number | null }
+// params 为 5 种 action_type 各自形状的并集（后端只取真实值，取不到留空）；缺省键前端如实显示"待顾问补充"。
+export type ExpansionTreeParams = {
+  current_groups?: ExpansionKeywordGroup[]; candidate_groups?: ExpansionKeywordGroup[]; rotation?: string
+  current_tiers?: string[]; next_tier?: string | null; tier_label?: string; companies?: string[]; rationale?: string; source_archetype?: string
+  items?: ExpansionRelaxItem[]; boundary?: string
+  channel_stats?: ExpansionChannelStat[]; recommended_channel?: string | null; basis?: string
+  actions?: string[]; reason?: string
+}
+export type ExpansionTreeStep = {
+  step_id: string
+  order?: number
+  action_type: ExpansionActionType
+  title?: string
+  detail?: string
+  params?: ExpansionTreeParams
+  status?: string
+}
 export type StrategyReviewChannelFinding = {
   channel: string; status?: string; recall_count?: number; unique_count?: number;
   intake_new_count?: number; assessed_count?: number; high_score_count?: number;
@@ -140,6 +177,8 @@ export type StrategyReview = {
   evidence?: StrategyReviewEvidence;
   per_channel_findings?: StrategyReviewChannelFinding[];
   revision_diff?: StrategyReviewDiff[];
+  signals?: StrategyReviewSignal[];
+  expansion_decision_tree?: ExpansionTreeStep[];
   escalation?: { kind?: string; target?: string; reason?: string; status?: string } | null;
   notes?: string[]; generated_at?: string; version?: number;
   history?: Array<{ version?: number; verdict?: string; verdict_reason?: string; generated_at?: string }>;
