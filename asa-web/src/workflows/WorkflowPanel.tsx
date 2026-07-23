@@ -16,6 +16,8 @@ import { WorkflowStrategy } from './WorkflowStrategy'
 import { WorkflowCandidates } from './WorkflowCandidates'
 import { WorkflowFunnel } from './WorkflowFunnel'
 import { StrategyReview } from './StrategyReview'
+import { MappingTaskCard } from './MappingTaskCard'
+import { findMappingArtifactId } from './mappingTask'
 
 export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void}) {
   const [busy,setBusy]=useState('')
@@ -47,6 +49,10 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
   const externalResult=recordValue(recordValue(sourcingStep?.output).external_result)
   const appliedResult=recordValue(recordValue(recordValue(externalResult.intake).applied))
   const contextJobId=Number(value.goal.context?.id||strategy.job_id||0)
+  // S5-2：Mapping 任务卡入口。已有任务（本工作流产物含 mapping_task）直接打开，不重复发起采集。
+  const mappingArtifactId=findMappingArtifactId(value.artifacts)
+  const [mappingCardId,setMappingCardId]=useState('')
+  const openMappingCard=(artifactId:string)=>setMappingCardId(artifactId)
   const jobEntity=jobs.find(job=>job.id===contextJobId)
   const target={client:String(strategy.client||appliedResult.client||jobEntity?.client||'客户待确认'),job:String(strategy.job||appliedResult.job||jobEntity?.title||'岗位待确认'),location:jobEntity?.location||'',status:jobEntity?.status||'',priority:jobEntity?.priority||'',id:contextJobId}
 
@@ -137,7 +143,8 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
     <WorkflowTarget target={target} objective={value.goal.objective}/>
     <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} coverage={strategyCoverage} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
     {sourcingStep&&<WorkflowFunnel workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''}/>}
-    <StrategyReview workflowId={value.workflow.workflow_id} status={status} updatedAt={value.workflow.updated_at||''} openCandidate={openCandidate}/>
+    <StrategyReview workflowId={value.workflow.workflow_id} status={status} updatedAt={value.workflow.updated_at||''} openCandidate={openCandidate} jobId={contextJobId||undefined} mappingArtifactId={mappingArtifactId||undefined} onOpenMapping={openMappingCard}/>
+    {mappingCardId&&contextJobId>0&&<MappingTaskCard jobId={contextJobId} artifactId={mappingCardId} openCandidate={openCandidate} onClose={()=>setMappingCardId('')}/>}
     <WorkflowCandidates ref={candidatesRef} workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
     <div className="workflow-section-label"><ListChecks/><b>执行步骤</b><span>{completed}/{total} 已完成</span></div>
     <div className="step-list">{value.steps.map(s=>{const tone=stepTone(s.status);const detail=stepDetails[stepCacheKey(s)];const result=stepBusinessResult(detail||s);return <details className={`workflow-step ${tone}`} key={s.id} open={s.id===current?.id || s.status==='running'} onToggle={event=>{const isOpen=event.currentTarget.open;setExpandedSteps(prev=>{const next=new Set(prev);if(isOpen)next.add(s.id);else next.delete(s.id);return next});if(isOpen)void loadStep(s)}}><summary><span className={`step-no ${tone}`}><StepStatusIcon status={s.status} sequence={s.sequence}/></span><div><b>{s.business_label}</b><small>{s.reason}</small>{s.started_at&&<span className="step-time"><Clock3/>{s.status==='running'?`已执行 ${elapsed(s.started_at,s.finished_at,now)}`:`${date(s.started_at)}${s.finished_at?` · 用时 ${elapsed(s.started_at,s.finished_at,now)}`:''}`}</span>}</div><span className={`status-badge ${tone}`}>{s.risk_level} · {stepStatusLabel[s.status]||s.status}</span></summary><div className={`step-detail business-result ${result.error?'error':''}`}><b>{result.headline}</b>{result.facts.map((fact,index)=><span key={index}><Check/>{fact}</span>)}{!detail&&<span><LoaderCircle className="spin"/>完整执行详情加载中…</span>}{s.status==='failed'&&<button className="button" disabled={!!busy} onClick={()=>retry(s.id)}>{busy===`retry-${s.id}`?<LoaderCircle className="spin"/>:<Activity/>}重试此步骤</button>}</div></details>})}</div>

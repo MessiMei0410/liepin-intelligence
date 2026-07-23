@@ -26,7 +26,15 @@ const FINDING_LABELS: Record<string, string> = {
   low_high_rate: '高分率低',
 }
 
-export function StrategyReview({ workflowId, status, updatedAt, openCandidate }: { workflowId: string; status: string; updatedAt: string; openCandidate?: (id: number) => void }) {
+export function StrategyReview({ workflowId, status, updatedAt, openCandidate, jobId, mappingArtifactId, onOpenMapping }: {
+  workflowId: string
+  status: string
+  updatedAt: string
+  openCandidate?: (id: number) => void
+  jobId?: number
+  mappingArtifactId?: string
+  onOpenMapping?: (artifactId: string) => void
+}) {
   const reviewable = REVIEWABLE_STATUSES.has(status)
   const [payload, setPayload] = useState<StrategyReviewPayload | null>(null)
   const [missing, setMissing] = useState(false)
@@ -114,7 +122,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate }:
         <div className="review-diffs-head"><b>修订建议</b><span>逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
         {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} decision={decisions[diff.diff_id]} />)}
       </div>}
-      <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} />
+      <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} jobId={jobId} mappingArtifactId={mappingArtifactId} onOpenMapping={onOpenMapping} />
       {downweights.length > 0 && <div className="review-diffs" aria-label="渠道降权建议">
         <div className="review-diffs-head"><b>渠道降权建议</b><span>连续 0 召回（非渠道故障）≥2 轮 · 仅建议不执行，配额调整待顾问确认</span></div>
         {downweights.map((item, index) => <DownweightRow key={`${item.channel}-${index}`} item={item} />)}

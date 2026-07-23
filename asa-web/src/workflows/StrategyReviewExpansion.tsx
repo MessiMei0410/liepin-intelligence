@@ -1,11 +1,26 @@
+import { useState } from 'react'
+import { LoaderCircle, MapPinned } from 'lucide-react'
+import { api } from '../api'
 import type { ExpansionTreeStep, StrategyReviewSignal } from '../api'
+import { humanizeActionError } from '../shared/errors'
 import { expansionActionLabel, loadTreeDecisions, sortedTreeSteps, treeStepSummary } from './strategyExpansionTree'
+import { MAPPING_TRIGGER_BY_TREE } from './mappingTask'
 
 // S4-3c-3（N3）复盘卡扩区：池枯竭信号（tag + detail 一行）与扩池决策树编号步骤列表。
 // 与 revision_diff 同法：此处只读展示并回显决策标记，逐项采纳/拒绝在“调整条件再搜”对话框内操作；
 // 树决策本期无后端回写接口，标记事实源为 localStorage（键含 workflow_id，条目按 step_id 索引）。
 // 无信号且无决策树（旧复盘）时不渲染。
-export function StrategyReviewExpansion({ workflowId, signals, tree }: { workflowId: string; signals?: StrategyReviewSignal[]; tree?: ExpansionTreeStep[] }) {
+// S5-2：escalate_mapping 步旁挂「发起 Mapping 直挖」入口——已有任务卡（本工作流产物含
+// mapping_task）直接打开；否则调 POST /jobs/{job_id}/mapping-tasks（trigger=decision_tree_exhausted）
+// 创建后打开。工作流无 job 上下文（jobId 缺失）时按钮不显示。
+export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mappingArtifactId, onOpenMapping }: {
+  workflowId: string
+  signals?: StrategyReviewSignal[]
+  tree?: ExpansionTreeStep[]
+  jobId?: number
+  mappingArtifactId?: string
+  onOpenMapping?: (artifactId: string) => void
+}) {
   const signalList = signals || []
   const steps = sortedTreeSteps(tree || [])
   if (signalList.length === 0 && steps.length === 0) return null
@@ -32,8 +47,44 @@ export function StrategyReviewExpansion({ workflowId, signals, tree }: { workflo
           </div>
           {summary.length > 0 && <ul className="review-tree-params">{summary.map((line, index) => <li key={index}>{line}</li>)}</ul>}
           {step.detail && <small>{step.detail}</small>}
+          {step.action_type === 'escalate_mapping' && jobId != null && jobId > 0 && onOpenMapping && (
+            <MappingEntryButton jobId={jobId} mappingArtifactId={mappingArtifactId || ''} onOpenMapping={onOpenMapping} />
+          )}
         </div>
       })}
     </div>}
   </>
+}
+
+// 「发起 Mapping 直挖」入口：已存在任务卡直接打开（不重复发起采集）；否则创建后打开。
+// 创建走幂等写（Idempotency-Key + request_id），409（岗位无 strategy_v2 等）中文原因直接透出。
+function MappingEntryButton({ jobId, mappingArtifactId, onOpenMapping }: {
+  jobId: number
+  mappingArtifactId: string
+  onOpenMapping: (artifactId: string) => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const open = async () => {
+    if (mappingArtifactId) {
+      onOpenMapping(mappingArtifactId)
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const result = await api.createMappingTask(jobId, MAPPING_TRIGGER_BY_TREE)
+      onOpenMapping(result.artifact_id)
+    } catch (cause) {
+      setError(humanizeActionError(cause, '发起失败，请重试。'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="review-mapping-entry">
+    <button className="button" disabled={busy} onClick={() => void open()}>
+      {busy ? <LoaderCircle className="spin" /> : <MapPinned />}{mappingArtifactId ? '打开 Mapping 任务卡' : '发起 Mapping 直挖'}
+    </button>
+    {error && <span className="tag warn">{error}</span>}
+  </div>
 }

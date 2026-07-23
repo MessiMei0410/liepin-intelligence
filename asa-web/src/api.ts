@@ -75,6 +75,11 @@ export type ContractAnchor = [
   // S4-3c 增补：逐项决策回写路由入锚。generated/api.d.ts 尚无此路由（后端本期新上，
   // 主控 regenerate 后条件类型自动收紧为真实 patch 操作类型，此前解析为 never）。
   StrategyReviewDiffsPatchAnchor,
+  // S5-2 增补：Mapping 任务卡读取/创建路由入锚（S5-1 已在生成类型中）。
+  // PATCH /mapping-tasks/{artifact_id}/candidates/{index} 与 icebreaker/intake 两个 POST 为
+  // S5-2 后端新上，generated/api.d.ts 尚无，待主控 regenerate 后补锚。
+  paths['/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}']['get'],
+  paths['/api/v1/jobs/{job_id}/mapping-tasks']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -220,6 +225,57 @@ export type StrategyReviewDiffPatchResult = {
   consultant_edits_appended?: number; learning_signal_recorded?: boolean;
 }
 
+// S5-2 Mapping 任务卡：Core 返回动态 dict（openapi 只描述为 object），按 mapping_task.py
+// mapping_v1 schema 与实际 payload 收窄声明。七态状态机（合法迁移由后端校验，409 透中文 detail）。
+export type MappingCandidateStatus = 'pending' | 'confirmed' | 'contacted' | 'replied' | 'intaken' | 'parked' | 'rejected'
+export type MappingTeamEvidence = { type?: string; ref?: string; as_of?: string }
+export type MappingTargetTeam = {
+  company: string; team?: string; location?: string; tier?: string;
+  evidence?: MappingTeamEvidence[]; confidence?: string; notes?: string[];
+}
+export type MappingIcebreaker = { hooks: string[]; angle: string; generated_at?: string; source_ref?: string }
+export type MappingIntakeReceipt = {
+  job_candidate_id: number; candidate_id?: number; person_id?: number; intaken_at?: string; relation_existed?: boolean;
+}
+export type MappingCandidate = {
+  name: string; current_role?: string; team_ref?: number; source_urls?: string[];
+  confidence?: string; reason?: string; status: MappingCandidateStatus; consultant_note?: string;
+  icebreaker?: MappingIcebreaker; intake?: MappingIntakeReceipt;
+}
+export type MappingFailure = { source?: string; url?: string; reason?: string; note?: string }
+export type MappingTaskStats = {
+  teams?: number; candidates?: number; confirmed?: number; intaken?: number; clues?: number;
+  banned_filtered?: number; rejected_no_source?: number; pages_fetched?: number;
+  failures_count?: number; failures?: MappingFailure[]; sources?: Record<string, number>;
+}
+export type MappingTaskDoc = {
+  schema_version?: string; trigger?: string; job_id?: number; strategy_ref?: string;
+  client?: string; job_title?: string; generated_at?: string;
+  target_teams?: MappingTargetTeam[]; candidates?: MappingCandidate[]; stats?: MappingTaskStats;
+}
+export type MappingTaskPayload = {
+  ok?: boolean; artifact_id: string; job_id?: number; workflow_id?: string;
+  title?: string; content?: string; created_at?: string; mapping_task: MappingTaskDoc;
+}
+export type MappingTaskCreateResult = {
+  ok?: boolean; job_id: number; workflow_id?: string; artifact_id: string; mapping_task?: MappingTaskDoc;
+}
+// PATCH 候选响应：confirmed 迁移自动生成破冰素材；素材不合格不阻断状态变更，原因进 icebreaker_errors。
+export type MappingCandidatePatchResult = {
+  ok?: boolean; artifact_id?: string; index?: number; candidate: MappingCandidate;
+  status: string; status_label?: string; stats?: MappingTaskStats;
+  icebreaker_generated?: boolean; icebreaker_errors?: string[];
+}
+export type MappingIcebreakerResult = {
+  ok?: boolean; artifact_id?: string; index?: number; icebreaker: MappingIcebreaker; candidate: MappingCandidate;
+}
+export type MappingIntakeResult = {
+  ok?: boolean; artifact_id?: string; index?: number; status: string;
+  already_intaken?: boolean; relation_existed?: boolean;
+  job_candidate_id: number; candidate_id?: number; person_id?: number; intaken_at?: string;
+  stats?: MappingTaskStats;
+}
+
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
   const body: unknown = await response.json().catch(() => ({ error: response.statusText }))
@@ -269,6 +325,19 @@ export const api = {
   // 404=工作流/复盘不存在，409=diff_id 未知或状态非法；错误带 status 由调用方决定降级策略。
   patchStrategyReviewDiffs: (id: string, decisions: StrategyReviewDiffDecision[]) =>
     write<StrategyReviewDiffPatchResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/diffs`, { decisions }, 'PATCH'),
+  // S5-2 Mapping 任务卡：读走 GET；创建/PATCH/重新生成/入库全走 write 幂等封装
+  // （Idempotency-Key + request_id，重放返回首次响应）。404=artifact/候选不存在；
+  // 409=业务冲突（非法迁移/终态/禁挖/无来源，中文 detail 直接透出）。
+  mappingTask: (jobId: number, artifactId: string) =>
+    json<MappingTaskPayload>(`/api/v1/jobs/${jobId}/mapping-tasks/${encodeURIComponent(artifactId)}`),
+  createMappingTask: (jobId: number, trigger: string) =>
+    write<MappingTaskCreateResult>(`/api/v1/jobs/${jobId}/mapping-tasks`, { trigger }),
+  patchMappingCandidate: (artifactId: string, index: number, patch: { status?: MappingCandidateStatus; consultant_note?: string }) =>
+    write<MappingCandidatePatchResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}`, { ...patch }, 'PATCH'),
+  regenerateMappingIcebreaker: (artifactId: string, index: number) =>
+    write<MappingIcebreakerResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/icebreaker`, {}),
+  intakeMappingCandidate: (artifactId: string, index: number) =>
+    write<MappingIntakeResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/intake`, {}),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
