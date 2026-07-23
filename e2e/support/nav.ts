@@ -4,13 +4,14 @@ import { expect } from './fixtures'
 // 数据锚点（来自正式库只读副本，每次运行由 global-setup 新鲜复制）：
 // 岗位 #154 士兰微·技术市场经理/总监（PC电源），人选数随真实业务增长（断言从 API 取期望值）；
 // #559 衣**（S1 在推）、#563 唐**（H5 已停止）；
-// workflow_1076e0e1d5d5 = blocked + completed_needs_review 的真实业务终态样本。
+// workflow_bcab82502825 = 第 7 轮 blocked + completed_needs_review 样本（未归档、有 strategy_v2/复盘/渠道漏斗行）。
+// 注意：业务侧归档旧轮次后需把锚点换成最新未归档 blocked 工作流（第 3 轮 1076e0e1d5d5 于 2026-07-23 09:50 归档）。
 export const JOB_ID = 154
 export const CANDIDATE_ID = 559
 export const CANDIDATE_NAME = '衣**'
 export const STAGE_BEFORE = 'S1 新增寻访/待复核'
 export const STAGE_STOPPED = 'H5 最近寻访/初筛不通过'
-export const WORKFLOW_ID = 'workflow_1076e0e1d5d5'
+export const WORKFLOW_ID = 'workflow_bcab82502825'
 
 export async function openJob(page: Page, jobId = JOB_ID): Promise<Locator> {
   await page.goto(`/asa-app#job=${jobId}`)

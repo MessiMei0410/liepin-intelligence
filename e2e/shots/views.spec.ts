@@ -35,7 +35,7 @@ test('工作流详情（blocked + completed_needs_review）', async ({ page }) =
   // 人选结果加载完成（岗位级口径，人数随轮次增长）+ 执行步骤 5 步全部渲染
   await expect(panel.locator('.workflow-candidates')).toContainText(/岗位已评估 \d+ 人/)
   await expect(panel.locator('.workflow-step')).toHaveCount(5)
-  // 渠道漏斗加载完成（该历史轮次无明细，显示回落文案，避免拍到加载中状态）
-  await expect(panel.locator('.workflow-funnel')).toContainText('该轮未记录渠道明细')
+  // 渠道漏斗加载完成（第 7 轮有真实漏斗行：猎聘渠道行 + X-SaaS 0 召回归因）
+  await expect(panel.locator('.workflow-funnel')).toContainText('猎聘')
   await expect(page).toHaveScreenshot('workflow.png')
 })
