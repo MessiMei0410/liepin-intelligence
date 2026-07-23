@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
-from . import knowledge_base, negative_rules, strategy_v2
+from . import knowledge_base, negative_rules, query_builders, strategy_v2
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -92,91 +92,18 @@ def _trim_error(text: Any, limit: int = 1000) -> str:
     return value if len(value) <= limit else value[-limit:]
 
 
-XSAAS_QUERY_MAX_TERMS = 2
-XSAAS_QUERY_MAX_COUNT = 8
-LIEPIN_QUERY_MAX_TERMS = 2
-LIEPIN_QUERY_MAX_COUNT = 6
-
-
-def _company_vocabulary(strategy: dict[str, Any]) -> set[str]:
-    """公司词表：策略 step2 目标池公司名 + 公司图谱全名 + 种子池公司名（运行时只读）。
-
-    顾问规则（2026-07-23）：两个公司名组合查询语义必错（一人不可能同时在两家公司），
-    需要词表识别查询里的公司 token。任何来源异常都降级为空集（不影响查询生成）。
-    """
-    names: set[str] = set()
-    v2 = strategy.get("strategy_v2") if isinstance(strategy, dict) else None
-    if not isinstance(v2, dict):
-        v2 = (strategy.get("metadata") or {}).get("strategy_v2") if isinstance(strategy, dict) else None
-    for path in (v2 or {}).get("step2_target_pool") or []:
-        for comp in (path or {}).get("companies") or []:
-            name = str((comp or {}).get("name") or "").strip()
-            if name:
-                names.add(name)
-    try:
-        graph, _trace = knowledge_base.load_company_graph()
-        names.update(graph.keys())
-    except Exception:
-        pass
-    return {norm for name in names if (norm := knowledge_base.normalize_client_name(name))}
-
-
-def _is_company_token(token: str, vocab: set[str]) -> bool:
-    norm = knowledge_base.normalize_client_name(token)
-    if not norm:
-        return False
-    # 短别名（MPS/TI 2 字符）只许精确等值；≥3 字符允许双向包含（矽力杰 ∈ 杭州矽力杰半导体）
-    if len(norm) <= 2:
-        return norm in vocab
-    return any(norm in entry or entry in norm for entry in vocab)
+# 渠道查询方言层已模块化（S4-3c-2 / N1）：实现在 a_system_agent.query_builders。
+# 以下常量与 adapt_channel_queries 是兼容别名/委托（既有测试与调用方签名不变），
+# 新接线直接用 query_builders.build_liepin_queries / build_xsaas_queries。
+XSAAS_QUERY_MAX_TERMS = query_builders.XSAAS_QUERY_MAX_TERMS
+XSAAS_QUERY_MAX_COUNT = query_builders.XSAAS_QUERY_MAX_COUNT
+LIEPIN_QUERY_MAX_TERMS = query_builders.LIEPIN_QUERY_MAX_TERMS
+LIEPIN_QUERY_MAX_COUNT = query_builders.LIEPIN_QUERY_MAX_COUNT
 
 
 def adapt_channel_queries(queries: list[Any], *, max_terms: int, max_count: int, company_terms: set[str] | None = None) -> list[str]:
-    """渠道查询适配：密集多词查询拆成 1-2 个关键词的短查询。
-
-    顾问经验（2026-07-23）：
-    - X-SaaS 系统本身识别不了多关键词组合，多词查询直接 0 结果
-      （round5 第 1 组"多相控制器 DrMOS POL TME FAE"五词 0 条实证）；
-    - 猎聘同理：候选人简历不一定包含全部关键词，往往只有一两个，
-      多词 AND 会把好人选过滤掉；
-    - **两个公司名组合语义必错**（round7 实证），公司词永不两两成对，
-      公司词只与非公司词配对或单独成组。
-    拆分策略：非公司词按"锚定词 + 逐个剩余词"组成二字查询；公司词各配首个非公司词
-    （无则单独）。去重保序，总量封顶渠道 runner 上限。
-    """
-    vocab = {knowledge_base.normalize_client_name(t) for t in (company_terms or set())}
-    vocab.discard("")
-    adapted: list[str] = []
-    for raw in queries:
-        # 策略产出的查询项可能是字符串，也可能是 {query, purpose, evidence, round} 字典
-        # （LLM 策略步骤与 MULTICHANNEL fallback 两种形态并存）——字典取 query 字段，其余跳过。
-        if isinstance(raw, dict):
-            raw = raw.get("query") or raw.get("q") or raw.get("keyword") or ""
-        terms = str(raw or "").split()
-        if not terms:
-            continue
-        companies = [t for t in terms if _is_company_token(t, vocab)]
-        others = [t for t in terms if not _is_company_token(t, vocab)]
-        if not companies:
-            if len(terms) <= max_terms:
-                adapted.append(" ".join(terms))
-            else:
-                anchor, rest = terms[0], terms[1:]
-                for term in rest:
-                    adapted.append(f"{anchor} {term}")
-            continue
-        for comp in companies:
-            adapted.append(f"{comp} {others[0]}" if others else comp)
-        if len(others) > 1:
-            anchor, rest = others[0], others[1:]
-            if len(others) <= max_terms:
-                adapted.append(" ".join(others))
-            else:
-                for term in rest:
-                    adapted.append(f"{anchor} {term}")
-    seen: set[str] = set()
-    unique = [query for query in adapted if not (query in seen or seen.add(query))]
-    return unique[:max_count]
+    """兼容委托：实现已迁入 query_builders.adapt_queries（组合式方言，猎聘语法）。"""
+    return query_builders.adapt_queries(queries, max_terms=max_terms, max_count=max_count, company_terms=company_terms)
 
 
 # pool_saturated 阈值：dedupe_count/extracted_count 超过该比例视为本地池枯竭
@@ -206,7 +133,7 @@ def _has_query_build_error(rounds: list[dict[str, Any]], vocab: set[str]) -> boo
                 continue
             if text.count("关键字：") >= 2 or text.startswith("{'"):
                 return True
-            if vocab and sum(1 for token in text.split() if _is_company_token(token, vocab)) >= 2:
+            if vocab and sum(1 for token in text.split() if query_builders.is_company_token(token, vocab)) >= 2:
                 return True
     return any(
         current != previous and current.startswith(previous)
@@ -336,12 +263,13 @@ class RecruitingCapabilityRuntime:
             fallback_channels = fallback.get("channels") or {}
             liepin_queries = liepin_queries or fallback_channels.get("liepin") or []
             xsaas_queries = xsaas_queries or fallback_channels.get("xsaas") or []
-        # 渠道查询适配（顾问规则 2026-07-23）：密集多词查询拆成 1-2 词短查询——
-        # X-SaaS 吃不下多词组合；猎聘 AND 语义会滤掉只写了一两个词的好简历；
+        # 渠道查询方言层（S4-3c-2 / N1，顾问规则 2026-07-23）：
+        # 猎聘维持组合查询（公司 + 职能/技术词可组合，≤2 词/≤6 组）；
+        # X-SaaS 公司词独立查询（不与任何词组合），职能/技术词锚定对 ≤2 词/≤8 组；
         # 公司词永不两两成对（一人不可能同时在两家公司）。
-        company_terms = _company_vocabulary(strategy)
-        liepin_queries = adapt_channel_queries(liepin_queries, max_terms=LIEPIN_QUERY_MAX_TERMS, max_count=LIEPIN_QUERY_MAX_COUNT, company_terms=company_terms)
-        xsaas_queries = adapt_channel_queries(xsaas_queries, max_terms=XSAAS_QUERY_MAX_TERMS, max_count=XSAAS_QUERY_MAX_COUNT, company_terms=company_terms)
+        company_terms = query_builders.company_vocabulary(strategy)
+        liepin_queries = query_builders.build_liepin_queries(liepin_queries, company_terms=company_terms)
+        xsaas_queries = query_builders.build_xsaas_queries(xsaas_queries, company_terms=company_terms)
         liepin_queries_path.write_text(json.dumps({"queries": liepin_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         xsaas_queries_path.write_text(json.dumps({"queries": xsaas_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         command = [
