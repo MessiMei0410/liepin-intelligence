@@ -668,6 +668,177 @@ def build_strategy_v2(
     return v2
 
 
+# S4-3c-4（N6）：策略全要素消费检查 —— 命中原型的种子要素分层标签（顺序固定）。
+_COVERAGE_POOL_LAYERS = (
+    ("T1_competitor_device", "T1 竞对原厂"),
+    ("T2_customer_OEM", "T2 客户整机厂"),
+    ("T3_adjacent_unconfirmed", "T3 相邻池（未确认）"),
+)
+
+
+def _coverage_norm(text: Any) -> str:
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _coverage_name_hit(seed_name: str, candidates: list[str]) -> bool:
+    """公司名双向包含匹配（“MPS”与“MPS（芯源系统）”视为同一家）。"""
+    norm = _coverage_norm(seed_name)
+    if not norm:
+        return False
+    for candidate in candidates:
+        normalized = _coverage_norm(candidate)
+        if normalized and (norm == normalized or norm in normalized or normalized in norm):
+            return True
+    return False
+
+
+def _coverage_text_corpus(v2: dict[str, Any]) -> str:
+    """策略对象的可检索文本（step1-5 + negative_rules），用于地点策略消费核对。"""
+    parts: list[str] = []
+    step1 = v2.get("step1_job_essence") if isinstance(v2.get("step1_job_essence"), dict) else {}
+    parts.extend([step1.get("statement"), step1.get("value_chain_role")])
+    for entry in v2.get("step2_target_pool") or []:
+        if isinstance(entry, dict):
+            parts.append(entry.get("rationale"))
+    step3 = v2.get("step3_level_mapping") if isinstance(v2.get("step3_level_mapping"), dict) else {}
+    parts.append(step3.get("calibration_rule"))
+    parts.extend(step3.get("accepted_levels") or [])
+    for group in v2.get("step4_keyword_groups") or []:
+        if isinstance(group, dict):
+            parts.extend([group.get("group"), group.get("targets")])
+            parts.extend(group.get("terms") or [])
+    step5 = v2.get("step5_expectation") if isinstance(v2.get("step5_expectation"), dict) else {}
+    parts.append(step5.get("fallback_plan"))
+    for rule in v2.get("negative_rules") or []:
+        if isinstance(rule, dict):
+            parts.extend([rule.get("type"), rule.get("rule")])
+    return _coverage_norm("".join(str(part or "") for part in parts))
+
+
+def build_coverage_report(archetype: dict[str, Any] | None, v2: dict[str, Any]) -> dict[str, Any] | None:
+    """S4-3c-4（N6）：策略全要素消费检查（治 B4，防知识资产静默漏用）。
+
+    对照命中原型的种子要素清单逐项核对 strategy_v2 是否消费：
+    - T1/T2/T3 各层公司池：该层种子公司全部进入 step2_target_pool（双向包含匹配）→ 已消费；
+      全部未进/仅部分进入 → 未使用并注明缺漏公司；
+    - 地点策略 location_policy：策略首分句（如“杭州优先”）出现在策略对象文本
+      （step1-5/negative_rules）→ 已消费；strategy_v2 schema 无地点策略落点时如实记为未使用
+      （这是生成侧的既有缺陷，N6 只留痕不修复）；
+    - 排除规则：种子 negative_rules 逐条，规则文本进入 strategy_v2.negative_rules → 已消费；
+    - 有效关键词组：种子 keyword_groups 逐组，同名组进入 step4 或与 step4 词面有交集 → 已消费。
+
+    种子未命中原型（无原型岗位）返回 None：coverage_report=None 留痕，不算缺失。
+    要素清单只来自种子原型；restricted 层要素（禁挖名单/竞业约束）永远不进 unused 对外面。
+    """
+    if not isinstance(archetype, dict) or not str(archetype.get("archetype_id") or "").strip():
+        return None
+    consumed: list[str] = []
+    unused: list[dict[str, str]] = []
+
+    pool_names = [
+        str(company.get("name") or "")
+        for entry in v2.get("step2_target_pool") or []
+        if isinstance(entry, dict)
+        for company in entry.get("companies") or []
+        if isinstance(company, dict) and str(company.get("name") or "").strip()
+    ]
+    seed_pool = archetype.get("target_company_pool") if isinstance(archetype.get("target_company_pool"), dict) else {}
+    for key, label in _COVERAGE_POOL_LAYERS:
+        block = seed_pool.get(key) if isinstance(seed_pool.get(key), dict) else {}
+        companies = [
+            str(company.get("name") or "").strip()
+            for company in block.get("companies") or []
+            if isinstance(company, dict) and str(company.get("name") or "").strip()
+        ]
+        if not companies:
+            continue
+        missing = [name for name in companies if not _coverage_name_hit(name, pool_names)]
+        if not missing:
+            consumed.append(label)
+        elif len(missing) == len(companies):
+            unused.append(
+                {
+                    "element": label,
+                    "reason": f"种子{label} {len(companies)} 家公司均未进入 step2 目标池（{'、'.join(companies[:4])}{'等' if len(companies) > 4 else ''}）",
+                }
+            )
+        else:
+            unused.append(
+                {
+                    "element": label,
+                    "reason": f"种子{label}仅部分消费：{len(companies) - len(missing)}/{len(companies)} 进入 step2，缺 {'、'.join(missing[:6])}",
+                }
+            )
+
+    policy = str(archetype.get("location_policy") or "").strip()
+    if policy:
+        clause = re.split(r"[；;。，,\n]", policy)[0].strip() or policy
+        corpus = _coverage_text_corpus(v2)
+        if _coverage_norm(clause) and _coverage_norm(clause) in corpus:
+            consumed.append(clause)
+        else:
+            unused.append(
+                {
+                    "element": clause,
+                    "reason": f"种子地点策略「{policy}」未进入 strategy_v2：schema 无地点策略落点（step1-5/negative_rules 均未消费），生成侧漏消费，N6 如实留痕",
+                }
+            )
+
+    rule_texts = [
+        _coverage_norm(rule.get("rule"))
+        for rule in v2.get("negative_rules") or []
+        if isinstance(rule, dict) and _coverage_norm(rule.get("rule"))
+    ]
+    for rule in archetype.get("negative_rules") or []:
+        text = str(rule or "").strip()
+        if not text:
+            continue
+        norm = _coverage_norm(text)
+        if any(norm in candidate or candidate in norm for candidate in rule_texts):
+            consumed.append(f"排除规则：{text}")
+        else:
+            unused.append(
+                {
+                    "element": f"排除规则：{text}",
+                    "reason": "种子排除规则未进入 negative_rules（策略采用了其他来源的排除规则）",
+                }
+            )
+
+    step4_groups = [group for group in v2.get("step4_keyword_groups") or [] if isinstance(group, dict)]
+    step4_names = {_coverage_norm(group.get("group")) for group in step4_groups}
+    step4_terms = [_coverage_norm(term) for group in step4_groups for term in group.get("terms") or [] if _coverage_norm(term)]
+    for group in archetype.get("keyword_groups") or []:
+        if not isinstance(group, dict):
+            continue
+        name = str(group.get("group") or "").strip()
+        terms = [_coverage_norm(term) for term in group.get("terms") or [] if _coverage_norm(term)]
+        if not name and not terms:
+            continue
+        label = f"关键词组 {name}" if name else "关键词组（未命名）"
+        name_hit = bool(name) and _coverage_norm(name) in step4_names
+        term_hit = any(term in candidate or candidate in term for term in terms for candidate in step4_terms)
+        if name_hit or term_hit:
+            consumed.append(label)
+        else:
+            unused.append(
+                {
+                    "element": label,
+                    "reason": f"种子关键词组 {name or '（未命名）'} 未进入 step4：策略关键词组与该组词面无交集",
+                }
+            )
+
+    total = len(consumed) + len(unused)
+    return {
+        "version": "n6_coverage_v1",
+        "archetype_id": str(archetype.get("archetype_id") or ""),
+        "consumed": consumed,
+        "unused": unused,
+        "coverage_rate": round(len(consumed) / total, 4) if total else 1.0,
+        "element_count": total,
+        "consumed_count": len(consumed),
+    }
+
+
 def validate_strategy_v2(value: Any) -> tuple[bool, list[str]]:
     """strategy_v2 落库前校验：缺必备键/类型错误时不写库并留 error。"""
     errors: list[str] = []

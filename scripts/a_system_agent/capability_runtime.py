@@ -1424,6 +1424,22 @@ class RecruitingCapabilityRuntime:
             negative_checklist=negative_checklist,
         )
         v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
+        # S4-3c-4（N6）：策略全要素消费检查 —— 对照命中原型的种子要素清单（T1/T2/T3 各层
+        # 公司池、地点策略、排除规则、有效关键词组）核对 strategy_v2 是否全部消费，未使用项
+        # 显式列出供顾问确认页展示；种子未命中（无原型岗位）coverage_report=None 留痕不算缺失。
+        coverage_report = strategy_v2.build_coverage_report(archetype, v2)
+        v2["coverage_report"] = coverage_report
+        if coverage_report:
+            existing_trace = v2.get("classification_trace")
+            v2["classification_trace"] = [
+                *(existing_trace if isinstance(existing_trace, list) else []),
+                f"N6 要素消费检查：消费 {coverage_report['consumed_count']}/{coverage_report['element_count']} 项"
+                + (
+                    f"，未使用：{'、'.join(item['element'] for item in coverage_report['unused'])}"
+                    if coverage_report["unused"]
+                    else "，种子要素全部消费"
+                ),
+            ]
         result: dict[str, Any] = {
             "summary": "已由大模型基于岗位事实、历史实验和长期记忆生成寻访策略，并完成无依据关键词校验。",
             "strategy": plan,
@@ -1436,7 +1452,7 @@ class RecruitingCapabilityRuntime:
             result["artifacts"] = [
                 self._artifact(
                     "search_strategy", "多渠道寻访策略", content=content,
-                    metadata={"plan": plan, "strategy_v2": v2, "schema_version": strategy_v2.STRATEGY_V2_VERSION},
+                    metadata={"plan": plan, "strategy_v2": v2, "schema_version": strategy_v2.STRATEGY_V2_VERSION, "coverage_report": coverage_report},
                 )
             ]
         else:
