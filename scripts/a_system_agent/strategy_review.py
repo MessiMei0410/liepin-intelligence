@@ -34,6 +34,22 @@ revision_diff 为 strategy_v2 的 diff 形式，每条带 reason 且可逐项采
 S4-3c：顾问逐项采纳/拒绝（apply_diff_decisions）—— status 写回 revision_diff
 （upsert 可重复覆盖，不 bump version），同一写动作追加 strategy_v2.consultant_edits
 （strategy_v2 缺失时降级跳过）并写 explicit_corrections 学习信号（strategy_corrections 表）。
+
+S4-3c-3（N3）：池枯竭信号 + 扩池决策树。
+- 轮次级 dedupe_rate = Σdedupe_count / Σextracted_count（聚合当轮全部漏斗行，extracted=0 不计）。
+  dedupe_rate > 阈值（0.80，可配置）触发 pool_saturated 信号：写入 review.signals 数组，
+  并在 verdict_reason 追加决策依据。信号与四判定分支正交——verdict 仍按原分支产出
+  （healthy/quality_gap/strategy_too_narrow/execution_channel_issue 均可同时携带该信号），
+  信号触发时强制产出扩池决策树。
+- 口径分层：本信号是复盘器轮次级聚合（>80%），区别于 capability_runtime 的渠道级 0 归因
+  zero_attribution=pool_saturated（>90%，写 agent_sourcing_funnel 行）；两者并存、语义不同层。
+- 扩池决策树 expansion_decision_tree：固定 5 步有序输出
+  （swap_keywords 换关键词组 → expand_pool 扩 T2/T3 池 → relax_condition 放宽年限/职级/地点
+  → rebalance_channel 渠道再平衡 → escalate_mapping 转 Mapping/与客户校准）。
+  每步 {step_id, order, action_type, title, detail, params, status:pending}，可逐项采纳。
+  params 只取 strategy_v2 / 漏斗行 / 岗位原型（archetype）的真实值；取不到留空并在 notes 说明，
+  禁止编造。与 revision_diff 的分工：diff 是对 strategy_v2 的逐条修订（点状），树是池枯竭后的
+  有序行动路径（面状），两者可并存于同一复盘。
 """
 
 from __future__ import annotations
@@ -51,6 +67,16 @@ GENERATOR = "rule_v1"
 DEFAULT_RECALL_SHORTFALL_RATIO = 0.5
 DEFAULT_DETAIL_FAILED_RATIO = 0.3
 DEFAULT_HIGH_SCORE_THRESHOLD = 0.15
+# N3 池枯竭信号阈值：轮次级 dedupe_rate = Σdedupe_count/Σextracted_count 超过即触发
+# （F3 实证：猎聘 119/120=99% 排重仍原样重搜，系统无信号）。阈值可配置。
+DEFAULT_POOL_SATURATED_DEDUPE_RATE = 0.8
+POOL_SATURATED_SIGNAL = "pool_saturated"
+
+# 扩池决策树：固定 5 步 action_type（顺序即执行优先级）
+EXPANSION_ACTION_TYPES = ("swap_keywords", "expand_pool", "relax_condition", "rebalance_channel", "escalate_mapping")
+# 层级 → 原型 target_company_pool 键 / 中文名（与 strategy_v2._kb_pool 的映射口径一致）
+_TIER_POOL_KEYS = {"T1": "T1_competitor_device", "T2": "T2_customer_OEM", "T3": "T3_adjacent_unconfirmed"}
+_TIER_LABELS = {"T1": "T1 同层友商", "T2": "T2 客户整机厂", "T3": "T3 相邻池"}
 
 # 执行/渠道类 0 召回归因（PRD §5：命中即执行问题，不改策略）
 EXECUTION_ZERO_ATTRIBUTIONS = ("session_expired", "page_structure_changed", "loading_incomplete")
@@ -99,6 +125,212 @@ def _expected_recall_total(strategy_doc: dict[str, Any]) -> int:
     return sum(_int(value) for value in expected.values())
 
 
+# ---------------------------------------------------------------------------
+# S4-3c-3（N3）：扩池决策树（纯函数；params 只取真实值，取不到留空 + notes）
+# ---------------------------------------------------------------------------
+
+def _tree_step(order: int, action_type: str, title: str, detail: str, params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "step_id": f"exp-{order}",
+        "order": order,
+        "action_type": action_type,
+        "title": title,
+        "detail": detail,
+        "params": params,
+        "status": "pending",
+    }
+
+
+def _group_view(group: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "group": str(group.get("group") or ""),
+        "targets": str(group.get("targets") or ""),
+        "terms": [str(term) for term in group.get("terms") or [] if str(term or "").strip()],
+    }
+
+
+def build_expansion_decision_tree(
+    *,
+    strategy_doc: dict[str, Any] | None,
+    funnel_rows: list[dict[str, Any]],
+    archetype: dict[str, Any] | None = None,
+    dedupe_rate: float,
+    dedupe_total: int,
+    extracted_total: int,
+    threshold: float = DEFAULT_POOL_SATURATED_DEDUPE_RATE,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """池枯竭后的有序行动路径（固定 5 步，order 即执行优先级）。
+
+    params 来源（只取真实值，取不到留空并由返回的 notes 说明，禁止编造）：
+    1 swap_keywords     —— strategy_v2.step4_keyword_groups（当前组）+ 原型 keyword_groups（候选组）
+    2 expand_pool       —— strategy_v2.step2_target_pool（已用层）+ 原型 target_company_pool（下一层公司）
+    3 relax_condition   —— step3_level_mapping（职级）/ 原型 location_policy（地点）；年限无来源留空
+    4 rebalance_channel —— 当轮漏斗行（入库/去重转化率）
+    5 escalate_mapping  —— 升级项（转 Mapping 直挖 / 与客户校准方向），仅需排重证据
+    """
+    notes: list[str] = []
+    has_strategy = isinstance(strategy_doc, dict) and bool(strategy_doc)
+    strategy_doc = strategy_doc if has_strategy else {}
+    archetype = archetype if isinstance(archetype, dict) else {}
+    rate_text = f"排重率 {dedupe_rate:.0%}（{dedupe_total}/{extracted_total}）> 阈值 {threshold:.0%}"
+
+    # ---- 1. 换关键词组（同池不同词）----
+    current_groups = [
+        _group_view(group)
+        for group in strategy_doc.get("step4_keyword_groups") or []
+        if isinstance(group, dict) and (group.get("terms") or [])
+    ]
+    current_names = {group["group"] for group in current_groups}
+    candidate_groups = [
+        _group_view(group)
+        for group in archetype.get("keyword_groups") or []
+        if isinstance(group, dict)
+        and (group.get("terms") or [])
+        and str(group.get("group") or "") not in current_names
+    ]
+    if not current_groups:
+        notes.append("换词步：strategy_v2 无 step4 关键词组，当前组留空，待顾问补充")
+    if not candidate_groups:
+        notes.append("换词步：知识库原型无更多候选关键词组，候选组留空，待顾问补充")
+    step1 = _tree_step(
+        1, "swap_keywords", "换关键词组（同池不同词）",
+        f"{rate_text}：当前词组覆盖的人选已见完。在同一目标池内轮换词组视角（技术词↔公司词↔职能词），"
+        f"当前 {len(current_groups)} 组、候选 {len(candidate_groups)} 组，逐组替换重搜。",
+        {"current_groups": current_groups, "candidate_groups": candidate_groups,
+         "rotation": "技术词↔公司词↔职能词（同池不同词）"},
+    )
+
+    # ---- 2. 扩池（T1→T2 客户整机厂→T3 相邻池）----
+    step2_entries = [entry for entry in strategy_doc.get("step2_target_pool") or [] if isinstance(entry, dict)]
+    tiers_in_use = [
+        tier for tier in dict.fromkeys(str(entry.get("tier") or "") for entry in step2_entries) if tier
+    ]
+    existing_names = {
+        str(company.get("name") or "")
+        for entry in step2_entries
+        for company in entry.get("companies") or []
+        if isinstance(company, dict)
+    }
+    next_tier = next((tier for tier in ("T1", "T2", "T3") if tier not in tiers_in_use), None)
+    pool = archetype.get("target_company_pool") or {}
+    block = pool.get(_TIER_POOL_KEYS.get(next_tier or "", ""), {}) if next_tier else {}
+    block = block if isinstance(block, dict) else {}
+    companies = [
+        name
+        for company in block.get("companies") or []
+        if isinstance(company, dict)
+        for name in [str(company.get("name") or "").strip()]
+        if name and name not in existing_names
+    ]
+    source_archetype = ""
+    if archetype:
+        source_archetype = str(archetype.get("archetype_id") or "")
+        if str(archetype.get("source_file") or ""):
+            source_archetype = f"{source_archetype}（{archetype.get('source_file')}）"
+    if next_tier is None:
+        notes.append("扩池步：T1/T2/T3 均已入池，无下一层可扩，待知识资产更新或顾问指定新池")
+    elif not companies:
+        notes.append(f"扩池步：原型 {_TIER_LABELS.get(next_tier, next_tier)} 无可用新公司（缺失或均已在池），公司列表留空，待顾问补充")
+    step2 = _tree_step(
+        2, "expand_pool", f"扩池：向 {_TIER_LABELS.get(next_tier, '下一层')} 扩展" if next_tier else "扩池：T1/T2/T3 均已入池",
+        (
+            f"按 T1→T2（客户整机厂）→T3（相邻池）顺序扩池。当前已用层：{'、'.join(tiers_in_use) or '（无）'}；"
+            f"下一层 {_TIER_LABELS.get(next_tier, next_tier)}，来源原型 {source_archetype or '（无）'}，"
+            f"可新增公司 {len(companies)} 家。"
+            if next_tier else
+            "T1/T2/T3 三层均已入池，池内扩展已尽，优先执行后续步骤或补充新知识资产。"
+        ),
+        {"current_tiers": tiers_in_use, "next_tier": next_tier,
+         "tier_label": _TIER_LABELS.get(next_tier, "") if next_tier else "",
+         "companies": companies, "rationale": str(block.get("rationale") or ""),
+         "source_archetype": source_archetype},
+    )
+
+    # ---- 3. 放宽条件（年限/职级/地点，逐项 + 代价）----
+    step3_mapping = strategy_doc.get("step3_level_mapping") or {}
+    levels = [str(level) for level in step3_mapping.get("accepted_levels") or [] if str(level or "").strip()]
+    location_policy = str(archetype.get("location_policy") or "")
+    items = [
+        {
+            "field": "年限",
+            "current": None,
+            "proposal": "",
+            "cost": "",
+            "source": "none",
+            "note": "strategy_v2 未记录年限门槛，当前值取不到；放宽幅度由顾问定",
+        },
+        {
+            "field": "职级",
+            "current": levels or None,
+            "proposal": "在 accepted_levels 基础上放宽一档（纳入相邻职级）" if levels else "",
+            "cost": "层级偏低人选增多，定档口径须同步复核，评估筛选成本上升" if levels else "",
+            "source": "step3_level_mapping" if levels else "none",
+            "note": "" if levels else "strategy_v2 无 step3 定档记录，当前职级取不到",
+        },
+        {
+            "field": "地点",
+            "current": location_policy or None,
+            "proposal": "从地点优先策略放宽为全国/周边城市" if location_policy else "",
+            "cost": "人选迁移意愿与到岗率下降，offer 谈判周期变长" if location_policy else "",
+            "source": "archetype.location_policy" if location_policy else "none",
+            "note": "" if location_policy else "原型未定义地点策略，当前值取不到",
+        },
+    ]
+    step3 = _tree_step(
+        3, "relax_condition", "放宽条件（年限/职级/地点，逐项记录代价）",
+        "逐项放宽准入条件并记录代价，顾问逐项确认。边界：只放宽年限/职级/地点，"
+        "不涉及禁挖名单/竞业限制等 restricted 约束，负向规则不放宽。",
+        {"items": items, "boundary": "不涉及禁挖名单/竞业等 restricted 约束，负向规则不放宽"},
+    )
+
+    # ---- 4. 渠道再平衡（高效渠道倾斜，引用漏斗转化率）----
+    channel_stats: list[dict[str, Any]] = []
+    for row in funnel_rows:
+        unique = _int(row.get("unique_count"))
+        intake = _int(row.get("intake_new_count"))
+        channel_stats.append(
+            {
+                "channel": str(row.get("channel") or ""),
+                "recall_count": _int(row.get("recall_count")),
+                "unique_count": unique,
+                "intake_new_count": intake,
+                "intake_conversion": round(intake / unique, 4) if unique else None,
+            }
+        )
+    best = max(
+        (stat for stat in channel_stats if stat["intake_new_count"] > 0),
+        key=lambda stat: stat["intake_conversion"] or 0,
+        default=None,
+    )
+    if best is None:
+        notes.append("渠道再平衡步：本轮各渠道均无入库转化，无可倾斜的高效渠道，优先执行前 3 步")
+    stats_text = "；".join(
+        f"{stat['channel']} 入库/去重 {stat['intake_new_count']}/{stat['unique_count']}"
+        + (f"（{stat['intake_conversion']:.0%}）" if stat["intake_conversion"] is not None else "")
+        for stat in channel_stats
+    ) or "（无漏斗行）"
+    step4 = _tree_step(
+        4, "rebalance_channel", "渠道再平衡（向高效渠道倾斜）",
+        f"按本轮漏斗转化率倾斜查询配额：{stats_text}。"
+        + (f"建议向 {best['channel']} 倾斜。" if best else "暂无可倾斜渠道，先执行前 3 步。"),
+        {"channel_stats": channel_stats,
+         "recommended_channel": best["channel"] if best else None,
+         "basis": "intake_new_count/unique_count（本轮漏斗转化率）"},
+    )
+
+    # ---- 5. 转 Mapping 直挖 / 与客户校准方向（升级项）----
+    step5 = _tree_step(
+        5, "escalate_mapping", "转 Mapping 直挖 / 与客户校准方向（升级项）",
+        f"{rate_text}：本地池与渠道池均已尽，继续原样重搜无增量。建议转 Mapping 直挖"
+        "（按目标公司组织架构定点挖人），或与客户校准寻访方向（岗位本质/目标池是否需重新定义）。"
+        "本步为升级项，须顾问决策后执行。",
+        {"actions": ["mapping_direct_sourcing", "client_direction_calibration"],
+         "reason": f"{rate_text}，本地池+渠道池已尽"},
+    )
+
+    return [step1, step2, step3, step4, step5], notes
+
+
 def build_strategy_review(
     *,
     workflow_id: str,
@@ -107,15 +339,18 @@ def build_strategy_review(
     assessment: dict[str, Any] | None = None,
     pool_candidates: list[str] | None = None,
     keyword_candidates: list[str] | None = None,
+    archetype: dict[str, Any] | None = None,
     recall_shortfall_ratio: float = DEFAULT_RECALL_SHORTFALL_RATIO,
     detail_failed_ratio_threshold: float = DEFAULT_DETAIL_FAILED_RATIO,
     high_score_threshold: float = DEFAULT_HIGH_SCORE_THRESHOLD,
+    dedupe_rate_threshold: float = DEFAULT_POOL_SATURATED_DEDUPE_RATE,
 ) -> dict[str, Any]:
     """规则版复盘判定（纯函数，不触碰 DB/KB）。返回复盘对象（不含 version/history）。"""
     thresholds = {
         "recall_shortfall_ratio": recall_shortfall_ratio,
         "detail_failed_ratio": detail_failed_ratio_threshold,
         "high_score_rate": high_score_threshold,
+        "pool_saturated_dedupe_rate": dedupe_rate_threshold,
     }
     pool_candidates = [str(name) for name in pool_candidates or [] if str(name or "").strip()]
     keyword_candidates = [str(term) for term in keyword_candidates or [] if str(term or "").strip()]
@@ -138,6 +373,12 @@ def build_strategy_review(
         assessment_source = "assessment_table"
     high_rate = round(high_total / assessed_total, 4) if assessed_total else None
     detail_failed_ratio = round(detail_failed / detail_total, 4) if detail_total else None
+
+    # ---- N3 池枯竭信号（轮次级）：dedupe_rate = Σdedupe_count/Σextracted_count，extracted=0 不计 ----
+    extracted_total = sum(_int(row.get("extracted_count")) for row in funnel_rows)
+    dedupe_total = sum(_int(row.get("dedupe_count")) for row in funnel_rows)
+    dedupe_rate = round(dedupe_total / extracted_total, 4) if extracted_total > 0 else None
+    pool_saturated = dedupe_rate is not None and dedupe_rate > dedupe_rate_threshold
 
     # ---- 逐渠道发现 ----
     per_channel: list[dict[str, Any]] = []
@@ -206,6 +447,9 @@ def build_strategy_review(
         "high_score_total": high_total,
         "high_score_rate": high_rate,
         "assessment_source": assessment_source,
+        "extracted_total": extracted_total,
+        "dedupe_total": dedupe_total,
+        "dedupe_rate": dedupe_rate,
     }
 
     # ---- 判定（分支决策表见模块 docstring）----
@@ -258,6 +502,56 @@ def build_strategy_review(
         else:
             verdict = "healthy"
             verdict_reason = "召回、详情、入库与高分率均在预期内，无需修订"
+
+    # ---- N3 池枯竭信号与扩池决策树（与 verdict 正交：信号触发即强制产出决策树）----
+    signals: list[dict[str, Any]] = []
+    expansion_decision_tree: list[dict[str, Any]] = []
+    if pool_saturated:
+        saturated_channels = [
+            {
+                "channel": str(row.get("channel") or ""),
+                "extracted_count": _int(row.get("extracted_count")),
+                "dedupe_count": _int(row.get("dedupe_count")),
+                "dedupe_rate": (
+                    round(_int(row.get("dedupe_count")) / _int(row.get("extracted_count")), 4)
+                    if _int(row.get("extracted_count")) > 0
+                    else None
+                ),
+            }
+            for row in funnel_rows
+            if _int(row.get("extracted_count")) > 0
+        ]
+        signals.append(
+            {
+                "signal": POOL_SATURATED_SIGNAL,
+                "label": "池枯竭（排重率过高）",
+                "scope": "round",
+                "dedupe_rate": dedupe_rate,
+                "dedupe_count": dedupe_total,
+                "extracted_count": extracted_total,
+                "threshold": dedupe_rate_threshold,
+                "channels": saturated_channels,
+                "detail": (
+                    f"本轮抽取 {extracted_total} 条、排重 {dedupe_total} 条，轮次排重率 {dedupe_rate:.1%}"
+                    f" > 阈值 {dedupe_rate_threshold:.0%}：本地候选池已枯竭，须换打法而非原样重搜"
+                ),
+                "semantics": "轮次级复盘信号（>80%，可配置）；区别于渠道级 0 归因 zero_attribution=pool_saturated（>90%），两者并存、语义分层",
+            }
+        )
+        verdict_reason += (
+            f"；轮次信号 {POOL_SATURATED_SIGNAL}：排重率 {dedupe_rate:.0%}（{dedupe_total}/{extracted_total}）"
+            f" > 阈值 {dedupe_rate_threshold:.0%}，本地池已枯竭，已生成扩池决策树（信号与判定正交）"
+        )
+        expansion_decision_tree, tree_notes = build_expansion_decision_tree(
+            strategy_doc=strategy_doc,
+            funnel_rows=funnel_rows,
+            archetype=archetype,
+            dedupe_rate=dedupe_rate,
+            dedupe_total=dedupe_total,
+            extracted_total=extracted_total,
+            threshold=dedupe_rate_threshold,
+        )
+        notes.extend(tree_notes)
 
     # ---- 修订建议（strategy_v2 diff，逐项可采纳/拒绝）----
     revision_diff: list[dict[str, Any]] = []
@@ -340,6 +634,8 @@ def build_strategy_review(
         "degraded": degraded,
         "thresholds": thresholds,
         "evidence": evidence,
+        "signals": signals,
+        "expansion_decision_tree": expansion_decision_tree,
         "per_channel_findings": per_channel,
         "revision_diff": revision_diff,
         "escalation": escalation,
@@ -369,13 +665,18 @@ def _round_index(conn: Any, workflow_id: str, job_id: int) -> int:
 
 def _kb_revision_candidates(
     strategy_doc: dict[str, Any] | None, *, client: str
-) -> tuple[list[str], list[str], list[str]]:
-    """从 KB 推导 step2 公司/step4 关键词修订候选（只读；异常一律降级为空并留痕）。"""
+) -> tuple[list[str], list[str], list[str], dict[str, Any] | None]:
+    """从 KB 推导 step2 公司/step4 关键词修订候选 + 命中原型（只读；异常一律降级为空并留痕）。
+
+    返回 (pool_candidates, keyword_candidates, trace, archetype)；archetype 供 N3 扩池决策树
+    取 T2/T3 池、候选关键词组、地点策略等真实值，推导失败为 None。
+    """
     trace: list[str] = []
     if not isinstance(strategy_doc, dict) or not strategy_doc:
-        return [], [], trace
+        return [], [], trace, None
     pool_candidates: list[str] = []
     keyword_candidates: list[str] = []
+    archetype: dict[str, Any] | None = None
     try:
         archetype_id = str(strategy_doc.get("archetype_id") or "")
         archetypes, _ = strategy_v2.load_job_archetypes()
@@ -418,8 +719,8 @@ def _kb_revision_candidates(
             )
     except Exception as exc:  # KB 缺失/异常不阻塞复盘
         trace.append(f"KB 修订候选推导失败（{exc.__class__.__name__}），按无候选处理")
-        pool_candidates, keyword_candidates = [], []
-    return list(dict.fromkeys(pool_candidates)), list(dict.fromkeys(keyword_candidates)), trace
+        pool_candidates, keyword_candidates, archetype = [], [], None
+    return list(dict.fromkeys(pool_candidates)), list(dict.fromkeys(keyword_candidates)), trace, archetype
 
 
 def generate_for_workflow(
@@ -429,6 +730,7 @@ def generate_for_workflow(
     recall_shortfall_ratio: float = DEFAULT_RECALL_SHORTFALL_RATIO,
     detail_failed_ratio_threshold: float = DEFAULT_DETAIL_FAILED_RATIO,
     high_score_threshold: float = DEFAULT_HIGH_SCORE_THRESHOLD,
+    dedupe_rate_threshold: float = DEFAULT_POOL_SATURATED_DEDUPE_RATE,
 ) -> dict[str, Any]:
     """从库中装配输入并生成复盘对象。工作流不存在抛 LookupError。"""
     row = conn.execute(
@@ -492,7 +794,7 @@ def generate_for_workflow(
         if named:
             client, job = str(named["client"] or ""), str(named["job"] or "")
 
-    pool_candidates, keyword_candidates, candidate_trace = _kb_revision_candidates(strategy_doc, client=client)
+    pool_candidates, keyword_candidates, candidate_trace, archetype = _kb_revision_candidates(strategy_doc, client=client)
 
     review = build_strategy_review(
         workflow_id=workflow_id,
@@ -501,9 +803,11 @@ def generate_for_workflow(
         assessment=assessment,
         pool_candidates=pool_candidates,
         keyword_candidates=keyword_candidates,
+        archetype=archetype,
         recall_shortfall_ratio=recall_shortfall_ratio,
         detail_failed_ratio_threshold=detail_failed_ratio_threshold,
         high_score_threshold=high_score_threshold,
+        dedupe_rate_threshold=dedupe_rate_threshold,
     )
     review.update(
         {
@@ -530,6 +834,15 @@ def _review_content(review: dict[str, Any]) -> str:
     ]
     for finding in review.get("per_channel_findings") or []:
         lines.append(f"- 渠道 {finding.get('channel')}：{finding.get('note')}")
+    for signal in review.get("signals") or []:
+        lines.append(f"- 信号（{signal.get('signal')}）：{signal.get('detail')}")
+    tree = review.get("expansion_decision_tree") or []
+    if tree:
+        lines.append("- 扩池决策树（按序执行，逐项可采纳/拒绝）：")
+        for step in tree:
+            lines.append(
+                f"  {step.get('order')}. [{step.get('action_type')}] {step.get('title')}：{step.get('detail')}"
+            )
     for diff in review.get("revision_diff") or []:
         lines.append(f"- 修订建议（{diff.get('diff_id')}，{diff.get('step')}/{diff.get('op')}）：{diff.get('reason')}")
     if review.get("escalation"):
