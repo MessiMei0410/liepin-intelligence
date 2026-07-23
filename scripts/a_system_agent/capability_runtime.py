@@ -54,6 +54,8 @@ ZERO_RESULT_ATTRIBUTIONS = (
     "parse_failure",
     "page_structure_changed",
     "loading_incomplete",
+    "query_build_error",
+    "pool_saturated",
     "unknown",
 )
 
@@ -65,6 +67,8 @@ ZERO_RESULT_ATTRIBUTION_LABELS = {
     "page_structure_changed": "页面结构变化，解析器需要适配",
     "parse_failure": "平台有结果但解析抓取失败",
     "no_results": "该渠道真实无匹配结果",
+    "query_build_error": "查询构造异常",
+    "pool_saturated": "本地池枯竭（排重率过高）",
     "unknown": "原因待排查",
 }
 
@@ -175,7 +179,49 @@ def adapt_channel_queries(queries: list[Any], *, max_terms: int, max_count: int,
     return unique[:max_count]
 
 
-def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> str:
+# pool_saturated 阈值：dedupe_count/extracted_count 超过该比例视为本地池枯竭
+# （F3 实证：猎聘 119/120=99% 排重仍原样重搜，系统无信号）。
+POOL_SATURATED_DEDUPE_RATE = 0.9
+
+
+def _has_query_build_error(rounds: list[dict[str, Any]], vocab: set[str]) -> bool:
+    """查询构造错误信号（HTTP 成功但查询本身错了；任一 query 命中即成立）。
+
+    a) "关键字："嵌套拼接（同一查询出现 ≥2 次，round7 真实形态：
+       ``MPS 矽力杰 关键字：MPS 杰华特 关键字：MPS TME``），或查询间条件累加
+       （后一条页面回显查询完整包含前一条且更长——条件未重置时 X-SaaS 的 selected_query 形态）；
+    b) 单查询含 ≥2 个公司名（一人不可能同时在两家公司，组合语义必错；词表为空时该信号不启用）；
+    c) 空查询，或 repr 残片（round6 真实形态：字典被 str() 当查询词，``{'evidence': ...`` 开头）。
+    """
+    selected_queries: list[str] = []
+    for entry in rounds:
+        query = str(entry.get("query") or "").strip()
+        if "query" in entry and not query:
+            return True
+        selected = str(entry.get("selected_query") or "").strip()
+        if selected:
+            selected_queries.append(selected)
+        for text in (query, selected):
+            if not text:
+                continue
+            if text.count("关键字：") >= 2 or text.startswith("{'"):
+                return True
+            if vocab and sum(1 for token in text.split() if _is_company_token(token, vocab)) >= 2:
+                return True
+    return any(
+        current != previous and current.startswith(previous)
+        for previous, current in zip(selected_queries, selected_queries[1:])
+    )
+
+
+def classify_zero_result(
+    channel: str,
+    status: str,
+    result: dict[str, Any],
+    *,
+    dedupe_count: int | None = None,
+    company_vocab: set[str] | None = None,
+) -> str:
     """用 runner 输出里的既有信号为 0 候选的渠道结果归因。
 
     信号来源（不改浏览器 runner 逻辑）：
@@ -184,7 +230,12 @@ def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> s
     - per-query rounds：search_controls_missing（X-SaaS SEARCH_JS 返回的 reason）→ page_structure_changed；
       stale_query（查询未生效）→ loading_incomplete；平台有结果数但抓取 0 条 → parse_failure；
       全部查询平台返回 0 条，或抓到了但全部被评分门槛/排重过滤 → no_results。
-    信号不足一律 unknown。
+    - query_build_error（S4-3c-1）：查询构造错误但 HTTP 成功——"关键字："嵌套拼接/查询间条件累加、
+      单查询 ≥2 个公司名（company_vocab 判定）、空查询/repr 残片；任一 query 命中即归类该渠道。
+    - pool_saturated（S4-3c-1）：召回正常（recall_count > 0）但排重率
+      dedupe_count/extracted_count > 90%（调用方传入漏斗口径 dedupe_count，extracted 为 0 不计）。
+    判定顺序：执行类（session/loading/结构）> query_build_error > pool_saturated
+    > rounds 常规判定（parse_failure/no_results）> unknown；信号不足一律 unknown。
     """
     error = str(result.get("error") or "")
     if "LOGIN_REQUIRED" in error or "登录已过期" in error or "登录态失效" in error:
@@ -197,8 +248,12 @@ def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> s
             return "page_structure_changed"
         if any(str(entry.get("status") or "") == "stale_query" for entry in rounds):
             return "loading_incomplete"
+        if _has_query_build_error(rounds, company_vocab or set()):
+            return "query_build_error"
         recall = sum(_round_int(entry, "result_count") for entry in rounds)
         extracted = sum(_round_int(entry, "extracted_count") for entry in rounds)
+        if dedupe_count is not None and recall > 0 and extracted > 0 and dedupe_count / extracted > POOL_SATURATED_DEDUPE_RATE:
+            return "pool_saturated"
         if recall > 0 and extracted <= 0:
             return "parse_failure"
         return "no_results"
@@ -352,6 +407,7 @@ class RecruitingCapabilityRuntime:
                 channel_candidates={"liepin": liepin_candidates, "xsaas": xsaas_candidates},
                 applied=applied,
                 attributions=attributions,
+                company_vocab=company_terms,
             )
         except Exception as exc:
             funnel = {"ok": False, "stored": 0, "error": str(exc)[:500]}
@@ -522,6 +578,7 @@ class RecruitingCapabilityRuntime:
         channel_candidates: dict[str, list[Any]],
         applied: dict[str, Any],
         attributions: dict[str, Any],
+        company_vocab: set[str] | None = None,
     ) -> dict[str, Any]:
         """每个 run×channel 落一行寻访漏斗，并把 0 结果归因回写到 channel_runs 条目上。"""
         staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
@@ -556,7 +613,13 @@ class RecruitingCapabilityRuntime:
                     continue
             zero_attribution = ""
             if not candidates:
-                zero_attribution = classify_zero_result(channel, status, result)
+                zero_attribution = classify_zero_result(
+                    channel,
+                    status,
+                    result,
+                    dedupe_count=max(0, extracted - len(candidates)),
+                    company_vocab=company_vocab,
+                )
                 run["zero_attribution"] = zero_attribution
             rows.append(
                 {

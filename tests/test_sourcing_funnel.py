@@ -158,6 +158,69 @@ class ClassifyZeroResultTest(unittest.TestCase):
         for channel, status, result in [entry for entries in cases.values() for entry in entries]:
             assert classify_zero_result(channel, status, result) in ZERO_RESULT_ATTRIBUTIONS
 
+    def test_query_build_error_round7_nested_keyword_concat(self) -> None:
+        # S4-3c-1 契约：workflow_bcab82502825 第 7 轮真实形态——X-SaaS selected_query
+        # 条件嵌套拼接（"关键字："≥2 次），当时只能报 unknown。
+        result = {
+            "ok": True,
+            "rounds": [
+                {"query": "MPS 矽力杰", "status": "completed", "result_count": 0, "extracted_count": 0,
+                 "selected_query": "MPS 矽力杰 关键字：MPS 杰华特 关键字：MPS TME"},
+                {"query": "MPS TME", "status": "completed", "result_count": 0, "extracted_count": 0,
+                 "selected_query": "MPS TME 关键字：MPS 矽力杰 关键字：MPS 杰华特"},
+            ],
+        }
+        assert classify_zero_result("xsaas", "completed", result) == "query_build_error"
+
+    def test_query_build_error_single_query_two_companies(self) -> None:
+        # 单查询含 ≥2 个公司名（一人不可能同时在两家公司，组合语义必错）
+        result = {"ok": True, "rounds": [{"query": "MPS 矽力杰", "status": "completed", "result_count": 0, "extracted_count": 0}]}
+        assert classify_zero_result("xsaas", "completed", result, company_vocab={"mps", "矽力杰"}) == "query_build_error"
+        # 词表为空时该信号不启用，回落常规判定
+        assert classify_zero_result("xsaas", "completed", result) == "no_results"
+
+    def test_query_build_error_repr_fragment_and_empty_query(self) -> None:
+        # round6 真实形态：{evidence, purpose, query, round} 字典被 str() 当查询词
+        result = {"ok": True, "rounds": [{"query": "{'evidence': 'purpose':", "status": "completed", "result_count": 0, "extracted_count": 0}]}
+        assert classify_zero_result("xsaas", "completed", result) == "query_build_error"
+        empty = {"ok": True, "rounds": [{"query": "  ", "status": "completed", "result_count": 0, "extracted_count": 0}]}
+        assert classify_zero_result("xsaas", "completed", empty) == "query_build_error"
+
+    def test_query_build_error_condition_accumulation(self) -> None:
+        # 查询间条件累加：后一条页面回显查询完整包含前一条且更长（条件未重置）
+        result = {
+            "ok": True,
+            "rounds": [
+                {"query": "MPS", "selected_query": "MPS", "status": "completed", "result_count": 0, "extracted_count": 0},
+                {"query": "矽力杰", "selected_query": "MPS 矽力杰", "status": "completed", "result_count": 0, "extracted_count": 0},
+            ],
+        }
+        assert classify_zero_result("xsaas", "completed", result) == "query_build_error"
+
+    def test_pool_saturated_high_dedupe_rate(self) -> None:
+        # F3 实证形态：召回正常但 dedupe_rate 119/120 > 90%
+        result = {"ok": True, "rounds": [{"query": "q", "status": "completed", "result_count": 120, "extracted_count": 120}]}
+        assert classify_zero_result("liepin", "completed", result, dedupe_count=119) == "pool_saturated"
+        # 边界：恰好 90% 不触发；dedupe_count 未传（旧调用方）保持 no_results
+        assert classify_zero_result("liepin", "completed", result, dedupe_count=108) == "no_results"
+        assert classify_zero_result("liepin", "completed", result) == "no_results"
+
+    def test_attribution_priority_order(self) -> None:
+        # 执行类 > query_build_error：session/结构/stale 信号先判
+        blocked = {
+            "ok": False,
+            "error": "X-SAAS_LOGIN_REQUIRED: 未找到已登录的 X-SaaS 页面",
+            "rounds": [{"query": "{'evidence':", "result_count": 0, "extracted_count": 0}],
+        }
+        assert classify_zero_result("xsaas", "blocked", blocked) == "session_expired"
+        structure = {"ok": True, "rounds": [{"query": "", "status": "failed", "reason": "search_controls_missing"}]}
+        assert classify_zero_result("xsaas", "completed", structure) == "page_structure_changed"
+        stale = {"ok": True, "rounds": [{"query": "MPS 矽力杰", "status": "stale_query", "result_count": 0, "extracted_count": 0}]}
+        assert classify_zero_result("xsaas", "completed", stale, company_vocab={"mps", "矽力杰"}) == "loading_incomplete"
+        # query_build_error > pool_saturated
+        both = {"ok": True, "rounds": [{"query": "MPS 矽力杰", "status": "completed", "result_count": 120, "extracted_count": 120}]}
+        assert classify_zero_result("liepin", "completed", both, dedupe_count=119, company_vocab={"mps", "矽力杰"}) == "query_build_error"
+
 
 class ValidateExternalResultQualityTest(unittest.TestCase):
     def _result(self, channel_runs: list[dict]) -> dict:
@@ -398,6 +461,30 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         AgentService.validate_external_result("multi_channel_sourcing", result)
         assert channel_runs["liepin"]["quality"] == "zero_attributed"
         assert "quality" not in channel_runs["xsaas"]  # blocked 渠道已有 status 区分，不打 quality
+
+    def test_pool_saturated_attribution_flows_to_funnel(self) -> None:
+        # S4-3c-1：召回正常但抓取全部被排重（dedupe_rate 100% > 90%）→ pool_saturated 落漏斗
+        self._install_runners(
+            liepin_result={
+                "ok": True,
+                "candidates": 0,
+                "detail_capture": {"requested": 0, "complete": 0, "partial": 0, "failed": 0},
+                "rounds": [{"name": "画像词 1", "query": "机械 设计", "result_count": 120, "extracted_count": 120, "recommended_count": 0}],
+            },
+            xsaas_result={"ok": True, "candidates": 0, "rounds": []},
+        )
+        result = self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
+
+        rows = {row["channel"]: row for row in self._funnel_rows()}
+        assert rows["liepin"]["unique_count"] == 0
+        assert rows["liepin"]["dedupe_count"] == 120
+        assert rows["liepin"]["zero_attribution"] == "pool_saturated"
+        assert rows["xsaas"]["zero_attribution"] == "unknown"
+
+        channel_runs = {run["channel"]: run for run in result["channel_runs"]}
+        assert channel_runs["liepin"]["zero_attribution"] == "pool_saturated"
+        AgentService.validate_external_result("multi_channel_sourcing", result)
+        assert channel_runs["liepin"]["quality"] == "zero_attributed"
 
     def test_liepin_failure_records_failed_funnel_row_and_reraises(self) -> None:
         self._install_runners(
