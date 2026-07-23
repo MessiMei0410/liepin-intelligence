@@ -951,6 +951,129 @@ class AgentService:
         finally:
             conn.close()
 
+    def create_mapping_task(self, job_id: int, *, trigger: str = "manual", collector: Any = None) -> dict[str, Any]:
+        """S5-1：发起 Mapping 直挖——目标团队定位 + 名单生成，落 mapping_task artifact 并写 job 时间线。
+
+        岗位不存在抛 LookupError（404）；岗位无 strategy_v2 策略或 trigger 非法抛 ValueError（409）。
+        红线：不自动触达；无来源人名拒写；禁挖名单照常过滤；restricted 仅白名单出库。
+        collector 可注入（测试用本地 fixture，绝不打外网；缺省为标准库只读采集器）。
+        """
+        from . import knowledge_base, mapping_task, strategy_v2
+
+        conn = self._connect()
+        try:
+            job = conn.execute(
+                "SELECT j.id,j.title,c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+                (int(job_id),),
+            ).fetchone()
+            if job is None:
+                raise LookupError(f"岗位不存在：{job_id}")
+            if trigger not in mapping_task.TRIGGERS:
+                raise ValueError(f"trigger 必须是 {'/'.join(mapping_task.TRIGGERS)}")
+            strategy = conn.execute(
+                """
+                SELECT w.workflow_id,g.goal_id,a.artifact_id,a.metadata_json
+                FROM agent_workflows w
+                JOIN agent_goals g ON g.goal_id=w.goal_id
+                JOIN agent_artifacts a ON a.workflow_id=w.workflow_id AND a.artifact_type='search_strategy'
+                WHERE g.context_type='job' AND g.context_id=?
+                ORDER BY a.id DESC LIMIT 1
+                """,
+                (int(job_id),),
+            ).fetchone()
+            if strategy is None:
+                raise ValueError(f"岗位 {job_id} 还没有寻访策略（strategy_v2），无法发起 Mapping 直挖")
+            strategy_doc = strategy_v2.extract_strategy_v2(strategy["metadata_json"])
+            if strategy_doc is None:
+                raise ValueError(f"岗位 {job_id} 的策略 artifact 不是 strategy_v2 格式，无法发起 Mapping 直挖")
+
+            archetype = None
+            archetypes, _load_trace = strategy_v2.load_job_archetypes()
+            archetype_id = str(strategy_doc.get("archetype_id") or "")
+            for item in archetypes:
+                if str(item.get("archetype_id") or "") == archetype_id:
+                    archetype = item
+                    break
+            graph, _graph_trace = knowledge_base.load_company_graph()
+
+            doc = mapping_task.build_mapping_task(
+                job_id=int(job_id),
+                trigger=trigger,
+                strategy_ref=str(strategy["artifact_id"]),
+                strategy_doc=strategy_doc,
+                client=str(job["client"] or ""),
+                job_title=str(job["title"] or ""),
+                graph=graph,
+                archetype=archetype,
+                collector=collector,
+            )
+            doc["workflow_id"] = str(strategy["workflow_id"])
+            doc["goal_id"] = str(strategy["goal_id"])
+            artifact_id = mapping_task.upsert_mapping_task(conn, doc)
+            stats = doc.get("stats") or {}
+            summary = (
+                f"发起 Mapping 直挖：目标团队 {stats.get('teams', 0)} 个、候选目标人 {stats.get('candidates', 0)} 位"
+                f"（禁挖过滤 {stats.get('banned_filtered', 0)}、无来源拒收 {stats.get('rejected_no_source', 0)}、"
+                f"采集失败 {stats.get('failures_count', 0)} 次已留痕）。名单仅供顾问本人决策，系统不自动触达。"
+            )
+            conn.execute(
+                """
+                INSERT INTO candidate_events
+                (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                VALUES (NULL,NULL,?,'mapping_task_created','completed',datetime('now','localtime'),?,?,'agent_artifacts',?)
+                """,
+                (
+                    int(job_id),
+                    summary,
+                    json.dumps(
+                        {
+                            "artifact_id": artifact_id,
+                            "workflow_id": doc["workflow_id"],
+                            "trigger": trigger,
+                            "teams": stats.get("teams", 0),
+                            "candidates": stats.get("candidates", 0),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    artifact_id,
+                ),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "job_id": int(job_id),
+                "workflow_id": doc["workflow_id"],
+                "artifact_id": artifact_id,
+                "mapping_task": doc,
+            }
+        finally:
+            conn.close()
+
+    def get_mapping_task(self, job_id: int, artifact_id: str) -> dict[str, Any]:
+        """S5-1：读取岗位的 mapping_task；岗位/artifact 不存在或不属于该岗位抛 LookupError（404）。"""
+        from . import mapping_task
+
+        conn = self._connect()
+        try:
+            job = conn.execute("SELECT id FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+            if job is None:
+                raise LookupError(f"岗位不存在：{job_id}")
+            payload = mapping_task.get_mapping_task(conn, artifact_id)
+            if payload is None:
+                raise LookupError(f"Mapping 任务卡不存在：{artifact_id}")
+            owner = conn.execute(
+                """
+                SELECT 1 FROM agent_workflows w JOIN agent_goals g ON g.goal_id=w.goal_id
+                WHERE w.workflow_id=? AND g.context_type='job' AND g.context_id=?
+                """,
+                (payload["workflow_id"], int(job_id)),
+            ).fetchone()
+            if owner is None:
+                raise LookupError(f"Mapping 任务卡不属于岗位 {job_id}：{artifact_id}")
+            return {"ok": True, "job_id": int(job_id), **payload}
+        finally:
+            conn.close()
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 

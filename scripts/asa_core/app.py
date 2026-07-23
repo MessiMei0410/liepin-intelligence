@@ -78,6 +78,11 @@ class StrategyReviewDiffDecisions(WriteEnvelope):
     decisions: list[DiffDecision] = Field(min_length=1)
 
 
+class MappingTaskCreate(WriteEnvelope):
+    # S5-1：decision_tree_exhausted=扩池决策树 escalate_mapping 步触发；manual=顾问手动发起
+    trigger: str = "manual"
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -216,6 +221,18 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("workflow.strategy_review_diff_decisions", body, idempotency_key, "workflow", workflow_id,
                     lambda: core.apply_strategy_review_diff_decisions(
                         workflow_id, [item.model_dump() for item in body.decisions]))
+
+    @app.get("/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}")
+    def job_mapping_task(job_id: int, artifact_id: str) -> dict[str, Any]:
+        # S5-1：读取 Mapping 任务卡；岗位/artifact 不存在或不属于该岗位 → 404（LookupError 全局映射）
+        return core.get_mapping_task(job_id, artifact_id)
+
+    @app.post("/api/v1/jobs/{job_id}/mapping-tasks")
+    def job_mapping_task_create(job_id: int, body: MappingTaskCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S5-1：扩池决策树 escalate_mapping 步的后端触发（或顾问手动）。走 execute_idempotent 幂等，
+        # 重放返回首次响应；岗位不存在 → 404，无 strategy_v2/trigger 非法 → 409。
+        return idem("job.mapping_task_create", body, idempotency_key, "job", str(job_id),
+                    lambda: core.create_mapping_task(job_id, trigger=body.trigger))
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:

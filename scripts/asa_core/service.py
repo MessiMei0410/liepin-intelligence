@@ -833,6 +833,16 @@ class CoreService:
             return self.agent_service.rebuild_strategy_review(workflow_id)
         raise RuntimeError("workflow service unavailable")
 
+    def create_mapping_task(self, job_id: int, *, trigger: str = "manual") -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.create_mapping_task(job_id, trigger=trigger)
+        raise RuntimeError("workflow service unavailable")
+
+    def get_mapping_task(self, job_id: int, artifact_id: str) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_mapping_task(job_id, artifact_id)
+        raise RuntimeError("workflow service unavailable")
+
     def apply_strategy_review_diff_decisions(self, workflow_id: str, decisions: list[dict[str, Any]]) -> dict[str, Any]:
         if self.agent_service:
             return self.agent_service.apply_strategy_review_diff_decisions(workflow_id, decisions)
