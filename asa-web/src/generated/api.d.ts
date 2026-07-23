@@ -276,6 +276,40 @@ export interface paths {
         patch: operations["workflow_strategy_review_diffs_api_v1_workflows__workflow_id__strategy_review_diffs_patch"];
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Mapping Task */
+        get: operations["job_mapping_task_api_v1_jobs__job_id__mapping_tasks__artifact_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/mapping-tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Mapping Task Create */
+        post: operations["job_mapping_task_create_api_v1_jobs__job_id__mapping_tasks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit-events": {
         parameters: {
             query?: never;
@@ -530,6 +564,16 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** MappingTaskCreate */
+        MappingTaskCreate: {
+            /** Request Id */
+            request_id: string;
+            /**
+             * Trigger
+             * @default manual
+             */
+            trigger: string;
         };
         /** StrategyReviewDiffDecisions */
         StrategyReviewDiffDecisions: {
@@ -1077,6 +1121,77 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["StrategyReviewDiffDecisions"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_mapping_task_api_v1_jobs__job_id__mapping_tasks__artifact_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_mapping_task_create_api_v1_jobs__job_id__mapping_tasks_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MappingTaskCreate"];
             };
         };
         responses: {
