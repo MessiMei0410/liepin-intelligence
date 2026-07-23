@@ -935,6 +935,22 @@ class AgentService:
         finally:
             conn.close()
 
+    def apply_strategy_review_diff_decisions(self, workflow_id: str, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+        """S4-3c：顾问逐项采纳/拒绝复盘 diff——status 落 artifact（upsert 可重复覆盖），
+        同一写动作追加 strategy_v2.consultant_edits 并写 explicit_corrections 学习信号。
+
+        工作流不存在/无复盘抛 LookupError（404）；diff_id 未知或 status 非法抛 ValueError（409）。
+        """
+        from . import strategy_review
+
+        conn = self._connect()
+        try:
+            payload = strategy_review.apply_diff_decisions(conn, workflow_id, decisions)
+            conn.commit()
+            return payload
+        finally:
+            conn.close()
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 

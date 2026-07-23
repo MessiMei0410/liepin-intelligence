@@ -30,6 +30,10 @@ revision_diff 为 strategy_v2 的 diff 形式，每条带 reason 且可逐项采
 （更新 content/metadata，version 自增，历次判定摘要收入 history，上限 10 条）。
 触发点：a) workflow 终局 _finish() 后对寻访类工作流自动生成；b) 按需 rebuild
 （存量终局工作流补生成，终局=completed/blocked/failed）。
+
+S4-3c：顾问逐项采纳/拒绝（apply_diff_decisions）—— status 写回 revision_diff
+（upsert 可重复覆盖，不 bump version），同一写动作追加 strategy_v2.consultant_edits
+（strategy_v2 缺失时降级跳过）并写 explicit_corrections 学习信号（strategy_corrections 表）。
 """
 
 from __future__ import annotations
@@ -627,4 +631,249 @@ def get_strategy_review(conn: Any, workflow_id: str) -> dict[str, Any] | None:
         "content": str(row["content"] or ""),
         "review": _loads(row["metadata_json"], {}),
         "created_at": str(row["created_at"] or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# S4-3c：顾问逐项采纳/拒绝落库（PATCH diffs）
+# ---------------------------------------------------------------------------
+
+DECISION_STATUSES = ("accepted", "rejected")
+_DECISION_LABELS = {"accepted": "采纳", "rejected": "拒绝"}
+
+# explicit_corrections 学习信号的落点表（读取点：capability_runtime._strategy_learning_context
+# 的 explicit_corrections）。DDL 与 scripts/generate_strategy_corrections.py 保持一致：
+# 既有库可能尚未建该表（批量脚本按需建），此处 CREATE IF NOT EXISTS 兜底。
+_STRATEGY_CORRECTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS strategy_corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT,
+    position TEXT,
+    promote_keywords_json TEXT DEFAULT '[]',
+    suppress_keywords_json TEXT DEFAULT '[]',
+    target_tags_json TEXT DEFAULT '[]',
+    blocker_tags_json TEXT DEFAULT '[]',
+    evidence_json TEXT DEFAULT '[]',
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(client, position)
+)
+"""
+
+
+def _append_consultant_edits(
+    conn: Any,
+    workflow_id: str,
+    diffs_by_id: dict[str, dict[str, Any]],
+    normalized: list[tuple[str, str]],
+    decided_at: str,
+) -> int:
+    """把决策追加进该工作流 strategy_v2 的 consultant_edits（同 diff_id 覆盖而非重复追加）。
+
+    strategy_v2 缺失（无 search_strategy artifact / v1 旧格式）时降级返回 0，不报错。
+    """
+    artifact = conn.execute(
+        """
+        SELECT artifact_id,metadata_json FROM agent_artifacts
+        WHERE workflow_id=? AND artifact_type='search_strategy' ORDER BY id DESC LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone()
+    if artifact is None:
+        return 0
+    metadata = _loads(artifact["metadata_json"], {})
+    strategy_doc = strategy_v2.extract_strategy_v2(metadata)
+    if not isinstance(strategy_doc, dict):
+        return 0
+    edits = [dict(item) for item in strategy_doc.get("consultant_edits") or [] if isinstance(item, dict)]
+    by_diff_id = {str(item.get("diff_id") or ""): item for item in edits}
+    order = [str(item.get("diff_id") or "") for item in edits]
+    for diff_id, status in normalized:
+        diff = diffs_by_id[diff_id]
+        entry = {
+            "diff_id": diff_id,
+            "step": str(diff.get("step") or ""),
+            "op": str(diff.get("op") or ""),
+            "status": status,
+            "reason": str(diff.get("reason") or ""),
+            "decided_at": decided_at,
+        }
+        if diff_id in by_diff_id:
+            by_diff_id[diff_id].update(entry)
+        else:
+            by_diff_id[diff_id] = entry
+            order.append(diff_id)
+    strategy_doc["consultant_edits"] = [by_diff_id[key] for key in order]
+    metadata["strategy_v2"] = strategy_doc
+    conn.execute(
+        "UPDATE agent_artifacts SET metadata_json=? WHERE artifact_id=?",
+        (_dumps(metadata), str(artifact["artifact_id"])),
+    )
+    return len(normalized)
+
+
+def _merged_signal_list(existing: Any, column: str, new_items: list[str], cap: int, drop: set[str] | None = None) -> str:
+    """合并既有 JSON 数组列与新信号：新信号在前（最新优先），去重后截断，口径同批量脚本。
+
+    drop 中的条目从既有列表剔除：顾问翻转决策（采纳↔拒绝）时撤回对侧旧信号，避免同一
+    关键词/公司同时挂在 promote 与 suppress 两列。
+    """
+    base = _loads(existing[column], []) if existing else []
+    if not isinstance(base, list):
+        base = []
+    discard = drop or set()
+    merged = [
+        item
+        for item in dict.fromkeys([*new_items, *(str(x) for x in base)])
+        if str(item).strip() and item not in discard
+    ]
+    return json.dumps(merged[:cap], ensure_ascii=False)
+
+
+def _record_explicit_correction(
+    conn: Any,
+    review: dict[str, Any],
+    diffs_by_id: dict[str, dict[str, Any]],
+    normalized: list[tuple[str, str]],
+    decided_at: str,
+) -> bool:
+    """写 explicit_corrections 学习信号（strategy_corrections 表，按 client+position 合并 upsert）。
+
+    语义映射：采纳 step4 词组→promote、拒绝 step4 词组→suppress、采纳 step2 公司→target、
+    拒绝 step2 公司→blocker；每条决策落 evidence 留痕（只含 diff_id/step/op，不含 restricted）。
+    缺 client/job 锚点时降级返回 False，不报错。
+    """
+    client = str(review.get("client") or "").strip()
+    position = str(review.get("job") or "").strip()
+    if not client or not position:
+        return False
+    promote: list[str] = []
+    suppress: list[str] = []
+    target: list[str] = []
+    blocker: list[str] = []
+    evidence: list[str] = []
+    for diff_id, status in normalized:
+        diff = diffs_by_id[diff_id]
+        step, op = str(diff.get("step") or ""), str(diff.get("op") or "")
+        if step == "step4_keyword_groups":
+            terms = [str(term) for term in diff.get("terms") or [] if str(term or "").strip()]
+            (promote if status == "accepted" else suppress).extend(terms)
+        elif step == "step2_target_pool":
+            companies = [str(name) for name in diff.get("companies") or [] if str(name or "").strip()]
+            (target if status == "accepted" else blocker).extend(companies)
+        evidence.append(f"复盘修订{_DECISION_LABELS[status]}：{diff_id} {step}/{op}（{decided_at}）")
+    conn.execute(_STRATEGY_CORRECTIONS_DDL)
+    existing = conn.execute(
+        "SELECT * FROM strategy_corrections WHERE client=? AND position=? ORDER BY id DESC LIMIT 1",
+        (client, position),
+    ).fetchone()
+    new_by_column = {
+        "promote_keywords_json": promote,
+        "suppress_keywords_json": suppress,
+        "target_tags_json": target,
+        "blocker_tags_json": blocker,
+        "evidence_json": evidence,
+    }
+    opposite = {
+        "promote_keywords_json": "suppress_keywords_json",
+        "suppress_keywords_json": "promote_keywords_json",
+        "target_tags_json": "blocker_tags_json",
+        "blocker_tags_json": "target_tags_json",
+    }
+    columns = (
+        ("promote_keywords_json", 20),
+        ("suppress_keywords_json", 20),
+        ("target_tags_json", 12),
+        ("blocker_tags_json", 20),
+        ("evidence_json", 30),
+    )
+    values = {
+        column: _merged_signal_list(
+            existing, column, new_by_column[column], cap,
+            drop=set(new_by_column[opposite[column]]) if column in opposite else None,
+        )
+        for column, cap in columns
+    }
+    if existing:
+        conn.execute(
+            """
+            UPDATE strategy_corrections SET promote_keywords_json=?,suppress_keywords_json=?,
+                   target_tags_json=?,blocker_tags_json=?,evidence_json=?,updated_at=datetime('now','localtime')
+            WHERE id=?
+            """,
+            (
+                values["promote_keywords_json"], values["suppress_keywords_json"],
+                values["target_tags_json"], values["blocker_tags_json"], values["evidence_json"],
+                existing["id"],
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO strategy_corrections
+            (client,position,promote_keywords_json,suppress_keywords_json,target_tags_json,blocker_tags_json,evidence_json,updated_at)
+            VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))
+            """,
+            (
+                client, position,
+                values["promote_keywords_json"], values["suppress_keywords_json"],
+                values["target_tags_json"], values["blocker_tags_json"], values["evidence_json"],
+            ),
+        )
+    return True
+
+
+def apply_diff_decisions(conn: Any, workflow_id: str, decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """顾问逐项采纳/拒绝：status 写回 artifact 的 revision_diff（upsert 可重复覆盖），并同步
+    strategy_v2.consultant_edits 与 explicit_corrections 学习信号。
+
+    全部决策先校验后落库（任一非法则整批不写入）：工作流不存在/无复盘抛 LookupError（404）；
+    diff_id 未知或 status 非 accepted/rejected 抛 ValueError（409）。
+    """
+    exists = conn.execute("SELECT 1 FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+    if exists is None:
+        raise LookupError(f"工作流不存在：{workflow_id}")
+    row = conn.execute(
+        """
+        SELECT artifact_id,metadata_json FROM agent_artifacts
+        WHERE workflow_id=? AND artifact_type=? ORDER BY id DESC LIMIT 1
+        """,
+        (workflow_id, ARTIFACT_TYPE),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"该工作流暂无策略复盘：{workflow_id}")
+    review = _loads(row["metadata_json"], {})
+    revision_diff = [item for item in review.get("revision_diff") or [] if isinstance(item, dict)]
+    diffs_by_id = {str(item.get("diff_id") or ""): item for item in revision_diff}
+    # 校验 + 归一化（同一 diff_id 重复出现时后者覆盖前者）
+    final: dict[str, str] = {}
+    for item in decisions:
+        if not isinstance(item, dict):
+            raise ValueError("决策条目必须是对象：{diff_id, status}")
+        diff_id = str(item.get("diff_id") or "")
+        status = str(item.get("status") or "")
+        if status not in DECISION_STATUSES:
+            raise ValueError(f"非法决策状态：{status or '(空)'}（仅支持 accepted/rejected）")
+        if diff_id not in diffs_by_id:
+            raise ValueError(f"复盘中不存在该修订项：{diff_id or '(空 diff_id)'}")
+        final[diff_id] = status
+    normalized = list(final.items())
+    decided_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for diff_id, status in normalized:
+        diffs_by_id[diff_id]["status"] = status
+        diffs_by_id[diff_id]["decided_at"] = decided_at
+    artifact_id = str(row["artifact_id"])
+    conn.execute(
+        "UPDATE agent_artifacts SET content=?,metadata_json=? WHERE artifact_id=?",
+        (_review_content(review), _dumps(review), artifact_id),
+    )
+    edits_appended = _append_consultant_edits(conn, workflow_id, diffs_by_id, normalized, decided_at)
+    signal_recorded = _record_explicit_correction(conn, review, diffs_by_id, normalized, decided_at)
+    return {
+        "ok": True,
+        "workflow_id": workflow_id,
+        "artifact_id": artifact_id,
+        "updated": len(normalized),
+        "revision_diff": revision_diff,
+        "consultant_edits_appended": edits_appended,
+        "learning_signal_recorded": signal_recorded,
     }

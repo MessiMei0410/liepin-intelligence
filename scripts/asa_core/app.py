@@ -69,6 +69,15 @@ class CopilotIntentConfirm(WriteEnvelope):
     session_id: str = ""
 
 
+class DiffDecision(BaseModel):
+    diff_id: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+
+
+class StrategyReviewDiffDecisions(WriteEnvelope):
+    decisions: list[DiffDecision] = Field(min_length=1)
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -199,6 +208,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 按需重算（存量终局工作流补生成）：走 execute_idempotent 模式，重放返回首次响应
         return idem("workflow.strategy_review_rebuild", body, idempotency_key, "workflow", workflow_id,
                     lambda: core.rebuild_strategy_review(workflow_id))
+
+    @app.patch("/api/v1/workflows/{workflow_id}/strategy-review/diffs")
+    def workflow_strategy_review_diffs(workflow_id: str, body: StrategyReviewDiffDecisions, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S4-3c 顾问逐项采纳/拒绝落库：走 execute_idempotent 模式，重放返回首次响应；
+        # 工作流/复盘不存在 → 404（LookupError），diff_id 未知或 status 非法 → 409（ValueError）
+        return idem("workflow.strategy_review_diff_decisions", body, idempotency_key, "workflow", workflow_id,
+                    lambda: core.apply_strategy_review_diff_decisions(
+                        workflow_id, [item.model_dump() for item in body.decisions]))
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
