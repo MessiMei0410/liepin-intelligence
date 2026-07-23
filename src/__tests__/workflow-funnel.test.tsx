@@ -7,7 +7,7 @@ import { zeroAttributionLabel, zeroAttributionLabels } from '../workflow/statusM
 import type { Workflow } from '../api'
 import { mockResponse } from './helpers'
 
-// R8 渠道漏斗验收：正常渲染 / 六类 0 结果归因中文映射 / 空数据回落 / 数字守恒 / 加载失败降级。
+// R8 渠道漏斗验收：正常渲染 / 0 结果归因中文映射（含 S4-3c-1 新增两类）/ 空数据回落 / 数字守恒 / 加载失败降级。
 
 const liepinRun = {
   run_id: 'r1', channel: 'liepin', status: 'completed', query_count: 2,
@@ -157,18 +157,20 @@ describe('R8 渠道寻访漏斗', () => {
     expect(await screen.findAllByText(/该轮未记录渠道明细/)).not.toHaveLength(0)
   })
 
-  it('0 结果归因映射与 ROUND2 T2 映射表逐字一致（六枚举冻结）', () => {
+  it('0 结果归因映射与 ROUND2 T2 映射表逐字一致（六枚举冻结 + S4-3c-1 新增两类）', () => {
     expect(zeroAttributionLabels).toEqual({
       session_expired: '登录态失效，需重新登录该渠道',
       loading_incomplete: '页面加载未完成或查询未生效',
       page_structure_changed: '页面结构变化，解析器需要适配',
       parse_failure: '平台有结果但解析抓取失败',
       no_results: '该渠道真实无匹配结果',
+      query_build_error: '查询构造异常',
+      pool_saturated: '本地池枯竭（排重率过高）',
       unknown: '原因待排查',
     })
   })
 
-  it('0 结果归因：六类枚举都有中文解释，不渲染英文原形', async () => {
+  it('0 结果归因：每类枚举都有中文解释，不渲染英文原形', async () => {
     for (const code of Object.keys(zeroAttributionLabels)) {
       stubFunnel({ ok: true, channels: [zeroChannel(code)], runs: [zeroRun(code)] })
       const { container, unmount } = renderFunnel()

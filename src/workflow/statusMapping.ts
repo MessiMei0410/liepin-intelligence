@@ -66,12 +66,15 @@ export const mapWorkflowStatus = ({ status, business_outcome, steps }: WorkflowS
 // R8 零结果归因映射：以后端 classify_zero_result 的枚举为准（agent_sourcing_funnel.zero_attribution）。
 // 0 召回/0 入库的渠道必须带中文解释，不得只显示 completed；未知新值回落“待排查”并保留原值便于排查。
 // 六枚举中文文案以 docs/ASA_KIMI_HANDOFF_2026-07-22_ROUND2.md T2 映射表为准（逐字冻结，测试钉住）。
+// S4-3c-1 新增 query_build_error/pool_saturated 两类，文案与后端 ZERO_RESULT_ATTRIBUTION_LABELS 逐字一致。
 export const zeroAttributionLabels: Record<string, string> = {
   no_results: '该渠道真实无匹配结果',
   session_expired: '登录态失效，需重新登录该渠道',
   loading_incomplete: '页面加载未完成或查询未生效',
   page_structure_changed: '页面结构变化，解析器需要适配',
   parse_failure: '平台有结果但解析抓取失败',
+  query_build_error: '查询构造异常',
+  pool_saturated: '本地池枯竭（排重率过高）',
   unknown: '原因待排查',
 }
 
