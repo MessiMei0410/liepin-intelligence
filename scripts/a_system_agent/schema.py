@@ -358,6 +358,22 @@ ON agent_sourcing_funnel(workflow_id,channel,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_sourcing_funnel_job
 ON agent_sourcing_funnel(job_id,channel,created_at DESC);
 
+CREATE TABLE IF NOT EXISTS agent_channel_effectiveness (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    archetype_id TEXT NOT NULL DEFAULT 'unknown',
+    rounds INTEGER NOT NULL DEFAULT 0,
+    recall_total INTEGER NOT NULL DEFAULT 0,
+    intake_total INTEGER NOT NULL DEFAULT 0,
+    high_score_total INTEGER NOT NULL DEFAULT 0,
+    zero_streak INTEGER NOT NULL DEFAULT 0,
+    conversion REAL,
+    last_verdict TEXT,
+    last_workflow_id TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(channel, archetype_id)
+);
+
 CREATE TABLE IF NOT EXISTS agent_sourcing_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dedupe_key TEXT NOT NULL UNIQUE,

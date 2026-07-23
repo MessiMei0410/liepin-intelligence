@@ -35,6 +35,27 @@ S4-3c：顾问逐项采纳/拒绝（apply_diff_decisions）—— status 写回 
 （upsert 可重复覆盖，不 bump version），同一写动作追加 strategy_v2.consultant_edits
 （strategy_v2 缺失时降级跳过）并写 explicit_corrections 学习信号（strategy_corrections 表）。
 
+S4-5（N4）渠道效能学习：
+- 新表 agent_channel_effectiveness（schema.py，ensure_schema 幂等；学习沉淀写 DB，不写 KB JSON）。
+  每轮复盘生成时按 渠道×岗位原型 累积：rounds/recall_total/intake_total/high_score_total
+  与 conversion（intake_total/recall_total），last_verdict 记当轮判定；无 archetype 归 'unknown' 桶。
+  幂等：last_workflow_id 去重，同一工作流重算（rebuild/终局重放）不重复累积，仅刷新判定与时间。
+- zero_streak 口径：当轮 recall=0 且 zero_attribution 非渠道故障
+  （session_expired/page_structure_changed/loading_incomplete 不计）→ streak+1；
+  当轮 recall>0 → 清零；渠道故障轮不计（streak 保持不变，既不累加也不打断）。
+- 降权规则：zero_streak ≥ 2（默认，可配置）→ review.channel_downweights 留痕
+  {channel, archetype_id, streak, reason, recommendation}，并同步标注扩池决策树
+  rebalance_channel 步 params.downweights；同一写动作把降权清单写回 strategy_v2
+  （channel_downweights 键，策略缺失时降级跳过）。本期仅建议不执行配额调整：
+  执行链路查询配额不在复盘器边界内，降权以复盘建议 + 策略对象留痕呈现，顾问决策后生效。
+
+S4-5（N5）评估校准暴露：高分率 0（high_total=0）且评估数 ≥ 5（可配置）时，
+复盘附 evaluation_review 条目 {items, prompt:"是尺严还是人不行"}：抽 ≤3 个被否人选
+（fit_score<75，按分数从高到低——最接近高分线者最能分辨"尺严/人不行"）的评分证据链摘要
+（遮罩名/当前公司职位/fit_score/关键扣分证据），证据只取 agent_candidate_assessments
+真实字段（criteria_json 中 status=not_met 的扣分准则 + gaps_json），候选人姓名一律遮罩，
+restricted 字面量不入条目。
+
 S4-3c-3（N3）：池枯竭信号 + 扩池决策树。
 - 轮次级 dedupe_rate = Σdedupe_count / Σextracted_count（聚合当轮全部漏斗行，extracted=0 不计）。
   dedupe_rate > 阈值（0.80，可配置）触发 pool_saturated 信号：写入 review.signals 数组，
@@ -80,6 +101,18 @@ _TIER_LABELS = {"T1": "T1 同层友商", "T2": "T2 客户整机厂", "T3": "T3 �
 
 # 执行/渠道类 0 召回归因（PRD §5：命中即执行问题，不改策略）
 EXECUTION_ZERO_ATTRIBUTIONS = ("session_expired", "page_structure_changed", "loading_incomplete")
+
+# S4-5（N4）渠道效能学习：连续 0 召回（非渠道故障归因）达到该轮数即产出降权建议
+DEFAULT_ZERO_STREAK_DOWNWEIGHT = 2
+# 无岗位原型（strategy_v2.archetype_id 为空）归 'unknown' 桶
+UNKNOWN_ARCHETYPE = "unknown"
+
+# S4-5（N5）评估校准暴露：高分 0 且评估数 ≥ 阈值时附"评估尺度复核"条目（≤3 个被否人选证据链）
+EVALUATION_REVIEW_MIN_ASSESSED = 5
+EVALUATION_REVIEW_MAX_ITEMS = 3
+EVALUATION_REVIEW_PROMPT = "是尺严还是人不行"
+# 被否人选口径：fit_score 低于高分线（75，与 sourcing_target_stats 的 score_75_plus 同口径）
+HIGH_SCORE_FLOOR = 75
 
 VERDICTS = ("strategy_too_narrow", "execution_channel_issue", "quality_gap", "insufficient_data", "healthy")
 VERDICT_LABELS = {
@@ -158,6 +191,7 @@ def build_expansion_decision_tree(
     dedupe_total: int,
     extracted_total: int,
     threshold: float = DEFAULT_POOL_SATURATED_DEDUPE_RATE,
+    channel_downweights: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """池枯竭后的有序行动路径（固定 5 步，order 即执行优先级）。
 
@@ -165,7 +199,7 @@ def build_expansion_decision_tree(
     1 swap_keywords     —— strategy_v2.step4_keyword_groups（当前组）+ 原型 keyword_groups（候选组）
     2 expand_pool       —— strategy_v2.step2_target_pool（已用层）+ 原型 target_company_pool（下一层公司）
     3 relax_condition   —— step3_level_mapping（职级）/ 原型 location_policy（地点）；年限无来源留空
-    4 rebalance_channel —— 当轮漏斗行（入库/去重转化率）
+    4 rebalance_channel —— 当轮漏斗行（入库/去重转化率）+ N4 渠道降权留痕（agent_channel_effectiveness）
     5 escalate_mapping  —— 升级项（转 Mapping 直挖 / 与客户校准方向），仅需排重证据
     """
     notes: list[str] = []
@@ -309,13 +343,21 @@ def build_expansion_decision_tree(
         + (f"（{stat['intake_conversion']:.0%}）" if stat["intake_conversion"] is not None else "")
         for stat in channel_stats
     ) or "（无漏斗行）"
+    # N4 渠道效能学习：连续 0 召回（非渠道故障）的降权留痕并入再平衡步（真实值，取不到为 []）
+    downweights = [dict(item) for item in channel_downweights or [] if isinstance(item, dict)]
+    downweight_text = "；".join(
+        f"{item.get('channel')}×{item.get('archetype_id')} 连续 {item.get('streak')} 轮 0 召回，建议降权"
+        for item in downweights
+    )
     step4 = _tree_step(
         4, "rebalance_channel", "渠道再平衡（向高效渠道倾斜）",
         f"按本轮漏斗转化率倾斜查询配额：{stats_text}。"
-        + (f"建议向 {best['channel']} 倾斜。" if best else "暂无可倾斜渠道，先执行前 3 步。"),
+        + (f"建议向 {best['channel']} 倾斜。" if best else "暂无可倾斜渠道，先执行前 3 步。")
+        + (f"渠道效能学习：{downweight_text}。" if downweights else ""),
         {"channel_stats": channel_stats,
          "recommended_channel": best["channel"] if best else None,
-         "basis": "intake_new_count/unique_count（本轮漏斗转化率）"},
+         "basis": "intake_new_count/unique_count（本轮漏斗转化率）",
+         "downweights": downweights},
     )
 
     # ---- 5. 转 Mapping 直挖 / 与客户校准方向（升级项）----
@@ -344,13 +386,23 @@ def build_strategy_review(
     detail_failed_ratio_threshold: float = DEFAULT_DETAIL_FAILED_RATIO,
     high_score_threshold: float = DEFAULT_HIGH_SCORE_THRESHOLD,
     dedupe_rate_threshold: float = DEFAULT_POOL_SATURATED_DEDUPE_RATE,
+    channel_downweights: list[dict[str, Any]] | None = None,
+    evaluation_items: list[dict[str, Any]] | None = None,
+    evaluation_review_min_assessed: int = EVALUATION_REVIEW_MIN_ASSESSED,
 ) -> dict[str, Any]:
-    """规则版复盘判定（纯函数，不触碰 DB/KB）。返回复盘对象（不含 version/history）。"""
+    """规则版复盘判定（纯函数，不触碰 DB/KB）。返回复盘对象（不含 version/history）。
+
+    S4-5：channel_downweights（N4 降权留痕，来自 agent_channel_effectiveness 累积快照）
+    与 evaluation_items（N5 被否人选证据链摘要，来自 agent_candidate_assessments）由
+    装配层（generate_for_workflow）计算后传入；本函数只负责按规则并入复盘对象。
+    """
     thresholds = {
         "recall_shortfall_ratio": recall_shortfall_ratio,
         "detail_failed_ratio": detail_failed_ratio_threshold,
         "high_score_rate": high_score_threshold,
         "pool_saturated_dedupe_rate": dedupe_rate_threshold,
+        "zero_streak_downweight": DEFAULT_ZERO_STREAK_DOWNWEIGHT,
+        "evaluation_review_min_assessed": evaluation_review_min_assessed,
     }
     pool_candidates = [str(name) for name in pool_candidates or [] if str(name or "").strip()]
     keyword_candidates = [str(term) for term in keyword_candidates or [] if str(term or "").strip()]
@@ -550,8 +602,40 @@ def build_strategy_review(
             dedupe_total=dedupe_total,
             extracted_total=extracted_total,
             threshold=dedupe_rate_threshold,
+            channel_downweights=channel_downweights,
         )
         notes.extend(tree_notes)
+
+    # ---- S4-5（N4）渠道降权留痕：zero_streak≥阈值的 渠道×原型 组合（本期仅建议不执行配额）----
+    downweights = [dict(item) for item in channel_downweights or [] if isinstance(item, dict)]
+    if downweights:
+        downweight_text = "；".join(
+            f"{item.get('channel')}×{item.get('archetype_id')} 连续 {item.get('streak')} 轮 0 召回（非渠道故障）"
+            for item in downweights
+        )
+        verdict_reason += f"；渠道效能学习：{downweight_text}，已产出降权建议（留痕 strategy_v2.channel_downweights，配额调整待顾问确认）"
+        notes.append(
+            "N4 渠道降权（仅建议不执行）：" + "；".join(str(item.get("recommendation") or "") for item in downweights)
+        )
+
+    # ---- S4-5（N5）评估校准暴露：高分率 0 且评估数 ≥ 阈值时附"评估尺度复核"条目 ----
+    evaluation_review: dict[str, Any] | None = None
+    if assessed_total >= evaluation_review_min_assessed and high_total == 0:
+        items = [dict(item) for item in evaluation_items or [] if isinstance(item, dict)][:EVALUATION_REVIEW_MAX_ITEMS]
+        evaluation_review = {
+            "kind": "evaluation_review",
+            "prompt": EVALUATION_REVIEW_PROMPT,
+            "assessed_total": assessed_total,
+            "high_score_total": high_total,
+            "items": items,
+            "note": "复核结论请在被否人选详情页以「评分复核」记录，写回候选人事件供校准回看",
+        }
+        verdict_reason += (
+            f"；评估尺度复核：评估 {assessed_total} 人、高分 0，已附 {len(items)} 个被否人选评分证据链"
+            f"（{EVALUATION_REVIEW_PROMPT}）"
+        )
+        if not items:
+            notes.append("评估尺度复核已触发，但未取到被否人选证据链（评估表无本岗位记录），请顾问人工抽查")
 
     # ---- 修订建议（strategy_v2 diff，逐项可采纳/拒绝）----
     revision_diff: list[dict[str, Any]] = []
@@ -639,8 +723,250 @@ def build_strategy_review(
         "per_channel_findings": per_channel,
         "revision_diff": revision_diff,
         "escalation": escalation,
+        "channel_downweights": downweights,
+        "evaluation_review": evaluation_review,
         "notes": notes,
     }
+
+
+# ---------------------------------------------------------------------------
+# S4-5（N4）渠道效能学习：agent_channel_effectiveness 累积 + 降权建议（DB 装配层）
+# ---------------------------------------------------------------------------
+
+def update_channel_effectiveness(
+    conn: Any,
+    *,
+    workflow_id: str,
+    funnel_rows: list[dict[str, Any]],
+    archetype_id: str,
+    verdict: str,
+) -> list[dict[str, Any]]:
+    """按 渠道×岗位原型 累积本轮漏斗指标（每轮复盘生成时调用一次）。返回本组合全部行快照。
+
+    口径：
+    - archetype_id 为空归 'unknown' 桶；每个漏斗行渠道各累积一条（UNIQUE(channel, archetype_id)）。
+    - 幂等：last_workflow_id 去重——同一工作流重算（rebuild/终局重放）不重复累积，
+      仅刷新 last_verdict/updated_at。
+    - zero_streak：当轮 recall=0 且 zero_attribution 非渠道故障（EXECUTION_ZERO_ATTRIBUTIONS
+      不计）→ +1；当轮 recall>0 → 清零；渠道故障轮不累加也不打断（保持原值）。
+    - conversion = intake_total / recall_total（recall_total=0 时为 None）。
+    """
+    archetype_key = str(archetype_id or "").strip() or UNKNOWN_ARCHETYPE
+    snapshots: list[dict[str, Any]] = []
+    for row in funnel_rows:
+        channel = str(row.get("channel") or "").strip()
+        if not channel:
+            continue
+        existing = conn.execute(
+            "SELECT * FROM agent_channel_effectiveness WHERE channel=? AND archetype_id=?",
+            (channel, archetype_key),
+        ).fetchone()
+        if existing is not None and str(existing["last_workflow_id"] or "") == workflow_id:
+            # 同工作流重算：不重复累积，只刷新判定留痕
+            conn.execute(
+                "UPDATE agent_channel_effectiveness SET last_verdict=?,updated_at=datetime('now','localtime') WHERE id=?",
+                (verdict, existing["id"]),
+            )
+        else:
+            recall = _int(row.get("recall_count"))
+            attribution = str(row.get("zero_attribution") or "")
+            rounds = _int(existing["rounds"]) + 1 if existing is not None else 1
+            recall_total = (_int(existing["recall_total"]) if existing is not None else 0) + recall
+            intake_total = (_int(existing["intake_total"]) if existing is not None else 0) + _int(row.get("intake_new_count"))
+            high_total = (_int(existing["high_score_total"]) if existing is not None else 0) + _int(row.get("high_score_count"))
+            if recall > 0:
+                zero_streak = 0
+            elif attribution in EXECUTION_ZERO_ATTRIBUTIONS:
+                zero_streak = _int(existing["zero_streak"]) if existing is not None else 0
+            else:
+                zero_streak = (_int(existing["zero_streak"]) if existing is not None else 0) + 1
+            conversion = round(intake_total / recall_total, 4) if recall_total else None
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO agent_channel_effectiveness
+                    (channel,archetype_id,rounds,recall_total,intake_total,high_score_total,
+                     zero_streak,conversion,last_verdict,last_workflow_id,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
+                    """,
+                    (channel, archetype_key, rounds, recall_total, intake_total, high_total,
+                     zero_streak, conversion, verdict, workflow_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE agent_channel_effectiveness
+                    SET rounds=?,recall_total=?,intake_total=?,high_score_total=?,zero_streak=?,
+                        conversion=?,last_verdict=?,last_workflow_id=?,updated_at=datetime('now','localtime')
+                    WHERE id=?
+                    """,
+                    (rounds, recall_total, intake_total, high_total, zero_streak,
+                     conversion, verdict, workflow_id, existing["id"]),
+                )
+        current = conn.execute(
+            "SELECT * FROM agent_channel_effectiveness WHERE channel=? AND archetype_id=?",
+            (channel, archetype_key),
+        ).fetchone()
+        if current is not None:
+            snapshots.append({key: current[key] for key in current.keys()})
+    return snapshots
+
+
+def compute_channel_downweights(
+    effectiveness_rows: list[dict[str, Any]],
+    *,
+    min_streak: int = DEFAULT_ZERO_STREAK_DOWNWEIGHT,
+) -> list[dict[str, Any]]:
+    """降权建议：同一 渠道×原型 连续 ≥min_streak 轮 0 召回（非渠道故障归因）→ 降权留痕。
+
+    本期仅建议不执行：查询配额在执行链路（capability_runtime），复盘器只产出建议并留痕
+    strategy_v2.channel_downweights，配额调整待顾问确认后生效。
+    """
+    downweights: list[dict[str, Any]] = []
+    for row in effectiveness_rows:
+        streak = _int(row.get("zero_streak"))
+        if streak < min_streak:
+            continue
+        channel = str(row.get("channel") or "")
+        archetype_id = str(row.get("archetype_id") or UNKNOWN_ARCHETYPE)
+        downweights.append(
+            {
+                "channel": channel,
+                "archetype_id": archetype_id,
+                "streak": streak,
+                "rounds": _int(row.get("rounds")),
+                "recall_total": _int(row.get("recall_total")),
+                "reason": (
+                    f"{channel}×{archetype_id} 连续 {streak} 轮 0 召回且归因非渠道故障"
+                    f"（累计 {_int(row.get('rounds'))} 轮、总召回 {_int(row.get('recall_total'))}）"
+                ),
+                "recommendation": (
+                    f"建议 {channel} 在原型 {archetype_id} 下查询配额降权（如下轮 queries 减半），"
+                    "配额让给高效渠道；执行待顾问确认"
+                ),
+            }
+        )
+    return downweights
+
+
+def _trace_channel_downweights(conn: Any, workflow_id: str, downweights: list[dict[str, Any]]) -> bool:
+    """降权决策留痕策略对象：写入 strategy_v2.channel_downweights（覆写为当轮最新清单）。
+
+    strategy_v2 缺失（无 search_strategy artifact / v1 旧格式）时降级返回 False，不报错。
+    """
+    artifact = conn.execute(
+        """
+        SELECT artifact_id,metadata_json FROM agent_artifacts
+        WHERE workflow_id=? AND artifact_type='search_strategy' ORDER BY id DESC LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone()
+    if artifact is None:
+        return False
+    metadata = _loads(artifact["metadata_json"], {})
+    strategy_doc = strategy_v2.extract_strategy_v2(metadata)
+    if not isinstance(strategy_doc, dict):
+        return False
+    strategy_doc["channel_downweights"] = [dict(item) for item in downweights]
+    metadata["strategy_v2"] = strategy_doc
+    conn.execute(
+        "UPDATE agent_artifacts SET metadata_json=? WHERE artifact_id=?",
+        (_dumps(metadata), str(artifact["artifact_id"])),
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# S4-5（N5）评估校准暴露：被否人选评分证据链摘要（DB 装配层）
+# ---------------------------------------------------------------------------
+
+def _mask_name(value: Any) -> str:
+    """候选人姓名遮罩（与 workflow._mask_candidate_name 同口径；已遮罩的保持原样）。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "*" in text or "某" in text or text.endswith(("先生", "女士", "老师")):
+        return text
+    return text[:1] + "**"
+
+
+def _deduction_evidence(criteria_json: Any, gaps_json: Any, *, cap: int = 3) -> list[dict[str, Any]]:
+    """关键扣分证据：criteria_json 中 status=not_met 的准则（硬伤在前）+ gaps_json 缺口。
+
+    只取真实字段（criterion/status/evidence/reason 与 gaps 原文），不编造；上限 cap 条。
+    """
+    deductions: list[dict[str, Any]] = []
+    criteria = _loads(criteria_json, {})
+    if isinstance(criteria, dict):
+        for group in ("hard_requirements", "core_abilities", "soft_preferences"):
+            items = criteria.get(group)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or str(item.get("status") or "") != "not_met":
+                    continue
+                deductions.append(
+                    {
+                        "group": group,
+                        "criterion": str(item.get("criterion") or ""),
+                        "status": "not_met",
+                        "critical": bool(item.get("critical")),
+                        "reason": str(item.get("reason") or ""),
+                        "evidence": [str(text) for text in item.get("evidence") or [] if str(text or "").strip()][:3],
+                    }
+                )
+    deductions.sort(key=lambda item: (not item["critical"], item["group"] != "hard_requirements"))
+    deductions = deductions[:cap]
+    gaps = [str(gap) for gap in _loads(gaps_json, []) if str(gap or "").strip()]
+    if gaps and len(deductions) < cap:
+        deductions.append({"group": "gaps", "criterion": "缺口", "status": "not_met", "critical": False,
+                           "reason": "", "evidence": gaps[: cap - len(deductions)]})
+    return deductions[:cap]
+
+
+def _evaluation_review_items(conn: Any, job_id: int, *, limit: int = EVALUATION_REVIEW_MAX_ITEMS) -> list[dict[str, Any]]:
+    """抽 ≤limit 个被否人选（fit_score<75）的评分证据链摘要。
+
+    来源：agent_candidate_assessments（is_current=1 且 run 完成）JOIN job_candidates/people，
+    证据只取 criteria_json 的 not_met 准则 + gaps_json；姓名一律遮罩。
+    按 fit_score 从高到低取——最接近高分线的被否者最能分辨"尺严还是人不行"。
+    表缺失/查询异常一律降级为空列表（不阻塞复盘）。
+    """
+    if not job_id:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT a.id AS assessment_id,a.job_candidate_id,a.fit_score,a.fit_level,a.recommendation,
+                   a.criteria_json,a.gaps_json,
+                   p.display_name,p.current_company,p.current_title
+            FROM agent_candidate_assessments a
+            JOIN job_candidates jc ON jc.id=a.job_candidate_id
+            JOIN people p ON p.id=a.person_id
+            JOIN agent_runs r ON r.run_id=a.run_id
+            WHERE jc.job_id=? AND a.is_current=1 AND r.status='completed' AND a.fit_score<? 
+            ORDER BY a.fit_score DESC,a.id DESC LIMIT ?
+            """,
+            (int(job_id), HIGH_SCORE_FLOOR, int(limit)),
+        ).fetchall()
+    except Exception:
+        return []
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                "job_candidate_id": _int(row["job_candidate_id"]),
+                "assessment_id": _int(row["assessment_id"]),
+                "candidate": _mask_name(row["display_name"]),
+                "company": str(row["current_company"] or ""),
+                "title": str(row["current_title"] or ""),
+                "fit_score": _int(row["fit_score"]),
+                "fit_level": str(row["fit_level"] or ""),
+                "recommendation": str(row["recommendation"] or ""),
+                "deductions": _deduction_evidence(row["criteria_json"], row["gaps_json"]),
+            }
+        )
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +1135,60 @@ def generate_for_workflow(
         high_score_threshold=high_score_threshold,
         dedupe_rate_threshold=dedupe_rate_threshold,
     )
+
+    # ---- S4-5（N4）渠道效能累积 → 降权建议；（N5）被否人选证据链 → 第二遍并入复盘 ----
+    archetype_id = str((strategy_doc or {}).get("archetype_id") or (archetype or {}).get("archetype_id") or "")
+    effectiveness_rows: list[dict[str, Any]] = []
+    downweights: list[dict[str, Any]] = []
+    try:
+        effectiveness_rows = update_channel_effectiveness(
+            conn,
+            workflow_id=workflow_id,
+            funnel_rows=funnel_rows,
+            archetype_id=archetype_id,
+            verdict=str(review.get("verdict") or ""),
+        )
+        downweights = compute_channel_downweights(effectiveness_rows)
+    except Exception:
+        effectiveness_rows, downweights = [], []
+    evaluation_items = _evaluation_review_items(conn, job_id)
+    if downweights or evaluation_items:
+        review = build_strategy_review(
+            workflow_id=workflow_id,
+            strategy_doc=strategy_doc,
+            funnel_rows=funnel_rows,
+            assessment=assessment,
+            pool_candidates=pool_candidates,
+            keyword_candidates=keyword_candidates,
+            archetype=archetype,
+            recall_shortfall_ratio=recall_shortfall_ratio,
+            detail_failed_ratio_threshold=detail_failed_ratio_threshold,
+            high_score_threshold=high_score_threshold,
+            dedupe_rate_threshold=dedupe_rate_threshold,
+            channel_downweights=downweights,
+            evaluation_items=evaluation_items,
+        )
+    try:
+        if _trace_channel_downweights(conn, workflow_id, downweights) and downweights:
+            review["notes"] = [
+                *(review.get("notes") or []),
+                f"降权决策已留痕 strategy_v2.channel_downweights（{len(downweights)} 条）",
+            ]
+    except Exception:
+        pass
+    review["channel_effectiveness"] = [
+        {
+            "channel": str(item.get("channel") or ""),
+            "archetype_id": str(item.get("archetype_id") or ""),
+            "rounds": _int(item.get("rounds")),
+            "recall_total": _int(item.get("recall_total")),
+            "intake_total": _int(item.get("intake_total")),
+            "high_score_total": _int(item.get("high_score_total")),
+            "zero_streak": _int(item.get("zero_streak")),
+            "conversion": item.get("conversion"),
+        }
+        for item in effectiveness_rows
+    ]
     review.update(
         {
             "goal_id": str(row["goal_id"] or ""),
@@ -847,6 +1227,27 @@ def _review_content(review: dict[str, Any]) -> str:
         lines.append(f"- 修订建议（{diff.get('diff_id')}，{diff.get('step')}/{diff.get('op')}）：{diff.get('reason')}")
     if review.get("escalation"):
         lines.append(f"- 转评估问题单：{review['escalation'].get('reason')}")
+    downweights = review.get("channel_downweights") or []
+    if downweights:
+        lines.append("- 渠道降权建议（N4，仅建议不执行，配额调整待顾问确认）：")
+        for item in downweights:
+            lines.append(f"  · {item.get('reason')} → {item.get('recommendation')}")
+    evaluation_review = review.get("evaluation_review")
+    if isinstance(evaluation_review, dict):
+        items = evaluation_review.get("items") or []
+        lines.append(
+            f"- 评估尺度复核（N5：评估 {evaluation_review.get('assessed_total')} 人、高分 0，"
+            f"prompt：{evaluation_review.get('prompt')}）：被否人选证据链 {len(items)} 条"
+        )
+        for item in items:
+            deductions = "；".join(
+                f"{ded.get('criterion')}（{ded.get('group')}）"
+                for ded in item.get("deductions") or []
+            ) or "无扣分证据明细"
+            lines.append(
+                f"  · {item.get('candidate')}｜{item.get('company')} {item.get('title')}｜"
+                f"fit_score {item.get('fit_score')}｜扣分：{deductions}"
+            )
     lines.extend(["", "```json", json.dumps(review, ensure_ascii=False, indent=2), "```"])
     return "\n".join(lines)
 
