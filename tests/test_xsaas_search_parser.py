@@ -57,13 +57,13 @@ class XsaasSearchParserRegressionTest(unittest.TestCase):
         self.assertIn("result?.queryMatched && !result.loading", source)
 
     def test_production_runner_resets_conditions_between_queries(self) -> None:
-        """round5 实战 bug：X-SaaS 把上次搜索关键词留在"已选条件"累加（AND），
-        循环内不重开列表页会让第 2 组起全部查询被污染（六组全 0）。防回归。"""
+        """round5/7 实战 bug：X-SaaS 把上次搜索关键词留在"已选条件"累加（AND），
+        hash 跳转不刷新 SPA（round7 复发实证），必须 location.reload() 真重载。防回归。"""
         if not PRODUCTION_RUNNER.exists():
             self.skipTest(f"生产 runner 不在本机: {PRODUCTION_RUNNER}")
         source = PRODUCTION_RUNNER.read_text(encoding="utf-8")
         loop = source.index("for index, query in enumerate(queries[:8]):")
-        reset = source.index("#/app/candidate/list';true", loop)
+        reset = source.index("location.reload()", loop)
         submit = source.index("SEARCH_JS", loop)
         self.assertLess(loop, reset)
         self.assertLess(reset, submit)
