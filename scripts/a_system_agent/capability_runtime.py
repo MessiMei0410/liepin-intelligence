@@ -88,6 +88,39 @@ def _trim_error(text: Any, limit: int = 1000) -> str:
     return value if len(value) <= limit else value[-limit:]
 
 
+XSAAS_QUERY_MAX_TERMS = 2
+XSAAS_QUERY_MAX_COUNT = 8
+LIEPIN_QUERY_MAX_TERMS = 2
+LIEPIN_QUERY_MAX_COUNT = 6
+
+
+def adapt_channel_queries(queries: list[Any], *, max_terms: int, max_count: int) -> list[str]:
+    """渠道查询适配：密集多词查询拆成 1-2 个关键词的短查询。
+
+    顾问经验（2026-07-23）：
+    - X-SaaS 系统本身识别不了多关键词组合，多词查询直接 0 结果
+      （round5 第 1 组"多相控制器 DrMOS POL TME FAE"五词 0 条实证）；
+    - 猎聘同理：候选人简历不一定包含全部关键词，往往只有一两个，
+      多词 AND 会把好人选过滤掉。
+    拆分策略："锚定词（首词，多为产品/技术锚）+ 逐个剩余词"组成二字查询，
+    保住锚定防方向词漂移；去重保序，总量封顶渠道 runner 上限。
+    """
+    adapted: list[str] = []
+    for raw in queries:
+        terms = str(raw or "").split()
+        if not terms:
+            continue
+        if len(terms) <= max_terms:
+            adapted.append(" ".join(terms))
+            continue
+        anchor, rest = terms[0], terms[1:]
+        for term in rest:
+            adapted.append(f"{anchor} {term}")
+    seen: set[str] = set()
+    unique = [query for query in adapted if not (query in seen or seen.add(query))]
+    return unique[:max_count]
+
+
 def classify_zero_result(channel: str, status: str, result: dict[str, Any]) -> str:
     """用 runner 输出里的既有信号为 0 候选的渠道结果归因。
 
@@ -194,6 +227,10 @@ class RecruitingCapabilityRuntime:
             fallback_channels = fallback.get("channels") or {}
             liepin_queries = liepin_queries or fallback_channels.get("liepin") or []
             xsaas_queries = xsaas_queries or fallback_channels.get("xsaas") or []
+        # 渠道查询适配（顾问规则 2026-07-23）：密集多词查询拆成 1-2 词短查询——
+        # X-SaaS 吃不下多词组合；猎聘 AND 语义会滤掉只写了一两个词的好简历。
+        liepin_queries = adapt_channel_queries(liepin_queries, max_terms=LIEPIN_QUERY_MAX_TERMS, max_count=LIEPIN_QUERY_MAX_COUNT)
+        xsaas_queries = adapt_channel_queries(xsaas_queries, max_terms=XSAAS_QUERY_MAX_TERMS, max_count=XSAAS_QUERY_MAX_COUNT)
         liepin_queries_path.write_text(json.dumps({"queries": liepin_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         xsaas_queries_path.write_text(json.dumps({"queries": xsaas_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         command = [

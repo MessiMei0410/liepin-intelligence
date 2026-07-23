@@ -14,9 +14,53 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from a_system_agent import AgentService, FakeLLM  # noqa: E402
-from a_system_agent.capability_runtime import ZERO_RESULT_ATTRIBUTIONS, classify_zero_result  # noqa: E402
+from a_system_agent.capability_runtime import (  # noqa: E402
+    ZERO_RESULT_ATTRIBUTIONS,
+    adapt_channel_queries,
+    classify_zero_result,
+)
 from a_system_agent.schema import ensure_schema  # noqa: E402
 from asa_core.app import create_app  # noqa: E402
+
+
+class AdaptChannelQueriesTest(unittest.TestCase):
+    """顾问规则（2026-07-23）：X-SaaS 吃不下多词组合；猎聘 AND 语义滤掉只写一两个词的简历。"""
+
+    def test_short_queries_unchanged(self) -> None:
+        self.assertEqual(
+            adapt_channel_queries(["DrMOS", "多相控制器", "MPS 矽力杰"], max_terms=2, max_count=8),
+            ["DrMOS", "多相控制器", "MPS 矽力杰"],
+        )
+
+    def test_dense_query_expands_to_anchor_pairs(self) -> None:
+        self.assertEqual(
+            adapt_channel_queries(["多相控制器 DrMOS POL TME FAE"], max_terms=2, max_count=8),
+            ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"],
+        )
+
+    def test_dedupe_preserves_order(self) -> None:
+        self.assertEqual(
+            adapt_channel_queries(["MPS 电源 市场", "MPS 电源"], max_terms=2, max_count=8),
+            ["MPS 电源", "MPS 市场"],
+        )
+
+    def test_count_cap_keeps_priority_order(self) -> None:
+        out = adapt_channel_queries(["a b c d e f g h i j"], max_terms=2, max_count=4)
+        self.assertEqual(out, ["a b", "a c", "a d", "a e"])
+
+    def test_empty_and_malformed_robust(self) -> None:
+        self.assertEqual(adapt_channel_queries([], max_terms=2, max_count=8), [])
+        self.assertEqual(adapt_channel_queries(["", None, "  "], max_terms=2, max_count=8), [])
+
+    def test_channel_presets(self) -> None:
+        from a_system_agent.capability_runtime import (
+            LIEPIN_QUERY_MAX_COUNT,
+            LIEPIN_QUERY_MAX_TERMS,
+            XSAAS_QUERY_MAX_COUNT,
+            XSAAS_QUERY_MAX_TERMS,
+        )
+        self.assertEqual((XSAAS_QUERY_MAX_TERMS, XSAAS_QUERY_MAX_COUNT), (2, 8))
+        self.assertEqual((LIEPIN_QUERY_MAX_TERMS, LIEPIN_QUERY_MAX_COUNT), (2, 6))
 
 
 FUNNEL_COLUMNS = {
