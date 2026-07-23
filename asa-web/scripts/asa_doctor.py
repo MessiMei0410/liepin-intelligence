@@ -308,7 +308,9 @@ AGENT_LABELS = (
     ("ai.hermes.asa-v3-backup", "每日备份", "warn"),
     ("ai.hermes.chrome-cdp", "Chrome CDP", "warn"),
 )
-GIT_REPOS = (("前端", REPO_ROOT), ("后端", LIEPIN_ROOT))
+# 2026-07-23 仓库合并：前端仓已并入后端仓为 asa-web/ 子树（/Users/messi/Documents/ASA 为符号链接），
+# 主仓唯一，git 检查只列主仓；asa-web 子树同仓随查。
+GIT_REPOS = (("主仓", LIEPIN_ROOT),)
 
 
 def probe_launchagent(label: str) -> dict:

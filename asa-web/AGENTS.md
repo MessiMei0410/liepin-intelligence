@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **2026-07-23 仓库合并**：本目录现为单体仓库 `liepin-intelligence` 的 `asa-web/` 子树；`/Users/messi/Documents/ASA` 是指向该子树的符号链接（路径兼容层）。提交在主仓 `liepin-intelligence` 进行，历史双方完整保留。
+
 ASA App 前端（React 19 + Vite 8 + TS strict），由 ASA Core（127.0.0.1:8765）的 `/asa-app` 提供 `dist/`。
 
 ## 常用命令
