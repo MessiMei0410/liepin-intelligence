@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import knowledge_base
+from . import knowledge_base, strategy_v2
 
 LIEPIN_QUERY_MAX_TERMS = 2
 LIEPIN_QUERY_MAX_COUNT = 6
@@ -56,6 +56,19 @@ def company_vocabulary(strategy: dict[str, Any]) -> set[str]:
             name = str((comp or {}).get("name") or "").strip()
             if name:
                 names.add(name)
+    # 种子原型池（round8 实证：execute_external 的 strategy 嵌套不含 step2 时，
+    # 仅靠图谱词表会漏 MPS/矽力杰/杰华特，公司词成对漏网）
+    try:
+        archetypes, _arch_trace = strategy_v2.load_job_archetypes()
+        for arch in archetypes:
+            pool = (arch or {}).get("target_company_pool") or {}
+            for group in pool.values():
+                for comp in (group or {}).get("companies") or []:
+                    name = str((comp or {}).get("name") or "").strip()
+                    if name:
+                        names.add(name)
+    except Exception:
+        pass
     try:
         graph, _trace = knowledge_base.load_company_graph()
         names.update(graph.keys())

@@ -37,6 +37,20 @@ from a_system_agent.query_builders import (  # noqa: E402
 )
 
 
+class CompanyVocabularyCoverageTest(unittest.TestCase):
+    def test_company_vocabulary_covers_seed_pool_without_strategy_nesting(self) -> None:
+        # round8 实证：execute_external 的 strategy 嵌套不含 step2 时，仅靠图谱词表漏种子公司
+        vocab = query_builders.company_vocabulary({})
+        for expected in ("mps", "矽力杰", "杰华特"):
+            self.assertIn(expected, vocab)
+
+    def test_round8_pair_queries_split_solo_with_seed_vocab(self) -> None:
+        vocab = query_builders.company_vocabulary({})
+        out = build_xsaas_queries(["MPS 矽力杰", "MPS 杰华特"], company_terms=vocab)
+        self.assertNotIn("MPS 矽力杰", out)
+        self.assertEqual(out, ["MPS", "矽力杰", "杰华特"])
+
+
 def _company_count(query: str, vocab: set[str]) -> int:
     return sum(1 for token in query.split() if is_company_token(token, vocab))
 
