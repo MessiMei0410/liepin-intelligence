@@ -66,6 +66,24 @@ class AdaptChannelQueriesTest(unittest.TestCase):
             ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "MPS 矽力杰", "杰华特 技术市场", "杰华特 产品定义"],
         )
 
+    def test_company_pairs_never_combined(self) -> None:
+        # 顾问规则（round7）：两个公司名组合语义必错——公司词只与非公司词配对或单独成组
+        out = adapt_channel_queries(
+            ["MPS 矽力杰 杰华特 FAE AE"], max_terms=2, max_count=8,
+            company_terms={"mps", "矽力杰", "杰华特"},
+        )
+        self.assertNotIn("MPS 矽力杰", out)
+        self.assertNotIn("矽力杰 杰华特", out)
+        self.assertEqual(out, ["MPS FAE", "矽力杰 FAE", "杰华特 FAE", "FAE AE"])
+
+    def test_company_only_query_goes_solo(self) -> None:
+        out = adapt_channel_queries(["MPS 矽力杰"], max_terms=2, max_count=8, company_terms={"mps", "矽力杰"})
+        self.assertEqual(out, ["MPS", "矽力杰"])
+
+    def test_single_company_pairs_with_first_function_term(self) -> None:
+        out = adapt_channel_queries(["杰华特 技术市场 产品定义"], max_terms=2, max_count=8, company_terms={"杰华特"})
+        self.assertEqual(out, ["杰华特 技术市场", "技术市场 产品定义"])
+
     def test_channel_presets(self) -> None:
         from a_system_agent.capability_runtime import (
             LIEPIN_QUERY_MAX_COUNT,

@@ -263,9 +263,10 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             if not query:
                 continue
             if index > 0:
-                # 每组前重开列表页：X-SaaS 会把上次搜索关键词留在"已选条件"里累加（AND 语义），
-                # 不重置会让第 2 组起全部查询被前面条件污染（round3/round5 六组全 0 的根因）。
-                evaluate(cdp, f"location.href='https://{XSAAS_HOST}/?{RUNNER_MARKER}#/app/candidate/list';true")
+                # 每组前真刷新页面：X-SaaS 是 hash 路由 SPA，改 hash 不会重载、已选条件（筛选 chips）会保留
+                # 并逐组累加（AND 语义），第 2 组起全部被前面条件污染（round3/5/7 根因）。
+                # location.reload() 重载 SPA 初始化内存态；登录态在 localStorage 不受影响。
+                evaluate(cdp, "location.reload();true")
                 wait_for_list(cdp)
             started = evaluate(cdp, f"({SEARCH_JS})({json_expr(query)})") or {}
             if not started.get("ok"):
