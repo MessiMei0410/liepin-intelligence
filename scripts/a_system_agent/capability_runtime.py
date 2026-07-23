@@ -175,6 +175,8 @@ def classify_zero_result(
             return "page_structure_changed"
         if any(str(entry.get("status") or "") == "stale_query" for entry in rounds):
             return "loading_incomplete"
+        if any(str(entry.get("reason") or "") == "settle_timeout" for entry in rounds):
+            return "loading_incomplete"
         if _has_query_build_error(rounds, company_vocab or set()):
             return "query_build_error"
         recall = sum(_round_int(entry, "result_count") for entry in rounds)

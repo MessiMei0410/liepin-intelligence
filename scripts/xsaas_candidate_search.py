@@ -120,6 +120,17 @@ SEARCH_JS = r"""
 """
 
 
+SETTLE_JS = r"""
+(() => {
+  const bodyText = document.body ? document.body.innerText || '' : '';
+  return {
+    loading: bodyText.includes('loading...'),
+    hasCount: /[0-9,]+条记录/.test(bodyText),
+  };
+})()
+"""
+
+
 EXTRACT_JS = r"""
 (() => {
   const bodyText = document.body ? document.body.innerText || '' : '';
@@ -273,7 +284,19 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             if not started.get("ok"):
                 rounds.append({"query": query, "status": "failed", "reason": started.get("reason")})
                 continue
-            time.sleep(3.5)
+            # 等待搜索结果渲染完成：固定 3.5s 会读到加载中间态（MPS 165 条实证渲染 >4s），
+            # 误判为 0 召回（round3/5/7/8 的 loading 未完成形态，R8 归因清单预言过）。
+            settled = False
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                settle_state = evaluate(cdp, SETTLE_JS) or {}
+                if settle_state.get("hasCount") and not settle_state.get("loading"):
+                    settled = True
+                    break
+                time.sleep(0.8)
+            if not settled:
+                rounds.append({"query": query, "status": "failed", "reason": "settle_timeout"})
+                continue
             extracted = evaluate(cdp, EXTRACT_JS) or {}
             selected = str(extracted.get("selected_query") or "")
             status = "completed" if query in selected else "stale_query"
