@@ -41,6 +41,8 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
   const strategy=recordValue(recordValue(strategyStep?.output).strategy)
   const strategyChannels=recordValue(strategy.channels)
   const reviewGates=recordValue(strategy.review_gates)
+  // S4-3c-4（N6）：strategy_v2.coverage_report（种子要素消费检查），旧策略/无原型为 null 不渲染
+  const strategyCoverage=recordValue(recordValue(strategyStep?.output).strategy_v2).coverage_report
   const sourcingStep=value.steps.find(step=>step.capability_id==='multi_channel_sourcing')
   const externalResult=recordValue(recordValue(sourcingStep?.output).external_result)
   const appliedResult=recordValue(recordValue(recordValue(externalResult.intake).applied))
@@ -133,7 +135,7 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
     </section>
     {mapped.showNextActions&&<div className="workflow-next-actions" role="group" aria-label="下一步操作"><button className="button" disabled={!!busy} onClick={reviewCandidates}><UserRoundSearch/>复核现有人选</button><button className="button" disabled={!!busy} onClick={()=>setReviseOpen(true)}>{busy==='revise'&&<LoaderCircle className="spin"/>}调整条件再搜</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}结束本轮</button>}</div>}
     <WorkflowTarget target={target} objective={value.goal.objective}/>
-    <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
+    <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} coverage={strategyCoverage} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)}/>
     {sourcingStep&&<WorkflowFunnel workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''}/>}
     <StrategyReview workflowId={value.workflow.workflow_id} status={status} updatedAt={value.workflow.updated_at||''}/>
     <WorkflowCandidates ref={candidatesRef} workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''} sourcingStatus={sourcingStep?.status||'pending'} openCandidate={openCandidate}/>
