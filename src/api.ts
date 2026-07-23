@@ -165,6 +165,26 @@ export type StrategyReviewChannelFinding = {
   detail_failed_ratio?: number | null; zero_attribution?: string | null;
   finding?: string; note?: string;
 }
+// S4-5（N4）渠道效能学习：渠道×岗位原型连续 0 召回（非渠道故障）≥2 轮时复盘附降权建议。
+// 本期仅建议不执行：配额调整待顾问确认，落痕 strategy_v2.channel_downweights 与决策树 rebalance 步。
+export type ChannelDownweight = {
+  channel: string; archetype_id?: string; streak?: number; rounds?: number; recall_total?: number;
+  reason?: string; recommendation?: string;
+}
+// S4-5（N5）评估校准暴露：高分 0 且评估数 ≥5 时复盘附"评估尺度复核"条目（prompt 固定"是尺严还是人不行"），
+// items 为 ≤3 个被否人选（fit_score<75，按分高者先取）的评分证据链摘要：
+// 遮罩名/当前公司职位/fit_score/关键扣分证据（criteria not_met 准则 + gaps，硬伤在前）。
+export type EvaluationDeduction = {
+  group?: string; criterion?: string; status?: string; critical?: boolean; reason?: string; evidence?: string[]
+}
+export type EvaluationReviewItem = {
+  job_candidate_id?: number; assessment_id?: number; candidate?: string; company?: string; title?: string;
+  fit_score?: number; fit_level?: string; recommendation?: string; deductions?: EvaluationDeduction[]
+}
+export type EvaluationReview = {
+  kind?: string; prompt?: string; assessed_total?: number; high_score_total?: number;
+  items?: EvaluationReviewItem[]; note?: string;
+}
 export type StrategyReviewEvidence = {
   has_strategy_v2?: boolean; funnel_channels?: number; expected_recall_total?: number;
   recall_total?: number; detail_total?: number; detail_failed_total?: number;
@@ -180,6 +200,8 @@ export type StrategyReview = {
   signals?: StrategyReviewSignal[];
   expansion_decision_tree?: ExpansionTreeStep[];
   escalation?: { kind?: string; target?: string; reason?: string; status?: string } | null;
+  channel_downweights?: ChannelDownweight[];
+  evaluation_review?: EvaluationReview | null;
   notes?: string[]; generated_at?: string; version?: number;
   history?: Array<{ version?: number; verdict?: string; verdict_reason?: string; generated_at?: string }>;
 }

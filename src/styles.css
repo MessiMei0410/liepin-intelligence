@@ -208,3 +208,12 @@
 .workflow-review .review-tree-step>small{font-size:9.5px;color:var(--muted);line-height:1.5}
 .revise-tree-params{margin:0;padding-left:16px;display:grid;gap:2px}
 .revise-tree-params li{font-size:10px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+/* S4-5（N5）评估尺度复核：证据链行内"尺度复核"跳转按钮与条目尾注 */
+.workflow-review .review-eval-note{font-size:9.5px;color:var(--muted);line-height:1.5}
+.workflow-review .review-eval-open{margin-left:auto;padding:2px 8px;font-size:10px;gap:3px}
+.workflow-review .review-eval-open svg{width:12px;height:12px}
+/* S4-5（N5）评分复核快捷记录：结论快捷项（尺太严/人不行） */
+.action-dialog-body .review-conclusion-field{display:grid;gap:6px;margin-top:12px}
+.action-dialog-body .review-conclusion-field>span{font-size:10.5px;color:var(--muted)}
+.action-dialog-body .review-conclusion-chips{display:flex;gap:8px}
+.action-dialog-body .review-conclusion-chips .button{flex:1}

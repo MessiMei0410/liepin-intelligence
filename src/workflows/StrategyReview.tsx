@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useState } from 'react'
-import { ClipboardCheck, LoaderCircle, RefreshCw } from 'lucide-react'
+import { ClipboardCheck, LoaderCircle, RefreshCw, UserRoundSearch } from 'lucide-react'
 import { api } from '../api'
-import type { StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload } from '../api'
+import type { ChannelDownweight, EvaluationReviewItem, StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { channelLabel } from './utils'
 import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, loadDiffDecisions, mergeReviewDecisions } from './strategyReviewDiff'
@@ -15,6 +15,8 @@ import { StrategyReviewExpansion } from './StrategyReviewExpansion'
 // S4-3c 起决策以后端 revision_diff[].status 为事实源（每次拉取后合并进本地缓存），
 // localStorage 仅作 API 失败时的缓存回退，变更事件到达即刷新。
 // S4-3c-3：池枯竭信号与扩池决策树扩区在 StrategyReviewExpansion（树决策本期仅 localStorage，无后端回写）。
+// S4-5：N4 渠道降权建议（channel_downweights，仅建议不执行）与 N5 评估尺度复核（evaluation_review）
+// 如实渲染；尺度复核条目可跳候选人详情页，经"评分复核"快捷记录回写顾问结论（既有 commit 链路）。
 
 const REVIEWABLE_STATUSES = new Set(['completed', 'blocked', 'failed'])
 
@@ -24,7 +26,7 @@ const FINDING_LABELS: Record<string, string> = {
   low_high_rate: '高分率低',
 }
 
-export function StrategyReview({ workflowId, status, updatedAt }: { workflowId: string; status: string; updatedAt: string }) {
+export function StrategyReview({ workflowId, status, updatedAt, openCandidate }: { workflowId: string; status: string; updatedAt: string; openCandidate?: (id: number) => void }) {
   const reviewable = REVIEWABLE_STATUSES.has(status)
   const [payload, setPayload] = useState<StrategyReviewPayload | null>(null)
   const [missing, setMissing] = useState(false)
@@ -58,6 +60,8 @@ export function StrategyReview({ workflowId, status, updatedAt }: { workflowId: 
   const evidence = review?.evidence
   const findings = review?.per_channel_findings || []
   const diffs = review?.revision_diff || []
+  const downweights = review?.channel_downweights || []
+  const evaluationReview = review?.evaluation_review || null
   const notes = review?.notes || []
   const decisions = loadDiffDecisions(workflowId)
   const headSummary = error && !review ? '复盘加载失败' : review ? review.verdict_label : missing ? '该轮未生成策略复盘' : '复盘加载中…'
@@ -111,6 +115,19 @@ export function StrategyReview({ workflowId, status, updatedAt }: { workflowId: 
         {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} decision={decisions[diff.diff_id]} />)}
       </div>}
       <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} />
+      {downweights.length > 0 && <div className="review-diffs" aria-label="渠道降权建议">
+        <div className="review-diffs-head"><b>渠道降权建议</b><span>连续 0 召回（非渠道故障）≥2 轮 · 仅建议不执行，配额调整待顾问确认</span></div>
+        {downweights.map((item, index) => <DownweightRow key={`${item.channel}-${index}`} item={item} />)}
+      </div>}
+      {evaluationReview && <div className="review-diffs review-eval" aria-label="评估尺度复核">
+        <div className="review-diffs-head">
+          <b>评估尺度复核</b>
+          <span>评估 {evaluationReview.assessed_total ?? 0} 人 · 高分 0 · {evaluationReview.prompt || '是尺严还是人不行'}</span>
+        </div>
+        {(evaluationReview.items || []).length === 0 && <div className="review-diff"><small>未取到被否人选评分证据链，请在候选人列表人工抽查。</small></div>}
+        {(evaluationReview.items || []).map(item => <EvaluationItemRow key={item.job_candidate_id || item.assessment_id || item.candidate} item={item} openCandidate={openCandidate} />)}
+        {evaluationReview.note && <small className="review-eval-note">{evaluationReview.note}</small>}
+      </div>}
       {review.escalation && <p className="review-escalation">转评估问题单：{review.escalation.reason || '评分口径待复核'}</p>}
       {notes.length > 0 && <ul className="review-notes">{notes.map((note, index) => <li key={index}>{note}</li>)}</ul>}
     </>}
@@ -141,5 +158,42 @@ function DiffRow({ diff, decision }: { diff: StrategyReviewDiff; decision?: stri
     </div>
     {content && <span className="review-diff-content">{content}</span>}
     <small>{diff.reason}</small>
+  </div>
+}
+
+// S4-5（N4）降权建议行：连续 0 召回（非渠道故障）的 渠道×原型，建议降权并把配额让给高效渠道。
+function DownweightRow({ item }: { item: ChannelDownweight }) {
+  return <div className="review-diff">
+    <div className="review-diff-head">
+      <b>{channelLabel(item.channel)}{item.archetype_id ? ` × ${item.archetype_id}` : ''}</b>
+      <span className="tag warn">连续 {item.streak ?? 0} 轮 0 召回</span>
+    </div>
+    {item.reason && <span className="review-diff-content">{item.reason}</span>}
+    {item.recommendation && <small>{item.recommendation}</small>}
+  </div>
+}
+
+// S4-5（N5）被否人选证据链行：遮罩名/当前公司职位/fit_score/关键扣分证据（硬伤在前）。
+// "尺度复核"按钮跳候选人详情页，顾问结论经详情页"评分复核"快捷记录写回（既有 commit 链路）。
+function EvaluationItemRow({ item, openCandidate }: { item: EvaluationReviewItem; openCandidate?: (id: number) => void }) {
+  const deductions = item.deductions || []
+  return <div className="review-diff">
+    <div className="review-diff-head">
+      <b>{item.candidate || '（姓名待补充）'}</b>
+      <span className="review-channel-stats">{[item.company, item.title].filter(Boolean).join(' · ') || '公司职位待补充'}</span>
+      <span className="tag">fit {item.fit_score ?? '-'}{item.fit_level ? ` · ${item.fit_level}` : ''}</span>
+      {openCandidate && item.job_candidate_id != null && <button
+        className="button review-eval-open"
+        title="打开候选人详情，用「评分复核」记录结论"
+        onClick={() => openCandidate(Number(item.job_candidate_id))}
+      ><UserRoundSearch />尺度复核</button>}
+    </div>
+    {deductions.length > 0
+      ? <ul className="review-tree-params">{deductions.map((ded, index) => <li key={index}>
+          {ded.critical ? '硬伤' : '扣分'}：{ded.criterion || '（未命名准则）'}
+          {ded.reason ? `（${ded.reason}）` : ''}
+          {ded.evidence && ded.evidence.length > 0 ? `——${ded.evidence.join('；')}` : ''}
+        </li>)}</ul>
+      : <small>无扣分证据明细，建议打开详情核对评分依据。</small>}
   </div>
 }
