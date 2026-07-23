@@ -69,6 +69,12 @@ class XsaasSearchParserRegressionTest(unittest.TestCase):
         self.assertLess(clone, submit)
         self.assertIn("wait_for_list(cdp)", source[loop:submit])
         self.assertNotIn("location.reload()", source[loop:submit])
+        # 渲染等待：固定 sleep 会读加载中间态（MPS 165 条实证），必须轮询 hasCount && !loading
+        self.assertIn("SETTLE_JS", source)
+        self.assertIn("settle_timeout", source)
+        settle_loop = source.index("settled = False", loop)
+        extract = source.index("EXTRACT_JS) or {}", loop)
+        self.assertLess(settle_loop, extract)
 
 
 if __name__ == "__main__":
