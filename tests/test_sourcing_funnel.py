@@ -52,6 +52,20 @@ class AdaptChannelQueriesTest(unittest.TestCase):
         self.assertEqual(adapt_channel_queries([], max_terms=2, max_count=8), [])
         self.assertEqual(adapt_channel_queries(["", None, "  "], max_terms=2, max_count=8), [])
 
+    def test_dict_entries_use_query_field(self) -> None:
+        # round6 实证：LLM 策略步骤产出 {evidence, purpose, query, round} 字典项，
+        # 直接 str() 会把 Python repr 当查询词（"{'evidence': 'purpose':" 垃圾查询）
+        items = [
+            {"evidence": "岗位要求熟悉多相控制器", "purpose": "精准锁定", "query": "多相控制器 DrMOS POL TME", "round": "core"},
+            {"query": "MPS 矽力杰"},
+            {"evidence": "缺 query 字段"},
+            "杰华特 技术市场 产品定义",
+        ]
+        self.assertEqual(
+            adapt_channel_queries(items, max_terms=2, max_count=8),
+            ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "MPS 矽力杰", "杰华特 技术市场", "杰华特 产品定义"],
+        )
+
     def test_channel_presets(self) -> None:
         from a_system_agent.capability_runtime import (
             LIEPIN_QUERY_MAX_COUNT,

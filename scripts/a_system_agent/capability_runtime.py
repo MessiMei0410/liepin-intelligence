@@ -107,6 +107,10 @@ def adapt_channel_queries(queries: list[Any], *, max_terms: int, max_count: int)
     """
     adapted: list[str] = []
     for raw in queries:
+        # 策略产出的查询项可能是字符串，也可能是 {query, purpose, evidence, round} 字典
+        # （LLM 策略步骤与 MULTICHANNEL fallback 两种形态并存）——字典取 query 字段，其余跳过。
+        if isinstance(raw, dict):
+            raw = raw.get("query") or raw.get("q") or raw.get("keyword") or ""
         terms = str(raw or "").split()
         if not terms:
             continue
