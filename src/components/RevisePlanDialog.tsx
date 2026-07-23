@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react'
 import { SquarePen, X } from 'lucide-react'
 import { api } from '../api'
 import type { StrategyReviewDiff } from '../api'
-import { buildDecisionSuffix, diffContentText, diffOpLabel, diffStepLabel, diffSuggestionText, loadDiffDecisions, saveDiffDecision } from '../workflows/strategyReviewDiff'
+import { buildDecisionSuffix, diffContentText, diffOpLabel, diffStepLabel, diffSuggestionText, mergeReviewDecisions, loadDiffDecisions, persistDiffDecisions, saveDiffDecision } from '../workflows/strategyReviewDiff'
 import type { DiffDecision } from '../workflows/strategyReviewDiff'
 
 // 工作流“修改计划”内联对话框：替代原 window.prompt，样式复用候选人操作确认层（.action-dialog）。
 // 空输入禁止提交；Esc 或点击遮罩取消。提交时回调已 trim 的修改意见并交由调用方发 action('revise')。
 // S4-3：传入 workflowId 时拉取策略复盘的 revision_diff 展示在对话框上部，顾问逐项采纳/拒绝——
-// 采纳把建议内容预填进 textarea（可继续编辑再提交）；决策暂存 localStorage（后端本期无条目级回写
-// 接口），提交时把逐项清单并入 instruction 尾部（"【逐项采纳】…【逐项拒绝】…"），作为
-// explicit_corrections 学习信号的文本载体走既有 revise 审批链。复盘拉取失败不影响原有修改流程。
+// 采纳把建议内容预填进 textarea（可继续编辑再提交）。S4-3c 起决策经 PATCH /strategy-review/diffs
+// 持久化到后端（事实源为复盘的 revision_diff[].status，localStorage 仅作 API 失败时的缓存回退）；
+// 提交时把逐项清单并入 instruction 尾部（"【逐项采纳】…【逐项拒绝】…"，保留作审计痕），并同步发
+// 一次 PATCH（与 revise 各自幂等）。复盘拉取失败不影响原有修改流程。
 export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowId?: string; onCancel: () => void; onSubmit: (instruction: string) => void }) {
   const [instruction, setInstruction] = useState('')
   const [diffs, setDiffs] = useState<StrategyReviewDiff[]>([])
@@ -24,8 +25,9 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
       .then(payload => {
         if (!alive || !payload) return
         // Core 返回动态 dict：review 缺失时按无 diff 处理，不影响原有修改流程。
+        // 决策以复盘 revision_diff[].status 为事实源合并本地缓存（API 失败时 load 降级回缓存）。
         setDiffs(payload.review?.revision_diff || [])
-        setDecisions(loadDiffDecisions(workflowId))
+        setDecisions(mergeReviewDecisions(workflowId, payload.review?.revision_diff))
       })
       .catch(() => { /* 复盘不可达不阻断修改计划 */ })
     return () => { alive = false }
@@ -52,6 +54,8 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
 
   const submit = () => {
     if (!valid) return
+    // 决策随提交整体回写后端（fire-and-forget，与 revise 各自幂等）；instruction 后缀保留作审计痕。
+    if (workflowId) persistDiffDecisions(workflowId, diffs, decisions)
     onSubmit(instruction.trim() + buildDecisionSuffix(diffs, decisions))
   }
 

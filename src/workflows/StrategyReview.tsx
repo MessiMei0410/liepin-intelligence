@@ -4,14 +4,15 @@ import { api } from '../api'
 import type { StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { channelLabel } from './utils'
-import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, loadDiffDecisions } from './strategyReviewDiff'
+import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, loadDiffDecisions, mergeReviewDecisions } from './strategyReviewDiff'
 
 // S4-3 策略复盘：终局工作流（completed/blocked/failed）展示规则版复盘结论与修订建议 diff。
 // 独立按需路由 /strategy-review，面板挂载与详情刷新（updatedAt 变化）时拉取，不进 /summary 轮询签名。
 // 无复盘（404）显示"该轮未生成策略复盘"并提供"生成复盘"（调 rebuild 幂等重算）。
 // degraded / insufficient_data 按后端语义如实呈现（证据不完整仅供参考），不夸大结论。
 // 逐项采纳/拒绝在"调整条件再搜"对话框（RevisePlanDialog）内操作，此处只回显决策标记；
-// 决策暂存 localStorage（后端本期无条目级回写接口），变更事件到达即刷新。
+// S4-3c 起决策以后端 revision_diff[].status 为事实源（每次拉取后合并进本地缓存），
+// localStorage 仅作 API 失败时的缓存回退，变更事件到达即刷新。
 
 const REVIEWABLE_STATUSES = new Set(['completed', 'blocked', 'failed'])
 
@@ -33,6 +34,8 @@ export function StrategyReview({ workflowId, status, updatedAt }: { workflowId: 
     if (!reviewable) return
     try {
       const result = await api.strategyReview(workflowId)
+      // 后端已决状态为事实源：合并进本地缓存（未决条目的本地暂存保留），展示以合并结果为准。
+      mergeReviewDecisions(workflowId, result?.review?.revision_diff)
       setPayload(result)
       setMissing(result === null)
       setError('')

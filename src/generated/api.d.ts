@@ -259,6 +259,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflow_id}/strategy-review/diffs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Workflow Strategy Review Diffs */
+        patch: operations["workflow_strategy_review_diffs_api_v1_workflows__workflow_id__strategy_review_diffs_patch"];
+        trace?: never;
+    };
     "/api/v1/audit-events": {
         parameters: {
             query?: never;
@@ -502,10 +519,24 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** DiffDecision */
+        DiffDecision: {
+            /** Diff Id */
+            diff_id: string;
+            /** Status */
+            status: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** StrategyReviewDiffDecisions */
+        StrategyReviewDiffDecisions: {
+            /** Request Id */
+            request_id: string;
+            /** Decisions */
+            decisions: components["schemas"]["DiffDecision"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -1009,6 +1040,43 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    workflow_strategy_review_diffs_api_v1_workflows__workflow_id__strategy_review_diffs_patch: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                workflow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyReviewDiffDecisions"];
             };
         };
         responses: {

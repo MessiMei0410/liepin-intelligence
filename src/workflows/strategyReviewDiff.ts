@@ -1,9 +1,11 @@
+import { api } from '../api'
 import type { StrategyReviewDiff } from '../api'
 
-// S4-3 策略复盘 diff 的顾问逐项决策：本期后端无条目级 status 回写接口，
-// 决策暂存 localStorage（键含 workflow_id，条目按 diff_id 索引），并在 revise 提交时
-// 以"【逐项采纳】…【逐项拒绝】…"后缀并入 instruction，作为 explicit_corrections
-// 学习信号的文本载体流入既有审批链。后端补上回写接口后只需替换 load/save 实现。
+// S4-3 策略复盘 diff 的顾问逐项决策：S4-3c 起持久化到后端（PATCH /strategy-review/diffs，
+// 事实源为 GET strategy-review 的 revision_diff[].status）；localStorage 降级为 API 失败时
+// 的缓存回退（键含 workflow_id，条目按 diff_id 索引），不阻断交互。revise 提交时仍以
+// "【逐项采纳】…【逐项拒绝】…"后缀并入 instruction（保留作审计痕），并同步发一次 PATCH
+// （与 revise 各自幂等）。
 
 export type DiffDecision = 'accepted' | 'rejected'
 
@@ -27,17 +29,59 @@ export function loadDiffDecisions(workflowId: string): Record<string, DiffDecisi
   }
 }
 
-// decision 传 null 表示撤销（回到 pending）。保存后广播事件，复盘展示区据此刷新决策标记。
-export function saveDiffDecision(workflowId: string, diffId: string, decision: DiffDecision | null): void {
+const writeLocalDiffDecisions = (workflowId: string, decisions: Record<string, DiffDecision>): void => {
   try {
-    const decisions = loadDiffDecisions(workflowId)
-    if (decision === null) delete decisions[diffId]
-    else decisions[diffId] = decision
     window.localStorage.setItem(storageKey(workflowId), JSON.stringify(decisions))
   } catch {
     // localStorage 不可用（隐私模式等）：决策仅保留在本次会话内存中，不阻断交互。
   }
+}
+
+// API 事实源合并：复盘 revision_diff 的已决状态覆盖同名本地暂存（后端为准），
+// 本地仅保留后端仍 pending 条目的暂存决策；合并结果写回缓存并返回。
+export function mergeReviewDecisions(workflowId: string, diffs: StrategyReviewDiff[] | undefined): Record<string, DiffDecision> {
+  const merged = loadDiffDecisions(workflowId)
+  let changed = false
+  for (const diff of diffs || []) {
+    if ((diff.status === 'accepted' || diff.status === 'rejected') && merged[diff.diff_id] !== diff.status) {
+      merged[diff.diff_id] = diff.status
+      changed = true
+    }
+  }
+  if (changed) writeLocalDiffDecisions(workflowId, merged)
+  return merged
+}
+
+// decision 传 null 表示撤销（回到 pending）。本地缓存即时更新并广播事件，复盘展示区据此刷新
+// 决策标记；已决状态同步 PATCH 落库（fire-and-forget：失败时本地缓存兜底，不阻断交互）。
+// 撤销（null）本期只落本地——PATCH 契约仅收 accepted/rejected，后端无回到 pending 的条目级接口。
+export function saveDiffDecision(workflowId: string, diffId: string, decision: DiffDecision | null): void {
+  const decisions = loadDiffDecisions(workflowId)
+  if (decision === null) delete decisions[diffId]
+  else decisions[diffId] = decision
+  writeLocalDiffDecisions(workflowId, decisions)
   window.dispatchEvent(new Event(DIFF_DECISIONS_EVENT))
+  if (decision !== null) {
+    void api.patchStrategyReviewDiffs(workflowId, [{ diff_id: diffId, status: decision }]).catch(() => {
+      // API 不可达：localStorage 缓存已留底，下次 GET 合并时仍以本地暂存呈现，不阻断交互。
+    })
+  }
+}
+
+// 提交 revise 时的一次性回写：把当前已决集合（按 revision_diff 原始条目序，稳定可解析）
+// PATCH 落库。fire-and-forget——本地缓存已兜底，成败均不阻断 revise 主流程。
+export function persistDiffDecisions(
+  workflowId: string,
+  diffs: StrategyReviewDiff[],
+  decisions: Record<string, DiffDecision>,
+): void {
+  const decided = diffs
+    .filter(diff => decisions[diff.diff_id] === 'accepted' || decisions[diff.diff_id] === 'rejected')
+    .map(diff => ({ diff_id: diff.diff_id, status: decisions[diff.diff_id] as DiffDecision }))
+  if (decided.length === 0) return
+  void api.patchStrategyReviewDiffs(workflowId, decided).catch(() => {
+    // API 不可达：决策已在 localStorage 缓存，下一轮 GET 合并前不丢交互。
+  })
 }
 
 const STEP_LABELS: Record<string, string> = {

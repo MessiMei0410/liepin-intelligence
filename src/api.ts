@@ -72,10 +72,17 @@ export type ContractAnchor = [
   // S4-3 增补：策略复盘读取与按需重算路由入锚。
   paths['/api/v1/workflows/{workflow_id}/strategy-review']['get'],
   paths['/api/v1/workflows/{workflow_id}/strategy-review/rebuild']['post'],
+  // S4-3c 增补：逐项决策回写路由入锚。generated/api.d.ts 尚无此路由（后端本期新上，
+  // 主控 regenerate 后条件类型自动收紧为真实 patch 操作类型，此前解析为 never）。
+  StrategyReviewDiffsPatchAnchor,
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
 type CandidateActionRequest = Pick<CandidateActionBody, 'request_id' | 'candidate_id' | 'action'>
+
+// S4-3c PATCH diffs 锚点：生成类型里有了该路由即生效，没有则为 never（不阻断 typecheck）。
+type RoutePatchOp<P, K extends PropertyKey> = K extends keyof P ? (P[K] extends { patch: infer R } ? R : never) : never
+type StrategyReviewDiffsPatchAnchor = RoutePatchOp<paths, '/api/v1/workflows/{workflow_id}/strategy-review/diffs'>
 
 // 响应形状：Core 返回动态 dict（openapi 只描述为 object），按实际 payload 收窄声明；
 // 工作流详情不在这里声明，由 workflowModel 的 zod schema 在边界校验（parseWorkflow）。
@@ -99,8 +106,9 @@ export type PreflightResult = { token: string; impact: string; expires_at?: stri
 type WriteAck = Record<string, unknown> & { ok?: boolean }
 
 // S4-3 策略复盘：Core 返回动态 dict（openapi 只描述为 object），按 strategy_review.py 实际 payload 收窄声明。
-// revision_diff 逐项可采纳/拒绝（status: pending → accepted/rejected）；本期后端无条目级回写接口，
-// 顾问决策由 RevisePlanDialog 暂存 localStorage 并随 revise instruction 汇入学习链路。
+// revision_diff 逐项可采纳/拒绝（status: pending → accepted/rejected）；S4-3c 起决策经
+// PATCH /strategy-review/diffs 回写后端持久化（并写 consultant_edits / explicit_corrections
+// 学习信号），localStorage 仅作 API 失败时的缓存回退。
 export type StrategyReviewDiff = {
   diff_id: string
   step: string
@@ -111,6 +119,7 @@ export type StrategyReviewDiff = {
   terms?: string[]
   reason: string
   status: 'pending' | 'accepted' | 'rejected'
+  decided_at?: string
 }
 export type StrategyReviewChannelFinding = {
   channel: string; status?: string; recall_count?: number; unique_count?: number;
@@ -140,6 +149,15 @@ export type StrategyReviewPayload = {
   created_at?: string; review: StrategyReview;
 }
 export type StrategyReviewRebuildResult = { ok?: boolean; workflow_id: string; artifact_id: string; review: StrategyReview }
+
+// S4-3c 逐项决策回写：generated/api.d.ts 尚无 PATCH /strategy-review/diffs（后端本期新上，主控
+// regenerate 后切换为生成类型），先按 strategy_review.apply_diff_decisions 实际 payload 窄声明。
+export type StrategyReviewDiffDecision = { diff_id: string; status: 'accepted' | 'rejected' }
+export type StrategyReviewDiffPatchResult = {
+  ok?: boolean; workflow_id: string; artifact_id: string; updated: number;
+  revision_diff: StrategyReviewDiff[];
+  consultant_edits_appended?: number; learning_signal_recorded?: boolean;
+}
 
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
@@ -186,6 +204,10 @@ export const api = {
   // 按需重算（终局工作流补生成）：幂等走 write 封装；非终局 Core 返回 409，错误带 status 由调用方呈现。
   rebuildStrategyReview: (id: string) =>
     write<StrategyReviewRebuildResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/rebuild`, {}),
+  // S4-3c 逐项采纳/拒绝回写：upsert 可重复覆盖，与 revise 各自幂等（不同 Idempotency-Key）。
+  // 404=工作流/复盘不存在，409=diff_id 未知或状态非法；错误带 status 由调用方决定降级策略。
+  patchStrategyReviewDiffs: (id: string, decisions: StrategyReviewDiffDecision[]) =>
+    write<StrategyReviewDiffPatchResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/diffs`, { decisions }, 'PATCH'),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
@@ -200,7 +222,7 @@ export const api = {
 }
 
 const requestId = () => `web_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`
-const write = <T = WriteAck>(url: string, payload: Record<string, unknown>): Promise<T> => {
+const write = <T = WriteAck>(url: string, payload: Record<string, unknown>, method: 'POST' | 'PATCH' = 'POST'): Promise<T> => {
   const request_id = requestId()
-  return json<T>(url, { method: 'POST', headers: { 'Idempotency-Key': `${request_id}_${url}` }, body: JSON.stringify({ ...payload, request_id }) })
+  return json<T>(url, { method, headers: { 'Idempotency-Key': `${request_id}_${url}` }, body: JSON.stringify({ ...payload, request_id }) })
 }

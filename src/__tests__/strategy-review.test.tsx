@@ -8,7 +8,8 @@ import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import { mockResponse, plannedWorkflow } from './helpers'
 
 // S4-3 策略复盘：复盘展示、404 空态与生成、revision_diff 逐项采纳/拒绝、决策并入 revise instruction。
-// 后端本期无条目级 status 回写接口，决策暂存 localStorage（键 asa_strategy_review_diffs:{workflow_id}）。
+// S4-3c：决策经 PATCH /strategy-review/diffs 持久化到后端（事实源为复盘 revision_diff[].status），
+// localStorage 降级为 API 失败时的缓存回退；提交 revise 时同步发一次 PATCH（各自幂等）。
 
 const reviewPayload = {
   ok: true,
@@ -290,6 +291,124 @@ describe('工作流面板：调整条件再搜 → diff 采纳 → revise 提交
     expect(reviseCall).toBeDefined()
     expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({
       instruction: '增列目标公司池：T2：甲公司、乙公司\n【逐项采纳】diff-1',
+    })
+  })
+})
+
+describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => {
+  it('逐项决策同步 PATCH 落库：PATCH 方法、幂等键与请求体正确', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubReviewFetch()
+    render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
+    const region = await screen.findByLabelText('策略复盘修订建议')
+    await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
+    const patchCall = fetchMock.mock.calls.find(
+      ([input, init]) => String(input).includes('/strategy-review/diffs') && (init as RequestInit | undefined)?.method === 'PATCH',
+    )
+    expect(patchCall).toBeDefined()
+    expect(String(patchCall?.[0])).toBe('/api/v1/workflows/wf-1/strategy-review/diffs')
+    const init = patchCall?.[1] as RequestInit
+    expect(init.headers).toMatchObject({ 'Idempotency-Key': expect.stringContaining('/strategy-review/diffs') })
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      request_id: expect.stringMatching(/^web_/),
+      decisions: [{ diff_id: 'diff-1', status: 'accepted' }],
+    })
+  })
+
+  it('PATCH 失败时回退 localStorage 缓存，交互与决策标记不丢', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/diffs')) return mockResponse({ detail: 'boom' }, false, 500)
+      return mockResponse(reviewPayload)
+    }))
+    render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
+    const region = await screen.findByLabelText('策略复盘修订建议')
+    await user.click(within(region).getAllByRole('button', { name: '拒绝' })[1])
+    // API 失败不阻断：按钮态、标记与本地缓存照常
+    expect(within(region).getAllByRole('button', { name: '拒绝' })[1]).toHaveAttribute('aria-pressed', 'true')
+    expect(within(region).getByText('已拒绝')).toBeInTheDocument()
+    expect(storedDecisions()).toEqual({ 'diff-2': 'rejected' })
+  })
+
+  it('复盘已决状态为事实源：打开对话框时后端 status 覆盖本地暂存，未决条目保留本地', async () => {
+    window.localStorage.setItem(decisionsKey, JSON.stringify({ 'diff-1': 'accepted', 'diff-2': 'rejected' }))
+    const serverPayload = {
+      ...reviewPayload,
+      review: {
+        ...reviewPayload.review,
+        revision_diff: reviewPayload.review.revision_diff.map((diff, index) => ({
+          ...diff,
+          status: index === 0 ? 'rejected' : 'pending',
+        })),
+      },
+    }
+    stubReviewFetch(serverPayload)
+    render(<RevisePlanDialog workflowId="wf-1" onCancel={() => undefined} onSubmit={vi.fn()} />)
+    const region = await screen.findByLabelText('策略复盘修订建议')
+    // 后端 diff-1=rejected 覆盖本地 accepted；diff-2 后端 pending 保留本地 rejected 暂存
+    await waitFor(() => expect(within(region).getAllByRole('button', { name: '拒绝' })[0]).toHaveAttribute('aria-pressed', 'true'))
+    expect(within(region).getAllByRole('button', { name: '采纳' })[0]).toHaveAttribute('aria-pressed', 'false')
+    expect(within(region).getAllByRole('button', { name: '拒绝' })[1]).toHaveAttribute('aria-pressed', 'true')
+    expect(storedDecisions()).toEqual({ 'diff-1': 'rejected', 'diff-2': 'rejected' })
+  })
+
+  it('typed client：patchStrategyReviewDiffs 走 PATCH + 幂等键 + request_id', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      mockResponse({ ok: true, workflow_id: 'wf-1', artifact_id: 'strategy_review_wf-1', updated: 1, revision_diff: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await api.patchStrategyReviewDiffs('wf-1', [{ diff_id: 'diff-1', status: 'accepted' }])
+    expect(result.updated).toBe(1)
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/workflows/wf-1/strategy-review/diffs')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect(init.headers).toMatchObject({ 'Idempotency-Key': expect.stringContaining('/strategy-review/diffs') })
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      request_id: expect.stringMatching(/^web_/),
+      decisions: [{ diff_id: 'diff-1', status: 'accepted' }],
+    })
+  })
+
+  it('提交时 PATCH 与 revise 双发且幂等键不同，PATCH 体为逐项决策快照', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/diffs')) {
+        return mockResponse({ ok: true, workflow_id: 'wf-1', artifact_id: 'strategy_review_wf-1', updated: 2, revision_diff: [] })
+      }
+      if (url.includes('/strategy-review')) return mockResponse(reviewPayload)
+      return mockResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+    await user.click(screen.getByRole('button', { name: '修改计划' }))
+    const dialog = await screen.findByRole('dialog')
+    const region = await within(dialog).findByLabelText('策略复盘修订建议')
+    await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
+    await user.click(within(region).getAllByRole('button', { name: '拒绝' })[1])
+    fetchMock.mockClear()
+    await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
+    const patchCalls = fetchMock.mock.calls.filter(
+      ([input, init]) => String(input).includes('/strategy-review/diffs') && (init as RequestInit | undefined)?.method === 'PATCH',
+    )
+    expect(reviseCall).toBeDefined()
+    expect(patchCalls).toHaveLength(1)
+    const reviseKey = ((reviseCall?.[1] as RequestInit).headers as Record<string, string>)['Idempotency-Key']
+    const patchKey = ((patchCalls[0][1] as RequestInit).headers as Record<string, string>)['Idempotency-Key']
+    expect(patchKey).toContain('/strategy-review/diffs')
+    expect(reviseKey).not.toBe(patchKey)
+    expect(JSON.parse(String((patchCalls[0][1] as RequestInit).body))).toMatchObject({
+      request_id: expect.stringMatching(/^web_/),
+      decisions: [
+        { diff_id: 'diff-1', status: 'accepted' },
+        { diff_id: 'diff-2', status: 'rejected' },
+      ],
+    })
+    // instruction 后缀保留作审计痕
+    expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({
+      instruction: '增列目标公司池：T2：甲公司、乙公司\n【逐项采纳】diff-1 【逐项拒绝】diff-2',
     })
   })
 })
