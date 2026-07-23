@@ -258,10 +258,15 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
         wait_for_list(cdp)
         rounds = []
         dedup: dict[str, dict[str, Any]] = {}
-        for query in queries[:8]:
+        for index, query in enumerate(queries[:8]):
             query = " ".join(str(query or "").split())
             if not query:
                 continue
+            if index > 0:
+                # 每组前重开列表页：X-SaaS 会把上次搜索关键词留在"已选条件"里累加（AND 语义），
+                # 不重置会让第 2 组起全部查询被前面条件污染（round3/round5 六组全 0 的根因）。
+                evaluate(cdp, f"location.href='https://{XSAAS_HOST}/?{RUNNER_MARKER}#/app/candidate/list';true")
+                wait_for_list(cdp)
             started = evaluate(cdp, f"({SEARCH_JS})({json_expr(query)})") or {}
             if not started.get("ok"):
                 rounds.append({"query": query, "status": "failed", "reason": started.get("reason")})
