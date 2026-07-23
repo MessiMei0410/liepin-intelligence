@@ -19,7 +19,8 @@ export default defineConfig({
     toHaveScreenshot: { animations: 'disabled', threshold: 0.2, maxDiffPixelRatio: 0.01 },
   },
   retries: 0,
-  workers: 3,
+  // 16GB 本机内存约束：限 2 并发，避免与常驻 CDP Chrome / Core 挤兑。
+  workers: 2,
   reporter: [['list']],
   outputDir: 'work/playwright-results',
   snapshotDir: './e2e/snapshots',

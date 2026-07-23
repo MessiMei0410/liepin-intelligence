@@ -17,7 +17,9 @@
     "doctor": "python3 scripts/asa_doctor.py",
     "check:api-drift": "node scripts/check-api-drift.mjs",
     "test:e2e": "playwright test --project=functional && playwright test --project=shots-desktop --project=shots-floating",
-    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run test:e2e && npm run check:api-drift"
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:contract && npm run test:e2e && npm run check:api-drift",
+    "ci:fast": "npm run typecheck && npm run lint && npm run test && npm run build && npm run check:api-drift",
+    "ci:e2e-functional": "playwright test --project=functional"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",

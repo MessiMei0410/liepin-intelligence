@@ -6,7 +6,10 @@ ASA App 前端（React 19 + Vite 8 + TS strict），由 ASA Core（127.0.0.1:876
 
 ## 常用命令
 
-- `npm run ci` — 本地 CI 一键：typecheck && lint && test && build && test:contract && test:e2e && check:api-drift。改动后必须全绿。
+- 验证分三层门禁（2026-07-23 提速方案，详见 `docs/ASA_提速方案_v1_20260723.md`）：
+  - **L1 快速门禁（每个 commit / 小任务必跑）**：`npm run ci:fast`（typecheck && lint && test && build && check:api-drift）。纯文案、样式、prompt、docs 改动只跑 L1。
+  - **L2 模块门禁（按需追加）**：动 Core API/数据结构 → `npm run test:contract`；动前端交互流程 → `npm run ci:e2e-functional`（不跑截图）；动寻访策略/池逻辑 → 单岗位真实寻访验证一次。
+  - **L3 全量门禁（里程碑收官 + 每日收工前一次）**：`npm run ci` 完整链。截图基线只在 UI 变更的里程碑重生成。
 - `npm run test` — Vitest + React Testing Library（`src/__tests__/`）。
 - `npm run test:contract` — Python 源码契约测试（`tests/`，unittest）。
 - `npm run test:e2e` — Playwright E2E + 截图回归（`e2e/`）。global setup 把正式库**只读**复制到 /tmp 新鲜副本，拉起隔离 Core（127.0.0.1:8876，`A_SYSTEM_DB`/`--db` 双指向副本），跑完回收；正式 Core（8765）与正式库绝不作为目标。缺依赖（后端仓库/python/dist）时整套降级 skip。基线在 `e2e/snapshots/`（桌面 1440×900 + 浮窗 390×700 两组），变更 UI 后用 `npx playwright test --project=shots-desktop --project=shots-floating --update-snapshots` 重生成。
