@@ -266,6 +266,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("mapping_task.candidate_intake", body, idempotency_key, "mapping_task", f"{artifact_id}#{index}",
                     lambda: core.intake_mapping_candidate(artifact_id, index))
 
+    @app.post("/api/v1/mapping-tasks/{artifact_id}/backflow")
+    def mapping_task_backflow(artifact_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S5-3：知识回流（图谱 teams 扩展层）显式触发——运行时 Core 不自动写图谱。
+        # 走 execute_idempotent 幂等 + 审计；同 artifact 重放返回首次响应（图谱只写一次）。
+        # 404=artifact 不存在；409=无已确认团队数据/可回流团队全部禁挖/图谱缺失或结构异常。
+        return idem("mapping_task.backflow", body, idempotency_key, "mapping_task", artifact_id,
+                    lambda: core.backflow_mapping_task(artifact_id))
+
+    @app.get("/api/v1/mapping-tasks/metrics")
+    def mapping_metrics() -> dict[str, Any]:
+        # S5-3：Mapping 评测指标聚合（PRD §8 四项口径，只读；数据不足的分组如实 null）。
+        return core.mapping_metrics()
+
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
         return core.audit_events(limit, offset)

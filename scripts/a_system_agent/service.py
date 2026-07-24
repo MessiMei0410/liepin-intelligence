@@ -1125,6 +1125,79 @@ class AgentService:
         finally:
             conn.close()
 
+    def backflow_mapping_task(self, artifact_id: str, *, kb_dir: str | None = None, as_of: str = "") -> dict[str, Any]:
+        """S5-3：知识回流——把任务卡已确认团队数据写入公司图谱 teams 扩展层（知识库维护流程）。
+
+        只在显式触发时执行（运行时 Core 不自动写图谱）；图谱文件原子重写，
+        除 teams/teams_external 相关键外原文件逐字节保留；同 artifact 幂等（更新 as_of 不重复条目）。
+        artifact 不存在抛 LookupError（404）；无已确认团队/全部禁挖/图谱缺失或结构异常抛 ValueError（409）。
+        """
+        from . import graph_teams_backflow, knowledge_base, mapping_task
+        from .strategy_v2 import knowledge_base_dir
+
+        conn = self._connect()
+        try:
+            payload = mapping_task.get_mapping_task(conn, artifact_id)
+            if payload is None:
+                raise LookupError(f"Mapping 任务卡不存在：{artifact_id}")
+            doc = payload["mapping_task"]
+            client = str(doc.get("client") or "")
+            restricted, _trace = knowledge_base.load_restricted_constraints(client, kb_dir=kb_dir)
+            constraints = (restricted or {}).get("constraints") if isinstance(restricted, dict) else {}
+            banned = [
+                str(item) for item in (constraints or {}).get("banned_companies") or [] if str(item or "").strip()
+            ]
+            graph_path = (Path(kb_dir) if kb_dir else knowledge_base_dir()) / knowledge_base.COMPANY_GRAPH_FILE
+            summary = graph_teams_backflow.backflow_teams(
+                graph_path, doc, artifact_id=str(artifact_id), as_of=as_of, banned=banned
+            )
+            job_id = int(doc.get("job_id") or 0)
+            if job_id:
+                conn.execute(
+                    """
+                    INSERT INTO candidate_events
+                    (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                    VALUES (NULL,NULL,?,'mapping_task_backflow','completed',datetime('now','localtime'),?,?,'agent_artifacts',?)
+                    """,
+                    (
+                        job_id,
+                        f"Mapping 团队数据回流图谱：写入公司 {summary['companies_written']} 家、"
+                        f"团队 {summary['teams_written']} 个（as_of {summary['as_of']}；"
+                        f"禁挖跳过 {summary['skipped_banned']}，teams_external {summary['external_companies_written']} 家）。",
+                        json.dumps(
+                            {
+                                "artifact_id": str(artifact_id),
+                                "as_of": summary["as_of"],
+                                "companies_written": summary["companies_written"],
+                                "teams_written": summary["teams_written"],
+                                "skipped_banned": summary["skipped_banned"],
+                                "changed": summary["changed"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        str(artifact_id),
+                    ),
+                )
+                conn.commit()
+            return {"ok": True, **summary}
+        finally:
+            conn.close()
+
+    def mapping_metrics(self) -> dict[str, Any]:
+        """S5-3：Mapping 评测指标聚合（PRD §8 四项口径，只读；数据不足的分组如实 null）。"""
+        from . import mapping_metrics
+
+        conn = self._connect()
+        try:
+            metrics = mapping_metrics.compute_mapping_metrics(conn)
+            return {
+                "ok": True,
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "metrics": metrics,
+            }
+        finally:
+            conn.close()
+
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
 
