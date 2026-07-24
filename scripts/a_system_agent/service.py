@@ -1116,6 +1116,7 @@ class AgentService:
     def intake_mapping_candidate(self, artifact_id: str, index: int) -> dict[str, Any]:
         """S5-2：Mapping 候选入库（仅 confirmed）。复用现有 intake 写入口径，同一事务；
         不写第二条 job_candidates；禁挖/无来源/已停止关系抛 ValueError（409）。
+        S8：入库成功后异步刷新该岗位画像（只抽新增人，失败不阻断入库回执）。
         """
         from . import mapping_task
 
@@ -1123,9 +1124,61 @@ class AgentService:
         try:
             result = mapping_task.intake_candidate(conn, artifact_id, int(index))
             conn.commit()
-            return result
         finally:
             conn.close()
+        job_candidate_id = int(result.get("job_candidate_id") or 0)
+        if job_candidate_id:
+            result["job_profile_refresh"] = self.submit_job_profile_refresh(
+                job_candidate_id, trigger="mapping_intake"
+            )
+        return result
+
+    def submit_job_profile_refresh(
+        self, job_candidate_id: int, *, trigger: str = "manual", wait: bool = False
+    ) -> dict[str, Any]:
+        """S8 岗位画像增量刷新：人选入库/履历更新后，只抽取该人职责事实（LLM 一调）+
+        确定性重算该岗画像（不重算整岗抽取）。后台线程执行；LLM 不可用或语料不足 →
+        记 error/skipped，绝不阻断主流程（入库/简历捕获照常返回）。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT job_id FROM job_candidates WHERE id=?", (int(job_candidate_id),)
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return {"ok": False, "scheduled": False, "reason": f"人岗关系不存在：{job_candidate_id}"}
+        job_id = int(row["job_id"] or 0)
+
+        def _run() -> dict[str, Any]:
+            from . import job_profile_insights
+
+            conn = self._connect()
+            try:
+                ensure_schema(conn)
+                extraction = job_profile_insights.extract_duty_facts_for_candidate(
+                    conn, candidate_id=int(job_candidate_id), llm=self.llm
+                )
+                insight = job_profile_insights.aggregate_job_profile(
+                    conn, job_id=int(extraction["job_id"]), persist=True
+                )
+                conn.commit()
+                return {
+                    "ok": True,
+                    "fact_count": extraction.get("fact_count", 0),
+                    "status": insight.get("status"),
+                    "source_count": insight.get("source_count"),
+                }
+            except Exception as exc:  # 画像学习失败绝不阻断主流程
+                conn.rollback()
+                return {"ok": False, "error": str(exc)[:200]}
+            finally:
+                conn.close()
+
+        if wait:
+            return {"scheduled": True, "trigger": trigger, "job_id": job_id, "result": _run()}
+        self.executor.submit(_run)
+        return {"ok": True, "scheduled": True, "trigger": trigger, "job_id": job_id}
 
     def backflow_mapping_task(self, artifact_id: str, *, kb_dir: str | None = None, as_of: str = "") -> dict[str, Any]:
         """S5-3：知识回流——把任务卡已确认团队数据写入公司图谱 teams 扩展层（知识库维护流程）。
@@ -1275,6 +1328,32 @@ class AgentService:
             )
             conn.commit()
             return payload
+        finally:
+            conn.close()
+
+    def assessment_calibration_metrics(self) -> dict[str, Any]:
+        """S6-4：采纳率度量（顾问点头率）——按维度×客户聚合采纳/改判/否决率。
+
+        只读；totals 与库内 advisor_action 实际分布一致，数据不足的分组三个率如实 null。
+        """
+        from . import assessment_calibration
+
+        conn = self._connect()
+        try:
+            return assessment_calibration.compute_metrics(conn)
+        finally:
+            conn.close()
+
+    def generate_assessment_calibration_report(self) -> dict[str, Any]:
+        """S6-4：校准周报（手动触发）——markdown 写 work/calibration/（不进 git）。
+
+        本周改判集中的维度 / 客户口径观察 / 系统性偏差建议；报告为内部留档，不对外输出。
+        """
+        from . import assessment_calibration
+
+        conn = self._connect()
+        try:
+            return assessment_calibration.generate_report(conn)
         finally:
             conn.close()
 
@@ -1704,9 +1783,14 @@ class AgentService:
         assessment = self.submit_assessment(
             int(job_candidate_id), force=True, trigger="liepin_resume_capture"
         )
+        # S8：简历更新后异步刷新该岗位画像（只抽该人事实 + 确定性重算聚合；失败不阻断捕获回执）
+        profile_refresh = self.submit_job_profile_refresh(
+            int(job_candidate_id), trigger="liepin_resume_capture"
+        )
         return {
             "ok": True,
             "message": "猎聘完整简历已写入 ASA，正在重新评估当前人选。",
+            "job_profile_refresh": profile_refresh,
             "resume": {
                 "resume_id": resume["resume_id"], "name": resume.get("name"),
                 "company": resume.get("company"), "title": resume.get("title"),

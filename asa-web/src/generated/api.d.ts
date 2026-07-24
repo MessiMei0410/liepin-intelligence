@@ -430,6 +430,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/radar/scans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Radar Scan Create */
+        post: operations["radar_scan_create_api_v1_radar_scans_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/radar/scans/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Radar Scan Latest */
+        get: operations["radar_scan_latest_api_v1_radar_scans_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit-events": {
         parameters: {
             query?: never;
@@ -715,6 +749,11 @@ export interface components {
              * @default manual
              */
             trigger: string;
+        };
+        /** RadarScanCreate */
+        RadarScanCreate: {
+            /** Request Id */
+            request_id: string;
         };
         /** StrategyReviewDiffDecisions */
         StrategyReviewDiffDecisions: {
@@ -1620,6 +1659,63 @@ export interface operations {
         };
     };
     mapping_metrics_api_v1_mapping_tasks_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    radar_scan_create_api_v1_radar_scans_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RadarScanCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    radar_scan_latest_api_v1_radar_scans_latest_get: {
         parameters: {
             query?: never;
             header?: never;

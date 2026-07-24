@@ -9,6 +9,7 @@ import type {
 } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { date } from '../shared/format'
+import { CalibrationMetrics } from './CalibrationMetrics'
 
 // S6-1b 判人评估区（候选人详情「评估」tab，新文件；CandidatePanel 只最小接线）：
 // 职业轨迹 + 跳槽质量史两维渲染、证据列表、置信度 tag、顾问口径摘要，
@@ -395,6 +396,8 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
           <p className="assessment-advisor-note">顾问备注：{doc.advisor_note}</p>
         )}
       </div>
+
+      <CalibrationMetrics/>
     </section>
   )
 }

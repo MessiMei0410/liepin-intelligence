@@ -101,6 +101,20 @@ class AssessmentAdvisorActionPatch(WriteEnvelope):
     note: str = ""
 
 
+class JobProfileFeedbackCreate(WriteEnvelope):
+    # S8：岗位画像顾问纠正（"不对"按钮）；item_type 四枚举 duty/tool/deliverable/customer，
+    # item_key 为条目原文（后端规范化归并键），非法 → 409。
+    item_type: str = Field(min_length=1)
+    item_key: str = Field(min_length=1)
+    item_label: str = ""
+    note: str = ""
+
+
+class CalibrationReportCreate(WriteEnvelope):
+    # S6-4：校准周报手动触发（无额外表单字段；markdown 输出到 work/calibration/，不进 git）
+    pass
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -182,6 +196,22 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.get("/api/v1/jobs/{job_id}")
     def job(job_id: int) -> dict[str, Any]: return core.job(job_id)
 
+    @app.get("/api/v1/jobs/{job_id}/profile-insights")
+    def job_profile_insights_get(job_id: int) -> dict[str, Any]:
+        # S8：岗位画像读取（这个岗位实际在干什么）。岗位不存在 → 404（LookupError 全局映射）；
+        # 尚无画像 → 200 + status=not_generated 空结构（前端空态：履历还太少，学不出画像）。
+        return core.get_job_profile_insights(job_id)
+
+    @app.post("/api/v1/jobs/{job_id}/profile-insights/feedback")
+    def job_profile_insights_feedback(job_id: int, body: JobProfileFeedbackCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S8：顾问纠正通道（"不对"按钮）。走 execute_idempotent 幂等 + 审计，重放返回首次响应；
+        # 404=岗位不存在；409=item_type 非法 / item_key 为空。标记 disputed 不删除，
+        # 聚合时排除并留痕统计——只是画像质量闭环，不接策略/评估消费。
+        return idem("job.profile_insights_feedback", body, idempotency_key, "job", f"{job_id}:profile:{body.item_type}:{body.item_key}",
+                    lambda: core.submit_job_profile_feedback(
+                        job_id, item_type=body.item_type, item_key=body.item_key,
+                        item_label=body.item_label, note=body.note))
+
     @app.get("/api/v1/candidates")
     def candidates(q: str = "", job_id: int | None = None, stage: str = "", limit: int = Query(100, le=200), offset: int = 0) -> dict[str, Any]:
         return core.candidates(query=q, job_id=job_id, stage=stage, limit=limit, offset=offset)
@@ -212,6 +242,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 只写 advisor_action/advisor_note/updated_at，artifact version 不 bump；已 action 可再改。
         return idem("candidate.assessment_advisor_action", body, idempotency_key, "job_candidate", f"{candidate_id}:{job_id}",
                     lambda: core.update_candidate_assessment_advisor_action(candidate_id, job_id, action=body.action, note=body.note))
+
+    @app.get("/api/v1/assessments/calibration/metrics")
+    def assessment_calibration_metrics() -> dict[str, Any]:
+        # S6-4：采纳率度量（顾问点头率）——按维度×客户聚合采纳/改判/否决率（只读）；
+        # 数据不足（<min_n）的分组三个率如实返回 null；totals 与库内 advisor_action 分布一致。
+        return core.assessment_calibration_metrics()
+
+    @app.post("/api/v1/assessments/calibration/report")
+    def assessment_calibration_report(body: CalibrationReportCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S6-4：校准周报（周度手动触发，不做定时）。走 execute_idempotent 幂等 + 审计，
+        # 重放返回首次响应；markdown 输出到 work/calibration/（不进 git），报告为内部留档不对外。
+        return idem("assessment.calibration_report", body, idempotency_key, "assessment_calibration", "weekly",
+                    lambda: core.generate_assessment_calibration_report())
 
     @app.get("/api/v1/workflows/{workflow_id}")
     def workflow(workflow_id: str) -> dict[str, Any]: return core.workflow(workflow_id)

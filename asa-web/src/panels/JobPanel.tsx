@@ -1,5 +1,6 @@
 import { ChevronLeft, MessageSquareText, X, ShieldAlert, Route, UserRoundSearch, ChevronRight, CircleCheck, CircleDashed, Check } from 'lucide-react'
 import { JobDetail } from '../api'
+import { JobProfileInsights } from './JobProfileInsights'
 import { recordValue, textList } from '../shared/records'
 import { date, sourceLabel } from '../shared/format'
 import { SectionHead } from '../shared/primitives'
@@ -25,6 +26,7 @@ export function JobPanel({value,close,openCandidate}:{value:JobDetail,close:()=>
   return <div className="overlay"><article className="detail-panel job-detail-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.title}</h2><p>{value.client} · {position.department||position.team||value.location||'岗位详情'} · 岗位 #{value.id}</p></div><div className="detail-actions"><button className="button" onClick={()=>openCopilotWindow({type:'job',id:value.id,client:value.client,job:value.title})}><MessageSquareText/>Copilot</button>{value.priority?.includes('P0')&&<span className="tag warn">P0 最急</span>}<button className="icon-btn" onClick={close} title="关闭" aria-label="关闭"><X/></button></div></header><div className="job-detail-body"><main>
     <section className="job-funnel" aria-label="岗位漏斗"><div><span>全部人选</span><b>{value.funnel.total}</b></div><div><span>活跃推进</span><b>{value.funnel.active}</b></div><div><span>已触达</span><b>{value.funnel.contacted}</b></div><div><span>已推荐</span><b>{value.funnel.recommended}</b></div><div><span>已停止</span><b>{value.funnel.stopped}</b></div></section>
     <section className="job-detail-section"><h3>岗位概况</h3><div className="job-facts">{facts.map(([label,content])=><div key={label}><span>{label}</span><b>{String(content)}</b></div>)}</div>{(profile.jd_analysis_summary||value.summary)&&<p className="job-summary">{String(profile.jd_analysis_summary||value.summary)}</p>}{value.closed_reason&&<p className="job-warning">{value.closed_reason}</p>}</section>
+    <JobProfileInsights jobId={value.id}/>
     <JobListSection title="硬性要求" items={hard}/>
     <JobListSection title="核心能力" items={abilities}/>
     <JobListSection title="岗位卖点" items={pitch}/>

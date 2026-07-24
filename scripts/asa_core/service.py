@@ -862,6 +862,88 @@ class CoreService:
             )
         raise RuntimeError("workflow service unavailable")
 
+    def assessment_calibration_metrics(self) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.assessment_calibration_metrics()
+        raise RuntimeError("workflow service unavailable")
+
+    def get_job_profile_insights(self, job_id: int) -> dict[str, Any]:
+        """S8 岗位画像读取（这个岗位实际在干什么）：无画像 → status=not_generated（空结构）；
+        岗位不存在 → LookupError（404）。只读，绝不触碰业务表。"""
+        from a_system_agent import job_profile_insights
+        from a_system_agent.schema import ensure_schema
+
+        conn = connect(self.db_path)
+        try:
+            ensure_schema(conn)
+            job = conn.execute("SELECT id FROM jobs WHERE id=?", (int(job_id),)).fetchone()
+            if job is None:
+                raise LookupError(f"岗位不存在：{job_id}")
+            row = conn.execute(
+                "SELECT status,source_count,insight_json,version,as_of,updated_at FROM job_profile_insights WHERE job_id=?",
+                (int(job_id),),
+            ).fetchone()
+            if row is None:
+                return {
+                    "ok": True, "job_id": int(job_id), "status": "not_generated", "source_count": 0,
+                    "min_source_count": job_profile_insights.MIN_SOURCE_COUNT, "as_of": "", "version": 0,
+                    "duties": [], "tools": [], "deliverables": [], "customers": [], "disputed": [], "stats": {},
+                }
+            doc = json_value(row["insight_json"], {})
+            if not isinstance(doc, dict):
+                doc = {}
+            return {
+                "ok": True,
+                "job_id": int(job_id),
+                "status": str(row["status"] or "insufficient"),
+                "source_count": int(row["source_count"] or 0),
+                "min_source_count": job_profile_insights.MIN_SOURCE_COUNT,
+                "as_of": str(row["as_of"] or ""),
+                "version": int(row["version"] or 1),
+                "duties": doc.get("duties") or [],
+                "tools": doc.get("tools") or [],
+                "deliverables": doc.get("deliverables") or [],
+                "customers": doc.get("customers") or [],
+                "disputed": doc.get("disputed") or [],
+                "stats": doc.get("stats") or {},
+            }
+        finally:
+            conn.close()
+
+    def submit_job_profile_feedback(self, job_id: int, *, item_type: str, item_key: str, item_label: str = "", note: str = "") -> dict[str, Any]:
+        """S8 顾问纠正通道：画像某条目标记 disputed（不删除，聚合排除 + 留痕统计）。
+        ValueError（409）：item_type 非法 / item_key 为空；LookupError（404）：岗位不存在。"""
+        from a_system_agent import job_profile_insights
+        from a_system_agent.schema import ensure_schema
+
+        conn = connect(self.db_path)
+        try:
+            ensure_schema(conn)
+            result = job_profile_insights.submit_feedback(
+                conn, job_id=int(job_id), item_type=str(item_type or "").strip(),
+                item_key=str(item_key or ""), item_label=str(item_label or ""), note=str(note or ""),
+            )
+            conn.commit()
+            insight = result.pop("insight", {})
+            return {
+                **result,
+                "duties": insight.get("duties") or [],
+                "tools": insight.get("tools") or [],
+                "deliverables": insight.get("deliverables") or [],
+                "customers": insight.get("customers") or [],
+                "disputed": insight.get("disputed") or [],
+                "stats": insight.get("stats") or {},
+                "source_count": insight.get("source_count") or 0,
+                "as_of": insight.get("as_of") or "",
+            }
+        finally:
+            conn.close()
+
+    def generate_assessment_calibration_report(self) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.generate_assessment_calibration_report()
+        raise RuntimeError("workflow service unavailable")
+
     def update_mapping_candidate(
         self,
         artifact_id: str,

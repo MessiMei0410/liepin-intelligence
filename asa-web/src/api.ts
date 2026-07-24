@@ -345,6 +345,36 @@ export type CandidateAssessmentPayload = {
   assessment?: CandidateAssessmentDoc;
 }
 
+// S6-4 评估校准度量（顾问点头率）：维度×客户聚合；数据不足的分组三个率为 null（前端如实呈现「数据不足」）。
+export type CalibrationMetricsGroup = {
+  client: string; dimension: string; dimension_label: string;
+  total: number; accepted: number; modified: number; rejected: number;
+  acceptance_rate: number | null; modified_rate: number | null; rejected_rate: number | null;
+}
+export type CalibrationMetricsPayload = {
+  ok: boolean; generated_at?: string; min_n?: number;
+  totals?: { assessments: number; pending: number; accepted: number; modified: number; rejected: number };
+  groups?: CalibrationMetricsGroup[];
+  labels?: { title?: string; acceptance_rate?: string; modified_rate?: string; rejected_rate?: string; insufficient?: string };
+}
+
+// S8 岗位画像（这个岗位实际在干什么）：Core 返回动态 dict，按 job_profile_insights.py 实际 payload 收窄声明。
+// status: ready=可展示 / insufficient=履历还太少 / not_generated=尚未学习；disputed 为顾问"不对"标记留痕区。
+export type JobProfileExample = { candidate: string; evidence: string }
+export type JobProfileItem = { key: string; label: string; count: number; ratio: number; examples: JobProfileExample[] }
+export type JobProfileDisputedItem = {
+  item_type: string; key: string; label: string; count: number; note?: string; disputed_at?: string
+}
+export type JobProfileInsightsPayload = {
+  ok?: boolean; job_id?: number; status?: 'ready' | 'insufficient' | 'not_generated';
+  source_count?: number; min_source_count?: number; as_of?: string; version?: number;
+  duties?: JobProfileItem[]; tools?: JobProfileItem[]; deliverables?: JobProfileItem[]; customers?: JobProfileItem[];
+  disputed?: JobProfileDisputedItem[]; stats?: Record<string, unknown>;
+}
+export type JobProfileFeedbackResult = {
+  ok?: boolean; status?: string; already_disputed?: boolean; item_type?: string; item_key?: string
+}
+
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
   const body: unknown = await response.json().catch(() => ({ error: response.statusText }))
@@ -421,6 +451,16 @@ export const api = {
     write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}`, {}),
   patchAssessmentAdvisorAction: (candidateId: number, jobId: number, action: AssessmentAdvisorAction, note?: string) =>
     write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments/${jobId}/advisor-action`, { action, ...(note ? { note } : {}) }, 'PATCH'),
+  // S6-4 评估校准度量（只读）：数据不足的分组率为 null，由展示层如实呈现。
+  assessmentCalibrationMetrics: () =>
+    json<CalibrationMetricsPayload>('/api/v1/assessments/calibration/metrics'),
+  // S8 岗位画像（这个岗位实际在干什么）：GET 永远 200（岗位存在时），status 决定展示/空态；
+  // "不对"回写走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应），409=非法条目类型。
+  // 两个 S8 路由为本期新上，generated/api.d.ts 尚无，待主控 regenerate 后可补 ContractAnchor。
+  jobProfileInsights: (jobId: number) =>
+    json<JobProfileInsightsPayload>(`/api/v1/jobs/${jobId}/profile-insights`),
+  disputeJobProfileItem: (jobId: number, item: { item_type: string; item_key: string; item_label?: string; note?: string }) =>
+    write<JobProfileFeedbackResult>(`/api/v1/jobs/${jobId}/profile-insights/feedback`, { ...item }),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),

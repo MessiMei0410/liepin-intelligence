@@ -618,6 +618,81 @@ CREATE TABLE IF NOT EXISTS agent_workflow_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_agent_workflow_feedback_type
 ON agent_workflow_feedback(feedback_type, created_at DESC);
+
+-- S8 岗位画像学习：单人职责事实（抽取器产出，证据逐字校验后才入库）。
+CREATE TABLE IF NOT EXISTS job_profile_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    job_candidate_id INTEGER NOT NULL,
+    person_id INTEGER,
+    facts_json TEXT NOT NULL DEFAULT '{}',
+    fact_count INTEGER NOT NULL DEFAULT 0,
+    source_hash TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    extractor_version TEXT NOT NULL DEFAULT '',
+    stats_json TEXT NOT NULL DEFAULT '{}',
+    as_of TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(job_id, job_candidate_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_profile_facts_job
+ON job_profile_facts(job_id);
+
+-- S8 岗位画像学习：按客户+岗位聚合的岗位真实画像（先给人看，不接策略/评估消费）。
+CREATE TABLE IF NOT EXISTS job_profile_insights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL UNIQUE,
+    client TEXT NOT NULL DEFAULT '',
+    job_title TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'insufficient',
+    source_count INTEGER NOT NULL DEFAULT 0,
+    insight_json TEXT NOT NULL DEFAULT '{}',
+    model TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
+    as_of TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- S8 岗位画像顾问纠正通道：标记 disputed 不删除，聚合时排除并留痕（质量闭环）。
+CREATE TABLE IF NOT EXISTS job_profile_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    item_type TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    item_label TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'disputed',
+    note TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL DEFAULT 'consultant',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(job_id, item_type, item_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_profile_feedback_job
+ON job_profile_feedback(job_id);
+
+-- S6-4 评估校准：改判样例库（advisor_action ∈ modified/rejected 回流；
+-- 只存口径与维度标签，不存简历原文；敏感因子拒入由写入侧拦截）。
+CREATE TABLE IF NOT EXISTS assessment_calibration_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id TEXT NOT NULL UNIQUE,
+    candidate_id INTEGER NOT NULL,
+    job_id INTEGER NOT NULL,
+    client TEXT NOT NULL DEFAULT '',
+    job_type TEXT NOT NULL DEFAULT '',
+    advisor_action TEXT NOT NULL,
+    dimensions_json TEXT NOT NULL DEFAULT '[]',
+    machine_verdicts_json TEXT NOT NULL DEFAULT '{}',
+    advisor_note TEXT NOT NULL DEFAULT '',
+    as_of TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_calibration_match
+ON assessment_calibration_samples(client, job_type, id DESC);
 """
 
 

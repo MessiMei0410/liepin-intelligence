@@ -1171,6 +1171,10 @@ def apply_advisor_action(
             artifact_id,
         ),
     )
+    # S6-4：改判/否决回流校准样例库（敏感因子拒入只拦样例，不阻断动作写回）
+    from . import assessment_calibration
+
+    calibration = assessment_calibration.sync_calibration_sample(conn, artifact_id=artifact_id, doc=doc)
     return {
         "ok": True,
         "candidate_id": int(candidate_id),
@@ -1179,6 +1183,7 @@ def apply_advisor_action(
         "advisor_action": action_value,
         "advisor_note": doc["advisor_note"],
         "updated_at": doc["updated_at"],
+        "calibration": calibration,
         "assessment": doc,
     }
 
@@ -1328,6 +1333,8 @@ def run_assessment(
     S6-2：分位落位与动机信号全部确定性计算（assessment_signals），LLM 第二调只读成
     顾问口径 verdict；第二调失败降级为确定性模板 verdict（记 signal_stats），不阻断。
     signal_fetcher/today 仅供测试与回测注入（默认真实采集 / 真实当天）。
+    S6-4：同客户/同岗位类型改判样例 ≤5 条注入三次 LLM 调用的 calibration 块
+    （无样例不注入）；样例内容只进 prompt，不进 artifact 正文与任何对外文本。
     """
     today = today or date.today()
     candidate = load_candidate_resume(conn, candidate_id)
@@ -1376,6 +1383,21 @@ def run_assessment(
         employers.insert(0, current_company)
     graph_hits = match_graph_hits(employers, graph)
 
+    # ------------------------------------------------------------------
+    # S6-4 校准注入：同客户或同岗位类型最近 ≤5 条改判样例 → few-shot 块。
+    # 只进三次 LLM 调用的 payload（键名 calibration；无样例时该键整个不出现）。
+    # 红线：样例内容不落 artifact 正文/markdown/推荐报告，UI 永不渲染；样例只影响
+    # 判断口径，证据强约束不放宽（约束写进注入 instruction）。
+    # ------------------------------------------------------------------
+    from . import assessment_calibration
+
+    calibration_examples = assessment_calibration.retrieve_examples(
+        conn,
+        client=str(job_item.get("client") or ""),
+        job_type=assessment_calibration.normalize_job_type(job_item.get("title")),
+    )
+    calibration_block = assessment_calibration.build_prompt_block(calibration_examples) if calibration_examples else None
+
     payload = build_llm_payload(
         candidate={
             "current_company": current_company,
@@ -1391,6 +1413,8 @@ def run_assessment(
         strategy_doc=strategy_doc,
         graph_hits=graph_hits,
     )
+    if calibration_block:
+        payload["calibration"] = calibration_block
     raw = llm.assess_trajectory(payload)
     if not isinstance(raw, dict) or not (raw.get("trajectory") or raw.get("move_history")):
         raise LLMError("判人评估模型未返回有效结构")
@@ -1477,6 +1501,8 @@ def run_assessment(
         "employment_facts": signal_stats["employment_facts"],
         "signals": signals,
     }
+    if calibration_block:
+        pm_payload["calibration"] = calibration_block
     try:
         raw_pm = llm.assess_percentile_motivation(pm_payload)
         if not isinstance(raw_pm, dict):
@@ -1527,6 +1553,8 @@ def run_assessment(
         "resume_work_text": str(resume.get("work_text") or "")[:4000],
         "deterministic_findings": [item["risk"] for item in risk_facts["items"]],
     }
+    if calibration_block:
+        risks_payload["calibration"] = calibration_block
     try:
         raw_risks = llm.assess_risks(risks_payload)
         if not isinstance(raw_risks, dict):
@@ -1567,6 +1595,12 @@ def run_assessment(
             "stripped_detail": stats["stripped_detail"],
         },
         "signal_stats": signal_stats,
+        # S6-4：只记注入计数与样例 id（内部留痕）；样例内容（改判 note/机器原判）
+        # 永不进 artifact 正文/markdown/推荐报告，UI 无内容可渲染（红线：注入不外泄）。
+        "calibration_stats": {
+            "samples_injected": len(calibration_examples),
+            "sample_ids": [int(example["sample_id"]) for example in calibration_examples],
+        },
     }
 
     # 硬闸 1：决策禁语（拒写 + 扫描日志）
