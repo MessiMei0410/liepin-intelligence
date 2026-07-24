@@ -158,6 +158,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/{candidate_id}/assessments/{job_id}/advisor-action": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Candidate Assessment Advisor Action */
+        patch: operations["candidate_assessment_advisor_action_api_v1_candidates__candidate_id__assessments__job_id__advisor_action_patch"];
+        trace?: never;
+    };
     "/api/v1/workflows/{workflow_id}": {
         parameters: {
             query?: never;
@@ -576,6 +593,18 @@ export interface components {
             request_id: string;
             /** Decision */
             decision: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** AssessmentAdvisorActionPatch */
+        AssessmentAdvisorActionPatch: {
+            /** Request Id */
+            request_id: string;
+            /** Action */
+            action: string;
             /**
              * Note
              * @default
@@ -1031,6 +1060,44 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candidate_assessment_advisor_action_api_v1_candidates__candidate_id__assessments__job_id__advisor_action_patch: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                candidate_id: number;
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssessmentAdvisorActionPatch"];
             };
         };
         responses: {
