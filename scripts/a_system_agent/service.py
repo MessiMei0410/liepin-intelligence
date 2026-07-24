@@ -6749,3 +6749,68 @@ class AgentService:
             source_type="agent_learning_rule", source_id=row["id"], confidence=1.0,
         )
         return result
+
+    # ------------------------------------------------------------------
+    # S7-1：人才流动雷达 —— 手动触发扫描 + 读最新榜单（同日幂等）
+    # ------------------------------------------------------------------
+
+    def create_radar_scan(
+        self,
+        *,
+        collector: Any = None,
+        extractor: Any = None,
+        as_of: str = "",
+        max_companies: int = 0,
+        max_workers: int = 1,
+    ) -> dict[str, Any]:
+        """S7-1：人才流动雷达扫描——公司池检索公开信号 → LLM 抽取 → 榜单，落 radar_scan artifact。
+
+        红线：全部公开信息只读；无来源信号拒写；来源 URL 必须来自真实检索结果；
+        禁挖名单照常过滤；restricted 仅白名单出库；不自动触达（动作由顾问本人执行）。
+        collector/extractor 可注入（测试用本地 fixture，绝不打外网/不依赖真实模型）。
+        同日重复扫描更新同一 artifact（radar_scan_<scan_date>，version 自增）。
+        """
+        from . import radar_scan
+
+        conn = self._connect()
+        try:
+            doc = radar_scan.build_radar_scan(
+                conn,
+                collector=collector,
+                extractor=extractor,
+                llm=self.llm,
+                as_of=as_of,
+                max_companies=max_companies,
+                max_workers=max_workers,
+                url_resolver=radar_scan.resolve_source_url,
+            )
+            artifact_id = radar_scan.upsert_radar_scan(conn, doc)
+            conn.commit()
+            stats = doc.get("stats") or {}
+            return {
+                "ok": True,
+                "artifact_id": artifact_id,
+                "scan_date": doc.get("scan_date"),
+                "ranking_file": doc.get("ranking_file"),
+                "summary": (
+                    f"扫描公司 {stats.get('companies_scanned', 0)} 家，发现信号 {stats.get('signals_found', 0)} 条"
+                    f"（全部带来源链接）；失败 {stats.get('sources_failed', 0)} 次已留痕，"
+                    f"禁挖过滤 {stats.get('banned_filtered', 0)} 条。榜单仅供顾问本人决策，系统不自动触达。"
+                ),
+                "radar_scan": doc,
+            }
+        finally:
+            conn.close()
+
+    def get_latest_radar_scan(self) -> dict[str, Any]:
+        """S7-1：读取最新雷达榜单；尚无扫描抛 LookupError（404）。"""
+        from . import radar_scan
+
+        conn = self._connect()
+        try:
+            payload = radar_scan.get_latest_radar_scan(conn)
+            if payload is None:
+                raise LookupError("还没有雷达榜单：请先发起一次扫描（POST /api/v1/radar/scans）")
+            return {"ok": True, **payload}
+        finally:
+            conn.close()

@@ -311,3 +311,5 @@
 .assessment-risk-evidence{margin:0;padding:0 0 0 4px;list-style:none;display:grid;gap:3px}
 .assessment-risk-evidence li{display:flex;align-items:baseline;gap:6px;font-size:10.5px;color:var(--muted);line-height:1.5}
 .assessment-risk-evidence li .tag{flex:0 0 auto}
+.overview-intent{display:flex;gap:8px;align-items:baseline;margin-top:6px}.overview-intent span,.overview-keywords span{color:var(--muted);font-size:12px;min-width:60px}.overview-keywords{display:flex;gap:8px;margin-top:6px}.overview-keywords>div{display:flex;flex-wrap:wrap;gap:4px}.overview-keywords i{font-style:normal;background:var(--green-soft);color:var(--green);padding:1px 8px;border-radius:10px;font-size:12px}
+.trace-main{display:flex;flex-direction:column;gap:2px;min-width:0}.trace-side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}.feedback-score{font-size:12px;font-weight:600}.feedback-score.positive{color:var(--green)}.feedback-score.negative{color:var(--red)}.feedback-score.muted{color:var(--muted)}

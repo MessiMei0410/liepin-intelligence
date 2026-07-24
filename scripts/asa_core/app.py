@@ -90,6 +90,11 @@ class MappingCandidatePatch(WriteEnvelope):
     consultant_note: str | None = None
 
 
+class RadarScanCreate(WriteEnvelope):
+    # S7-1：手动触发一次人才流动雷达扫描（无额外表单字段；同日幂等更新同一 artifact）
+    pass
+
+
 class AssessmentAdvisorActionPatch(WriteEnvelope):
     # S6-1b：判人评估顾问动作写回；action 四枚举（非法 → 409），note 选填（改判时附口径）。
     action: str = Field(min_length=1)
@@ -305,6 +310,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def mapping_metrics() -> dict[str, Any]:
         # S5-3：Mapping 评测指标聚合（PRD §8 四项口径，只读；数据不足的分组如实 null）。
         return core.mapping_metrics()
+
+    @app.post("/api/v1/radar/scans")
+    def radar_scan_create(body: RadarScanCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S7-1：人才流动雷达手动扫描（公司池=33 客户档案+mapping 已确认公司，公开信号只读检索）。
+        # 走 execute_idempotent 幂等 + 审计，重放返回首次响应；同日重复扫描更新同一 artifact。
+        # 红线：无来源信号拒写；禁挖照常过滤；榜单只出建议，系统不自动触达。
+        return idem("radar.scan_create", body, idempotency_key, "radar", "global",
+                    lambda: core.create_radar_scan())
+
+    @app.get("/api/v1/radar/scans/latest")
+    def radar_scan_latest() -> dict[str, Any]:
+        # S7-1：读最新雷达榜单；尚无扫描 → 404（LookupError 全局映射）
+        return core.get_latest_radar_scan()
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:

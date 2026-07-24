@@ -1296,3 +1296,17 @@ class CoreService:
             "business_event_id": cursor.lastrowid,
             "sourcing_learning": learning,
         }
+
+    # ------------------------------------------------------------------
+    # S7-1：人才流动雷达（路由层薄封装，业务在 AgentService/a_system_agent.radar_scan）
+    # ------------------------------------------------------------------
+
+    def create_radar_scan(self) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.create_radar_scan()
+        raise RuntimeError("workflow service unavailable")
+
+    def get_latest_radar_scan(self) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_latest_radar_scan()
+        raise RuntimeError("workflow service unavailable")

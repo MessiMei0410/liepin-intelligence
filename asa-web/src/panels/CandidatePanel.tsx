@@ -6,6 +6,7 @@ import { date, sourceLabel, sourceLinkLabel, eventStatusLabel } from '../shared/
 import { copilotText } from '../shared/text'
 import { SectionHead } from '../shared/primitives'
 import { openCopilotWindow } from '../copilot/bridge'
+import { parseOverviewBasic, splitIntentKeywords, formatFeedbackScore } from './overviewFormat'
 
 export type CandidateAction = 'advance' | 'review' | 'contact' | 'recommend' | 'stop'
 export type CandidateActionPreflight = { action: CandidateAction; token: string; impact: string; expires_at?: string }
@@ -52,7 +53,7 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
         <nav className="candidate-tabs" aria-label="候选人详情"><button className={view==='overview'?'active':''} onClick={()=>setView('overview')}><UserRoundSearch/>概览</button><button className={view==='resume'?'active':''} onClick={()=>setView('resume')}><BriefcaseBusiness/>履历</button><button className={view==='activity'?'active':''} onClick={()=>setView('activity')}><Clock3/>记录</button><button className={view==='assessment'?'active':''} onClick={()=>setView('assessment')}><ClipboardCheck/>评估</button></nav>
         {view==='overview'&&<>
           <ResumeOverview text={resume.summary || resume.full_text} company={value.current_company}/>
-          {value.sourcing_attributions?.length>0&&<section className="sourcing-trace"><div className="sourcing-trace-head"><Search/><div><span>寻访来源</span><b>关键词及后续业务反馈</b></div></div>{value.sourcing_attributions.map(item=><div className="sourcing-trace-row" key={item.id}><div><span>{sourceLabel(item.channel)} · {item.source_round||'寻访查询'}</span><b>{item.source_query}</b><small>{item.source_purpose||'根据岗位策略生成'}{item.strategy_model?` · ${item.strategy_model}`:''}</small></div><div className={`learning-score ${Number(item.learning_score||0)<0?'negative':Number(item.learning_score||0)>0?'positive':''}`}><b>{Number(item.learning_score||0).toFixed(1)}</b><span>经验分</span></div><LearningSignals item={item}/></div>)}</section>}
+          {value.sourcing_attributions?.length>0&&<section className="sourcing-trace"><div className="sourcing-trace-head"><Search/><div><span>寻访来源</span><b>怎么找到他的</b></div></div>{value.sourcing_attributions.map(item=><div className="sourcing-trace-row" key={item.id}><div className="trace-main"><span>{sourceLabel(item.channel)} · {item.source_round||'寻访查询'}</span><b>{item.source_query}</b><small>{item.source_purpose||'根据岗位策略生成'}</small></div><div className="trace-side"><span className={`feedback-score ${formatFeedbackScore(item.learning_score).tone}`}>{formatFeedbackScore(item.learning_score).text}</span><LearningSignals item={item}/></div></div>)}</section>}
         </>}
         {view==='assessment'&&<CandidateAssessment candidateId={value.id} jobId={value.job_id}/>}
         {view==='resume'&&<div className="resume-workspace"><ResumeTimelineSection title="工作经历" text={resume.work_text} empty="尚未采集结构化工作经历，可通过来源链接核对原始简历。"/><ResumeTimelineSection title="项目经历" text={resume.project_text} empty="暂无结构化项目经历。"/><ResumeTimelineSection title="教育经历" text={resume.education_text} empty="暂无结构化教育经历。"/>{resume.full_text&&<details className="raw-resume"><summary>完整原始履历</summary><pre>{resume.full_text}</pre></details>}</div>}
@@ -68,8 +69,16 @@ function ResumeOverview({text,company}:{text?:string;company?:string}) {
   const markerIndex=normalized.indexOf(marker)
   const companyIndex=company&&markerIndex>=0?normalized.indexOf(company,markerIndex+marker.length):-1
   const basic=markerIndex>=0?normalized.slice(0,markerIndex).trim():normalized
-  const intent=markerIndex>=0?normalized.slice(markerIndex+marker.length,companyIndex>markerIndex?companyIndex:undefined).trim():''
-  return <section className="resume-section resume-overview"><h3>职业概览</h3><dl><div><dt>基本信息</dt><dd>{basic.split(/\s+/).join(' · ')}</dd></div>{intent&&<div><dt>求职意向与关键词</dt><dd>{intent}</dd></div>}</dl></section>
+  const intentRaw=markerIndex>=0?normalized.slice(markerIndex+marker.length,companyIndex>markerIndex?companyIndex:undefined).trim():''
+  const fields=parseOverviewBasic(basic)
+  const {intent,keywords}=splitIntentKeywords(intentRaw)
+  const rows:[string,string][]=[]
+  if(fields.age)rows.push(['年龄',fields.age])
+  if(fields.experience)rows.push(['经验',fields.experience])
+  if(fields.education)rows.push(['学历',fields.education])
+  if(fields.city)rows.push(['城市',fields.city])
+  if(fields.status)rows.push(['状态',fields.status])
+  return <section className="resume-section resume-overview"><h3>职业概览</h3>{rows.length?<dl>{rows.map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>:<p className="overview-basic">{basic}</p>}{intent&&<div className="overview-intent"><span>求职意向</span><b>{intent}</b></div>}{keywords.length>0&&<div className="overview-keywords"><span>技能关键词</span><div>{keywords.map(k=><i key={k}>{k}</i>)}</div></div>}</section>
 }
 
 function ResumeTimelineSection({title,text,empty}:{title:string;text?:string;empty:string}) {
