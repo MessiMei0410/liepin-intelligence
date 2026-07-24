@@ -35,6 +35,10 @@ ASSESSOR_VERSION = "s6-trajectory-v1"
 DIMENSIONS_IMPLEMENTED = ("trajectory", "move_history")
 DIMENSIONS_PLACEHOLDER = ("percentile", "motivation", "risks")
 
+# 顾问动作（采纳/改判/否决）：经 PATCH advisor-action 写回 artifact，version 不 bump。
+ADVISOR_ACTIONS = ("pending", "accepted", "modified", "rejected")
+ADVISOR_ACTION_LABELS = {"pending": "待处理", "accepted": "已采纳", "modified": "已改判", "rejected": "已否决"}
+
 _CONFIDENCE = {"certain", "inferred"}
 _TIER = {"T1", "T2", "T3", "unknown"}
 _TIER_SOURCE = {"graph", "inferred"}
@@ -438,7 +442,7 @@ def validate_assessment(doc: Any) -> list[str]:
     for name in DIMENSIONS_PLACEHOLDER:
         if dimensions.get(name) is not None:
             errors.append(f"dimensions.{name} 本期必须为 null 占位")
-    if doc.get("advisor_action") not in ("pending", "accepted", "modified", "rejected"):
+    if doc.get("advisor_action") not in ADVISOR_ACTIONS:
         errors.append("advisor_action 必须是 pending|accepted|modified|rejected")
     return errors
 
@@ -619,6 +623,74 @@ def get_assessment(conn: sqlite3.Connection, candidate_id: int, job_id: int) -> 
         "content": row["content"],
         "assessment": doc,
         "created_at": row["created_at"],
+    }
+
+
+def apply_advisor_action(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: int,
+    job_id: int,
+    action: str,
+    note: str = "",
+) -> dict[str, Any]:
+    """S6-1b：顾问动作写回（采纳/改判/否决）——只更新 advisor_action/advisor_note/updated_at。
+
+    version 不 bump、as_of 不动（评估内容未变，只是顾问结论变化）；artifact markdown 同步重渲。
+    LookupError：人选/岗位不存在或不匹配、尚无评估；ValueError：非法 action。
+    已 action 的可再次写回（顾问改主意是正常业务流）；不 commit（调用方决定事务）。
+    """
+    relation = conn.execute(
+        "SELECT id,job_id,person_id FROM job_candidates WHERE id=?", (int(candidate_id),)
+    ).fetchone()
+    if relation is None:
+        raise LookupError(f"人选不存在：{candidate_id}")
+    if int(relation["job_id"] or 0) != int(job_id):
+        raise LookupError(f"人选 {candidate_id} 不属于岗位 {job_id}")
+    payload = get_assessment(conn, int(candidate_id), int(job_id))
+    if payload is None:
+        raise LookupError(f"人选 {candidate_id} 在岗位 {job_id} 下还没有判人评估，请先 POST 生成")
+    action_value = str(action or "").strip()
+    if action_value not in ADVISOR_ACTIONS:
+        raise ValueError(f"action 必须是 {'/'.join(ADVISOR_ACTIONS)}，收到：{action_value or '空'}")
+
+    doc = payload["assessment"]
+    doc["advisor_action"] = action_value
+    doc["advisor_note"] = _clean_text(note, 600)
+    doc["updated_at"] = _now()
+    artifact_id = str(payload["artifact_id"])
+    conn.execute(
+        "UPDATE agent_artifacts SET content=?,metadata_json=? WHERE artifact_id=?",
+        (_artifact_markdown(doc), _dumps(doc), artifact_id),
+    )
+    label = ADVISOR_ACTION_LABELS.get(action_value, action_value)
+    summary = f"判人评估顾问动作：{label}"
+    if doc["advisor_note"]:
+        summary += f"（备注：{doc['advisor_note'][:80]}）"
+    conn.execute(
+        """
+        INSERT INTO candidate_events
+        (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+        VALUES (?,?,?,'candidate_assessment_advisor_action','completed',datetime('now','localtime'),?,?,'agent_artifacts',?)
+        """,
+        (
+            int(candidate_id),
+            int(relation["person_id"]) if relation["person_id"] else None,
+            int(job_id),
+            summary,
+            _dumps({"artifact_id": artifact_id, "advisor_action": action_value, "advisor_note": doc["advisor_note"]}),
+            artifact_id,
+        ),
+    )
+    return {
+        "ok": True,
+        "candidate_id": int(candidate_id),
+        "job_id": int(job_id),
+        "artifact_id": artifact_id,
+        "advisor_action": action_value,
+        "advisor_note": doc["advisor_note"],
+        "updated_at": doc["updated_at"],
+        "assessment": doc,
     }
 
 

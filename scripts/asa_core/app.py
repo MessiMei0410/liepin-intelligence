@@ -90,6 +90,12 @@ class MappingCandidatePatch(WriteEnvelope):
     consultant_note: str | None = None
 
 
+class AssessmentAdvisorActionPatch(WriteEnvelope):
+    # S6-1b：判人评估顾问动作写回；action 四枚举（非法 → 409），note 选填（改判时附口径）。
+    action: str = Field(min_length=1)
+    note: str = ""
+
+
 class CandidateAction(BaseModel):
     request_id: str = Field(min_length=4)
     candidate_id: int
@@ -193,6 +199,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def candidate_assessment_get(candidate_id: int, job_id: int = Query(...)) -> dict[str, Any]:
         # S6-1：读取同人同岗判人评估；人选/岗位不存在或不匹配、尚无评估 → 404（LookupError 全局映射）
         return core.get_candidate_assessment(candidate_id, job_id)
+
+    @app.patch("/api/v1/candidates/{candidate_id}/assessments/{job_id}/advisor-action")
+    def candidate_assessment_advisor_action(candidate_id: int, job_id: int, body: AssessmentAdvisorActionPatch, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S6-1b：顾问动作写回（accepted/modified/rejected/pending + 选填 note）。走 execute_idempotent
+        # 幂等 + 审计，重放返回首次响应；404=人选/岗位不存在或不匹配、尚无评估；409=非法 action。
+        # 只写 advisor_action/advisor_note/updated_at，artifact version 不 bump；已 action 可再改。
+        return idem("candidate.assessment_advisor_action", body, idempotency_key, "job_candidate", f"{candidate_id}:{job_id}",
+                    lambda: core.update_candidate_assessment_advisor_action(candidate_id, job_id, action=body.action, note=body.note))
 
     @app.get("/api/v1/workflows/{workflow_id}")
     def workflow(workflow_id: str) -> dict[str, Any]: return core.workflow(workflow_id)

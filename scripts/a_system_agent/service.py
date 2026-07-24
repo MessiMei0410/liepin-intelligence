@@ -1255,6 +1255,26 @@ class AgentService:
         finally:
             conn.close()
 
+    def update_candidate_assessment_advisor_action(
+        self, candidate_id: int, job_id: int, *, action: str, note: str = ""
+    ) -> dict[str, Any]:
+        """S6-1b：顾问动作写回（采纳/改判/否决，可附 note）。
+
+        404：人选/岗位不存在或不匹配、尚无评估（LookupError）；409：非法 action（ValueError）。
+        只更新 advisor_action/advisor_note/updated_at，version 不 bump；写岗位时间线留痕。
+        """
+        from . import candidate_assessment
+
+        conn = self._connect()
+        try:
+            payload = candidate_assessment.apply_advisor_action(
+                conn, candidate_id=int(candidate_id), job_id=int(job_id), action=action, note=note
+            )
+            conn.commit()
+            return payload
+        finally:
+            conn.close()
+
 
     def revise_workflow(self, workflow_id: str, instruction: str) -> dict[str, Any]:
         return self.workflow_engine.revise_workflow(workflow_id, instruction)

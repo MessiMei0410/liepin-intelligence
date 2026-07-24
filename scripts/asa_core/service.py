@@ -853,6 +853,15 @@ class CoreService:
             return self.agent_service.get_candidate_assessment(candidate_id, job_id)
         raise RuntimeError("workflow service unavailable")
 
+    def update_candidate_assessment_advisor_action(
+        self, candidate_id: int, job_id: int, *, action: str, note: str = ""
+    ) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.update_candidate_assessment_advisor_action(
+                candidate_id, job_id, action=action, note=note
+            )
+        raise RuntimeError("workflow service unavailable")
+
     def update_mapping_candidate(
         self,
         artifact_id: str,

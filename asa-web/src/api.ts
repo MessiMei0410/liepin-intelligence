@@ -276,6 +276,44 @@ export type MappingIntakeResult = {
   stats?: MappingTaskStats;
 }
 
+// S6-1b 判人评估：Core 返回动态 dict（openapi 只描述为 object），按 assessment_v1 schema 收窄声明。
+// PATCH advisor-action 为 S6-1b 后端新上，generated/api.d.ts 尚无，待主控 regenerate 后补锚。
+export type AssessmentAdvisorAction = 'pending' | 'accepted' | 'modified' | 'rejected'
+export type AssessmentEvidence = { type?: string; ref?: string }
+export type AssessmentSegment = {
+  company?: string; title?: string; period?: string; tier?: string; tier_source?: string;
+  team?: string; report_line?: string; note?: string;
+}
+export type AssessmentMove = {
+  from?: string; to?: string; direction?: string; platform?: string;
+  title_direction?: string; responsibility_direction?: string; reason?: string;
+}
+export type AssessmentTrajectory = {
+  verdict?: string; evidence?: AssessmentEvidence[]; confidence?: string;
+  segments?: AssessmentSegment[]; promotion_pace?: string; tech_evolution?: string;
+}
+export type AssessmentMoveHistory = {
+  verdict?: string; evidence?: AssessmentEvidence[]; confidence?: string;
+  moves?: AssessmentMove[]; current_move?: string;
+}
+export type CandidateAssessmentDoc = {
+  schema_version?: string; candidate_id?: number; job_id?: number; candidate_name_masked?: string;
+  job_title?: string; client?: string; as_of?: string; updated_at?: string;
+  assessor_version?: string; model?: string;
+  dimensions?: {
+    trajectory?: AssessmentTrajectory | null;
+    move_history?: AssessmentMoveHistory | null;
+    percentile?: unknown; motivation?: unknown; risks?: unknown;
+  };
+  consultant_summary?: string; advisor_action?: AssessmentAdvisorAction; advisor_note?: string;
+}
+export type CandidateAssessmentPayload = {
+  ok?: boolean; candidate_id?: number; job_id?: number; artifact_id?: string;
+  title?: string; content?: string; created_at?: string; updated_at?: string;
+  advisor_action?: AssessmentAdvisorAction; advisor_note?: string;
+  assessment?: CandidateAssessmentDoc;
+}
+
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
   const body: unknown = await response.json().catch(() => ({ error: response.statusText }))
@@ -338,6 +376,20 @@ export const api = {
     write<MappingIcebreakerResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/icebreaker`, {}),
   intakeMappingCandidate: (artifactId: string, index: number) =>
     write<MappingIntakeResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/intake`, {}),
+  // S6-1b 判人评估：无评估时 Core 返回 404，此处收敛为 null（其余错误照常抛出，携带 status）。
+  // 生成/重生成与顾问动作写回全走 write 幂等封装；409=无简历语料/模型不可用/非法 action（中文 detail 透出）。
+  candidateAssessment: async (candidateId: number, jobId: number): Promise<CandidateAssessmentPayload | null> => {
+    try {
+      return await json<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}`)
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) return null
+      throw error
+    }
+  },
+  generateCandidateAssessment: (candidateId: number, jobId: number) =>
+    write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}`, {}),
+  patchAssessmentAdvisorAction: (candidateId: number, jobId: number, action: AssessmentAdvisorAction, note?: string) =>
+    write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments/${jobId}/advisor-action`, { action, ...(note ? { note } : {}) }, 'PATCH'),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),

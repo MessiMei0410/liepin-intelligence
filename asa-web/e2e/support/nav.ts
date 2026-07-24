@@ -13,7 +13,8 @@ export const STAGE_BEFORE = 'S1 新增寻访/待复核'
 export const STAGE_STOPPED = 'H5 最近寻访/初筛不通过'
 export const WORKFLOW_ID = 'workflow_bcab82502825'
 // S5-2 Mapping 任务卡锚点：第 9 轮 blocked + completed_needs_review，策略复盘含 escalate_mapping 步，
-// 且产物已有真实任务卡 mapping_task_workflow_15fc23c21ce8（job 154，17 团队 / 10 候选全 pending）。
+// 且产物已有真实任务卡 mapping_task_workflow_15fc23c21ce8（job 154，17 团队 / 10 候选；
+// 人选状态随顾问真实使用漂移，用例按「有确认按钮的卡」动态选 pending，不钉人名）。
 export const MAPPING_WORKFLOW_ID = 'workflow_15fc23c21ce8'
 
 export async function openJob(page: Page, jobId = JOB_ID): Promise<Locator> {
