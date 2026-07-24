@@ -3658,5 +3658,18 @@
     "精密设备"
    ]
   }
+ },
+ "teams_external": {
+  "MPS": [
+   {
+    "name": "PC/服务器/ADAS 方向 TME/FAE/AE 团队",
+    "headcount_hint": 2,
+    "key_roles": [
+     "MPS 技术论文作者"
+    ],
+    "as_of": "2026-07-24",
+    "source_artifact": "mapping_task_workflow_15fc23c21ce8"
+   }
+  ]
  }
 }
