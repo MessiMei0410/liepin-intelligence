@@ -494,3 +494,346 @@ def collect_company_signals(
     if not signals:
         stats["note"] = "已采集公开页但未见明显变动信号关键词"
     return signals, stats
+
+
+# ---------------------------------------------------------------------------
+# S6-3 风险点（呈现口径：需要核实的问题，不是风险定罪）：确定性检出原料
+#
+# 五类检出中三类半确定性（gap 空窗 / 频繁跳动 / 时间线冲突 / strategy_v2 硬条件差距），
+# title 通胀与过度包装的语义判断由 LLM 补充（candidate_assessment 过同一道证据闸）。
+# 阈值全部固定、可解释；每条 item 带 kind/severity/evidence（简历逐字行优先）；
+# 呈现语义永远是"需要核实的问题"，不出现任何定罪/淘汰表述。
+# ---------------------------------------------------------------------------
+
+RISK_GAP_MONTHS = 6  # 相邻两段经历之间空窗 >6 个月 → 需核实
+RISK_GAP_HIGH_MONTHS = 12  # 空窗 >12 个月 → high
+RISK_SHORT_TENURE_MONTHS = 12  # 已结束段任期 <12 个月计一次短任期
+RISK_SHORT_TENURE_MEDIUM = 2  # 短任期 ≥2 段 → medium
+RISK_SHORT_TENURE_HIGH = 3  # 短任期 ≥3 段 → high
+RISK_RECENT_WINDOW_MONTHS = 60  # 近 5 年窗口内段数过多也算频繁跳动
+RISK_RECENT_MOVES = 3  # 近 5 年 ≥3 段经历 → low
+RISK_OVERLAP_MONTHS = 6  # 两段时间重叠 >6 个月 → 时间线冲突（过度包装信号类）
+RISK_MAX_PER_KIND = 3  # 同类确定性 item 上限（防刷屏）
+RISK_SKILL_TERM_MAX = 12  # 技能缺项核对的词数上限
+RISK_SKILL_MISSING_MAX = 3  # 技能缺项 item 最多列 3 个缺项词
+
+# 学历等级（硬性比对用；只比岗位要求 vs 简历自述，不推测）
+_EDU_LEVELS: tuple[tuple[str, int], ...] = (
+    ("博士", 4),
+    ("硕士", 3),
+    ("研究生", 3),
+    ("mba", 3),
+    ("MBA", 3),
+    ("本科", 2),
+    ("学士", 2),
+    ("大专", 1),
+    ("专科", 1),
+)
+
+_YEARS_PATTERN = re.compile(r"(\d{1,2})\s*年")
+_SKILL_VERB_PREFIXES = ("熟悉", "掌握", "精通", "具备", "具有", "了解")
+# 学历段（"浙江大学 · 本科 2009.09-2013.06"）不是工作经历：gap/任期/冲突检出前剔除
+_DEGREE_LINE_PATTERN = re.compile(r"本科|大专|专科|硕士|博士|学士|研究生|MBA|mba")
+_SKILL_STOP_TOKENS = {
+    "经验", "以上", "以下", "优先", "能力", "工作", "相关", "及", "或", "和", "与",
+    "学历", "年", "年以上", "者", "人选", "岗位", "职责", "要求", "背景",
+    "设计", "开发", "研发", "工程师", "良好", "较好", "优秀",
+}
+
+
+def _ym(value: Any) -> tuple[int, int] | None:
+    """"YYYY.MM" 段端点 → (year, month)；"至今" 等 → None。"""
+    match = re.match(r"(\d{4})\.(\d{1,2})", str(value or ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _risk_item(kind: str, risk: str, severity: str, evidence: list[dict[str, str]]) -> dict[str, Any]:
+    return {"kind": kind, "risk": risk, "severity": severity, "evidence": evidence}
+
+
+def _line_evidence(*lines: str) -> list[dict[str, str]]:
+    # 只去首尾空白：内部空白必须保持原样，否则过不了简历逐字包含校验（verify_evidence）
+    evidence: list[dict[str, str]] = []
+    for line in lines:
+        body = str(line or "").strip()
+        if body and {"type": "简历", "ref": body} not in evidence:
+            evidence.append({"type": "简历", "ref": body})
+    return evidence
+
+
+def detect_resume_gaps(segments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """空窗检出：按开始时间排序后，相邻两段（前段有结束月）间隔 >6 个月 → 需核实。
+
+    空窗月数 = 两段端点之间完整的间隔月（2020.05 结束 → 2021.03 开始 = 9 个月）。
+    >12 个月 high，否则 medium。证据 = 前后两段所在行原文（逐字）。
+    """
+    items: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+    ordered = sorted(
+        (seg for seg in segments if _ym(seg.get("start"))), key=lambda seg: _ym(seg["start"]) or (0, 0)
+    )
+    for earlier, later in zip(ordered, ordered[1:]):
+        end = _ym(earlier.get("end"))
+        start = _ym(later.get("start"))
+        if end is None or start is None:  # 前段"至今"不可能是较早段；防御
+            continue
+        gap_months = (start[0] - end[0]) * 12 + (start[1] - end[1]) - 1
+        if gap_months <= RISK_GAP_MONTHS:
+            continue
+        gaps.append({"after": earlier["end"], "before": later["start"], "months": gap_months})
+        if len(items) >= RISK_MAX_PER_KIND:
+            continue
+        severity = "high" if gap_months > RISK_GAP_HIGH_MONTHS else "medium"
+        items.append(
+            _risk_item(
+                "gap",
+                f"{earlier['end']} 至 {later['start']} 之间有约 {gap_months} 个月简历空窗，需要核实该期间的经历安排",
+                severity,
+                _line_evidence(earlier.get("line") or "", later.get("line") or ""),
+            )
+        )
+    return items, {"gaps": gaps}
+
+
+def detect_frequent_hops(
+    segments: list[dict[str, Any]], *, today: date | None = None, stability_sensitive: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """频繁跳动：已结束段任期 <12 个月 ≥2 段（≥3 段升 high）；或近 5 年 ≥3 段经历（low）。
+
+    岗位硬条件强调"稳定"（stability_sensitive）→ severity 升一档（low→medium→high）。
+    """
+    today = today or date.today()
+    ended = [seg for seg in segments if not seg.get("is_current")]
+    short = [seg for seg in ended if int(seg.get("months") or 0) < RISK_SHORT_TENURE_MONTHS]
+    current_ym = (today.year, today.month)
+    recent = [
+        seg for seg in segments
+        if _ym(seg.get("start")) and (current_ym[0] - _ym(seg["start"])[0]) * 12 + (current_ym[1] - _ym(seg["start"])[1]) <= RISK_RECENT_WINDOW_MONTHS
+    ]
+    facts: dict[str, Any] = {
+        "short_tenure_segments": [{"period": f"{seg['start']}-{seg['end']}", "months": seg["months"]} for seg in short],
+        "recent_window_segments": len(recent),
+        "stability_sensitive": stability_sensitive,
+    }
+    items: list[dict[str, Any]] = []
+    if len(short) >= RISK_SHORT_TENURE_MEDIUM:
+        severity = "high" if len(short) >= RISK_SHORT_TENURE_HIGH else "medium"
+        if stability_sensitive and severity == "medium":
+            severity = "high"
+        examples = "、".join(f"{seg['start']}-{seg['end']}（{seg['months']} 个月）" for seg in short[:3])
+        items.append(
+            _risk_item(
+                "frequent_hop",
+                f"有 {len(short)} 段经历任期不足 12 个月（{examples}），需要核实换工作频率与稳定性匹配情况",
+                severity,
+                _line_evidence(*[seg.get("line") or "" for seg in short[:3]]),
+            )
+        )
+    elif len(recent) >= RISK_RECENT_MOVES:
+        severity = "medium" if stability_sensitive else "low"
+        items.append(
+            _risk_item(
+                "frequent_hop",
+                f"近 5 年内有 {len(recent)} 段经历，需要核实换工作的频率与动因",
+                severity,
+                _line_evidence(*[seg.get("line") or "" for seg in recent[:3]]),
+            )
+        )
+    return items, facts
+
+
+def detect_timeline_conflicts(segments: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """时间线冲突（过度包装信号）：两段时间重叠 >6 个月 → 需核实（兼任/简历笔误都可能，不定罪）。"""
+    items: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    ordered = sorted(
+        (seg for seg in segments if _ym(seg.get("start"))), key=lambda seg: _ym(seg["start"]) or (0, 0)
+    )
+    for index, earlier in enumerate(ordered):
+        earlier_end = _ym(earlier.get("end"))
+        if earlier_end is None:
+            continue
+        for later in ordered[index + 1:]:
+            later_start = _ym(later.get("start"))
+            if later_start is None or later_start >= earlier_end:
+                continue
+            overlap = (earlier_end[0] - later_start[0]) * 12 + (earlier_end[1] - later_start[1]) + 1
+            if overlap <= RISK_OVERLAP_MONTHS:
+                continue
+            conflicts.append({"first": f"{earlier['start']}-{earlier['end']}", "second": f"{later['start']}-{later['end']}", "overlap_months": overlap})
+            if len(items) >= 2:
+                continue
+            items.append(
+                _risk_item(
+                    "over_packaging",
+                    f"两段经历时间线重叠约 {overlap} 个月（{earlier['start']}-{earlier['end']} 与 {later['start']}-{later['end']}），需要核实时间线是否准确",
+                    "medium",
+                    _line_evidence(earlier.get("line") or "", later.get("line") or ""),
+                )
+            )
+    return items, {"timeline_conflicts": conflicts}
+
+
+def parse_hard_requirements(hard_text: Any) -> dict[str, Any]:
+    """岗位硬条件确定性解析：学历要求 / 年限要求 / 技能关键词 / 是否强调稳定。"""
+    text = " ".join(str(hard_text or "").split())
+    edu_required: tuple[str, int] | None = None
+    for label, level in _EDU_LEVELS:
+        if label in text and (edu_required is None or level > edu_required[1]):
+            edu_required = (label, level)
+    years_values = [int(match.group(1)) for match in _YEARS_PATTERN.finditer(text)]
+    # 年限硬条件取最低值（"4年以上，优先8年以上"的硬线是 4；取 max 会把"优先"误当硬线）
+    years_required = min(years_values) if years_values else None
+    scrubbed = _YEARS_PATTERN.sub(" ", text)
+    for label, _level in _EDU_LEVELS:
+        scrubbed = scrubbed.replace(label, " ")
+    # 连接性话术不是技能词：先整体剥离再切词（"8年以上电源芯片经验" → "电源芯片"）
+    for filler in ("及以上", "以上", "学历", "学位"):
+        scrubbed = scrubbed.replace(filler, " ")
+    tokens: list[str] = []
+    for token in re.split(r"[、，,；;。/|\s]+", scrubbed):
+        body = token.strip()
+        for prefix in _SKILL_VERB_PREFIXES:
+            if body.startswith(prefix):
+                body = body[len(prefix):]
+        body = body.strip("（）()【】 ")
+        if body.endswith("经验") or body.endswith("优先") or body.endswith("方向"):
+            body = body[:-2].strip()
+        # "稳定性好"类是态度要求不是技能词（稳定性已单独用于 severity 加权）
+        if len(body) < 2 or body in _SKILL_STOP_TOKENS or "稳定" in body:
+            continue
+        if body not in tokens:
+            tokens.append(body)
+    return {
+        "edu_required": edu_required,
+        "years_required": years_required,
+        "skill_terms": tokens[:RISK_SKILL_TERM_MAX],
+        "stability_sensitive": "稳定" in text,
+    }
+
+
+def _education_level(text: Any) -> tuple[str, int] | None:
+    found: tuple[str, int] | None = None
+    body = str(text or "")
+    for label, level in _EDU_LEVELS:
+        if label in body and (found is None or level > found[1]):
+            found = (label, level)
+    return found
+
+
+def _corpus_line_with(corpus: str, keyword: str) -> str:
+    for line in str(corpus or "").splitlines():
+        if keyword and keyword in line:
+            # 只去首尾空白，保持内部原样（逐字校验口径同上）
+            return line.strip()
+    return ""
+
+
+def detect_hard_gaps(
+    *,
+    hard_text: Any,
+    education_text: Any,
+    experience_text: Any,
+    segments: list[dict[str, Any]],
+    corpus: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """与岗位硬条件（jobs.hard_requirements，即 strategy_v2 的硬条件输入）的差距：学历 / 年限 / 必备技能缺项。
+
+    只比对明确写出的硬条件 vs 简历自述；双方任一缺失 → 不检（不编造）。
+    技能词只取硬条件文本解析结果——strategy_v2 step4 是寻访关键词（含目标池公司名），
+    不是对人要求，误用会把"人选不是来自友商"错报成缺项（S6-3 真实验证 #564 暴露，已修正）。
+    学历/年限差距 = high（硬条件）；技能缺项 = low 且 evidence 为空（缺项本身无逐字证据，
+    调用方据此把 risks 维 confidence 压为 inferred）。
+    """
+    parsed = parse_hard_requirements(hard_text)
+    items: list[dict[str, Any]] = []
+    facts: dict[str, Any] = {"hard_requirement_parsed": parsed}
+    edu_required = parsed["edu_required"]
+    edu_candidate = _education_level(education_text) or _education_level(corpus)
+    facts["edu_candidate"] = edu_candidate
+    if edu_required and edu_candidate and edu_required[1] > edu_candidate[1]:
+        line = _corpus_line_with(corpus, edu_candidate[0])
+        items.append(
+            _risk_item(
+                "hard_requirement",
+                f"岗位要求{edu_required[0]}及以上学历，简历显示最高学历为{edu_candidate[0]}，需要核实是否满足学历硬条件",
+                "high",
+                _line_evidence(line),
+            )
+        )
+    years_required = parsed["years_required"]
+    candidate_years = parse_experience_years(experience_text)
+    if candidate_years is None and segments:
+        candidate_years = sum(int(seg.get("months") or 0) for seg in segments) // 12
+    facts["years_candidate"] = candidate_years
+    if years_required is not None and candidate_years is not None and candidate_years < years_required:
+        earliest = min((seg for seg in segments if _ym(seg.get("start"))), key=lambda seg: _ym(seg["start"]), default=None)
+        items.append(
+            _risk_item(
+                "hard_requirement",
+                f"岗位要求 {years_required} 年以上相关经验，简历推算约 {candidate_years} 年，需要核实年限是否达标",
+                "high",
+                _line_evidence((earliest or {}).get("line") or ""),
+            )
+        )
+    terms = parsed["skill_terms"]
+    missing = [term for term in terms if term not in str(corpus or "")]
+    facts["skill_terms_checked"] = terms
+    facts["skill_terms_missing"] = missing
+    if missing:
+        shown = "、".join(missing[:RISK_SKILL_MISSING_MAX])
+        items.append(
+            _risk_item(
+                "hard_requirement",
+                f"岗位关键词「{shown}」在简历中未见，需要核实是否具备相关经验",
+                "low",
+                [],
+            )
+        )
+    return items, facts
+
+
+def collect_risk_facts(
+    work_text: str,
+    *,
+    corpus: str,
+    hard_text: Any = "",
+    education_text: Any = "",
+    experience_text: Any = "",
+    today: date | None = None,
+) -> dict[str, Any]:
+    """S6-3 确定性风险检出汇总：gap / 频繁跳动 / 时间线冲突 / 硬条件差距。
+
+    返回 {items, facts, checks_run}；checks_run 记录实际执行了哪些核对（空态置信度用）：
+    有时间段 → gap/跳动/冲突三项都跑了；有硬条件文本 → 硬条件核对跑了。
+    """
+    today = today or date.today()
+    segments = [
+        seg for seg in parse_work_segments(work_text, today=today)
+        if not _DEGREE_LINE_PATTERN.search(str(seg.get("line") or ""))
+    ]
+    items: list[dict[str, Any]] = []
+    facts: dict[str, Any] = {}
+    checks: list[str] = []
+    if segments:
+        gap_items, gap_facts = detect_resume_gaps(segments)
+        hop_items, hop_facts = detect_frequent_hops(
+            segments, today=today, stability_sensitive="稳定" in str(hard_text or "")
+        )
+        conflict_items, conflict_facts = detect_timeline_conflicts(segments)
+        items.extend(gap_items + hop_items + conflict_items)
+        facts.update({**gap_facts, **hop_facts, **conflict_facts})
+        checks.extend(["gap", "frequent_hop", "over_packaging"])
+    if str(hard_text or "").strip():
+        hard_items, hard_facts = detect_hard_gaps(
+            hard_text=hard_text,
+            education_text=education_text,
+            experience_text=experience_text,
+            segments=segments,
+            corpus=corpus,
+        )
+        items.extend(hard_items)
+        facts.update(hard_facts)
+        checks.append("hard_requirement")
+    facts["segments_count"] = len(segments)
+    return {"items": items, "facts": facts, "checks_run": checks}

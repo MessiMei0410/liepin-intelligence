@@ -1048,14 +1048,79 @@ class WorkflowEngineTest(AgentDbCase):
         ]
         assert "opencli_browser_read" not in capabilities
 
+    def _seed_s6_assessment(self, job_candidate_id: int = 30, job_id: int = 10) -> None:
+        """S6-3：推荐报告强制引用判人评估块——先种一份 candidate_assessment artifact。"""
+        import json as _json
+
+        doc = {
+            "schema_version": "assessment_v1",
+            "candidate_id": job_candidate_id,
+            "job_id": job_id,
+            "candidate_name_masked": "张**",
+            "job_title": "机械高级工程师",
+            "client": "长越科技",
+            "as_of": "2026-07-24 10:00:00",
+            "assessor_version": "s6-3-v1",
+            "dimensions": {
+                "trajectory": {"verdict": "精密设备机械线一路上行", "confidence": "certain"},
+                "percentile": {"band": "top25", "reference": {"n": 10, "years_window": 3, "direction": "机械"}},
+                "risks": {
+                    "verdict": "共 1 项需要核实的问题",
+                    "items": [
+                        {"kind": "gap", "risk": "2019.06 至 2020.03 之间有约 8 个月简历空窗，需要核实该期间的经历安排",
+                         "severity": "medium", "evidence": [{"type": "简历", "ref": "2020.03-至今 ASM中国集团公司 · 高级机械设计工程师"}]}
+                    ],
+                    "confidence": "certain",
+                },
+            },
+            "consultant_summary": "精密设备经验完整，轨迹清晰，当前这单偏平移。",
+        }
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_artifacts
+                (artifact_id,goal_id,workflow_id,step_id,artifact_type,title,mime_type,content,metadata_json,validation_status)
+                VALUES (?,?,?,NULL,'candidate_assessment',?,'text/markdown','# 判人评估',?,'passed')
+                """,
+                (
+                    f"candidate_assessment_{job_candidate_id}_{job_id}",
+                    f"candidate_{job_candidate_id}",
+                    f"assessment_{job_candidate_id}_{job_id}",
+                    f"判人评估：张** × 机械高级工程师 v1",
+                    _json.dumps(doc, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_recommendation_report_blocked_without_s6_assessment(self) -> None:
+        """S6-3：无判人评估 → 推荐报告必须阻塞并明确提示先跑评估，不许退回纯简历罗列。"""
+        self.service.submit_assessment(30, wait=True)
+        result = self.service.skills.execute("recommendation_report", {"type": "candidate", "id": 30}, {})["result"]
+        assert result["blocked"] is True
+        assert "判人评估" in result["summary"]
+        assert any("判人评估" in item for item in result["missing_inputs"])
+
     def test_real_document_runners_generate_audited_docx(self) -> None:
         self.service.submit_assessment(30, wait=True)
         matching = self.service.skills.execute("matching_report", {"type": "candidate", "id": 30}, {})["result"]
+        blocked = self.service.skills.execute("recommendation_report", {"type": "candidate", "id": 30}, {})["result"]
+        assert blocked["blocked"] is True, "无判人评估时推荐报告必须阻塞（S6-3 强制引用评估块）"
+        self._seed_s6_assessment()
         recommendation = self.service.skills.execute("recommendation_report", {"type": "candidate", "id": 30}, {})["result"]
         assert matching["artifacts"][0]["file_path"].endswith(".docx")
         assert recommendation["artifacts"][0]["file_path"].endswith(".docx")
         assert recommendation["artifacts"][0]["validation_status"] == "passed"
         assert recommendation["artifacts"][0]["metadata"]["job_candidate_id"] == 30
+        # S6-3：报告产物 metadata 必须带评估引用块（trajectory/分位 band/需核实问题 top 3）
+        s6_meta = recommendation["artifacts"][0]["metadata"]["s6_assessment"]
+        assert s6_meta["artifact_id"] == "candidate_assessment_30_10"
+        assert s6_meta["trajectory_verdict"] == "精密设备机械线一路上行"
+        assert s6_meta["percentile_band"] == "top25" and s6_meta["percentile_band_label"] == "前 25%"
+        assert s6_meta["risks_pending"] is False
+        assert len(s6_meta["top_risks"]) == 1 and "空窗" in s6_meta["top_risks"][0]["risk"]
 
     def test_salary_report_blocks_without_structured_evidence(self) -> None:
         result = self.service.skills.execute("salary_verification", {"type": "candidate", "id": 30}, {})["result"]

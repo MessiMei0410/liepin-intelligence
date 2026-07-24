@@ -296,6 +296,35 @@ export type AssessmentMoveHistory = {
   verdict?: string; evidence?: AssessmentEvidence[]; confidence?: string;
   moves?: AssessmentMove[]; current_move?: string;
 }
+// S6-2 水平分位：band/参照系由后端确定性落位；sample_sufficient=false → UI 标「推测」。
+export type AssessmentPercentileReference = {
+  n?: number | null; direction?: string; years_window?: number | null;
+  median?: number | null; q25?: number | null; q75?: number | null;
+  min?: number | null; max?: number | null;
+  sample_sufficient?: boolean; min_n?: number; note?: string;
+}
+export type AssessmentPercentile = {
+  verdict?: string; band?: string | null; basis?: string; score?: number | null;
+  percentile_rank?: number | null; reference?: AssessmentPercentileReference;
+  evidence?: AssessmentEvidence[]; confidence?: string;
+}
+// S6-2 动机与时机：signals 为确定性产出（简历工况/公开信息带来源 URL）。
+export type AssessmentMotivationSignal = {
+  kind?: string; kind_label?: string; source?: string; summary?: string;
+  url?: string; as_of?: string; evidence_line?: string;
+}
+export type AssessmentMotivation = {
+  verdict?: string; signals?: AssessmentMotivationSignal[];
+  evidence?: AssessmentEvidence[]; confidence?: string;
+}
+// S6-3 需要核实的问题：severity 三档 + 每条证据；items 空 → 「未见需核实的问题」。
+export type AssessmentRiskItem = {
+  kind?: string; risk?: string; severity?: string; evidence?: AssessmentEvidence[];
+}
+export type AssessmentRisks = {
+  verdict?: string; items?: AssessmentRiskItem[];
+  evidence?: AssessmentEvidence[]; confidence?: string;
+}
 export type CandidateAssessmentDoc = {
   schema_version?: string; candidate_id?: number; job_id?: number; candidate_name_masked?: string;
   job_title?: string; client?: string; as_of?: string; updated_at?: string;
@@ -303,7 +332,9 @@ export type CandidateAssessmentDoc = {
   dimensions?: {
     trajectory?: AssessmentTrajectory | null;
     move_history?: AssessmentMoveHistory | null;
-    percentile?: unknown; motivation?: unknown; risks?: unknown;
+    percentile?: AssessmentPercentile | null;
+    motivation?: AssessmentMotivation | null;
+    risks?: AssessmentRisks | null;
   };
   consultant_summary?: string; advisor_action?: AssessmentAdvisorAction; advisor_note?: string;
 }

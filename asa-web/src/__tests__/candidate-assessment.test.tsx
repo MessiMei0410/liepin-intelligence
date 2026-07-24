@@ -268,3 +268,179 @@ describe('判人评估区（CandidateAssessment）', () => {
     expect(screen.queryByRole('region', { name: '跳槽质量史' })).not.toBeInTheDocument()
   })
 })
+
+// S6-3：评估区新增三块——「在同龄人里的位置」「动机与时机」「需要核实的问题」。
+// band 中文/参照系/样本不足「推测」tag；信号带来源链接 + 无信号如实文案；severity 三档色 + 证据 + 空态。
+const s63Doc = {
+  ...assessmentDoc,
+  assessor_version: 's6-3-v1',
+  dimensions: {
+    ...assessmentDoc.dimensions,
+    percentile: {
+      verdict: '同方向（技术市场）±3年参照人群 N=10，该人选落位前 25%，高于多数同方向同龄人。',
+      band: 'top25',
+      basis: 'fit_score',
+      score: 88,
+      percentile_rank: 0.8,
+      reference: {
+        n: 10, direction: '技术市场', years_window: 3, median: 67.5, q25: 56.2, q75: 78.8,
+        min: 45, max: 95, sample_sufficient: true, min_n: 8, note: '',
+      },
+      evidence: [{ type: '知识库', ref: '历史人选库参照系：同方向（技术市场）±3年 样本N=10' }],
+      confidence: 'certain',
+    },
+    motivation: {
+      verdict: '当前任职已超其历史平均任期，公司近期有公开融资信号，动的可能性存在。',
+      signals: [
+        { kind: 'tenure_over_avg', source: '简历工况', summary: '当前任职已 65 个月，明显超过其历史平均任期 46.0 个月', as_of: '2026-07-24' },
+        { kind: 'funding', kind_label: '融资', source: '公开信息', summary: '杰华特微电子股份有限公司：公司完成新一轮融资', url: 'https://www.joulwatt.com/news/1', as_of: '2026-07-24' },
+      ],
+      evidence: [{ type: '公开信息', ref: 'https://www.joulwatt.com/news/1' }],
+      confidence: 'certain',
+    },
+    risks: {
+      verdict: '共 2 项需要核实的问题（高 1 项，中 1 项），逐项附证据，请逐条核实后再下判断。',
+      items: [
+        {
+          kind: 'gap',
+          risk: '2019.03 至 2020.01 之间有约 9 个月简历空窗，需要核实该期间的经历安排',
+          severity: 'high',
+          evidence: [
+            { type: '简历', ref: '2020.01-至今 某公司 · 工程师' },
+            { type: '简历', ref: '2017.06-2019.03 另一家公司 · 工程师' },
+          ],
+        },
+        {
+          kind: 'hard_requirement',
+          risk: '岗位关键词「多相控制器」在简历中未见，需要核实是否具备相关经验',
+          severity: 'medium',
+          evidence: [],
+        },
+      ],
+      evidence: [{ type: '简历', ref: '2020.01-至今 某公司 · 工程师' }],
+      confidence: 'inferred',
+    },
+  },
+}
+
+const s63Payload = { ...assessmentPayload, assessment: s63Doc }
+
+describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）', () => {
+  it('「在同龄人里的位置」：band 中文 + 参照系 N/方向/年限窗 + 中位分', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '在同龄人里的位置' })
+    expect(within(block).getByText('前 25%')).toBeInTheDocument()
+    expect(within(block).getByText(/参照系：同方向（技术市场）±3年/)).toBeInTheDocument()
+    expect(within(block).getByText(/样本 N=/)).toHaveTextContent('样本 N=10')
+    expect(within(block).getByText(/中位分 67.5/)).toBeInTheDocument()
+    expect(within(block).getByText('确定')).toBeInTheDocument()
+    expect(within(block).queryByText('推测 · 参照样本不足')).not.toBeInTheDocument()
+  })
+
+  it('「在同龄人里的位置」样本不足：显示「推测 · 参照样本不足」tag 与如实备注', async () => {
+    const insufficient = {
+      ...s63Payload,
+      assessment: {
+        ...s63Doc,
+        dimensions: {
+          ...s63Doc.dimensions,
+          percentile: {
+            ...s63Doc.dimensions.percentile,
+            reference: { ...s63Doc.dimensions.percentile.reference, n: 3, sample_sufficient: false, note: '参照样本不足，结论按推测口径' },
+            confidence: 'inferred',
+          },
+        },
+      },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: insufficient } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '在同龄人里的位置' })
+    expect(within(block).getByText('推测 · 参照样本不足')).toBeInTheDocument()
+    expect(within(block).getByText('参照样本不足，结论按推测口径')).toBeInTheDocument()
+    expect(within(block).getByText(/样本 N=/)).toHaveTextContent('样本 N=3')
+  })
+
+  it('「动机与时机」：信号列表带来源链接与 as_of；公开信息信号可点开来源', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '动机与时机' })
+    expect(within(block).getByText(/当前任职已 65 个月/)).toBeInTheDocument()
+    expect(within(block).getByText(/公司完成新一轮融资/)).toBeInTheDocument()
+    const link = within(block).getByRole('link', { name: '来源' })
+    expect(link).toHaveAttribute('href', 'https://www.joulwatt.com/news/1')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(within(block).getAllByText('2026-07-24').length).toBeGreaterThan(0)
+  })
+
+  it('「动机与时机」无信号：如实文案，不编造', async () => {
+    const noSignal = {
+      ...s63Payload,
+      assessment: {
+        ...s63Doc,
+        dimensions: {
+          ...s63Doc.dimensions,
+          motivation: {
+            verdict: '未见明显变动信号：动机与时机需面谈核实。',
+            signals: [],
+            evidence: [],
+            confidence: 'inferred',
+          },
+        },
+      },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: noSignal } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '动机与时机' })
+    expect(within(block).getAllByText(/未见明显变动信号/).length).toBeGreaterThan(0)
+    expect(within(block).queryByRole('link')).not.toBeInTheDocument()
+  })
+
+  it('「需要核实的问题」：severity 三档色 tag + kind 中文 + 证据逐条渲染', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '需要核实的问题' })
+    const high = within(block).getByText('高')
+    expect(high).toHaveClass('tag', 'danger')
+    const medium = within(block).getByText('中')
+    expect(medium).toHaveClass('tag', 'warn')
+    expect(within(block).getByText('空窗')).toBeInTheDocument()
+    expect(within(block).getByText('硬条件差距')).toBeInTheDocument()
+    expect(within(block).getByText(/9 个月简历空窗/)).toBeInTheDocument()
+    expect(within(block).getByText(/多相控制器/)).toBeInTheDocument()
+    expect(within(block).getByText('2020.01-至今 某公司 · 工程师')).toBeInTheDocument()
+    expect(within(block).getByText(/不构成任何决策建议/)).toBeInTheDocument()
+  })
+
+  it('「需要核实的问题」空态：items=[] → 显示「未见需核实的问题」', async () => {
+    const empty = {
+      ...s63Payload,
+      assessment: {
+        ...s63Doc,
+        dimensions: {
+          ...s63Doc.dimensions,
+          risks: {
+            verdict: '未见需核实的问题（已按简历时间线、任期节奏与岗位硬条件逐项核对）。',
+            items: [],
+            evidence: [],
+            confidence: 'certain',
+          },
+        },
+      },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: empty } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '需要核实的问题' })
+    expect(within(block).getAllByText(/未见需核实的问题/).length).toBeGreaterThan(0)
+    expect(within(block).queryByText('高')).not.toBeInTheDocument()
+  })
+
+  it('三块为 null（旧版评估）时不渲染对应区块', async () => {
+    stubFetch()
+    renderAssessment()
+    await screen.findByRole('region', { name: '职业轨迹' })
+    expect(screen.queryByRole('region', { name: '在同龄人里的位置' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '动机与时机' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '需要核实的问题' })).not.toBeInTheDocument()
+  })
+})

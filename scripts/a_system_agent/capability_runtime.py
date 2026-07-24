@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
-from . import knowledge_base, negative_rules, query_builders, strategy_v2
+from . import candidate_assessment, knowledge_base, negative_rules, query_builders, strategy_v2
 
 if TYPE_CHECKING:
     from .service import AgentService
@@ -1666,9 +1666,34 @@ class RecruitingCapabilityRuntime:
                     },
                 )]}
 
+    def _s6_assessment_doc(self, job_candidate_id: int, job_id: Any) -> dict[str, Any] | None:
+        """S6 判人评估 artifact（candidate_assessment，人×岗）；不存在/岗位号缺失 → None。"""
+        try:
+            jid = int(job_id or 0)
+        except (TypeError, ValueError):
+            return None
+        if not jid:
+            return None
+        conn = self.service._connect()
+        try:
+            payload = candidate_assessment.get_assessment(conn, int(job_candidate_id), jid)
+            return payload["assessment"] if payload else None
+        finally:
+            conn.close()
+
     def run_recommendation_report(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         candidate = self._candidate(context)
         relation, identity, position = candidate["relation"], candidate["identity"], candidate["position"]
+        # S6-3：推荐报告强制引用判人评估块（PRD §1 ②）——无评估不许退回纯简历罗列。
+        s6 = self._s6_assessment_doc(int(relation["job_candidate_id"]), relation.get("job_id"))
+        if s6 is None:
+            return self._blocked(
+                "推荐报告必须引用判人评估结论：该人选还没有判人评估，请先在人选卡「评估」区生成判人评估"
+                "（职业轨迹/在同龄人里的位置/动机与时机/需要核实的问题），再生成推荐报告。",
+                ["先完成判人评估（candidate_assessment）"],
+                self._candidate_reference(candidate),
+            )
+        assessment_block = candidate_assessment.report_reference_block(s6)
         assessment = self._latest_assessment(int(relation["job_candidate_id"]))
         if float(assessment.get("evidence_coverage") or 0) < 0.75:
             return self._blocked("证据覆盖不足，不能生成可发送推荐报告。", ["核验问题完成", "证据覆盖率>=0.75"], self._candidate_reference(candidate))
@@ -1678,7 +1703,7 @@ class RecruitingCapabilityRuntime:
         data = {
             "customer": position.get("client"), "position": position.get("job"), "name": identity.get("name"),
             "current_location": identity.get("city") or "不详", "expected_location": "不详",
-            "consultant_comments": (assessment.get("strengths") or [])[:6],
+            "consultant_comments": assessment_block["lines"] + (assessment.get("strengths") or [])[:6],
             "education": [str(identity.get("education") or "不详")],
             "work_experience": [f"时间不详 {identity.get('company') or '公司待核验'}\n担任职位：{identity.get('title') or '职位待核验'}\n工作职责：{profile_summary}"],
             "project_experience": ["暂无明确项目经历"], "motivation": "待核验", "leaving_reason": "待核验",
@@ -1689,7 +1714,7 @@ class RecruitingCapabilityRuntime:
         self._run([self.python, str(JIASHI_REPORT), "--template", str(JIASHI_TEMPLATE), "--data", str(data_path), "--output", str(output)], 180)
         self._sanitize_docx_privacy(output)
         audit = self._run([self.python, str(JIASHI_AUDIT), str(output)], 120)
-        return {"summary": "嘉驰推荐报告草稿已生成并通过模板审计。", "references": self._candidate_reference(candidate),
+        return {"summary": "嘉驰推荐报告草稿已生成并通过模板审计，已引用判人评估块（评估只辅助判断，发送前请顾问复核）。", "references": self._candidate_reference(candidate),
                 "artifacts": [self._artifact(
                     "recommendation_report", "嘉驰推荐报告", file_path=output,
                     mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1699,6 +1724,17 @@ class RecruitingCapabilityRuntime:
                         "person_id": relation.get("person_id"), "candidate_id": relation.get("source_candidate_id"),
                         "job_id": relation.get("job_id"), "client": position.get("client"), "job": position.get("job"),
                         "attached_to_candidate": True, "external_submitted": False,
+                        "s6_assessment": {
+                            "artifact_id": f"candidate_assessment_{int(relation['job_candidate_id'])}_{int(relation.get('job_id') or 0)}",
+                            "as_of": assessment_block["as_of"],
+                            "assessor_version": assessment_block["assessor_version"],
+                            "trajectory_verdict": assessment_block["trajectory_verdict"],
+                            "percentile_band": assessment_block["percentile_band"],
+                            "percentile_band_label": assessment_block["percentile_band_label"],
+                            "reference_n": assessment_block["reference_n"],
+                            "top_risks": assessment_block["top_risks"],
+                            "risks_pending": assessment_block["risks_pending"],
+                        },
                     },
                 )]}
 

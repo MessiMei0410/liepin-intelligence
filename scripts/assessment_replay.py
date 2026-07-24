@@ -173,6 +173,19 @@ def render_person_markdown(index: int, person: dict[str, Any], doc: dict[str, An
             lines.append(f"- [{signal.get('source') or ''}] {signal.get('summary') or ''}{suffix}")
         if not (motivation.get("signals") or []):
             lines.append("- 未见明显变动信号")
+    risks = dimensions.get("risks") or {}
+    if risks:
+        lines.append(
+            f"\n### 需要核实的问题（置信度：{label.get(risks.get('confidence'), risks.get('confidence'))}）\n"
+        )
+        lines.append(f"**结论**：{risks.get('verdict') or ''}\n")
+        for item in risks.get("items") or []:
+            lines.append(
+                f"- 【{label.get(item.get('severity'), item.get('severity'))}｜{label.get(item.get('kind'), item.get('kind'))}】"
+                f"{item.get('risk') or ''}"
+            )
+        if not (risks.get("items") or []):
+            lines.append("- 未见需核实的问题")
     lines.append("\n### 证据\n")
     for dim_name in candidate_assessment.DIMENSIONS_IMPLEMENTED:
         dim = dimensions.get(dim_name) or {}

@@ -1,6 +1,6 @@
-"""S6-1/S6-2：判人评估器 —— candidate_assessment artifact（轨迹/跳槽史/水平分位/动机时机）。
+"""S6-1/S6-2/S6-3：判人评估器 —— candidate_assessment artifact（轨迹/跳槽史/分位/动机/风险点）。
 
-口径来源：docs/TASKCARD_S6-1_判人评估器_轨迹与跳槽史_20260724.md + PRD §2/§3/§5（S6-2 行）。
+口径来源：docs/TASKCARD_S6-1_判人评估器_轨迹与跳槽史_20260724.md + PRD §2/§3/§5（S6-2/S6-3 行）。
 
 架构（LLM 角色 vs 确定性校验）：
 - LLM 只做"资深顾问式"判断（verdict/segments/moves/summary），输入为简历原文 + strategy_v2
@@ -10,19 +10,24 @@
 - S6-2 动机时机：信号确定性产出——a) 简历工况（在职时长 vs 历史平均任期、近一年简历更新）；
   b) 公司近况公开信号（只读采集，每条带来源 URL 与 as_of，失败记 stats）；c) 无信号如实
   "未见明显变动信号" + inferred。不推断个人隐私。
+- S6-3 风险点（呈现口径"需要核实的问题"）：gap 空窗/频繁跳动/时间线冲突/硬条件差距由
+  assessment_signals 确定性检出（阈值固定）；title 通胀/过度包装两类语义项由 LLM 第三调
+  assess_risks 补充，证据过同一道逐字闸，证据归零的 LLM 项整条丢弃；第三调失败降级为
+  纯确定性检出（记 signal_stats），不阻断。无风险项时 items=[] + "未见需核实的问题"。
 - 写入前必过确定性校验层（不过闸不落库）：
   1) 证据强约束：type=简历 的 ref 必须逐字存在于该候选人语料（原文包含校验，失败剥离）；
      type=图谱 的 ref 必须解析到本评估实际命中的图谱条目（公司名规范化匹配，失败剥离）；
      type=知识库 的 ref 必须等于本评估实际生成的参照系摘要串（白名单，防编造）；
      type=公开信息 的 ref 必须等于本评估实际采集到的来源 URL（白名单，防编造）。
      某维 evidence 归零 → confidence 强制 inferred。
-  2) 敏感属性负向扫描：verdict/summary/segments/moves 等 LLM 生成文本命中年龄/性别/婚育/户籍
+  2) 敏感属性负向扫描：verdict/summary/segments/moves/risk 等 LLM 生成文本命中年龄/性别/婚育/户籍
      词表 → 整条拒写（ValueError）并记扫描日志（candidate_events）；简历逐字引用命中 → 剥离该条；
      公开信号摘要命中 → 丢弃该条信号（公开页内容不可控，宁可不采）。
   3) 决策字眼拦截："建议淘汰/不建议推荐"类 → 拒写。
   4) 图谱未命中的公司 tier_source 一律强制 inferred（不瞎编）。
 
-红线：评估只辅助不决策；评估数据不出本机；同人同岗幂等（重复生成更新原行，as_of 刷新）。
+红线：评估只辅助不决策；风险以"需要核实的问题"呈现（不做风险定罪）；评估数据不出本机；
+同人同岗幂等（重复生成更新原行，as_of 刷新）。
 """
 
 from __future__ import annotations
@@ -38,10 +43,9 @@ from .llm import BaseLLM, LLMError
 
 ARTIFACT_TYPE = "candidate_assessment"
 SCHEMA_VERSION = "assessment_v1"
-ASSESSOR_VERSION = "s6-2-v1"
+ASSESSOR_VERSION = "s6-3-v1"
 
-DIMENSIONS_IMPLEMENTED = ("trajectory", "move_history", "percentile", "motivation")
-DIMENSIONS_PLACEHOLDER = ("risks",)
+DIMENSIONS_IMPLEMENTED = ("trajectory", "move_history", "percentile", "motivation", "risks")
 
 # 顾问动作（采纳/改判/否决）：经 PATCH advisor-action 写回 artifact，version 不 bump。
 ADVISOR_ACTIONS = ("pending", "accepted", "modified", "rejected")
@@ -57,6 +61,12 @@ _MOVE_UNKNOWN = {"up", "lateral", "down", "unknown"}
 _BANDS = set(assessment_signals.BANDS)
 _PERCENTILE_BASIS = {"fit_score", "trajectory_features"}
 _EVIDENCE_TYPES = {"简历", "图谱", "知识库", "公开信息"}
+_SEVERITY = {"high", "medium", "low"}
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+# S6-3 风险点五类：前三类半 + 硬条件差距确定性检出；title 通胀/过度包装由 LLM 语义补充。
+_RISK_KINDS = {"gap", "frequent_hop", "title_inflation", "over_packaging", "hard_requirement"}
+_RISK_LLM_KINDS = {"title_inflation", "over_packaging"}
+RISK_ITEM_MAX = 8  # risks.items 上限（确定性每类 ≤3 + LLM ≤4，双保险）
 
 # 决策类禁语（评估只辅助不决策）：出现在生成文本里 → 拒写。
 _BANNED_DECISION_PATTERNS = [
@@ -79,6 +89,7 @@ LABELS = {
     "move_history": "跳槽质量史",
     "percentile": "在同龄人里的位置",
     "motivation": "动机与时机",
+    "risks": "需要核实的问题",
     "inferred": "推测",
     "certain": "确定",
     "up": "上升",
@@ -99,6 +110,14 @@ LABELS = {
     "below": "相对靠后",
     "fit_score": "既有评估得分",
     "trajectory_features": "轨迹特征分",
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+    "gap": "空窗",
+    "frequent_hop": "频繁跳动",
+    "title_inflation": "title 通胀",
+    "over_packaging": "过度包装信号",
+    "hard_requirement": "硬条件差距",
 }
 
 
@@ -157,10 +176,12 @@ def scan_banned_decision(texts: list[str]) -> list[str]:
 
 
 def generated_texts(doc: dict[str, Any]) -> list[str]:
-    """收集 artifact 中全部 LLM 生成文本（verdict/summary/segments/moves 描述字段）。
+    """收集 artifact 中全部 LLM 生成文本（verdict/summary/segments/moves/risk 描述字段）。
 
     注：motivation.signals 的 summary 是确定性数据（工况计算/公开页原文摘录），不是 LLM 文本，
     不进本扫描；公开信号摘要在采集侧单独过敏感词丢弃（见 run_assessment）。
+    risks.items 的 risk 文本（含确定性模板与 LLM 语义项）全部进扫描——确定性模板本就不会命中，
+    LLM 项命中即拒写，口径与其他维一致。
     """
     texts: list[str] = []
     dimensions = doc.get("dimensions") if isinstance(doc.get("dimensions"), dict) else {}
@@ -173,6 +194,9 @@ def generated_texts(doc: dict[str, Any]) -> list[str]:
         for move in dim.get("moves") or []:
             if isinstance(move, dict):
                 texts.append(str(move.get("reason") or ""))
+        for risk_item in dim.get("items") or []:
+            if isinstance(risk_item, dict):
+                texts.append(str(risk_item.get("risk") or ""))
     texts.append(str(doc.get("consultant_summary") or ""))
     return [text for text in texts if text]
 
@@ -420,8 +444,7 @@ def normalize_llm_result(
 
     dimensions["percentile"] = None  # S6-2：由 build_s62_dimensions 填充
     dimensions["motivation"] = None  # S6-2：由 build_s62_dimensions 填充
-    for name in DIMENSIONS_PLACEHOLDER:
-        dimensions[name] = None  # S6-3 填充，本期留空占位
+    dimensions["risks"] = None  # S6-3：由 build_risks_dimension 填充
 
     summary = " ".join(str(raw.get("consultant_summary") or "").split())[:600]
     return dimensions, summary, stats
@@ -561,6 +584,125 @@ def build_s62_dimensions(
 
 
 # ---------------------------------------------------------------------------
+# S6-3：风险点（需要核实的问题）—— 确定性检出 + LLM 语义项，证据同一道闸
+# ---------------------------------------------------------------------------
+
+def _risks_template_verdict(items: list[dict[str, Any]], checks_run: list[str]) -> str:
+    """risks verdict 确定性模板（口径：需要核实的问题，不定罪）。"""
+    if not items:
+        if checks_run:
+            return "未见需核实的问题（已按简历时间线、任期节奏与岗位硬条件逐项核对）。"
+        return "简历信息不足，未能完成风险核对，建议补充简历后再评估。"
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for item in items:
+        counts[str(item.get("severity") or "low")] = counts.get(str(item.get("severity") or "low"), 0) + 1
+    parts = [f"{LABELS[level]} {counts[level]} 项" for level in ("high", "medium", "low") if counts[level]]
+    return f"共 {len(items)} 项需要核实的问题（{'，'.join(parts)}），逐项附证据，请逐条核实后再下判断。"
+
+
+def build_risks_dimension(
+    raw_risks: dict[str, Any] | None,
+    *,
+    deterministic_items: list[dict[str, Any]],
+    checks_run: list[str],
+    corpus: str,
+    graph_hits: list[dict[str, Any]],
+    stats: dict[str, Any],
+) -> dict[str, Any]:
+    """组装 risks 维：确定性 items（gap/频繁跳动/时间线冲突/硬条件差距）+ LLM 语义 items（title 通胀/过度包装）。
+
+    - 确定性 items 由 assessment_signals 产出，evidence 已是简历逐字行，直接采信（仍过一遍闸留痕）。
+    - LLM items：kind 只允许 title_inflation/over_packaging（其余视为越权，丢弃）；severity 非法值压 low；
+      evidence 过 verify_evidence 同一道闸，证据归零的 LLM 项整条丢弃（记 stripped_detail，防编造）。
+    - confidence：items 非空且每条都有证据 → certain；任一 item 无证据（如技能缺项这类" absence 型"）
+      → inferred；items 为空时按 checks_run（确实核对了 → certain；无数据可核对 → inferred）。
+    raw_risks=None（模型不可用/输出非法）→ 仅确定性 items，调用方在 signal_stats 记 fallback。
+    """
+    graph_names = [hit["graph_name"] for hit in graph_hits]
+    items: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+    llm_dropped = 0
+
+    def _append_item(kind: str, risk: Any, severity: Any, kept: list[dict[str, str]]) -> None:
+        text = _clean_text(risk, 200)
+        if not text or text in seen_texts or len(items) >= RISK_ITEM_MAX:
+            return
+        seen_texts.add(text)
+        items.append(
+            {
+                "kind": kind if kind in _RISK_KINDS else "over_packaging",
+                "risk": text,
+                "severity": _enum(severity, _SEVERITY, "low"),
+                "evidence": kept,
+            }
+        )
+
+    for entry in deterministic_items:
+        if not isinstance(entry, dict):
+            continue
+        kept, dropped = verify_evidence(entry.get("evidence"), corpus=corpus, graph_names=graph_names)
+        stats["kept"] += len(kept)
+        stats["stripped"] += len(dropped)
+        stats["stripped_detail"].extend(dropped)
+        _append_item(str(entry.get("kind") or ""), entry.get("risk"), entry.get("severity"), kept)
+
+    raw_risks = raw_risks if isinstance(raw_risks, dict) else {}
+    for entry in (raw_risks.get("items") if isinstance(raw_risks.get("items"), list) else [])[:4]:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip()
+        if kind not in _RISK_LLM_KINDS:
+            llm_dropped += 1
+            stats["stripped_detail"].append(
+                {"type": "风险项", "ref": _clean_text(entry.get("risk"), 80), "reason": "LLM 风险项 kind 越权（仅允许 title_inflation/over_packaging），丢弃"}
+            )
+            continue
+        kept, dropped = verify_evidence(entry.get("evidence"), corpus=corpus, graph_names=graph_names)
+        stats["kept"] += len(kept)
+        stats["stripped"] += len(dropped)
+        stats["stripped_detail"].extend(dropped)
+        if not kept:
+            llm_dropped += 1
+            stats["stripped_detail"].append(
+                {"type": "风险项", "ref": _clean_text(entry.get("risk"), 80), "reason": "LLM 风险项证据全部未过逐字校验，整条丢弃"}
+            )
+            continue
+        _append_item(kind, entry.get("risk"), entry.get("severity"), kept)
+
+    items.sort(key=lambda item: _SEVERITY_RANK.get(str(item.get("severity") or "low"), 2))
+    evidence = _merge_evidence(*[item["evidence"] for item in items])
+    if items:
+        confidence = "certain" if all(item["evidence"] for item in items) else "inferred"
+    else:
+        confidence = "certain" if checks_run else "inferred"
+    return {
+        "verdict": _risks_template_verdict(items, checks_run),
+        "items": items,
+        "evidence": evidence,
+        "confidence": confidence,
+        "stats": {
+            "deterministic_items": len(deterministic_items),
+            "llm_items_kept": len(items) - len([i for i in items if i["kind"] not in _RISK_LLM_KINDS]),
+            "llm_items_dropped": llm_dropped,
+            "checks_run": list(checks_run),
+        },
+    }
+
+
+def refresh_risks_dimension(risks: dict[str, Any]) -> None:
+    """敏感剥离后重算 risks 维的 verdict / dim 级 evidence / confidence（item 级剥离在 run_assessment）。"""
+    items = [item for item in (risks.get("items") or []) if isinstance(item, dict)]
+    risks["items"] = items
+    checks = (risks.get("stats") or {}).get("checks_run") or []
+    risks["verdict"] = _risks_template_verdict(items, checks)
+    risks["evidence"] = _merge_evidence(*[item.get("evidence") or [] for item in items])
+    if items:
+        risks["confidence"] = "certain" if all(item.get("evidence") for item in items) else "inferred"
+    else:
+        risks["confidence"] = "certain" if checks else "inferred"
+
+
+# ---------------------------------------------------------------------------
 # artifact 校验 / 构建 / 幂等 upsert / 读取
 # ---------------------------------------------------------------------------
 
@@ -590,7 +732,8 @@ def validate_assessment(doc: Any) -> list[str]:
         evidence = dim.get("evidence")
         if not isinstance(evidence, list):
             errors.append(f"dimensions.{name}.evidence 必须是数组")
-        elif not evidence and dim.get("confidence") == "certain":
+        elif not evidence and dim.get("confidence") == "certain" and name != "risks":
+            # risks 空态（未见需核实的问题）本身无证据，certain 与否由 risks 专项规则按 checks_run 判定
             errors.append(f"dimensions.{name} 无证据时 confidence 不得为 certain")
         for item in evidence or []:
             if not isinstance(item, dict) or item.get("type") not in _EVIDENCE_TYPES or not str(item.get("ref") or "").strip():
@@ -648,9 +791,41 @@ def validate_assessment(doc: Any) -> list[str]:
                 errors.append("motivation 公开信息信号必须带来源 URL 与 as_of")
         if not signals and motivation.get("confidence") != "inferred":
             errors.append("motivation 无信号时 confidence 必须为 inferred（如实『未见明显变动信号』）")
-    for name in DIMENSIONS_PLACEHOLDER:
-        if dimensions.get(name) is not None:
-            errors.append(f"dimensions.{name} 本期必须为 null 占位")
+    risks = dimensions.get("risks") if isinstance(dimensions.get("risks"), dict) else {}
+    if risks:
+        risk_items = risks.get("items")
+        if not isinstance(risk_items, list):
+            errors.append("risks.items 必须是数组")
+            risk_items = []
+        if len(risk_items) > RISK_ITEM_MAX:
+            errors.append(f"risks.items 最多 {RISK_ITEM_MAX} 条")
+        for item in risk_items:
+            if not isinstance(item, dict):
+                errors.append("risks.items 存在非法条目（必须是对象）")
+                continue
+            if not str(item.get("risk") or "").strip():
+                errors.append("risks.items 存在非法条目（risk 为空）")
+            if item.get("severity") not in _SEVERITY:
+                errors.append("risks.items.severity 必须是 high|medium|low")
+            kind = item.get("kind")
+            if kind is not None and kind not in _RISK_KINDS:
+                errors.append("risks.items.kind 枚举非法")
+            item_evidence = item.get("evidence")
+            if not isinstance(item_evidence, list):
+                errors.append("risks.items.evidence 必须是数组")
+                continue
+            for ev in item_evidence:
+                if not isinstance(ev, dict) or ev.get("type") not in _EVIDENCE_TYPES or not str(ev.get("ref") or "").strip():
+                    errors.append("risks.items.evidence 存在非法条目")
+        if risk_items and any(not (item.get("evidence") or []) for item in risk_items if isinstance(item, dict)):
+            if risks.get("confidence") != "inferred":
+                errors.append("risks 存在无证据条目时 confidence 必须为 inferred（如技能缺项类 absence 证据）")
+        if not risk_items:
+            if not str(risks.get("verdict") or "").strip():
+                errors.append("risks 无条目时 verdict 也必须如实说明（如『未见需核实的问题』）")
+            risk_stats = risks.get("stats") if isinstance(risks.get("stats"), dict) else {}
+            if risks.get("confidence") == "certain" and not (risk_stats.get("checks_run") or []):
+                errors.append("risks 空态且未实际执行核对（checks_run 为空）时 confidence 必须为 inferred")
     if doc.get("advisor_action") not in ADVISOR_ACTIONS:
         errors.append("advisor_action 必须是 pending|accepted|modified|rejected")
     return errors
@@ -778,6 +953,24 @@ def _artifact_markdown(doc: dict[str, Any]) -> str:
             lines.append(f"- [{signal.get('source') or ''}] {signal.get('summary') or ''}{suffix}")
         if not (motivation.get("signals") or []):
             lines.append("- 未见明显变动信号")
+    risks = (doc.get("dimensions") or {}).get("risks") or {}
+    if risks:
+        lines.extend(["", "## 需要核实的问题", ""])
+        lines.append(
+            f"**结论**：{risks.get('verdict') or ''}"
+            f"（置信度：{LABELS.get(risks.get('confidence'), risks.get('confidence'))}）"
+        )
+        for item in risks.get("items") or []:
+            lines.append(
+                f"- 【{LABELS.get(item.get('severity'), item.get('severity'))}｜{LABELS.get(item.get('kind'), item.get('kind'))}】"
+                f"{item.get('risk') or ''}"
+            )
+            for ev in item.get("evidence") or []:
+                lines.append(f"  - 证据（{ev.get('type')}）：{ev.get('ref')}")
+        if not (risks.get("items") or []):
+            lines.append("- 未见需核实的问题")
+        lines.append("")
+        lines.append("（以上为需要核实的问题清单，只辅助顾问判断，不构成任何决策建议）")
     lines.extend(["", "## 证据", ""])
     for name in DIMENSIONS_IMPLEMENTED:
         dim = (doc.get("dimensions") or {}).get(name) or {}
@@ -867,6 +1060,58 @@ def get_assessment(conn: sqlite3.Connection, candidate_id: int, job_id: int) -> 
         "content": row["content"],
         "assessment": doc,
         "created_at": row["created_at"],
+    }
+
+
+def report_reference_block(assessment: dict[str, Any]) -> dict[str, Any]:
+    """S6-3：推荐报告强制引用块 —— trajectory 结论 / 分位 band / 需核实问题 top 3 / 顾问口径摘要。
+
+    返回 lines（可直接进报告"顾问评语"板块的行）+ 结构化字段（报告产物 metadata 留痕用）。
+    旧版评估（risks 为 null 占位）如实标注 risks_pending，由顾问重新评估后报告自动带上风险维。
+    呈现语义：需要核实的问题；只辅助判断，不构成决策建议。
+    """
+    assessment = assessment if isinstance(assessment, dict) else {}
+    dimensions = assessment.get("dimensions") if isinstance(assessment.get("dimensions"), dict) else {}
+    trajectory = dimensions.get("trajectory") if isinstance(dimensions.get("trajectory"), dict) else {}
+    percentile = dimensions.get("percentile") if isinstance(dimensions.get("percentile"), dict) else {}
+    risks = dimensions.get("risks") if isinstance(dimensions.get("risks"), dict) else None
+    reference = percentile.get("reference") if isinstance(percentile.get("reference"), dict) else {}
+    band = percentile.get("band")
+    band_label = LABELS.get(band, "无法落位") if band else "无法落位"
+    window = f"±{reference.get('years_window')}年" if reference.get("years_window") is not None else "不限年限"
+    summary = " ".join(str(assessment.get("consultant_summary") or "").split())
+    lines = [
+        f"判人评估（{assessment.get('as_of') or ''}）顾问口径：{summary or '（未生成摘要）'}",
+        f"职业轨迹：{trajectory.get('verdict') or '未评估'}",
+        f"在同龄人里的位置：{band_label}（同方向 {window}参照 N={reference.get('n') or 0}）",
+    ]
+    top_risks: list[dict[str, Any]] = []
+    if risks is None:
+        lines.append("需要核实的问题：当前评估为旧版（未含该维度），重新评估后报告将自动引用")
+    elif not (risks.get("items") or []):
+        lines.append("需要核实的问题：未见需核实的问题")
+    else:
+        ordered = sorted(
+            [item for item in risks.get("items") or [] if isinstance(item, dict)],
+            key=lambda item: _SEVERITY_RANK.get(str(item.get("severity") or "low"), 2),
+        )
+        top_risks = ordered[:3]
+        lines.append("需要核实的问题：" + "；".join(str(item.get("risk") or "") for item in top_risks))
+    lines.append("（以上摘自判人评估，只辅助顾问判断，不构成任何决策建议）")
+    return {
+        "lines": lines,
+        "trajectory_verdict": str(trajectory.get("verdict") or ""),
+        "percentile_band": band,
+        "percentile_band_label": band_label,
+        "reference_n": reference.get("n"),
+        "top_risks": [
+            {"risk": str(item.get("risk") or ""), "severity": str(item.get("severity") or ""), "kind": str(item.get("kind") or "")}
+            for item in top_risks
+        ],
+        "risks_pending": risks is None,
+        "consultant_summary": summary,
+        "assessor_version": str(assessment.get("assessor_version") or ""),
+        "as_of": str(assessment.get("as_of") or ""),
     }
 
 
@@ -1027,12 +1272,15 @@ def persist_assessment(conn: sqlite3.Connection, doc: dict[str, Any]) -> str:
     move_history = (doc.get("dimensions") or {}).get("move_history") or {}
     percentile = (doc.get("dimensions") or {}).get("percentile") or {}
     motivation = (doc.get("dimensions") or {}).get("motivation") or {}
+    risks = (doc.get("dimensions") or {}).get("risks") or {}
+    risk_items = risks.get("items") or []
     summary = (
-        f"生成判人评估（职业轨迹/跳槽质量史/在同龄人里的位置/动机与时机）：置信度 "
+        f"生成判人评估（职业轨迹/跳槽质量史/在同龄人里的位置/动机与时机/需要核实的问题）：置信度 "
         f"{trajectory.get('confidence')}/{move_history.get('confidence')}/"
-        f"{percentile.get('confidence')}/{motivation.get('confidence')}，"
+        f"{percentile.get('confidence')}/{motivation.get('confidence')}/{risks.get('confidence')}，"
         f"分位 {percentile.get('band') or '无法落位'}（参照 N={(percentile.get('reference') or {}).get('n')}），"
         f"动机信号 {len(motivation.get('signals') or [])} 条，"
+        f"需要核实的问题 {len(risk_items)} 项（高 {sum(1 for i in risk_items if i.get('severity') == 'high')} 项），"
         f"证据 {stats.get('kept', 0)} 条（剥离 {stats.get('stripped', 0)} 条）。"
         "评估只辅助顾问判断，不构成决策建议。"
     )
@@ -1249,6 +1497,54 @@ def run_assessment(
     dimensions["percentile"] = percentile_dim
     dimensions["motivation"] = motivation_dim
 
+    # ------------------------------------------------------------------
+    # S6-3 风险点（需要核实的问题）：确定性检出（gap/频繁跳动/时间线冲突/硬条件差距）
+    # + LLM 第三调只补 title 通胀/过度包装两类语义项（证据过同一道逐字闸）
+    # ------------------------------------------------------------------
+    risk_facts = assessment_signals.collect_risk_facts(
+        work_text,
+        corpus=corpus,
+        hard_text=str(job_item.get("hard_requirements") or ""),
+        education_text=" ".join(
+            part for part in (str(candidate.get("education") or ""), str(resume.get("education_text") or "")) if part
+        ),
+        experience_text=str(candidate.get("experience") or ""),
+        today=today,
+    )
+    risks_payload = {
+        "task": "判人评估：需要核实的问题（S6-3，仅 title 通胀/过度包装两类语义项）",
+        "candidate": {
+            "current_company": current_company,
+            "current_title": str(candidate.get("current_title") or ""),
+            "experience": str(candidate.get("experience") or ""),
+        },
+        "job": {
+            "client": str(job_item.get("client") or ""),
+            "title": str(job_item.get("title") or ""),
+            "hard_requirements": _clean_text(job_item.get("hard_requirements"), 400),
+        },
+        "resume_full_text": str(resume.get("full_text") or resume.get("profile_text") or "")[:6000],
+        "resume_work_text": str(resume.get("work_text") or "")[:4000],
+        "deterministic_findings": [item["risk"] for item in risk_facts["items"]],
+    }
+    try:
+        raw_risks = llm.assess_risks(risks_payload)
+        if not isinstance(raw_risks, dict):
+            raise LLMError("风险点模型输出非 JSON 对象")
+        signal_stats["risks_llm"] = "ok"
+    except LLMError:
+        raw_risks = None
+        signal_stats["risks_llm"] = "fallback_deterministic"
+    dimensions["risks"] = build_risks_dimension(
+        raw_risks,
+        deterministic_items=risk_facts["items"],
+        checks_run=risk_facts["checks_run"],
+        corpus=corpus,
+        graph_hits=graph_hits,
+        stats=stats,
+    )
+    signal_stats["risk_facts"] = risk_facts["facts"]
+
     masked = mask_name(candidate.get("display_name")) if callable(mask_name) else str(candidate.get("display_name") or "")
     doc: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -1282,6 +1578,33 @@ def run_assessment(
     kept_sensitives: list[dict[str, str]] = []
     for name in DIMENSIONS_IMPLEMENTED:
         dim = doc["dimensions"][name]
+        if name == "risks":
+            # 风险点为 item 级证据：逐 item 剥离敏感简历引用；LLM 语义项证据归零 → 整条丢弃
+            # （确定性 absence 型条目本就没证据，保留）；随后重算 verdict/evidence/confidence。
+            surviving_items: list[dict[str, Any]] = []
+            for risk_item in dim.get("items") or []:
+                if not isinstance(risk_item, dict):
+                    continue
+                kept_item_evidence: list[dict[str, str]] = []
+                for item in risk_item.get("evidence") or []:
+                    if item.get("type") == "简历" and scan_sensitive([item.get("ref") or ""]):
+                        doc["evidence_stats"]["stripped"] += 1
+                        doc["evidence_stats"]["stripped_detail"].append(
+                            {"type": "简历", "ref": str(item.get("ref") or "")[:120], "reason": "简历引用含敏感属性表述，剥离"}
+                        )
+                        kept_sensitives.append(item)
+                        continue
+                    kept_item_evidence.append(item)
+                risk_item["evidence"] = kept_item_evidence
+                if not kept_item_evidence and risk_item.get("kind") in _RISK_LLM_KINDS:
+                    doc["evidence_stats"]["stripped_detail"].append(
+                        {"type": "风险项", "ref": str(risk_item.get("risk") or "")[:80], "reason": "风险项证据因敏感剥离归零，整条丢弃"}
+                    )
+                    continue
+                surviving_items.append(risk_item)
+            dim["items"] = surviving_items
+            refresh_risks_dimension(dim)
+            continue
         kept: list[dict[str, str]] = []
         for item in dim.get("evidence") or []:
             if item.get("type") == "简历" and scan_sensitive([item.get("ref") or ""]):

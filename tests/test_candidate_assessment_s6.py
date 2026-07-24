@@ -4,7 +4,7 @@
 全部使用临时库 + 临时 KB fixture + FakeLLM，绝不触碰生产 DB、真实知识库与外网 LLM。
 
 覆盖：
-1. 模型：schema 校验（必备键/占位维度 null/两维结构/枚举）、幂等 upsert（同人同岗一行、as_of 刷新、version 自增）；
+1. 模型：schema 校验（必备键/维度结构/枚举，含 S6-3 risks 结构校验）、幂等 upsert（同人同岗一行、as_of 刷新、version 自增）；
 2. 证据契约：20 条逐字引用 100% 通过；编造简历引用/编造图谱引用必被拦；证据归零强制 inferred；
    图谱未命中的 tier_source 强制 inferred；
 3. 敏感属性负向扫描：诱导输入（"已婚已育稳定"类）不得成为因子——拒写 + 扫描日志；
@@ -249,7 +249,7 @@ def _valid_doc(**overrides) -> dict:
         "candidate_id": 1,
         "job_id": 154,
         "as_of": "2026-07-24 10:00:00",
-        "assessor_version": "s6-2-v1",
+        "assessor_version": "s6-3-v1",
         "model": "fake-agent-v1",
         "strategy_ref": "artifact_strategy_154",
         "dimensions": {
@@ -297,7 +297,14 @@ def _valid_doc(**overrides) -> dict:
                 "evidence": [{"type": "公开信息", "ref": "https://www.joulwatt.com/news"}],
                 "confidence": "certain",
             },
-            "risks": None,
+            "risks": {
+                "verdict": "未见需核实的问题（已按简历时间线、任期节奏与岗位硬条件逐项核对）。",
+                "items": [],
+                "evidence": [],
+                "confidence": "certain",
+                "stats": {"deterministic_items": 0, "llm_items_kept": 0, "llm_items_dropped": 0,
+                          "checks_run": ["gap", "frequent_hop", "over_packaging", "hard_requirement"]},
+            },
         },
         "consultant_summary": "轨迹清晰，跳槽质量高。",
         "advisor_action": "pending",
@@ -319,11 +326,24 @@ class SchemaValidationTest(unittest.TestCase):
         del doc["as_of"]
         assert any("as_of" in error for error in candidate_assessment.validate_assessment(doc))
 
-    def test_placeholder_dimensions_must_be_null(self) -> None:
+    def test_risks_dimension_structure_validated(self) -> None:
+        """S6-3 起 risks 必须填充且结构合法：severity 枚举 / items 结构 / 空态置信度规则。"""
         doc = _valid_doc()
         doc["dimensions"]["risks"] = {"verdict": "有风险"}
         errors = candidate_assessment.validate_assessment(doc)
-        assert any("risks" in error and "占位" in error for error in errors)
+        assert any("risks" in error for error in errors), "risks 缺 items/confidence 必须被拦"
+        doc = _valid_doc()
+        doc["dimensions"]["risks"]["items"] = [
+            {"kind": "gap", "risk": "有空窗需核实", "severity": "致命", "evidence": []}
+        ]
+        errors = candidate_assessment.validate_assessment(doc)
+        assert any("severity" in error for error in errors), "severity 枚举非法必须被拦"
+        # 空态且未执行核对 → certain 非法
+        doc = _valid_doc()
+        doc["dimensions"]["risks"]["stats"]["checks_run"] = []
+        doc["dimensions"]["risks"]["confidence"] = "certain"
+        errors = candidate_assessment.validate_assessment(doc)
+        assert any("checks_run" in error for error in errors)
 
     def test_two_dimensions_structure(self) -> None:
         doc = _valid_doc()
@@ -585,7 +605,11 @@ class RunAssessmentTest(DbCase):
             assert dim["confidence"] in {"certain", "inferred"}
         assert doc["dimensions"]["percentile"]["band"] in {None, "top10", "top25", "median", "below"}
         assert isinstance(doc["dimensions"]["motivation"]["signals"], list)
-        assert doc["dimensions"]["risks"] is None, "risks 本期仍留空占位（S6-3）"
+        risks = doc["dimensions"]["risks"]
+        assert isinstance(risks, dict) and isinstance(risks["items"], list), "S6-3 起 risks 必须填充"
+        assert risks["confidence"] in {"certain", "inferred"}
+        for item in risks["items"]:
+            assert item["severity"] in {"high", "medium", "low"}
         assert candidate_assessment.validate_assessment(doc) == []
 
     def test_run_assessment_mismatch_and_no_resume(self) -> None:

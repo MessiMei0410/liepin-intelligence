@@ -297,3 +297,17 @@
 .assessment-note textarea{width:100%;font-size:11.5px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;resize:vertical}
 .assessment-note .button{justify-self:end}
 .assessment-advisor-note{margin:0;font-size:10.5px;color:var(--muted);line-height:1.5}
+.tag.danger{background:var(--red-soft);color:var(--red)}
+.assessment-note-line{margin:0;font-size:10.5px;color:var(--muted);line-height:1.6}
+.assessment-signals{margin:0;padding:0;list-style:none;display:grid;gap:6px}
+.assessment-signals li{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;font-size:11px;line-height:1.55}
+.assessment-signals li .tag{flex:0 0 auto}
+.assessment-signals a{color:var(--green);text-decoration:underline;text-underline-offset:2px}
+.assessment-signal-date{color:var(--muted);font-size:10px}
+.assessment-risks{margin:0;padding:0;list-style:none;display:grid;gap:10px}
+.assessment-risks>li{display:grid;gap:4px;border-left:2px solid var(--line);padding-left:10px}
+.assessment-risk-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;font-size:11.5px;line-height:1.6}
+.assessment-risk-head .tag{flex:0 0 auto}
+.assessment-risk-evidence{margin:0;padding:0 0 0 4px;list-style:none;display:grid;gap:3px}
+.assessment-risk-evidence li{display:flex;align-items:baseline;gap:6px;font-size:10.5px;color:var(--muted);line-height:1.5}
+.assessment-risk-evidence li .tag{flex:0 0 auto}

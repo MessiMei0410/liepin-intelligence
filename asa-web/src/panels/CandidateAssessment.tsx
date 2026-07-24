@@ -13,14 +13,23 @@ import { date } from '../shared/format'
 // S6-1b 判人评估区（候选人详情「评估」tab，新文件；CandidatePanel 只最小接线）：
 // 职业轨迹 + 跳槽质量史两维渲染、证据列表、置信度 tag、顾问口径摘要，
 // 顾问动作行（采纳/改判/否决）经 PATCH advisor-action 幂等写回，响应直接回写本地。
-// 文案一律 UX-1 业务语言（与后端 candidate_assessment.LABELS 同文）；红线：评估只辅助判断，不做决策。
-// percentile/motivation/risks 三维本期为 null 占位，对应区块不渲染。
+// S6-3 补三块：「在同龄人里的位置」（band 中文 + 参照系 + 样本不足「推测」tag）、
+// 「动机与时机」（信号列表带来源链接，无信号如实文案）、「需要核实的问题」（severity 三档色 + 证据，空态如实）。
+// 文案一律 UX-1 业务语言（与后端 candidate_assessment.LABELS 同文）；红线：评估只辅助判断，不做决策，
+// 风险一律以「需要核实的问题」呈现，不出现定罪/淘汰字眼。维度为 null（旧版评估）时对应区块不渲染。
 
 const CONFIDENCE_LABELS: Record<string, string> = { certain: '确定', inferred: '推测' }
 const PACE_LABELS: Record<string, string> = { fast: '偏快', normal: '正常', slow: '偏慢', unknown: '无法判断' }
 const EVOLUTION_LABELS: Record<string, string> = { rising: '上升', lateral: '平移', stagnant: '吃老本', unknown: '无法判断' }
 const DIRECTION_LABELS: Record<string, string> = { up: '上升', lateral: '平移', down: '下降', unknown: '无法判断' }
 const TIER_LABELS: Record<string, string> = { T1: '头部', T2: '腰部', T3: '长尾', unknown: '未评级' }
+const BAND_LABELS: Record<string, string> = { top10: '前 10%', top25: '前 25%', median: '中位区间', below: '相对靠后' }
+const BASIS_LABELS: Record<string, string> = { fit_score: '既有评估得分', trajectory_features: '轨迹特征分' }
+const SEVERITY_LABELS: Record<string, string> = { high: '高', medium: '中', low: '低' }
+const RISK_KIND_LABELS: Record<string, string> = {
+  gap: '空窗', frequent_hop: '频繁跳动', title_inflation: 'title 通胀',
+  over_packaging: '过度包装信号', hard_requirement: '硬条件差距',
+}
 const ADVISOR_ACTION_LABELS: Record<AssessmentAdvisorAction, string> = {
   pending: '待处理', accepted: '已采纳', modified: '已改判', rejected: '已否决',
 }
@@ -29,6 +38,9 @@ const confidenceLabel = (value?: string) => CONFIDENCE_LABELS[String(value || ''
 const confidenceTone = (value?: string) => (value === 'certain' ? 'ok' : 'warn')
 const directionLabel = (value?: string) => DIRECTION_LABELS[String(value || '')] || '无法判断'
 const directionTone = (value?: string) => (value === 'up' ? 'ok' : value === 'down' ? 'warn' : 'muted')
+const bandLabel = (value?: string | null) => (value ? BAND_LABELS[String(value)] || '无法落位' : '无法落位')
+const severityLabel = (value?: string) => SEVERITY_LABELS[String(value || '')] || '低'
+const severityTone = (value?: string) => (value === 'high' ? 'danger' : value === 'medium' ? 'warn' : 'muted')
 
 const assessmentOf = (payload: CandidateAssessmentPayload | null): CandidateAssessmentDoc | null =>
   payload?.assessment && typeof payload.assessment === 'object' ? payload.assessment : null
@@ -125,7 +137,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
           <ClipboardCheck/>
           <div>
             <b>还没做过评估</b>
-            <p>生成「职业轨迹 + 跳槽质量史」两维判语，辅助日常判人；评估只辅助判断，不构成决策建议。</p>
+            <p>生成「职业轨迹 / 跳槽质量史 / 在同龄人里的位置 / 动机与时机 / 需要核实的问题」五维判语，辅助日常判人；评估只辅助判断，不构成决策建议。</p>
           </div>
           <button className="button primary" disabled={!!busy} onClick={() => void generate()}>
             {busy === 'generate' ? <LoaderCircle className="spin"/> : <ClipboardCheck/>}做评估
@@ -138,6 +150,9 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
 
   const trajectory = doc.dimensions?.trajectory || null
   const moveHistory = doc.dimensions?.move_history || null
+  const percentile = doc.dimensions?.percentile || null
+  const motivation = doc.dimensions?.motivation || null
+  const risks = doc.dimensions?.risks || null
   const evidence = collectEvidence(doc)
   const advisorAction: AssessmentAdvisorAction = doc.advisor_action || 'pending'
 
@@ -211,6 +226,103 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
           <div className="assessment-current-move">
             当前这单判定：<b>{directionLabel(moveHistory.current_move)}</b>
           </div>
+        </section>
+      )}
+
+      {percentile && (
+        <section className="assessment-dim" aria-label="在同龄人里的位置">
+          <div className="assessment-dim-head">
+            <h3>在同龄人里的位置</h3>
+            {percentile.reference && percentile.reference.sample_sufficient === false && (
+              <span className="tag warn">推测 · 参照样本不足</span>
+            )}
+            <span className={`tag ${confidenceTone(percentile.confidence)}`}>{confidenceLabel(percentile.confidence)}</span>
+          </div>
+          {percentile.verdict && <p className="assessment-verdict">{percentile.verdict}</p>}
+          <div className="assessment-facts">
+            <span>落位：<b>{bandLabel(percentile.band)}</b></span>
+            {percentile.score !== null && percentile.score !== undefined && (
+              <span>得分：<b>{percentile.score}</b>（{BASIS_LABELS[String(percentile.basis || '')] || percentile.basis || '轨迹特征分'}）</span>
+            )}
+          </div>
+          {percentile.reference && (
+            <div className="assessment-facts">
+              <span>
+                参照系：同方向{percentile.reference.direction ? `（${percentile.reference.direction}）` : ''}
+                {percentile.reference.years_window !== null && percentile.reference.years_window !== undefined
+                  ? `±${percentile.reference.years_window}年` : '不限年限'}
+                ｜样本 N=<b>{percentile.reference.n ?? 0}</b>
+                {percentile.reference.median !== null && percentile.reference.median !== undefined && (
+                  <>｜中位分 {percentile.reference.median}（P25={percentile.reference.q25}，P75={percentile.reference.q75}）</>
+                )}
+              </span>
+            </div>
+          )}
+          {percentile.reference?.note && <p className="assessment-note-line">{percentile.reference.note}</p>}
+        </section>
+      )}
+
+      {motivation && (
+        <section className="assessment-dim" aria-label="动机与时机">
+          <div className="assessment-dim-head">
+            <h3>动机与时机</h3>
+            <span className={`tag ${confidenceTone(motivation.confidence)}`}>{confidenceLabel(motivation.confidence)}</span>
+          </div>
+          {motivation.verdict && <p className="assessment-verdict">{motivation.verdict}</p>}
+          {(motivation.signals || []).length > 0 ? (
+            <ul className="assessment-signals">
+              {(motivation.signals || []).map((signal, index) => (
+                <li key={`${signal.kind || 'signal'}-${index}`}>
+                  <span className="tag muted">{signal.source || '信号'}</span>
+                  <span>{signal.summary || ''}</span>
+                  {signal.url && (
+                    <a href={signal.url} target="_blank" rel="noreferrer">
+                      来源
+                    </a>
+                  )}
+                  {signal.as_of && <span className="assessment-signal-date">{signal.as_of}</span>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="assessment-note-line">未见明显变动信号：动机与时机需面谈核实。</p>
+          )}
+        </section>
+      )}
+
+      {risks && (
+        <section className="assessment-dim" aria-label="需要核实的问题">
+          <div className="assessment-dim-head">
+            <h3>需要核实的问题</h3>
+            <span className={`tag ${confidenceTone(risks.confidence)}`}>{confidenceLabel(risks.confidence)}</span>
+          </div>
+          {risks.verdict && <p className="assessment-verdict">{risks.verdict}</p>}
+          {(risks.items || []).length > 0 ? (
+            <ul className="assessment-risks">
+              {(risks.items || []).map((item, index) => (
+                <li key={`${item.kind || 'risk'}-${index}`}>
+                  <div className="assessment-risk-head">
+                    <span className={`tag ${severityTone(item.severity)}`}>{severityLabel(item.severity)}</span>
+                    {item.kind && <span className="tag muted">{RISK_KIND_LABELS[String(item.kind)] || item.kind}</span>}
+                    <span>{item.risk || ''}</span>
+                  </div>
+                  {(item.evidence || []).length > 0 && (
+                    <ul className="assessment-risk-evidence">
+                      {(item.evidence || []).map((ev, evIndex) => (
+                        <li key={evIndex}>
+                          <span className="tag">{ev.type || '未标注'}</span>
+                          <span>{ev.ref || ''}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="assessment-note-line">未见需核实的问题。</p>
+          )}
+          <p className="assessment-note-line">以上是辅助核实的清单，不构成任何决策建议。</p>
         </section>
       )}
 

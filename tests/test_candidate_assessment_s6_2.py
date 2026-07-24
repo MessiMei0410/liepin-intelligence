@@ -667,7 +667,8 @@ class UpgradeAndRouteTest(DbCase):
             motivation = doc["dimensions"]["motivation"]
             assert percentile and percentile["band"] == "top10", "旧 artifact 重生成后分位必须有值"
             assert motivation["signals"], "旧 artifact 重生成后动机信号必须有值"
-            assert doc["assessor_version"] == "s6-2-v1"
+            assert isinstance(doc["dimensions"]["risks"], dict), "旧 artifact 重生成后 risks 必须填充（S6-3）"
+            assert doc["assessor_version"] == "s6-3-v1"
             assert doc["version"] == 2, "重生成走幂等更新，version 自增"
             # GET 透出两维
             fetched = client.get("/api/v1/candidates/1/assessments?job_id=154")
@@ -700,7 +701,8 @@ class UpgradeAndRouteTest(DbCase):
             assert created.status_code == 200, created.text
             doc = created.json()["assessment"]
             assert set(doc["dimensions"].keys()) == {"trajectory", "move_history", "percentile", "motivation", "risks"}
-            assert doc["dimensions"]["risks"] is None, "risks 仍是 S6-3 占位"
+            risks = doc["dimensions"]["risks"]
+            assert isinstance(risks, dict) and isinstance(risks["items"], list), "S6-3 起 risks 必须填充"
             percentile = doc["dimensions"]["percentile"]
             assert percentile["band"] is None and percentile["confidence"] == "inferred", "空参照池如实无法落位"
             motivation = doc["dimensions"]["motivation"]
