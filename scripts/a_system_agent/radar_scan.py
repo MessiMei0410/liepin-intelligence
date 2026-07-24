@@ -37,6 +37,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from html import unescape
 from pathlib import Path
 from typing import Any, Callable
 
@@ -452,29 +453,74 @@ def baidu_searcher(query: str, limit: int, *, timeout: float = DEFAULT_TIMEOUT) 
     return results, ""
 
 
+# 360 结果块：li.res-list 内 h3>a 为标题+跳转链接，摘要取整块可见文本
+_SO_BLOCK = re.compile(r'<li[^>]*class="[^"]*res-list[^"]*"[\s\S]*?</li>', re.I)
+_SO_TITLE_LINK = re.compile(r"<h3[^>]*>[\s\S]*?<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)</a>", re.I)
+# 360 跳转页是 JS/meta 刷新页（无 302），从中提取目标 URL
+_SO_JS_REDIRECT = re.compile(r"""window\.location\.replace\(["']([^"']+)["']\)""")
+_SO_META_REFRESH = re.compile(r"""refresh[^>]*URL=['"]?([^'">\s]+)""", re.I)
+
+
+def parse_so_results(body: str, *, limit: int = MAX_RESULTS_PER_QUERY) -> list[SearchResult]:
+    """解析 360 搜索页 HTML 的结果块（标题/跳转链接/摘要）；结构变动时返回空列表（按失败留痕）。"""
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for block in _SO_BLOCK.findall(body or ""):
+        match = _SO_TITLE_LINK.search(block)
+        if not match:
+            continue
+        url = unescape(match.group(1).strip())
+        if not url.startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        title = unescape(_strip_tags(match.group(2)))
+        snippet = unescape(_strip_tags(block))
+        results.append({"title": title, "url": url, "snippet": snippet[:400]})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def so_searcher(query: str, limit: int, *, timeout: float = DEFAULT_TIMEOUT) -> tuple[list[SearchResult], str]:
+    """360 公开搜索页检索（urllib 只读，超时 ≤10s；百度被拦时的中文兜底源）。错误分类同 bing_searcher。"""
+    url = "https://www.so.com/s?q=" + urllib.parse.quote(str(query or "")) + "&pn=1"
+    status, body, error = mapping_task.urllib_fetcher(url, timeout)
+    if error or status != 200 or not body:
+        return [], error or f"http_{status}"
+    results = parse_so_results(body, limit=limit)
+    if not results:
+        return [], "parse_error"
+    return results, ""
+
+
 def default_searcher(query: str, limit: int, *, timeout: float = DEFAULT_TIMEOUT) -> tuple[list[SearchResult], str]:
-    """默认检索器：百度主源，失败/结构变动时 Bing 兜底；双源都失败返回主源错误分类。"""
+    """默认检索器：百度主源 → 360 兜底 → Bing 末位；全部失败返回主源错误分类。"""
     results, error = baidu_searcher(query, limit, timeout=timeout)
     if not error:
         return results, ""
-    fallback, fallback_error = bing_searcher(query, limit, timeout=timeout)
+    fallback, fallback_error = so_searcher(query, limit, timeout=timeout)
     if not fallback_error:
         return fallback, ""
+    last, last_error = bing_searcher(query, limit, timeout=timeout)
+    if not last_error:
+        return last, ""
     return [], error
 
 
 def resolve_source_url(url: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[str, str]:
-    """还原搜索引擎跳转链接到目标 URL（只读 GET，跟随 302；超时 ≤10s）。
+    """还原搜索引擎跳转链接到目标 URL（只读 GET；百度走 302，360 走 JS/meta 刷新页提取）。
 
     返回 (final_url, error_category)；失败返回 ("", 分类)，调用方保留原链接并留痕。
-    非跳转链接（非百度 /link）直接原样返回，不发请求。
+    非跳转链接直接原样返回，不发请求。
     """
     text = str(url or "").strip()
     try:
         parsed = urllib.parse.urlparse(text)
     except ValueError:
         return "", "network_error"
-    if not (parsed.netloc.lower().endswith("baidu.com") and parsed.path.startswith("/link")):
+    host = parsed.netloc.lower()
+    is_jump = (host.endswith("baidu.com") or host.endswith("so.com")) and parsed.path.startswith("/link")
+    if not is_jump:
         return text, ""
     request = urllib.request.Request(
         text,
@@ -483,6 +529,13 @@ def resolve_source_url(url: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[str,
     try:
         with urllib.request.urlopen(request, timeout=min(float(timeout), 10.0), context=mapping_task._ssl_context()) as response:
             final = str(response.geturl() or "").strip()
+            if final and final != text:
+                return final, ""
+            # 360 跳转页：无 302，从 JS/meta 刷新提取目标
+            body = response.read(60_000).decode("utf-8", "replace")
+            match = _SO_JS_REDIRECT.search(body) or _SO_META_REFRESH.search(body)
+            if match and match.group(1).startswith(("http://", "https://")):
+                return match.group(1), ""
             return (final or text), ""
     except urllib.error.HTTPError as exc:
         # 目标站 4xx/5xx 但跳转链本身真实：保留原链，分类留痕

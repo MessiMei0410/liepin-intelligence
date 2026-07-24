@@ -225,7 +225,12 @@ class _StubCollector:
         self._results = results_by_company
 
     def collect_company(self, company: str) -> dict:
-        return {"results": list(self._results.get(company, [])), "failures": []}
+        # 相关性闸要求标题/摘要提及公司名，stub 统一把公司名拼进标题
+        results = [
+            {**item, "title": f"{company} {item.get('title', '')}"}
+            for item in self._results.get(company, [])
+        ]
+        return {"results": results, "failures": []}
 
 
 def _stub_extractor(llm, payload):
