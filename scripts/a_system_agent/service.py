@@ -6898,3 +6898,273 @@ class AgentService:
             return {"ok": True, **payload}
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------
+    # S7-2：雷达联动——榜单一键发起 Mapping（trigger=radar）+ 激活存量人选清单
+    # ------------------------------------------------------------------
+
+    def start_mapping_from_radar(self, company: str, job_id: int, *, collector: Any = None) -> dict[str, Any]:
+        """S7-2：对最新雷达榜单里的一家公司发起 Mapping 直挖（trigger="radar"）。
+
+        - 调 mapping_task 既有创建链路，trigger="radar"；目标团队定位注入该公司所在榜单的
+          未过期信号上下文（只提升定位质量，信号正文/链接不进 artifact 对外字段，见
+          stats.radar_context 标记）；
+        - strategy_ref 取该 job 最新 strategy_v2；岗位暂无策略时允许为 null（仅 radar 触发
+          合法），并在 stats.radar_context.strategy_ref_missing 注明；
+        - 同日幂等：同岗位同公司当天已有 trigger=radar 的 mapping_task → 返回已存在，
+          不重复建 task（version 不变）；自然日起算（本地日期）。
+        404：岗位不存在 / 尚无雷达榜单（LookupError）；409：公司名为空（ValueError）。
+        红线沿用 S5：无来源不进名单、禁挖过滤、不自动触达；restricted 仅白名单出库。
+        collector 可注入（测试用本地 fixture，绝不打外网）。
+        """
+        from . import knowledge_base, mapping_task, radar_scan, strategy_v2
+
+        company = str(company or "").strip()
+        if not company:
+            raise ValueError("company 必须非空（要对哪家公司发起 Mapping）")
+        conn = self._connect()
+        try:
+            job = conn.execute(
+                "SELECT j.id,j.title,c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+                (int(job_id),),
+            ).fetchone()
+            if job is None:
+                raise LookupError(f"岗位不存在：{job_id}")
+            latest = radar_scan.get_latest_radar_scan(conn)
+            if latest is None:
+                raise LookupError("还没有雷达榜单：请先发起一次扫描（POST /api/v1/radar/scans）")
+
+            # 岗位最新 strategy_v2（无则按 null 处理，stats 注明；radar 触发专属放宽）
+            strategy = conn.execute(
+                """
+                SELECT w.workflow_id,g.goal_id,a.artifact_id,a.metadata_json
+                FROM agent_workflows w
+                JOIN agent_goals g ON g.goal_id=w.goal_id
+                JOIN agent_artifacts a ON a.workflow_id=w.workflow_id AND a.artifact_type='search_strategy'
+                WHERE g.context_type='job' AND g.context_id=?
+                ORDER BY a.id DESC LIMIT 1
+                """,
+                (int(job_id),),
+            ).fetchone()
+            strategy_doc = None
+            strategy_ref = ""
+            workflow_id = ""
+            goal_id = ""
+            if strategy is not None:
+                strategy_doc = strategy_v2.extract_strategy_v2(strategy["metadata_json"])
+                strategy_ref = str(strategy["artifact_id"])
+                workflow_id = str(strategy["workflow_id"])
+                goal_id = str(strategy["goal_id"])
+            if not workflow_id:
+                # 无策略 artifact 时退回岗位最新工作流（upsert 幂等键需要 workflow_id）
+                fallback = conn.execute(
+                    """
+                    SELECT w.workflow_id,g.goal_id
+                    FROM agent_workflows w JOIN agent_goals g ON g.goal_id=w.goal_id
+                    WHERE g.context_type='job' AND g.context_id=?
+                    ORDER BY w.id DESC LIMIT 1
+                    """,
+                    (int(job_id),),
+                ).fetchone()
+                if fallback is None:
+                    raise ValueError(f"岗位 {job_id} 还没有工作流，无法发起 Mapping 直挖")
+                workflow_id = str(fallback["workflow_id"])
+                goal_id = str(fallback["goal_id"])
+
+            # 同日幂等：该工作流当天已有 trigger=radar 且同公司的 mapping_task → 返回已存在
+            today = datetime.now().strftime("%Y-%m-%d")
+            existing = mapping_task.get_mapping_task(conn, f"mapping_task_{workflow_id}")
+            if existing is not None:
+                existing_doc = existing.get("mapping_task") or {}
+                existing_radar = (existing_doc.get("stats") or {}).get("radar_context") or {}
+                if (
+                    existing_doc.get("trigger") == "radar"
+                    and str(existing_doc.get("generated_at") or "").startswith(today)
+                    and str(existing_radar.get("company") or "") == company
+                ):
+                    return {
+                        "ok": True,
+                        "already_exists": True,
+                        "job_id": int(job_id),
+                        "workflow_id": workflow_id,
+                        "artifact_id": str(existing.get("artifact_id") or ""),
+                        "note": "今天已对该公司发起过 Mapping（trigger=radar），返回既有任务卡，未重复创建",
+                        "mapping_task": existing_doc,
+                    }
+
+            radar_context, scan_artifact_id = radar_scan.radar_context_by_company(conn)
+
+            archetype = None
+            graph = None
+            if strategy_doc is not None:
+                archetypes, _load_trace = strategy_v2.load_job_archetypes()
+                archetype_id = str(strategy_doc.get("archetype_id") or "")
+                for item in archetypes:
+                    if str(item.get("archetype_id") or "") == archetype_id:
+                        archetype = item
+                        break
+                graph, _graph_trace = knowledge_base.load_company_graph()
+
+            doc = mapping_task.build_mapping_task(
+                job_id=int(job_id),
+                trigger="radar",
+                strategy_ref=strategy_ref,
+                strategy_doc=strategy_doc,
+                client=str(job["client"] or ""),
+                job_title=str(job["title"] or ""),
+                graph=graph,
+                archetype=archetype,
+                collector=collector,
+                radar_context=radar_context or None,
+                radar_company=company,
+                radar_scan_ref=scan_artifact_id,
+            )
+            doc["workflow_id"] = workflow_id
+            doc["goal_id"] = goal_id
+            artifact_id = mapping_task.upsert_mapping_task(conn, doc)
+            stats = doc.get("stats") or {}
+            summary = (
+                f"雷达联动发起 Mapping（{company}）：目标团队 {stats.get('teams', 0)} 个、"
+                f"候选目标人 {stats.get('candidates', 0)} 位"
+                f"（禁挖过滤 {stats.get('banned_filtered', 0)}、无来源拒收 {stats.get('rejected_no_source', 0)}）。"
+                "名单仅供顾问本人决策，系统不自动触达。"
+            )
+            conn.execute(
+                """
+                INSERT INTO candidate_events
+                (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                VALUES (NULL,NULL,?,'mapping_task_created','completed',datetime('now','localtime'),?,?,'agent_artifacts',?)
+                """,
+                (
+                    int(job_id),
+                    summary,
+                    json.dumps(
+                        {
+                            "artifact_id": artifact_id,
+                            "workflow_id": workflow_id,
+                            "trigger": "radar",
+                            "radar_company": company,
+                            "teams": stats.get("teams", 0),
+                            "candidates": stats.get("candidates", 0),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    artifact_id,
+                ),
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "already_exists": False,
+                "job_id": int(job_id),
+                "workflow_id": workflow_id,
+                "artifact_id": artifact_id,
+                "mapping_task": doc,
+            }
+        finally:
+            conn.close()
+
+    def activate_radar_company(self, company: str, *, limit: int = 50) -> dict[str, Any]:
+        """S7-2：激活存量人选——人才库里该公司现职/曾任职的候选人清单（现职优先）。
+
+        只读不写库；动作（是否触达、怎么触达）永远由顾问本人执行。
+        字段：候选人 id、遮罩名、当前职务、入库阶段（最近一条 job_candidates.clean_stage）、
+        最近一次动作日期（candidate_events 最近 event_time，无则退回 updated_at/search_date）。
+        404：尚无雷达榜单（LookupError）；409：公司名为空（ValueError）。
+        """
+        from . import radar_scan
+        from .workflow import _mask_candidate_name
+
+        company = str(company or "").strip()
+        if not company:
+            raise ValueError("company 必须非空（要查哪家公司的存量人选）")
+        conn = self._connect()
+        try:
+            if radar_scan.get_latest_radar_scan(conn) is None:
+                raise LookupError("还没有雷达榜单：请先发起一次扫描（POST /api/v1/radar/scans）")
+            if not _table_exists(conn, "candidates"):
+                return {"ok": True, "company": company, "total": 0, "candidates": [], "note": "人才库为空"}
+
+            rows = conn.execute(
+                "SELECT id,name,company,title,status,updated_at,search_date FROM candidates"
+            ).fetchall()
+            current_hits: list[dict[str, Any]] = []
+            for row in rows:
+                if radar_scan.company_matches(company, str(row["company"] or "")):
+                    current_hits.append(dict(row))
+
+            # 曾任职：source_profiles.raw_json 文本命中该公司（现职未命中的人才库人选）
+            current_ids = {int(row["id"]) for row in current_hits}
+            history_hits: list[dict[str, Any]] = []
+            if _table_exists(conn, "source_profiles") and _table_exists(conn, "job_candidates"):
+                tokens = [token for token in radar_scan._company_alias_tokens(company) if len(token.strip()) >= 2]
+                if tokens:
+                    like = tokens[0]
+                    profile_rows = conn.execute(
+                        "SELECT person_id,raw_json FROM source_profiles WHERE raw_json LIKE ? LIMIT 500",
+                        (f"%{like}%",),
+                    ).fetchall()
+                    candidate_rows = conn.execute(
+                        """
+                        SELECT c.id,c.name,c.company,c.title,c.status,c.updated_at,c.search_date,jc.person_id
+                        FROM job_candidates jc JOIN candidates c ON CAST(c.id AS TEXT)=jc.source_candidate_id
+                        """
+                    ).fetchall()
+                    by_person: dict[int, dict[str, Any]] = {}
+                    for row in candidate_rows:
+                        person_id = int(row["person_id"] or 0)
+                        if person_id and int(row["id"]) not in current_ids and person_id not in by_person:
+                            by_person[person_id] = dict(row)
+                    for profile in profile_rows:
+                        person_id = int(profile["person_id"] or 0)
+                        hit = by_person.get(person_id)
+                        if hit is not None:
+                            history_hits.append(hit)
+
+            def enrich(row: dict[str, Any], tenure: str) -> dict[str, Any]:
+                stage_rows = conn.execute(
+                    """
+                    SELECT clean_stage,updated_at FROM job_candidates
+                    WHERE CAST(? AS TEXT)=source_candidate_id ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (str(row["id"]),),
+                ).fetchall()
+                stage = str(stage_rows[0]["clean_stage"] or "") if stage_rows else ""
+                event_rows = conn.execute(
+                    """
+                    SELECT MAX(ce.event_time) AS last_action
+                    FROM candidate_events ce JOIN job_candidates jc ON jc.id=ce.job_candidate_id
+                    WHERE CAST(? AS TEXT)=jc.source_candidate_id
+                    """,
+                    (str(row["id"]),),
+                ).fetchone()
+                last_action = ""
+                if event_rows is not None and event_rows["last_action"]:
+                    last_action = str(event_rows["last_action"])
+                if not last_action:
+                    last_action = str(row.get("updated_at") or row.get("search_date") or "")
+                return {
+                    "id": int(row["id"]),
+                    "name_masked": _mask_candidate_name(row.get("name")),
+                    "current_title": str(row.get("title") or ""),
+                    "current_company": str(row.get("company") or ""),
+                    "tenure": tenure,
+                    "stage": stage or str(row.get("status") or ""),
+                    "last_action_at": last_action,
+                }
+
+            items = [enrich(row, "现职") for row in current_hits]
+            items.extend(enrich(row, "曾任职") for row in history_hits)
+            items.sort(key=lambda item: (0 if item["tenure"] == "现职" else 1, item["last_action_at"]), reverse=False)
+            items.sort(key=lambda item: item["last_action_at"], reverse=True)
+            items.sort(key=lambda item: 0 if item["tenure"] == "现职" else 1)
+            items = items[: max(1, int(limit))]
+            return {
+                "ok": True,
+                "company": company,
+                "total": len(items),
+                "candidates": items,
+                "note": "清单只读展示；是否触达、怎么触达由顾问本人决定，系统不自动触达",
+            }
+        finally:
+            conn.close()

@@ -60,7 +60,7 @@ _DIRECTION = {"up", "lateral", "down"}
 _MOVE_UNKNOWN = {"up", "lateral", "down", "unknown"}
 _BANDS = set(assessment_signals.BANDS)
 _PERCENTILE_BASIS = {"fit_score", "trajectory_features"}
-_EVIDENCE_TYPES = {"简历", "图谱", "知识库", "公开信息"}
+_EVIDENCE_TYPES = {"简历", "图谱", "知识库", "公开信息", "雷达信号"}
 _SEVERITY = {"high", "medium", "low"}
 _SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
 # S6-3 风险点五类：前三类半 + 硬条件差距确定性检出；title 通胀/过度包装由 LLM 语义补充。
@@ -1522,6 +1522,34 @@ def run_assessment(
     )
     dimensions["percentile"] = percentile_dim
     dimensions["motivation"] = motivation_dim
+
+    # ------------------------------------------------------------------
+    # S7-2 雷达联动：候选人现职公司在最新雷达榜单有未过期信号 → 追加 motivation 证据
+    #（type="雷达信号"，带 as_of + 来源链接，文案标注"推测"；confidence 封顶 inferred）。
+    # 读取侧只追加一次雷达信号查询调用，不改既有生成逻辑；无榜单/无信号时行为与之前一致。
+    # ------------------------------------------------------------------
+    from . import radar_scan
+
+    radar_signals = radar_scan.radar_signals_for_company(conn, current_company, today=today)
+    radar_injected = 0
+    motivation_dim = dimensions["motivation"]
+    if radar_signals and isinstance(motivation_dim, dict):
+        for signal in radar_signals[:2]:
+            summary = str(signal.get("summary") or "").strip()
+            # 与公开信号同口径：摘要命中敏感词的整条不采（宁可不注，不进 artifact）
+            if not summary or scan_sensitive([summary]):
+                continue
+            urls = "；".join(str(url) for url in signal.get("source_urls") or [] if str(url or "").strip())
+            if not urls:
+                continue  # 红线：雷达信号作证据必须带来源链接
+            ref = f"{summary}（{signal.get('as_of')}，推测）｜来源：{urls}"
+            merged = _merge_evidence(motivation_dim.get("evidence") or [], [{"type": "雷达信号", "ref": ref}], limit=10)
+            motivation_dim["evidence"] = merged
+            radar_injected += 1
+        if radar_injected:
+            # 雷达信号是公开信息推测：注入后 confidence 封顶 inferred（无论信号自报置信度）
+            motivation_dim["confidence"] = "inferred"
+    signal_stats["radar_signals"] = {"matched": len(radar_signals), "injected": radar_injected}
 
     # ------------------------------------------------------------------
     # S6-3 风险点（需要核实的问题）：确定性检出（gap/频繁跳动/时间线冲突/硬条件差距）

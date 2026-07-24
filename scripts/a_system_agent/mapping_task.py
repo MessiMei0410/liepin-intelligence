@@ -54,8 +54,12 @@ from .workflow import _mask_candidate_name
 ARTIFACT_TYPE = "mapping_task"
 SCHEMA_VERSION = "mapping_v1"
 
-TRIGGERS = ("decision_tree_exhausted", "manual")
-TRIGGER_LABELS = {"decision_tree_exhausted": "扩池决策树末端（池已尽）", "manual": "顾问手动发起"}
+TRIGGERS = ("decision_tree_exhausted", "manual", "radar")
+TRIGGER_LABELS = {
+    "decision_tree_exhausted": "扩池决策树末端（池已尽）",
+    "manual": "顾问手动发起",
+    "radar": "人才流动雷达榜单发起（公司近况信号联动）",
+}
 CANDIDATE_STATUSES = ("pending", "confirmed", "contacted", "replied", "intaken", "parked", "rejected")
 # PRD §2 evidence.type 枚举（图谱/官网/公众号/招聘JD/脉脉）；专利/论文证据只进候选 source_urls，
 # 团队证据沿用 PRD 枚举，不另造类型。
@@ -146,7 +150,9 @@ def validate_mapping_task(doc: Any) -> list[str]:
         errors.append(f"trigger 必须是 {'/'.join(TRIGGERS)}")
     if not isinstance(doc.get("job_id"), int) or int(doc.get("job_id") or 0) <= 0:
         errors.append("job_id 必须是正整数")
-    if not str(doc.get("strategy_ref") or "").strip():
+    if not str(doc.get("strategy_ref") or "").strip() and doc.get("trigger") != "radar":
+        # S7-2：trigger=radar 允许 strategy_ref 为空（岗位暂无 strategy_v2 时按 null 处理，
+        # 由 artifact.stats.radar_context 注明）；其余 trigger 仍强制指向 strategy_v2。
         errors.append("strategy_ref 必须非空（指向 strategy_v2 artifact）")
 
     teams = doc.get("target_teams")
@@ -275,12 +281,17 @@ def locate_target_teams(
     archetype: dict[str, Any] | None = None,
     tiers: tuple[str, ...] = ("T1", "T2"),
     as_of: str = "",
+    radar_context: dict[str, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """目标团队定位器：策略 v2 step2_target_pool 的 T1/T2 公司 → 每家公司的目标团队。
 
     证据优先级：公司图谱已有信息（track/business/categories）→ 种子原型方向标注；
     二者都缺的公司仍进列表（confidence=low，团队名取策略 step1 岗位本质方向），
     缺失信息交采集器补充并在留痕说明，不编造。
+
+    S7-2：radar_context（雷达未过期信号，key=规范化公司名）只作团队定位的上下文输入——
+    有新鲜信号的公司优先排在目标团队列表前面（窗口期公司先挖），信号正文/链接
+    不进 target_teams 任何对外字段，只以计数形式进 trace。
     """
     as_of = as_of or _today()
     strategy_doc = strategy_doc if isinstance(strategy_doc, dict) else {}
@@ -348,7 +359,52 @@ def locate_target_teams(
     trace.append(
         f"团队定位：策略 T1/T2 公司 {len(teams)} 家（图谱直接命中 {graph_hits} 家，其余交采集器补充证据）"
     )
+    # S7-2：雷达信号上下文参与定位——窗口期公司（有未过期信号）排到目标团队列表前面。
+    # 只用"有无信号+条数"，信号正文/来源链接不进 target_teams 对外字段。
+    if radar_context:
+        signaled = [
+            team for team in teams
+            if _radar_context_signals(radar_context, str(team.get("company") or ""))
+        ]
+        if signaled:
+            order = {id(team): index for index, team in enumerate(teams)}
+            teams.sort(
+                key=lambda team: (
+                    0 if _radar_context_signals(radar_context, str(team.get("company") or "")) else 1,
+                    order[id(team)],
+                )
+            )
+            total_signals = sum(
+                len(_radar_context_signals(radar_context, str(team.get("company") or ""))) for team in signaled
+            )
+            trace.append(
+                f"雷达联动：{len(signaled)} 家目标公司有未过期雷达信号（共 {total_signals} 条），"
+                "已作为定位上下文优先排前；信号内容不进任务卡对外字段"
+            )
     return teams, trace
+
+
+def _radar_context_signals(radar_context: dict[str, list[dict[str, Any]]], company: str) -> list[dict[str, Any]]:
+    """按规范化公司名取雷达上下文信号；key 不匹配时退回别名包含匹配（宁可 miss 不可错配）。"""
+    if not radar_context or not company:
+        return []
+    norm = knowledge_base.normalize_client_name(company)
+    if not norm:
+        return []
+    direct = radar_context.get(norm)
+    if direct:
+        return list(direct)
+    raw = " ".join(str(company).split())
+    for key, signals in radar_context.items():
+        if not key:
+            continue
+        shorter, longer = sorted((norm, str(key)), key=len)
+        if len(shorter) >= 3 and shorter in longer:
+            return list(signals)
+        rule, _reason = knowledge_base.name_match_rule(raw, norm, str(key))
+        if rule:
+            return list(signals)
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -832,11 +888,16 @@ def build_mapping_task(
     banned: list[str] | tuple[str, ...] | None = None,
     kb_dir: str | None = None,
     as_of: str = "",
+    radar_context: dict[str, list[dict[str, Any]]] | None = None,
+    radar_company: str = "",
+    radar_scan_ref: str = "",
 ) -> dict[str, Any]:
     """组装 mapping_v1 文档：团队定位 → 线索采集 → 名单生成 → stats。
 
     banned=None 时按客户读 restricted 白名单（load_restricted_constraints）；
     显式传 [] 表示无禁挖（测试注入）。
+    S7-2：trigger=radar 时 radar_context（未过期雷达信号）注入团队定位上下文，
+    radar_company/radar_scan_ref 只以标记形式进 stats.radar_context（不含信号正文/链接）。
     """
     as_of = as_of or _today()
     if banned is None:
@@ -847,7 +908,7 @@ def build_mapping_task(
         restricted_trace = []
     banned = [str(item) for item in banned if str(item or "").strip()]
 
-    teams, trace = locate_target_teams(strategy_doc or {}, graph=graph, archetype=archetype, as_of=as_of)
+    teams, trace = locate_target_teams(strategy_doc or {}, graph=graph, archetype=archetype, as_of=as_of, radar_context=radar_context)
     trace.extend(restricted_trace)
 
     collector = collector or MappingCollector()
@@ -945,6 +1006,28 @@ def build_mapping_task(
             "后续确认入库走现有 preflight/commit 链路，Mapping 不写第二条 job_candidates",
         ],
     }
+    if trigger == "radar":
+        # S7-2 雷达联动标记（验收锚点）：只记公司名/计数/来源榜单 id，信号正文与链接不进 artifact。
+        pool_companies = [str(team.get("company") or "") for team in teams]
+        signaled = [
+            name for name in pool_companies if radar_context and _radar_context_signals(radar_context, name)
+        ]
+        radar_marker: dict[str, Any] = {
+            "applied": bool(radar_context),
+            "company": str(radar_company or ""),
+            "company_in_pool": any(
+                radar_company and _radar_context_signals({knowledge_base.normalize_client_name(radar_company): [{}]}, name)
+                for name in pool_companies
+            ) if radar_company else False,
+            "pool_companies_with_signals": len(signaled),
+            "signals_used": sum(len(_radar_context_signals(radar_context or {}, name)) for name in signaled),
+            "scan_artifact": str(radar_scan_ref or ""),
+            "note": "雷达信号只作团队定位上下文，信号内容不进任务卡对外字段",
+        }
+        if not str(strategy_ref or "").strip():
+            radar_marker["strategy_ref_missing"] = "该岗位暂无 strategy_v2，strategy_ref 按 null 处理"
+        doc["stats"]["radar_context"] = radar_marker
+        doc["red_lines"].append("雷达联动：信号仅作定位上下文， Mapping 名单红线不变（无来源不进名单、禁挖过滤、不自动触达）")
     return doc
 
 

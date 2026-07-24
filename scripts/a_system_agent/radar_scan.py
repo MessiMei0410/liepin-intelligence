@@ -1164,3 +1164,113 @@ def get_latest_radar_scan(conn: Any) -> dict[str, Any] | None:
         "radar_scan": doc,
         "created_at": str(record.get("created_at") or ""),
     }
+
+
+# ---------------------------------------------------------------------------
+# 7. S7-2 雷达联动读取侧：未过期信号查询（start-mapping 上下文 / 动机维度注入共用）
+# ---------------------------------------------------------------------------
+
+# PRD §3：信号有效期默认 60 天，过期信号自动降权不进榜单、不注入任何联动场景
+SIGNAL_VALIDITY_DAYS = 60
+
+_BRACKET_TOKEN = re.compile(r"[（(]([^（）()]{1,30})[）)]")
+
+
+def _company_alias_tokens(name: str) -> list[str]:
+    """公司名匹配用别名 token：原名 + 括号内别名（如 "美国芯源系统有限公司 (MPS)" → MPS）。
+
+    规范化（normalize_client_name）会剥掉括号内容，纯英文别名（MPS）会丢，
+    这里显式保留，保证雷达信号公司 "MPS" 能命中人才库 "美国芯源系统有限公司 (MPS)"。
+    """
+    raw = " ".join(str(name or "").split())
+    tokens = [raw] if raw else []
+    for token in _BRACKET_TOKEN.findall(str(name or "")):
+        text = token.strip()
+        if text and text not in tokens:
+            tokens.append(text)
+    return tokens
+
+
+def company_matches(signal_company: str, candidate_company: str) -> bool:
+    """雷达信号公司 vs 人才库/简历公司：原名 + 括号别名逐个过 name_match_rule（宁可 miss 不可错配）。"""
+    for token_a in _company_alias_tokens(signal_company):
+        norm_a = knowledge_base.normalize_client_name(token_a)
+        if not norm_a:
+            continue
+        for token_b in _company_alias_tokens(candidate_company):
+            rule, _reason = knowledge_base.name_match_rule(" ".join(token_a.split()), norm_a, token_b)
+            if rule:
+                return True
+    return False
+
+
+def load_unexpired_signals(
+    conn: Any,
+    *,
+    today: Any = None,
+    validity_days: int = SIGNAL_VALIDITY_DAYS,
+) -> tuple[list[dict[str, Any]], str]:
+    """最新雷达榜单的未过期信号（as_of 距今 ≤60 天）；返回 (signals, scan_artifact_id)。
+
+    无榜单 / 表缺失 / 日期解析失败一律按空列表处理（联动场景降级为无信号，绝不补造）。
+    """
+    from datetime import date as _date
+    from datetime import timedelta
+
+    payload = get_latest_radar_scan(conn)
+    if payload is None:
+        return [], ""
+    doc = payload.get("radar_scan") or {}
+    if isinstance(today, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", today):
+        today_date = _date.fromisoformat(today)
+    elif isinstance(today, _date):
+        today_date = today
+    else:
+        today_date = _date.today()
+    cutoff = today_date - timedelta(days=max(1, int(validity_days)))
+    signals: list[dict[str, Any]] = []
+    for signal in doc.get("signals") or []:
+        if not isinstance(signal, dict):
+            continue
+        try:
+            as_of_date = _date.fromisoformat(str(signal.get("as_of") or ""))
+        except ValueError:
+            continue
+        if as_of_date >= cutoff:
+            signals.append(signal)
+    return signals, str(payload.get("artifact_id") or "")
+
+
+def radar_signals_for_company(conn: Any, company: str, *, today: Any = None) -> list[dict[str, Any]]:
+    """某公司在最新榜单里的未过期信号（动机维度注入用）；无榜单/无信号返回空列表。"""
+    name = str(company or "").strip()
+    if not name:
+        return []
+    signals, _artifact_id = load_unexpired_signals(conn, today=today)
+    return [signal for signal in signals if company_matches(str(signal.get("company") or ""), name)]
+
+
+def radar_context_by_company(conn: Any, *, today: Any = None) -> tuple[dict[str, list[dict[str, Any]]], str]:
+    """start-mapping 团队定位上下文：{规范化公司名: [信号摘要...]}，只含定位所需字段。
+
+    刻意不带 source_urls：上下文只提升定位质量，信号正文/链接不进 mapping_task 对外字段
+    （任务卡 S7-2 硬约束）；返回 (context, scan_artifact_id)，无榜单时 ({}, "")。
+    """
+    signals, artifact_id = load_unexpired_signals(conn, today=today)
+    context: dict[str, list[dict[str, Any]]] = {}
+    for signal in signals:
+        company = str(signal.get("company") or "").strip()
+        norm = knowledge_base.normalize_client_name(company)
+        if not norm:
+            continue
+        context.setdefault(norm, []).append(
+            {
+                "type": str(signal.get("type") or ""),
+                "summary": str(signal.get("summary") or ""),
+                "implication": str(signal.get("implication") or ""),
+                "as_of": str(signal.get("as_of") or ""),
+                "confidence": str(signal.get("confidence") or ""),
+                "linked_action": str(signal.get("linked_action") or ""),
+            }
+        )
+    return context, artifact_id

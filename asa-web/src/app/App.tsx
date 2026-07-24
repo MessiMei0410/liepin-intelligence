@@ -8,6 +8,7 @@ import { Overview } from '../pages/Overview'
 import { Jobs } from '../pages/Jobs'
 import { Candidates } from '../pages/Candidates'
 import { Progress } from '../pages/Progress'
+import { RadarPage } from '../pages/Radar'
 import { JobPanel } from '../panels/JobPanel'
 import { CandidatePanel } from '../panels/CandidatePanel'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
@@ -162,6 +163,7 @@ export function App() {
         {tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
         {tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
         {tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
+        {tab === 'radar' && <RadarPage jobs={jobs} />}
       </div>
     </main>
     {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}

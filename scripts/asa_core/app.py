@@ -95,6 +95,13 @@ class RadarScanCreate(WriteEnvelope):
     pass
 
 
+class RadarStartMappingCreate(WriteEnvelope):
+    # S7-2：对最新雷达榜单里的一家公司发起 Mapping 直挖（trigger=radar 由后端锚定，前端不传）。
+    # 同日幂等：同岗位同公司当天重复发起返回已存在任务卡，不重复创建。
+    company: str = Field(min_length=1)
+    job_id: int = Field(gt=0)
+
+
 class AssessmentAdvisorActionPatch(WriteEnvelope):
     # S6-1b：判人评估顾问动作写回；action 四枚举（非法 → 409），note 选填（改判时附口径）。
     action: str = Field(min_length=1)
@@ -366,6 +373,21 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def radar_scan_latest() -> dict[str, Any]:
         # S7-1：读最新雷达榜单；尚无扫描 → 404（LookupError 全局映射）
         return core.get_latest_radar_scan()
+
+    @app.post("/api/v1/radar/scans/latest/actions/start-mapping")
+    def radar_start_mapping(body: RadarStartMappingCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S7-2：榜单一键发起 Mapping——trigger=radar 由后端锚定（前端不传 trigger），
+        # 目标团队定位注入该公司未过期雷达信号上下文（信号内容不进 artifact 对外字段）。
+        # 走 execute_idempotent 幂等 + 审计；同日同公司重复发起返回已存在任务卡（不重复建 task）。
+        # 红线沿用 S5：无来源不进名单、禁挖过滤、不自动触达。
+        return idem("radar.start_mapping", body, idempotency_key, "radar", f"mapping:{body.job_id}:{body.company}",
+                    lambda: core.start_mapping_from_radar(body.company, body.job_id))
+
+    @app.get("/api/v1/radar/scans/latest/actions/activate")
+    def radar_activate(company: str = Query(..., min_length=1)) -> dict[str, Any]:
+        # S7-2：激活存量人选——人才库该公司现职/曾任职候选清单（现职优先），只读不写库，
+        # 动作由顾问本人执行；尚无雷达榜单 → 404（LookupError 全局映射）
+        return core.activate_radar_company(company)
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:
