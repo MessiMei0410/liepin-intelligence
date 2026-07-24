@@ -234,6 +234,11 @@ def _fake_llm(result: dict | None = None) -> FakeLLM:
     return FakeLLM({}, trajectory=result if result is not None else GOOD_LLM)
 
 
+def _stub_fetcher(url: str, timeout: float) -> tuple[int, str, str]:
+    """S6-2 公司近况采集 stub：测试绝不真实外呼网络。"""
+    return (0, "", "network_error")
+
+
 # ---------------------------------------------------------------------------
 # 1. schema 校验 + 幂等 upsert
 # ---------------------------------------------------------------------------
@@ -244,7 +249,7 @@ def _valid_doc(**overrides) -> dict:
         "candidate_id": 1,
         "job_id": 154,
         "as_of": "2026-07-24 10:00:00",
-        "assessor_version": "s6-trajectory-v1",
+        "assessor_version": "s6-2-v1",
         "model": "fake-agent-v1",
         "strategy_ref": "artifact_strategy_154",
         "dimensions": {
@@ -269,8 +274,29 @@ def _valid_doc(**overrides) -> dict:
                 ],
                 "current_move": "lateral",
             },
-            "percentile": None,
-            "motivation": None,
+            "percentile": {
+                "verdict": "同方向参照人群 N=10，该人选落位前 25%",
+                "band": "top25",
+                "basis": "fit_score",
+                "score": 88,
+                "percentile_rank": 0.8,
+                "reference": {"n": 10, "direction": "技术市场", "years_window": 3, "median": 67.5,
+                              "q25": 56.2, "q75": 78.8, "min": 45, "max": 95,
+                              "sample_sufficient": True, "min_n": 8, "note": ""},
+                "evidence": [{"type": "知识库", "ref": "历史人选库参照系：同方向（技术市场）±3年 样本N=10，既有评估中位分67.5（P25=56.2，P75=78.8）"}],
+                "confidence": "certain",
+            },
+            "motivation": {
+                "verdict": "在职时长已超其历史平均任期，存在变动的可能",
+                "signals": [
+                    {"kind": "tenure_over_avg", "source": "简历工况",
+                     "summary": "当前任职已 65 个月，明显超过其历史平均任期 46.0 个月", "as_of": "2026-07-24"},
+                    {"kind": "funding", "source": "公开信息",
+                     "summary": "杰华特微电子股份有限公司：公司完成新一轮融资", "url": "https://www.joulwatt.com/news", "as_of": "2026-07-24"},
+                ],
+                "evidence": [{"type": "公开信息", "ref": "https://www.joulwatt.com/news"}],
+                "confidence": "certain",
+            },
             "risks": None,
         },
         "consultant_summary": "轨迹清晰，跳槽质量高。",
@@ -295,9 +321,9 @@ class SchemaValidationTest(unittest.TestCase):
 
     def test_placeholder_dimensions_must_be_null(self) -> None:
         doc = _valid_doc()
-        doc["dimensions"]["percentile"] = {"verdict": "前25%"}
+        doc["dimensions"]["risks"] = {"verdict": "有风险"}
         errors = candidate_assessment.validate_assessment(doc)
-        assert any("percentile" in error and "占位" in error for error in errors)
+        assert any("risks" in error and "占位" in error for error in errors)
 
     def test_two_dimensions_structure(self) -> None:
         doc = _valid_doc()
@@ -466,7 +492,7 @@ class SensitiveScanTest(DbCase):
         try:
             with self.assertRaises(ValueError) as ctx:
                 candidate_assessment.run_assessment(
-                    conn, candidate_id=1, job_id=154, llm=_fake_llm(induced), kb_dir=str(self.kb_dir)
+                    conn, candidate_id=1, job_id=154, llm=_fake_llm(induced), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
                 )
             assert "敏感" in str(ctx.exception)
             row = conn.execute(
@@ -490,7 +516,7 @@ class SensitiveScanTest(DbCase):
         try:
             with self.assertRaises(ValueError):
                 candidate_assessment.run_assessment(
-                    conn, candidate_id=1, job_id=154, llm=_fake_llm(banned), kb_dir=str(self.kb_dir)
+                    conn, candidate_id=1, job_id=154, llm=_fake_llm(banned), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
                 )
             row = conn.execute(
                 "SELECT 1 FROM agent_artifacts WHERE artifact_type=?", (candidate_assessment.ARTIFACT_TYPE,)
@@ -508,7 +534,7 @@ class SensitiveScanTest(DbCase):
         conn = self.connect()
         try:
             doc = candidate_assessment.run_assessment(
-                conn, candidate_id=1, job_id=154, llm=_fake_llm(raw), kb_dir=str(self.kb_dir)
+                conn, candidate_id=1, job_id=154, llm=_fake_llm(raw), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
             )
             refs = [item["ref"] for item in doc["dimensions"]["trajectory"]["evidence"]]
             assert "个人情况：41岁 已婚已育 家庭稳定" not in refs, "含敏感词的简历引用必须剥离"
@@ -532,7 +558,7 @@ class RunAssessmentTest(DbCase):
                 candidate_id=1,
                 job_id=154,
                 llm=_fake_llm(),
-                kb_dir=str(self.kb_dir),
+                kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher,
                 mask_name=lambda value: str(value or "")[:1] + "**",
             )
         finally:
@@ -553,8 +579,13 @@ class RunAssessmentTest(DbCase):
         for key in ("direction", "platform", "title_direction", "responsibility_direction"):
             assert move[key] in {"up", "lateral", "down"}
         assert move_history["current_move"] in {"up", "lateral", "down", "unknown"}
-        for name in ("percentile", "motivation", "risks"):
-            assert doc["dimensions"][name] is None, f"{name} 本期必须留空占位"
+        for name in ("percentile", "motivation"):
+            dim = doc["dimensions"][name]
+            assert isinstance(dim, dict) and dim["verdict"], f"{name} 本期必须填充（S6-2）"
+            assert dim["confidence"] in {"certain", "inferred"}
+        assert doc["dimensions"]["percentile"]["band"] in {None, "top10", "top25", "median", "below"}
+        assert isinstance(doc["dimensions"]["motivation"]["signals"], list)
+        assert doc["dimensions"]["risks"] is None, "risks 本期仍留空占位（S6-3）"
         assert candidate_assessment.validate_assessment(doc) == []
 
     def test_run_assessment_mismatch_and_no_resume(self) -> None:
@@ -563,11 +594,11 @@ class RunAssessmentTest(DbCase):
         try:
             with self.assertRaises(LookupError):
                 candidate_assessment.run_assessment(
-                    conn, candidate_id=1, job_id=137, llm=_fake_llm(), kb_dir=str(self.kb_dir)
+                    conn, candidate_id=1, job_id=137, llm=_fake_llm(), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
                 )
             with self.assertRaises(LookupError):
                 candidate_assessment.run_assessment(
-                    conn, candidate_id=999, job_id=154, llm=_fake_llm(), kb_dir=str(self.kb_dir)
+                    conn, candidate_id=999, job_id=154, llm=_fake_llm(), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
                 )
         finally:
             conn.close()
@@ -579,7 +610,7 @@ class RunAssessmentTest(DbCase):
             conn.commit()
             with self.assertRaises(ValueError):
                 candidate_assessment.run_assessment(
-                    conn, candidate_id=9, job_id=154, llm=_fake_llm(), kb_dir=str(self.kb_dir)
+                    conn, candidate_id=9, job_id=154, llm=_fake_llm(), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
                 )
         finally:
             conn.close()
@@ -598,6 +629,8 @@ class AssessmentApiTest(DbCase):
         )
         app = create_app(db_path=self.db_path, start_legacy=False)
         app.state.core.agent_service.llm = _fake_llm()
+        # S6-2 公司近况采集走网络：测试一律 stub，绝不真实外呼
+        app.state.core.agent_service.assessment_signal_fetcher = lambda url, timeout: (0, "", "network_error")
         with TestClient(app) as client:
             # 404：人选不存在 / 人选不属于该岗位 / 尚无评估
             missing = client.post(
@@ -623,7 +656,8 @@ class AssessmentApiTest(DbCase):
             assert payload["ok"] is True and payload["artifact_id"] == "candidate_assessment_1_154"
             assert payload["receipt"]["idempotent_replay"] is False
             doc = payload["assessment"]
-            assert doc["dimensions"]["percentile"] is None
+            assert isinstance(doc["dimensions"]["percentile"], dict), "S6-2 起 percentile 必须填充"
+            assert isinstance(doc["dimensions"]["motivation"], dict), "S6-2 起 motivation 必须填充"
             assert doc["dimensions"]["trajectory"]["confidence"] == "certain"
             assert "*" in doc["candidate_name_masked"], "评估输出姓名必须遮罩"
 
@@ -722,7 +756,7 @@ class ReplayTest(DbCase):
         self._seed_pool()
         out_dir = Path(self.db_temp.name) / "work" / "assessment_replay"
         summary = assessment_replay.run_replay(
-            self.db_path, 154, limit=5, out_dir=out_dir, llm=_fake_llm(), kb_dir=str(self.kb_dir)
+            self.db_path, 154, limit=5, out_dir=out_dir, llm=_fake_llm(), kb_dir=str(self.kb_dir), signal_fetcher=_stub_fetcher
         )
         assert summary["attempted"] == 5 and summary["generated"] == 5, summary
         trace = summary["sample_trace"]

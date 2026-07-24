@@ -1,16 +1,24 @@
-"""S6-1：判人评估器 —— candidate_assessment artifact（职业轨迹 + 跳槽质量史）。
+"""S6-1/S6-2：判人评估器 —— candidate_assessment artifact（轨迹/跳槽史/水平分位/动机时机）。
 
-口径来源：docs/TASKCARD_S6-1_判人评估器_轨迹与跳槽史_20260724.md + PRD §2/§3/§5。
+口径来源：docs/TASKCARD_S6-1_判人评估器_轨迹与跳槽史_20260724.md + PRD §2/§3/§5（S6-2 行）。
 
 架构（LLM 角色 vs 确定性校验）：
 - LLM 只做"资深顾问式"判断（verdict/segments/moves/summary），输入为简历原文 + strategy_v2
-  + 确定性预匹配的图谱命中（graph_hits）。
+  + 确定性预匹配的图谱命中（graph_hits）；S6-2 两维 LLM 只把确定性算好的 band/信号读成顾问口径。
+- S6-2 水平分位：参照池抽取/年限过滤/分位 rank/band 全部由 assessment_signals 确定性计算并
+  强制写入 artifact，模型永不可能改 band；N < 8（默认阈值）→ confidence=inferred 注明样本不足。
+- S6-2 动机时机：信号确定性产出——a) 简历工况（在职时长 vs 历史平均任期、近一年简历更新）；
+  b) 公司近况公开信号（只读采集，每条带来源 URL 与 as_of，失败记 stats）；c) 无信号如实
+  "未见明显变动信号" + inferred。不推断个人隐私。
 - 写入前必过确定性校验层（不过闸不落库）：
   1) 证据强约束：type=简历 的 ref 必须逐字存在于该候选人语料（原文包含校验，失败剥离）；
      type=图谱 的 ref 必须解析到本评估实际命中的图谱条目（公司名规范化匹配，失败剥离）；
-     本期无知识库/公开信息证据源，其他 type 一律剥离。某维 evidence 归零 → confidence 强制 inferred。
+     type=知识库 的 ref 必须等于本评估实际生成的参照系摘要串（白名单，防编造）；
+     type=公开信息 的 ref 必须等于本评估实际采集到的来源 URL（白名单，防编造）。
+     某维 evidence 归零 → confidence 强制 inferred。
   2) 敏感属性负向扫描：verdict/summary/segments/moves 等 LLM 生成文本命中年龄/性别/婚育/户籍
-     词表 → 整条拒写（ValueError）并记扫描日志（candidate_events）；简历逐字引用命中 → 剥离该条。
+     词表 → 整条拒写（ValueError）并记扫描日志（candidate_events）；简历逐字引用命中 → 剥离该条；
+     公开信号摘要命中 → 丢弃该条信号（公开页内容不可控，宁可不采）。
   3) 决策字眼拦截："建议淘汰/不建议推荐"类 → 拒写。
   4) 图谱未命中的公司 tier_source 一律强制 inferred（不瞎编）。
 
@@ -22,18 +30,18 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Callable
 
-from . import knowledge_base
+from . import assessment_signals, knowledge_base
 from .llm import BaseLLM, LLMError
 
 ARTIFACT_TYPE = "candidate_assessment"
 SCHEMA_VERSION = "assessment_v1"
-ASSESSOR_VERSION = "s6-trajectory-v1"
+ASSESSOR_VERSION = "s6-2-v1"
 
-DIMENSIONS_IMPLEMENTED = ("trajectory", "move_history")
-DIMENSIONS_PLACEHOLDER = ("percentile", "motivation", "risks")
+DIMENSIONS_IMPLEMENTED = ("trajectory", "move_history", "percentile", "motivation")
+DIMENSIONS_PLACEHOLDER = ("risks",)
 
 # 顾问动作（采纳/改判/否决）：经 PATCH advisor-action 写回 artifact，version 不 bump。
 ADVISOR_ACTIONS = ("pending", "accepted", "modified", "rejected")
@@ -46,7 +54,9 @@ _PACE = {"fast", "normal", "slow", "unknown"}
 _EVOLUTION = {"rising", "lateral", "stagnant", "unknown"}
 _DIRECTION = {"up", "lateral", "down"}
 _MOVE_UNKNOWN = {"up", "lateral", "down", "unknown"}
-_EVIDENCE_TYPES = {"简历", "图谱"}
+_BANDS = set(assessment_signals.BANDS)
+_PERCENTILE_BASIS = {"fit_score", "trajectory_features"}
+_EVIDENCE_TYPES = {"简历", "图谱", "知识库", "公开信息"}
 
 # 决策类禁语（评估只辅助不决策）：出现在生成文本里 → 拒写。
 _BANNED_DECISION_PATTERNS = [
@@ -67,6 +77,8 @@ _CORPUS_FIELDS = ("full_text", "work_text", "project_text", "education_text", "p
 LABELS = {
     "trajectory": "职业轨迹",
     "move_history": "跳槽质量史",
+    "percentile": "在同龄人里的位置",
+    "motivation": "动机与时机",
     "inferred": "推测",
     "certain": "确定",
     "up": "上升",
@@ -81,6 +93,12 @@ LABELS = {
     "T1": "头部",
     "T2": "腰部",
     "T3": "长尾",
+    "top10": "前 10%",
+    "top25": "前 25%",
+    "median": "中位区间",
+    "below": "相对靠后",
+    "fit_score": "既有评估得分",
+    "trajectory_features": "轨迹特征分",
 }
 
 
@@ -139,7 +157,11 @@ def scan_banned_decision(texts: list[str]) -> list[str]:
 
 
 def generated_texts(doc: dict[str, Any]) -> list[str]:
-    """收集 artifact 中全部 LLM 生成文本（verdict/summary/segments/moves 描述字段）。"""
+    """收集 artifact 中全部 LLM 生成文本（verdict/summary/segments/moves 描述字段）。
+
+    注：motivation.signals 的 summary 是确定性数据（工况计算/公开页原文摘录），不是 LLM 文本，
+    不进本扫描；公开信号摘要在采集侧单独过敏感词丢弃（见 run_assessment）。
+    """
     texts: list[str] = []
     dimensions = doc.get("dimensions") if isinstance(doc.get("dimensions"), dict) else {}
     for name in DIMENSIONS_IMPLEMENTED:
@@ -191,11 +213,19 @@ def verify_evidence(
     *,
     corpus: str,
     graph_names: list[str],
+    kb_refs: list[str] | None = None,
+    url_refs: list[str] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """校验一组 evidence；返回 (保留, 剥离)，剥离含原因，全部留痕。"""
+    """校验一组 evidence；返回 (保留, 剥离)，剥离含原因，全部留痕。
+
+    知识库 ref 必须逐字等于本评估实际生成的参照系摘要串；公开信息 ref 必须逐字等于
+    本评估实际采集到的来源 URL——两者都是白名单精确匹配，模型编造的引用过不了闸。
+    """
     kept: list[dict[str, str]] = []
     stripped: list[dict[str, str]] = []
     items = evidence if isinstance(evidence, list) else []
+    kb_whitelist = {str(ref) for ref in (kb_refs or []) if str(ref or "").strip()}
+    url_whitelist = {str(ref) for ref in (url_refs or []) if str(ref or "").strip()}
     for item in items:
         if not isinstance(item, dict):
             stripped.append({"type": "", "ref": str(item)[:80], "reason": "evidence 结构非法"})
@@ -213,8 +243,18 @@ def verify_evidence(
                 kept.append({"type": etype, "ref": matched})
             else:
                 stripped.append({"type": etype, "ref": ref[:120], "reason": "图谱引用未解析到本评估命中的真实条目"})
+        elif etype == "知识库":
+            if ref in kb_whitelist:
+                kept.append({"type": etype, "ref": ref})
+            else:
+                stripped.append({"type": etype, "ref": ref[:120], "reason": "知识库引用非本评估实际生成的参照系摘要"})
+        elif etype == "公开信息":
+            if ref in url_whitelist:
+                kept.append({"type": etype, "ref": ref})
+            else:
+                stripped.append({"type": etype, "ref": ref[:120], "reason": "公开信息引用非本评估实际采集的来源 URL"})
         else:
-            stripped.append({"type": etype or "未标注", "ref": ref[:120], "reason": "本期证据类型仅支持 简历/图谱"})
+            stripped.append({"type": etype or "未标注", "ref": ref[:120], "reason": "证据类型仅支持 简历/图谱/知识库/公开信息"})
     return kept, stripped
 
 
@@ -378,11 +418,146 @@ def normalize_llm_result(
         "current_move": _enum(raw_moves.get("current_move"), _MOVE_UNKNOWN, "unknown"),
     }
 
+    dimensions["percentile"] = None  # S6-2：由 build_s62_dimensions 填充
+    dimensions["motivation"] = None  # S6-2：由 build_s62_dimensions 填充
     for name in DIMENSIONS_PLACEHOLDER:
-        dimensions[name] = None  # S6-2/3 填充，本期留空占位
+        dimensions[name] = None  # S6-3 填充，本期留空占位
 
     summary = " ".join(str(raw.get("consultant_summary") or "").split())[:600]
     return dimensions, summary, stats
+
+
+# ---------------------------------------------------------------------------
+# S6-2：水平分位 + 动机时机（落位/信号确定性，LLM 只读成顾问口径 verdict）
+# ---------------------------------------------------------------------------
+
+def _percentile_template_verdict(placement: dict[str, Any], *, direction: str, years_window: int | None) -> str:
+    """LLM 未给 verdict 时的确定性模板（band 本身就是确定性计算结果，话术同样可模板化）。"""
+    if placement.get("band") is None:
+        return "历史参照样本为空，无法给出在同龄人里的位置判断，建议结合面试实地判断。"
+    window = f"±{years_window}年" if years_window is not None else "不限年限"
+    base = f"同方向（{direction}）{window}参照人群 N={placement['n']}（既有评估中位分 {placement.get('median')}）"
+    insufficient = "" if placement.get("sample_sufficient") else f"参照样本不足（N<{placement.get('min_n', 8)}），谨慎参考："
+    if placement["band"] == "top10":
+        return f"{insufficient}{base}，该人选落位前 10%，属于同龄人里的第一梯队。"
+    if placement["band"] == "top25":
+        return f"{insufficient}{base}，该人选落位前 25%，高于多数同方向同龄人。"
+    if placement["band"] == "median":
+        return f"{insufficient}{base}，该人选落位中位区间，处于同方向同龄人的中间位置。"
+    return f"{insufficient}{base}，该人选落位相对靠后，建议结合面试再核实真实水平。"
+
+
+def _motivation_template_verdict(signals: list[dict[str, Any]]) -> str:
+    """无信号时如实"未见明显变动信号"（红线 c）；有信号时列信号、诉求留面谈。"""
+    if not signals:
+        return (
+            "未见明显变动信号：在职工况与其历史节奏未见显著偏离，也未采集到公司近况的公开变动信号；"
+            "动机与时机需面谈核实。"
+        )
+    parts = [str(sig.get("summary") or "") for sig in signals[:2] if str(sig.get("summary") or "").strip()]
+    return "变动信号：" + "；".join(parts) + "。动的可能性与真实诉求需结合面谈核实。"
+
+
+def _merge_evidence(*groups: list[dict[str, str]], limit: int = 8) -> list[dict[str, str]]:
+    """确定性证据 + LLM 校验后证据合并去重（按 type+ref），限量。"""
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for item in group:
+            key = (str(item.get("type") or ""), str(item.get("ref") or ""))
+            if key in seen or not key[0] or not key[1]:
+                continue
+            seen.add(key)
+            merged.append({"type": key[0], "ref": key[1]})
+        if len(merged) >= limit:
+            break
+    return merged[:limit]
+
+
+def build_s62_dimensions(
+    raw_pm: dict[str, Any] | None,
+    *,
+    corpus: str,
+    placement: dict[str, Any],
+    basis: str,
+    direction: str,
+    years_window: int | None,
+    signals: list[dict[str, Any]],
+    stats: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """组装 percentile/motivation 两维；band/signals 由确定性侧强制写入，LLM 只提供 verdict。
+
+    raw_pm=None（模型不可用/输出非法）→ 两维 verdict 用确定性模板，并在 stats 记 fallback。
+    证据：percentile 挂知识库参照系摘要（白名单唯一合法值）；motivation 挂公开信号 URL +
+    工况信号所在简历行（逐字校验）。LLM 返回的证据过同一道 verify_evidence 闸。
+    """
+    raw_pm = raw_pm if isinstance(raw_pm, dict) else {}
+    kb_ref = assessment_signals.reference_summary_text(placement, direction=direction, years_window=years_window)
+    url_refs = [str(sig.get("url")) for sig in signals if sig.get("source") == "公开信息" and sig.get("url")]
+
+    raw_percentile = raw_pm.get("percentile") if isinstance(raw_pm.get("percentile"), dict) else {}
+    kept, dropped = verify_evidence(
+        raw_percentile.get("evidence"), corpus=corpus, graph_names=[], kb_refs=[kb_ref], url_refs=url_refs
+    )
+    stats["kept"] += len(kept)
+    stats["stripped"] += len(dropped)
+    stats["stripped_detail"].extend(dropped)
+    evidence = _merge_evidence([{"type": "知识库", "ref": kb_ref}], kept)
+    confidence = _enum(raw_percentile.get("confidence"), _CONFIDENCE, "inferred")
+    # 确定性闸：无法落位 / 参照样本不足 → 强制 inferred 并注明样本不足
+    if placement.get("band") is None or not placement.get("sample_sufficient"):
+        confidence = "inferred"
+    if not evidence:
+        confidence = "inferred"
+    percentile = {
+        "verdict": _clean_text(raw_percentile.get("verdict"), 300)
+        or _percentile_template_verdict(placement, direction=direction, years_window=years_window),
+        "band": placement.get("band"),
+        "basis": basis,
+        "score": placement.get("score"),
+        "percentile_rank": placement.get("percentile_rank"),
+        "reference": {
+            "n": placement.get("n"),
+            "direction": direction,
+            "years_window": years_window,
+            "median": placement.get("median"),
+            "q25": placement.get("q25"),
+            "q75": placement.get("q75"),
+            "min": placement.get("min"),
+            "max": placement.get("max"),
+            "sample_sufficient": bool(placement.get("sample_sufficient")),
+            "min_n": placement.get("min_n"),
+            "note": "" if placement.get("sample_sufficient") else "参照样本不足，结论按推测口径",
+        },
+        "evidence": evidence,
+        "confidence": confidence,
+    }
+
+    raw_motivation = raw_pm.get("motivation") if isinstance(raw_pm.get("motivation"), dict) else {}
+    kept, dropped = verify_evidence(
+        raw_motivation.get("evidence"), corpus=corpus, graph_names=[], kb_refs=[kb_ref], url_refs=url_refs
+    )
+    stats["kept"] += len(kept)
+    stats["stripped"] += len(dropped)
+    stats["stripped_detail"].extend(dropped)
+    deterministic_evidence: list[dict[str, str]] = []
+    for sig in signals:
+        if sig.get("source") == "公开信息" and sig.get("url"):
+            deterministic_evidence.append({"type": "公开信息", "ref": str(sig["url"])})
+        elif sig.get("evidence_line") and _verbatim_hit(str(sig["evidence_line"]), corpus):
+            deterministic_evidence.append({"type": "简历", "ref": str(sig["evidence_line"])})
+    evidence = _merge_evidence(deterministic_evidence, kept)
+    confidence = _enum(raw_motivation.get("confidence"), _CONFIDENCE, "inferred")
+    # 确定性闸：无信号 → 强制 inferred；证据归零 → 强制 inferred
+    if not signals or not evidence:
+        confidence = "inferred"
+    motivation = {
+        "verdict": _clean_text(raw_motivation.get("verdict"), 300) or _motivation_template_verdict(signals),
+        "signals": signals,
+        "evidence": evidence,
+        "confidence": confidence,
+    }
+    return percentile, motivation
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +614,40 @@ def validate_assessment(doc: Any) -> list[str]:
                 for key in ("direction", "platform", "title_direction", "responsibility_direction"):
                     if move.get(key) not in _DIRECTION:
                         errors.append(f"move_history.moves.{key} 枚举非法")
+    percentile = dimensions.get("percentile") if isinstance(dimensions.get("percentile"), dict) else {}
+    if percentile:
+        band = percentile.get("band")
+        reference = percentile.get("reference") if isinstance(percentile.get("reference"), dict) else {}
+        ref_n = reference.get("n")
+        if band is not None and band not in _BANDS:
+            errors.append("percentile.band 必须是 top10|top25|median|below（null 仅限参照样本为空）")
+        if band is None and ref_n != 0:
+            errors.append("percentile.band 为 null 仅限参照样本 N=0")
+        if not isinstance(ref_n, int) or ref_n < 0:
+            errors.append("percentile.reference.n 必须是非负整数")
+        elif ref_n < assessment_signals.MIN_REFERENCE_N and percentile.get("confidence") != "inferred":
+            errors.append("percentile 参照样本不足时 confidence 必须为 inferred")
+        if percentile.get("basis") not in _PERCENTILE_BASIS:
+            errors.append("percentile.basis 必须是 fit_score|trajectory_features")
+        rank = percentile.get("percentile_rank")
+        if rank is not None and not (isinstance(rank, (int, float)) and 0.0 <= float(rank) <= 1.0):
+            errors.append("percentile.percentile_rank 必须在 0-1 之间")
+    motivation = dimensions.get("motivation") if isinstance(dimensions.get("motivation"), dict) else {}
+    if motivation:
+        signals = motivation.get("signals")
+        if not isinstance(signals, list):
+            errors.append("motivation.signals 必须是数组")
+            signals = []
+        for signal in signals or []:
+            if not isinstance(signal, dict) or not str(signal.get("kind") or "").strip() or not str(signal.get("summary") or "").strip():
+                errors.append("motivation.signals 存在非法条目（缺 kind/summary）")
+                continue
+            if signal.get("source") == "公开信息" and (
+                not str(signal.get("url") or "").strip() or not str(signal.get("as_of") or "").strip()
+            ):
+                errors.append("motivation 公开信息信号必须带来源 URL 与 as_of")
+        if not signals and motivation.get("confidence") != "inferred":
+            errors.append("motivation 无信号时 confidence 必须为 inferred（如实『未见明显变动信号』）")
     for name in DIMENSIONS_PLACEHOLDER:
         if dimensions.get(name) is not None:
             errors.append(f"dimensions.{name} 本期必须为 null 占位")
@@ -534,6 +743,41 @@ def _artifact_markdown(doc: dict[str, Any]) -> str:
             f"/职责 {LABELS.get(move.get('responsibility_direction'), '平移')}）— {move.get('reason') or ''}"
         )
     lines.append(f"- 当前这一单对他：{LABELS.get(move_history.get('current_move'), '无法判断')}")
+    percentile = (doc.get("dimensions") or {}).get("percentile") or {}
+    if percentile:
+        lines.extend(["", "## 在同龄人里的位置", ""])
+        reference = percentile.get("reference") if isinstance(percentile.get("reference"), dict) else {}
+        window = f"±{reference.get('years_window')}年" if reference.get("years_window") is not None else "不限年限"
+        band_label = LABELS.get(percentile.get("band"), "无法落位") if percentile.get("band") else "无法落位"
+        lines.append(
+            f"**结论**：{percentile.get('verdict') or ''}"
+            f"（置信度：{LABELS.get(percentile.get('confidence'), percentile.get('confidence'))}）"
+        )
+        lines.append(
+            f"- 落位：{band_label}｜得分 {percentile.get('score')}（{LABELS.get(percentile.get('basis'), percentile.get('basis'))}）"
+        )
+        lines.append(
+            f"- 参照系：同方向（{reference.get('direction') or ''}）{window}｜样本 N={reference.get('n')}"
+            f"｜中位分 {reference.get('median')}（P25={reference.get('q25')}，P75={reference.get('q75')}）"
+            + (f"｜{reference.get('note')}" if reference.get("note") else "")
+        )
+    motivation = (doc.get("dimensions") or {}).get("motivation") or {}
+    if motivation:
+        lines.extend(["", "## 动机与时机", ""])
+        lines.append(
+            f"**结论**：{motivation.get('verdict') or ''}"
+            f"（置信度：{LABELS.get(motivation.get('confidence'), motivation.get('confidence'))}）"
+        )
+        for signal in motivation.get("signals") or []:
+            if signal.get("url"):
+                suffix = f"（来源：{signal.get('url')}，{signal.get('as_of')}）"
+            elif signal.get("as_of"):
+                suffix = f"（{signal.get('as_of')}）"
+            else:
+                suffix = ""
+            lines.append(f"- [{signal.get('source') or ''}] {signal.get('summary') or ''}{suffix}")
+        if not (motivation.get("signals") or []):
+            lines.append("- 未见明显变动信号")
     lines.extend(["", "## 证据", ""])
     for name in DIMENSIONS_IMPLEMENTED:
         dim = (doc.get("dimensions") or {}).get(name) or {}
@@ -781,9 +1025,14 @@ def persist_assessment(conn: sqlite3.Connection, doc: dict[str, Any]) -> str:
     stats = doc.get("evidence_stats") or {}
     trajectory = (doc.get("dimensions") or {}).get("trajectory") or {}
     move_history = (doc.get("dimensions") or {}).get("move_history") or {}
+    percentile = (doc.get("dimensions") or {}).get("percentile") or {}
+    motivation = (doc.get("dimensions") or {}).get("motivation") or {}
     summary = (
-        f"生成判人评估（职业轨迹/跳槽质量史）：置信度 "
-        f"{trajectory.get('confidence')}/{move_history.get('confidence')}，"
+        f"生成判人评估（职业轨迹/跳槽质量史/在同龄人里的位置/动机与时机）：置信度 "
+        f"{trajectory.get('confidence')}/{move_history.get('confidence')}/"
+        f"{percentile.get('confidence')}/{motivation.get('confidence')}，"
+        f"分位 {percentile.get('band') or '无法落位'}（参照 N={(percentile.get('reference') or {}).get('n')}），"
+        f"动机信号 {len(motivation.get('signals') or [])} 条，"
         f"证据 {stats.get('kept', 0)} 条（剥离 {stats.get('stripped', 0)} 条）。"
         "评估只辅助顾问判断，不构成决策建议。"
     )
@@ -821,12 +1070,18 @@ def run_assessment(
     llm: BaseLLM,
     kb_dir: str | None = None,
     mask_name: Any = None,
+    signal_fetcher: Callable[[str, float], tuple[int, str, str]] | None = None,
+    today: date | None = None,
 ) -> dict[str, Any]:
     """生成判人评估（不落库）：返回 doc；敏感扫描命中抛 ValueError（含 scan_blocked 标记）。
 
     LookupError：candidate/job 不存在或不匹配；ValueError：无简历语料 / 扫描命中；
     LLMError：模型不可用或输出非法（调用方映射 409）。
+    S6-2：分位落位与动机信号全部确定性计算（assessment_signals），LLM 第二调只读成
+    顾问口径 verdict；第二调失败降级为确定性模板 verdict（记 signal_stats），不阻断。
+    signal_fetcher/today 仅供测试与回测注入（默认真实采集 / 真实当天）。
     """
+    today = today or date.today()
     candidate = load_candidate_resume(conn, candidate_id)
     if candidate is None:
         raise LookupError(f"人选不存在：{candidate_id}")
@@ -894,6 +1149,106 @@ def run_assessment(
 
     dimensions, summary, stats = normalize_llm_result(raw, corpus=corpus, graph_hits=graph_hits)
 
+    # ------------------------------------------------------------------
+    # S6-2 水平分位：参照池抽取 + 确定性落位（band 由数据算，不许模型拍）
+    # ------------------------------------------------------------------
+    target_years = assessment_signals.parse_experience_years(candidate.get("experience"))
+    pool = assessment_signals.load_reference_pool(
+        conn,
+        job_id=int(job_id),
+        job_title=str(job_item.get("title") or ""),
+        target_years=target_years,
+        exclude_job_candidate_id=int(candidate_id),
+    )
+    fit_score = assessment_signals.load_target_fit_score(conn, int(candidate_id))
+    if fit_score is not None:
+        score, basis = fit_score, "fit_score"
+    else:
+        score = assessment_signals.trajectory_feature_score(dimensions["trajectory"], dimensions["move_history"])
+        basis = "trajectory_features"
+    placement = assessment_signals.compute_placement(score, [m["fit_score"] for m in pool["members"]])
+
+    # ------------------------------------------------------------------
+    # S6-2 动机与时机：a) 简历工况信号 b) 公司近况公开信号（带来源 URL）
+    # ------------------------------------------------------------------
+    latest_source = conn.execute(
+        "SELECT MAX(source_date) AS latest FROM source_profiles WHERE person_id=?",
+        (candidate.get("person_id"),),
+    ).fetchone()
+    work_text = str(resume.get("work_text") or "") or corpus
+    emp_signals, emp_facts = assessment_signals.employment_signals(
+        work_text, latest_source_date=(latest_source["latest"] if latest_source else None), today=today
+    )
+    company_signals, company_stats = assessment_signals.collect_company_signals(
+        current_company, fetcher=signal_fetcher, today=today
+    )
+    # 公开页内容不可控：信号摘要命中敏感词 → 丢弃该条信号（宁可不采，不进 artifact）
+    signals: list[dict[str, Any]] = list(emp_signals)
+    dropped_sensitive_signals = 0
+    for signal in company_signals:
+        if scan_sensitive([str(signal.get("summary") or "")]):
+            dropped_sensitive_signals += 1
+            continue
+        signals.append(signal)
+    signal_stats: dict[str, Any] = {
+        "company_collection": company_stats,
+        "employment_facts": {key: value for key, value in emp_facts.items() if key != "segments"},
+        "dropped_sensitive_signals": dropped_sensitive_signals,
+        "pm_llm": "ok",
+    }
+
+    # LLM 第二调：只把 band/信号读成顾问口径 verdict；失败降级确定性模板（不阻断）
+    pm_payload = {
+        "task": "判人评估：在同龄人里的位置 + 动机与时机（S6-2）",
+        "candidate": {
+            "current_company": current_company,
+            "current_title": str(candidate.get("current_title") or ""),
+            "experience": str(candidate.get("experience") or ""),
+        },
+        "job": {"client": str(job_item.get("client") or ""), "title": str(job_item.get("title") or "")},
+        "trajectory_brief": {
+            "promotion_pace": dimensions["trajectory"].get("promotion_pace"),
+            "tech_evolution": dimensions["trajectory"].get("tech_evolution"),
+            "moves": [str(move.get("direction") or "") for move in dimensions["move_history"].get("moves") or []],
+        },
+        "percentile": {
+            "band": placement.get("band"),
+            "score": placement.get("score"),
+            "basis": basis,
+            "percentile_rank": placement.get("percentile_rank"),
+            "reference": {
+                "direction": pool["direction"],
+                "years_window": pool["years_window"],
+                "n": placement.get("n"),
+                "median": placement.get("median"),
+                "q25": placement.get("q25"),
+                "q75": placement.get("q75"),
+                "sample_sufficient": placement.get("sample_sufficient"),
+            },
+        },
+        "employment_facts": signal_stats["employment_facts"],
+        "signals": signals,
+    }
+    try:
+        raw_pm = llm.assess_percentile_motivation(pm_payload)
+        if not isinstance(raw_pm, dict):
+            raise LLMError("分位/动机模型输出非 JSON 对象")
+    except LLMError:
+        raw_pm = None
+        signal_stats["pm_llm"] = "fallback_template"
+    percentile_dim, motivation_dim = build_s62_dimensions(
+        raw_pm,
+        corpus=corpus,
+        placement=placement,
+        basis=basis,
+        direction=pool["direction"],
+        years_window=pool["years_window"],
+        signals=signals,
+        stats=stats,
+    )
+    dimensions["percentile"] = percentile_dim
+    dimensions["motivation"] = motivation_dim
+
     masked = mask_name(candidate.get("display_name")) if callable(mask_name) else str(candidate.get("display_name") or "")
     doc: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -915,6 +1270,7 @@ def run_assessment(
             "stripped": stats["stripped"],
             "stripped_detail": stats["stripped_detail"],
         },
+        "signal_stats": signal_stats,
     }
 
     # 硬闸 1：决策禁语（拒写 + 扫描日志）

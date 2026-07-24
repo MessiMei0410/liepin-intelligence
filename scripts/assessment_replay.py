@@ -142,6 +142,37 @@ def render_person_markdown(index: int, person: dict[str, Any], doc: dict[str, An
             f" / 职责 {label.get(move.get('responsibility_direction'), '平移')}）— {move.get('reason') or ''}"
         )
     lines.append(f"- 当前这一单对他：{label.get(move_history.get('current_move'), '无法判断')}")
+    percentile = dimensions.get("percentile") or {}
+    if percentile:
+        reference = percentile.get("reference") if isinstance(percentile.get("reference"), dict) else {}
+        window = f"±{reference.get('years_window')}年" if reference.get("years_window") is not None else "不限年限"
+        band_label = label.get(percentile.get("band"), "无法落位") if percentile.get("band") else "无法落位"
+        lines.append(
+            f"\n### 在同龄人里的位置（置信度：{label.get(percentile.get('confidence'), percentile.get('confidence'))}）\n"
+        )
+        lines.append(f"**结论**：{percentile.get('verdict') or ''}\n")
+        lines.append(
+            f"- 落位：{band_label}｜得分 {percentile.get('score')}（{label.get(percentile.get('basis'), percentile.get('basis'))}）"
+            f"｜参照系：同方向（{reference.get('direction') or ''}）{window} N={reference.get('n')}"
+            f" 中位分 {reference.get('median')}"
+            + (f"｜{reference.get('note')}" if reference.get("note") else "")
+        )
+    motivation = dimensions.get("motivation") or {}
+    if motivation:
+        lines.append(
+            f"\n### 动机与时机（置信度：{label.get(motivation.get('confidence'), motivation.get('confidence'))}）\n"
+        )
+        lines.append(f"**结论**：{motivation.get('verdict') or ''}\n")
+        for signal in motivation.get("signals") or []:
+            if signal.get("url"):
+                suffix = f"（来源：{signal.get('url')}，{signal.get('as_of')}）"
+            elif signal.get("as_of"):
+                suffix = f"（{signal.get('as_of')}）"
+            else:
+                suffix = ""
+            lines.append(f"- [{signal.get('source') or ''}] {signal.get('summary') or ''}{suffix}")
+        if not (motivation.get("signals") or []):
+            lines.append("- 未见明显变动信号")
     lines.append("\n### 证据\n")
     for dim_name in candidate_assessment.DIMENSIONS_IMPLEMENTED:
         dim = dimensions.get(dim_name) or {}
@@ -167,8 +198,12 @@ def run_replay(
     out_dir: Path = DEFAULT_OUT_DIR,
     llm: BaseLLM | None = None,
     kb_dir: str | None = None,
+    signal_fetcher: Any = None,
 ) -> dict[str, Any]:
-    """回放主流程：抽样 → 逐人生成（写 artifact）→ 导出 markdown → 返回统计。"""
+    """回放主流程：抽样 → 逐人生成（写 artifact）→ 导出 markdown → 返回统计。
+
+    signal_fetcher：S6-2 公司近况采集器（默认真实只读采集；测试注入 stub 防真实网络）。
+    """
     llm = llm or create_default_llm()
     conn = _connect(db_path)
     try:
@@ -190,6 +225,7 @@ def run_replay(
                     llm=llm,
                     kb_dir=kb_dir,
                     mask_name=_mask_candidate_name,
+                    signal_fetcher=signal_fetcher,
                 )
                 artifact_id = candidate_assessment.persist_assessment(conn, doc)
                 conn.commit()
@@ -260,12 +296,14 @@ def run_replay(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="S6-1 判人评估回放：抽样 → 真实生成 → 导出盲评 markdown")
+    parser = argparse.ArgumentParser(description="S6-1/6-2 判人评估回放：抽样 → 真实生成 → 导出盲评 markdown")
     parser.add_argument("--db", default=DEFAULT_DB, help="v3 库路径（生产库回放 artifact 落库；可用备份库副本）")
     parser.add_argument("--job-id", type=int, action="append", required=True, help="岗位 id（可多次指定）")
     parser.add_argument("--limit", type=int, default=5, help="每岗位抽样人数（默认 5）")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="导出目录（默认 work/assessment_replay/）")
+    parser.add_argument("--no-company-signals", action="store_true", help="跳过公司近况公开采集（工况信号仍计算）")
     args = parser.parse_args()
+    fetcher = (lambda url, timeout: (0, "", "skipped_by_flag")) if args.no_company_signals else None
     summaries = []
     for job_id in args.job_id:
         summary = run_replay(
@@ -273,6 +311,7 @@ def main() -> int:
             job_id,
             limit=max(1, args.limit),
             out_dir=Path(args.out_dir).expanduser(),
+            signal_fetcher=fetcher,
         )
         summaries.append(summary)
         print(json.dumps({key: value for key, value in summary.items() if key != "results"}, ensure_ascii=False, indent=2))

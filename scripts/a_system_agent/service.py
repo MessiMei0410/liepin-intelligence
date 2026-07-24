@@ -154,6 +154,8 @@ class AgentService:
         self.db_path = Path(db_path).expanduser()
         self.config = load_config()
         self.llm = llm or create_default_llm(self.config)
+        # S6-2 动机维度公司近况采集器（只读公网页面）；测试注入 stub 防真实网络。
+        self.assessment_signal_fetcher: Any = None
         worker_count = max_workers or int(self.config["runtime"]["max_workers"])
         self.executor = ThreadPoolExecutor(max_workers=max(1, worker_count), thread_name_prefix="a-system-agent")
         self._lock = threading.Lock()
@@ -1220,6 +1222,7 @@ class AgentService:
                     job_id=int(job_id),
                     llm=self.llm,
                     mask_name=_mask_candidate_name,
+                    signal_fetcher=self.assessment_signal_fetcher,
                 )
             except LLMError as exc:
                 raise ValueError(f"判人评估模型不可用或输出非法：{exc}") from exc
