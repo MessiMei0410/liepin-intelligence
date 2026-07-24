@@ -20,7 +20,7 @@ from .capability_runtime import RecruitingCapabilityRuntime, ZERO_RESULT_ATTRIBU
 from .context import build_candidate_context
 from .evaluation import compute_evaluation
 from .job_status import job_status_intake_allowed
-from .llm import BaseLLM, PROMPT_VERSION, create_default_llm
+from .llm import BaseLLM, LLMError, PROMPT_VERSION, create_default_llm
 from .liepin_capture import capture_open_liepin_resumes, resume_matches_identity
 from .native_attachments import attachment_read_requested, image_analysis_requested, resolve_wechat_attachments
 from .panel import (
@@ -1200,6 +1200,61 @@ class AgentService:
 
     def start_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self.workflow_engine.start_workflow(workflow_id)
+
+    def generate_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
+        """S6-1：生成/重新生成判人评估（职业轨迹 + 跳槽质量史），落 candidate_assessment artifact。
+
+        404：人选/岗位不存在或不匹配（LookupError）；409：无简历语料、敏感扫描命中、
+        模型不可用或输出非法（ValueError/LLMError）。同人同岗幂等：更新原行，as_of 刷新。
+        红线：评估只辅助不决策；敏感扫描命中拒写并记扫描日志；证据不过闸不落库。
+        """
+        from . import candidate_assessment
+        from .workflow import _mask_candidate_name
+
+        conn = self._connect()
+        try:
+            try:
+                doc = candidate_assessment.run_assessment(
+                    conn,
+                    candidate_id=int(candidate_id),
+                    job_id=int(job_id),
+                    llm=self.llm,
+                    mask_name=_mask_candidate_name,
+                )
+            except LLMError as exc:
+                raise ValueError(f"判人评估模型不可用或输出非法：{exc}") from exc
+            artifact_id = candidate_assessment.persist_assessment(conn, doc)
+            conn.commit()
+            return {
+                "ok": True,
+                "candidate_id": int(candidate_id),
+                "job_id": int(job_id),
+                "artifact_id": artifact_id,
+                "assessment": doc,
+            }
+        finally:
+            conn.close()
+
+    def get_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
+        """S6-1：读取同人同岗判人评估；人选/岗位/评估不存在抛 LookupError（404）。"""
+        from . import candidate_assessment
+
+        conn = self._connect()
+        try:
+            relation = conn.execute(
+                "SELECT id,job_id FROM job_candidates WHERE id=?", (int(candidate_id),)
+            ).fetchone()
+            if relation is None:
+                raise LookupError(f"人选不存在：{candidate_id}")
+            if int(relation["job_id"] or 0) != int(job_id):
+                raise LookupError(f"人选 {candidate_id} 不属于岗位 {job_id}")
+            payload = candidate_assessment.get_assessment(conn, int(candidate_id), int(job_id))
+            if payload is None:
+                raise LookupError(f"人选 {candidate_id} 在岗位 {job_id} 下还没有判人评估，请先 POST 生成")
+            return {"ok": True, "candidate_id": int(candidate_id), "job_id": int(job_id), **payload}
+        finally:
+            conn.close()
+
 
     def revise_workflow(self, workflow_id: str, instruction: str) -> dict[str, Any]:
         return self.workflow_engine.revise_workflow(workflow_id, instruction)

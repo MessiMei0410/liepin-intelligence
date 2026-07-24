@@ -181,6 +181,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.get("/api/v1/candidates/{candidate_id}")
     def candidate(candidate_id: int) -> dict[str, Any]: return core.candidate(candidate_id)
 
+    @app.post("/api/v1/candidates/{candidate_id}/assessments")
+    def candidate_assessment_generate(candidate_id: int, body: WriteEnvelope, job_id: int = Query(...), idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S6-1：生成/重新生成判人评估（职业轨迹 + 跳槽质量史）。走 execute_idempotent 幂等 + 审计，
+        # 重放返回首次响应；404=人选/岗位不存在或不匹配；409=无简历语料/敏感扫描命中/模型不可用。
+        # 同人同岗重复 POST 更新原 artifact（as_of 刷新），不重复建行。评估只辅助判断，不做决策。
+        return idem("candidate.assessment_generate", body, idempotency_key, "job_candidate", f"{candidate_id}:{job_id}",
+                    lambda: core.generate_candidate_assessment(candidate_id, job_id))
+
+    @app.get("/api/v1/candidates/{candidate_id}/assessments")
+    def candidate_assessment_get(candidate_id: int, job_id: int = Query(...)) -> dict[str, Any]:
+        # S6-1：读取同人同岗判人评估；人选/岗位不存在或不匹配、尚无评估 → 404（LookupError 全局映射）
+        return core.get_candidate_assessment(candidate_id, job_id)
+
     @app.get("/api/v1/workflows/{workflow_id}")
     def workflow(workflow_id: str) -> dict[str, Any]: return core.workflow(workflow_id)
 
