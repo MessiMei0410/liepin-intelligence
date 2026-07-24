@@ -89,6 +89,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/profile-insights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Profile Insights Get */
+        get: operations["job_profile_insights_get_api_v1_jobs__job_id__profile_insights_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/profile-insights/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Profile Insights Feedback */
+        post: operations["job_profile_insights_feedback_api_v1_jobs__job_id__profile_insights_feedback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates": {
         parameters: {
             query?: never;
@@ -173,6 +207,40 @@ export interface paths {
         head?: never;
         /** Candidate Assessment Advisor Action */
         patch: operations["candidate_assessment_advisor_action_api_v1_candidates__candidate_id__assessments__job_id__advisor_action_patch"];
+        trace?: never;
+    };
+    "/api/v1/assessments/calibration/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Assessment Calibration Metrics */
+        get: operations["assessment_calibration_metrics_api_v1_assessments_calibration_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/assessments/calibration/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Assessment Calibration Report */
+        post: operations["assessment_calibration_report_api_v1_assessments_calibration_report_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/workflows/{workflow_id}": {
@@ -645,6 +713,11 @@ export interface components {
              */
             note: string;
         };
+        /** CalibrationReportCreate */
+        CalibrationReportCreate: {
+            /** Request Id */
+            request_id: string;
+        };
         /** CandidateAction */
         CandidateAction: {
             /** Request Id */
@@ -730,6 +803,25 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** JobProfileFeedbackCreate */
+        JobProfileFeedbackCreate: {
+            /** Request Id */
+            request_id: string;
+            /** Item Type */
+            item_type: string;
+            /** Item Key */
+            item_key: string;
+            /**
+             * Item Label
+             * @default
+             */
+            item_label: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
         };
         /** MappingCandidatePatch */
         MappingCandidatePatch: {
@@ -956,6 +1048,76 @@ export interface operations {
             };
         };
     };
+    job_profile_insights_get_api_v1_jobs__job_id__profile_insights_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_profile_insights_feedback_api_v1_jobs__job_id__profile_insights_feedback_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobProfileFeedbackCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     candidates_api_v1_candidates_get: {
         parameters: {
             query?: {
@@ -1137,6 +1299,63 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["AssessmentAdvisorActionPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assessment_calibration_metrics_api_v1_assessments_calibration_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    assessment_calibration_report_api_v1_assessments_calibration_report_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CalibrationReportCreate"];
             };
         };
         responses: {

@@ -80,6 +80,9 @@ export type ContractAnchor = [
   // S5-2 后端新上，generated/api.d.ts 尚无，待主控 regenerate 后补锚。
   paths['/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}']['get'],
   paths['/api/v1/jobs/{job_id}/mapping-tasks']['post'],
+  // S8 增补：岗位画像读取/顾问纠正路由入锚（generated/api.d.ts 已 regenerate）。
+  paths['/api/v1/jobs/{job_id}/profile-insights']['get'],
+  paths['/api/v1/jobs/{job_id}/profile-insights/feedback']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -456,7 +459,7 @@ export const api = {
     json<CalibrationMetricsPayload>('/api/v1/assessments/calibration/metrics'),
   // S8 岗位画像（这个岗位实际在干什么）：GET 永远 200（岗位存在时），status 决定展示/空态；
   // "不对"回写走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应），409=非法条目类型。
-  // 两个 S8 路由为本期新上，generated/api.d.ts 尚无，待主控 regenerate 后可补 ContractAnchor。
+  // 两个 S8 路由已入 ContractAnchor（generated/api.d.ts 已 regenerate）。
   jobProfileInsights: (jobId: number) =>
     json<JobProfileInsightsPayload>(`/api/v1/jobs/${jobId}/profile-insights`),
   disputeJobProfileItem: (jobId: number, item: { item_type: string; item_key: string; item_label?: string; note?: string }) =>

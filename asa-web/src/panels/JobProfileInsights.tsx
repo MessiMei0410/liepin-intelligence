@@ -27,10 +27,6 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
   }, [jobId])
 
   useEffect(() => {
-    setData(null)
-    setError('')
-    setNotice('')
-    setExpanded(new Set())
     void load()
   }, [load])
 
@@ -144,7 +140,7 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
               const key = `tool:${item.key}`
               const open = expanded.has(key)
               return (
-                <span key={key} className="job-profile-tool">
+                <div key={key} className="job-profile-tool">
                   <button className="job-profile-toggle" onClick={() => toggle(key)} aria-expanded={open} title="展开示例证据">
                     {open ? <ChevronDown /> : <ChevronRight />}{item.label} ×{item.count}
                   </button>
@@ -155,7 +151,7 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
                     title="这个工具不符合实际？标记后不再参与学习"
                   >不对</button>
                   {open && examples(item)}
-                </span>
+                </div>
               )
             })}
           </div>

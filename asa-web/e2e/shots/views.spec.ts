@@ -26,6 +26,8 @@ test('岗位 #154 详情', async ({ page }) => {
   const expected = ((job.job ?? job).candidates ?? []).length
   await expect(panel.locator('.job-candidate-list button')).toHaveCount(expected)
   await expect(panel.locator('.job-candidate-list')).toContainText('唐**')
+  // S8 岗位画像区块为异步拉取：等其渲染稳定（就绪或空态）再拍，避免基线抖动
+  await expect(panel.locator('.job-profile-section')).toBeVisible()
   await expect(page).toHaveScreenshot('job-154.png')
 })
 
