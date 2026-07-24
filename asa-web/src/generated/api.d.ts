@@ -140,6 +140,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/{candidate_id}/assessments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Candidate Assessment Get */
+        get: operations["candidate_assessment_get_api_v1_candidates__candidate_id__assessments_get"];
+        put?: never;
+        /** Candidate Assessment Generate */
+        post: operations["candidate_assessment_generate_api_v1_candidates__candidate_id__assessments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflow_id}": {
         parameters: {
             query?: never;
@@ -949,6 +967,80 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candidate_assessment_get_api_v1_candidates__candidate_id__assessments_get: {
+        parameters: {
+            query: {
+                job_id: number;
+            };
+            header?: never;
+            path: {
+                candidate_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candidate_assessment_generate_api_v1_candidates__candidate_id__assessments_post: {
+        parameters: {
+            query: {
+                job_id: number;
+            };
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                candidate_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
