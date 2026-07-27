@@ -1,4 +1,0 @@
-interface:
-  display_name: "Liepin Job Publish"
-  short_description: "Automate Liepin job form publishing and verification"
-  default_prompt: "Use -job-publish to publish a reviewed Liepin job draft and verify it appears in the job list."

@@ -7,7 +7,7 @@ import prettier from 'eslint-config-prettier';
 // R5 已落地：src/** 新增代码 no-explicit-any=error，main.tsx 存量 any 保持 warn 至 R4 拆分收口。
 export default tseslint.config(
   {
-    ignores: ['dist/', 'node_modules/', 'opencli/', 'work/', 'experiments/', 'src/generated/'],
+    ignores: ['dist/', 'node_modules/', 'opencli/', 'work/', 'experiments/', 'src/generated/', 'headhunting-skills-hermes-pack-*/'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

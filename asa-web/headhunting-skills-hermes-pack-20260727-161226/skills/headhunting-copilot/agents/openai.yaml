@@ -1,7 +1,0 @@
-interface:
-  display_name: "猎头 Copilot"
-  short_description: "融合招聘方法论与本机猎头技能的总控入口"
-  default_prompt: "Use $headhunting-copilot to analyze this recruiting task, identify the stage, and route it to the right local workflow."
-
-policy:
-  allow_implicit_invocation: true

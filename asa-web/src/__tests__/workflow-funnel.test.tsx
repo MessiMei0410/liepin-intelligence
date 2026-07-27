@@ -166,6 +166,8 @@ describe('R8 渠道寻访漏斗', () => {
       no_results: '该渠道真实无匹配结果',
       query_build_error: '查询构造异常',
       pool_saturated: '本地人才库基本找遍了（重复率太高）',
+      // round10（cfcfb13）新增：猎聘合规墙识别
+      compliance_wall: '命中平台合规墙（需在浏览器里确认承诺函后重试）',
       unknown: '原因待排查',
     })
   })

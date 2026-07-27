@@ -17,6 +17,9 @@ test-results/
 # opencli 运行时浏览器登录资料（含 Cookie / CDP 会话，绝不提交）
 opencli/chrome-profile/
 
+# Hermes 技能包构建产物（时间戳目录/压缩包，仅本机分发用，不入库）
+headhunting-skills-hermes-pack-*
+
 # Python 缓存
 __pycache__/
 *.pyc

@@ -79,8 +79,9 @@ class XsaasSearchParserRegressionTest(unittest.TestCase):
         # 防止默认列表/上一轮结果被当作本轮结果（串词错配）。
         self.assertIn("queryMatch", source)
         self.assertIn("query_matches(query, selected)", source)
-        # 超时兜底 20s + 该词重试一次，仍失败记日志并标记"跳过"（skipped），不得静默丢失。
-        self.assertIn("time.time() + 20", source[settle_loop:extract])
+        # 超时兜底 45s（9f5299c：技术市场大结果集实测 >20s，round10 超时误弃后放宽）
+        # + 该词重试一次，仍失败记日志并标记"跳过"（skipped），不得静默丢失。
+        self.assertIn("time.time() + 45", source[settle_loop:extract])
         self.assertIn("attempts < 2", source[loop:])
         self.assertIn('"skipped"', source[loop:])
         self.assertIn("file=sys.stderr", source[loop:])
