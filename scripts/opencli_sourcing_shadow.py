@@ -83,6 +83,7 @@ def normalize_candidate(channel: str, item: dict[str, Any]) -> dict[str, Any]:
         "resume_capture_missing": [clean_text(value) for value in missing if clean_text(value)],
         "resume_capture_error": clean_text(item.get("resumeCaptureError") or item.get("resume_capture_error")),
         "resume_captured_at": clean_text(item.get("resumeCapturedAt") or item.get("resume_captured_at")),
+        "score": int(float(item.get("fit_score", item.get("score", 0)))) if item.get("fit_score") is not None or item.get("score") is not None else None,
     }
 
 
@@ -282,22 +283,26 @@ def run_opencli(
 def apply_liepin_score_gate(
     rows: list[dict[str, Any]], db_path: Path, client: str, job: str, min_score: int,
 ) -> list[dict[str, Any]]:
-    profile = build_db_position_profile(str(db_path), client, job)
+    profile = None
     accepted = []
     for item in rows:
-        card = {
-            "name": item.get("name"),
-            "current_company": item.get("company"),
-            "current_title": item.get("title"),
-            "experience": item.get("experience"),
-            "education": item.get("education"),
-            "city": item.get("city"),
-            "raw_text": item.get("recall_profile_text") or item.get("profile_text"),
-            "skills": [],
-            "work": [],
-        }
-        score, _, _, _ = score_candidate_for_profile(card, None, profile)
-        if score >= min_score:
+        score = item.get("score")
+        if score is None:
+            if profile is None:
+                profile = build_db_position_profile(str(db_path), client, job)
+            card = {
+                "name": item.get("name"),
+                "current_company": item.get("company"),
+                "current_title": item.get("title"),
+                "experience": item.get("experience"),
+                "education": item.get("education"),
+                "city": item.get("city"),
+                "raw_text": item.get("recall_profile_text") or item.get("profile_text"),
+                "skills": [],
+                "work": [],
+            }
+            score, _, _, _ = score_candidate_for_profile(card, None, profile)
+        if int(score) >= min_score:
             accepted.append(item)
     return accepted
 
