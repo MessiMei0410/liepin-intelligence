@@ -1319,33 +1319,20 @@ def load_unexpired_signals(
     today: Any = None,
     validity_days: int = SIGNAL_VALIDITY_DAYS,
 ) -> tuple[list[dict[str, Any]], str]:
-    """最新雷达榜单的未过期信号（as_of 距今 ≤60 天）；返回 (signals, scan_artifact_id)。
+    """最新雷达榜单的未过期信号（as_of 距今 <60 天，S7-3 统一边界）；返回 (signals, scan_artifact_id)。
 
     无榜单 / 表缺失 / 日期解析失败一律按空列表处理（联动场景降级为无信号，绝不补造）。
     """
-    from datetime import date as _date
-    from datetime import timedelta
-
     payload = get_latest_radar_scan(conn)
     if payload is None:
         return [], ""
     doc = payload.get("radar_scan") or {}
-    if isinstance(today, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", today):
-        today_date = _date.fromisoformat(today)
-    elif isinstance(today, _date):
-        today_date = today
-    else:
-        today_date = _date.today()
-    cutoff = today_date - timedelta(days=max(1, int(validity_days)))
+    # S7-3 起统一过期边界（is_signal_expired：年龄 ≥60 天即过期，与榜单降权同一口径）
     signals: list[dict[str, Any]] = []
     for signal in doc.get("signals") or []:
         if not isinstance(signal, dict):
             continue
-        try:
-            as_of_date = _date.fromisoformat(str(signal.get("as_of") or ""))
-        except ValueError:
-            continue
-        if as_of_date >= cutoff:
+        if not is_signal_expired(str(signal.get("as_of") or ""), today, validity_days=validity_days):
             signals.append(signal)
     return signals, str(payload.get("artifact_id") or "")
 

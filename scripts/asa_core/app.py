@@ -102,6 +102,11 @@ class RadarStartMappingCreate(WriteEnvelope):
     job_id: int = Field(gt=0)
 
 
+class RadarWeeklyReportCreate(WriteEnvelope):
+    # S7-3：生成雷达周报（无额外表单字段；同日幂等更新同一 artifact；生成后推 Copilot 提醒）
+    pass
+
+
 class AssessmentAdvisorActionPatch(WriteEnvelope):
     # S6-1b：判人评估顾问动作写回；action 四枚举（非法 → 409），note 选填（改判时附口径）。
     action: str = Field(min_length=1)
@@ -388,6 +393,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # S7-2：激活存量人选——人才库该公司现职/曾任职候选清单（现职优先），只读不写库，
         # 动作由顾问本人执行；尚无雷达榜单 → 404（LookupError 全局映射）
         return core.activate_radar_company(company)
+
+    @app.post("/api/v1/radar/weekly-report")
+    def radar_weekly_report_create(body: RadarWeeklyReportCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # S7-3：雷达周报——本周 Top 信号 + 过期降权统计 + 榜单变化对比（缺上周如实标注"首期，无对比基线"），
+        # markdown 落 work/radar/；生成后向 Copilot 仲裁层推一条提醒（只推条数和入口，不含敏感细节，
+        # 推送失败不阻断周报）。走 execute_idempotent 幂等 + 审计；尚无雷达榜单 → 404。
+        return idem("radar.weekly_report", body, idempotency_key, "radar", "weekly",
+                    lambda: core.create_radar_weekly_report())
+
+    @app.get("/api/v1/radar/weekly-report/latest")
+    def radar_weekly_report_latest() -> dict[str, Any]:
+        # S7-3：读最新雷达周报；尚无周报 → 404（LookupError 全局映射）
+        return core.get_latest_radar_weekly_report()
 
     @app.get("/api/v1/audit-events")
     def audit_events(limit: int = Query(100, le=500), offset: int = 0) -> dict[str, Any]:

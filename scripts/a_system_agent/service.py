@@ -7168,3 +7168,57 @@ class AgentService:
             }
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------
+    # S7-3：雷达周报——Top 信号/过期统计/榜单变化对比 + Copilot 提醒推送（同日幂等）
+    # ------------------------------------------------------------------
+
+    def create_radar_weekly_report(self, *, push_copilot: bool = True) -> dict[str, Any]:
+        """S7-3：生成雷达周报（内容全部来自库内最近两期 radar_scan artifact，不现编）。
+
+        缺上一期榜单 → 周报如实标注"首期，无对比基线"；尚无榜单抛 LookupError（404）。
+        生成后向 Copilot 仲裁层推一条提醒（只推条数和入口，不含敏感细节）；
+        推送失败不阻断周报（copilot.pushed=False 留痕）。同日重复生成更新同一 artifact。
+        """
+        from . import radar_weekly
+
+        conn = self._connect()
+        try:
+            doc = radar_weekly.build_weekly_report(conn)
+            artifact_id = radar_weekly.upsert_weekly_report(conn, doc)
+            conn.commit()
+        finally:
+            conn.close()
+        if push_copilot:
+            copilot = radar_weekly.push_copilot_hint(doc.get("copilot_hint") or {})
+        else:
+            copilot = {"pushed": False, "note": "未推送（push_copilot=False）"}
+        baseline = doc.get("baseline") or {}
+        return {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "report_date": doc.get("report_date"),
+            "report_file": doc.get("report_file"),
+            "copilot": copilot,
+            "summary": (
+                f"周报 {doc.get('report_date')}：Top 信号 {len(doc.get('top_signals') or [])} 条，"
+                f"过期降权 {doc.get('expired_signal_count', 0)} 条，"
+                f"建议发起 Mapping {(doc.get('action_summary') or {}).get('mapping', 0)} 家"
+                f"（{'对比基线 ' + str(baseline.get('scan_date')) if baseline.get('has_baseline') else '首期，无对比基线'}）。"
+                "动作由顾问本人执行，系统不自动触达。"
+            ),
+            "weekly_report": doc,
+        }
+
+    def get_latest_radar_weekly_report(self) -> dict[str, Any]:
+        """S7-3：读取最新雷达周报；尚无周报抛 LookupError（404）。"""
+        from . import radar_weekly
+
+        conn = self._connect()
+        try:
+            payload = radar_weekly.get_latest_weekly_report(conn)
+            if payload is None:
+                raise LookupError("还没有雷达周报：请先生成（POST /api/v1/radar/weekly-report）")
+            return {"ok": True, **payload}
+        finally:
+            conn.close()

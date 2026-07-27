@@ -1406,3 +1406,17 @@ class CoreService:
         if self.agent_service:
             return self.agent_service.activate_radar_company(company)
         raise RuntimeError("workflow service unavailable")
+
+    # ------------------------------------------------------------------
+    # S7-3：雷达周报（路由层薄封装，业务在 AgentService/a_system_agent.radar_weekly）
+    # ------------------------------------------------------------------
+
+    def create_radar_weekly_report(self, *, push_copilot: bool = True) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.create_radar_weekly_report(push_copilot=push_copilot)
+        raise RuntimeError("workflow service unavailable")
+
+    def get_latest_radar_weekly_report(self) -> dict[str, Any]:
+        if self.agent_service:
+            return self.agent_service.get_latest_radar_weekly_report()
+        raise RuntimeError("workflow service unavailable")

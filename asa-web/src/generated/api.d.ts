@@ -532,6 +532,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/radar/scans/latest/actions/start-mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Radar Start Mapping */
+        post: operations["radar_start_mapping_api_v1_radar_scans_latest_actions_start_mapping_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/radar/scans/latest/actions/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Radar Activate */
+        get: operations["radar_activate_api_v1_radar_scans_latest_actions_activate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit-events": {
         parameters: {
             query?: never;
@@ -846,6 +880,15 @@ export interface components {
         RadarScanCreate: {
             /** Request Id */
             request_id: string;
+        };
+        /** RadarStartMappingCreate */
+        RadarStartMappingCreate: {
+            /** Request Id */
+            request_id: string;
+            /** Company */
+            company: string;
+            /** Job Id */
+            job_id: number;
         };
         /** StrategyReviewDiffDecisions */
         StrategyReviewDiffDecisions: {
@@ -1952,6 +1995,74 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    radar_start_mapping_api_v1_radar_scans_latest_actions_start_mapping_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RadarStartMappingCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    radar_activate_api_v1_radar_scans_latest_actions_activate_get: {
+        parameters: {
+            query: {
+                company: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
