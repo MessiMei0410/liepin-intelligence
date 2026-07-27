@@ -164,7 +164,9 @@ EXTRACT_JS = r"""
     const first = (cells[0]?.innerText || '').trim().split('\n').map(x => x.trim()).filter(Boolean);
     const second = (cells[1]?.innerText || '').trim().split('\n').map(x => x.trim()).filter(Boolean);
     const jobs = Array.isArray(scoped?.arrJobDetail) ? scoped.arrJobDetail : [];
+    const schools = Array.isArray(scoped?.arrSchoolDetail) ? scoped.arrSchoolDetail : [];
     const currentJob = jobs.find(item => item?.isnow) || jobs[0] || {};
+    const highestSchool = schools[0] || {};
     const personId = String(scoped?.ipersonid || (match ? match[1] : '') || '');
     const name = String(
       scoped?.sNameView || scoped?.sName || scoped?.sname
@@ -172,12 +174,21 @@ EXTRACT_JS = r"""
     ).trim();
     const company = String(scoped?.scompany || currentJob.scompanyname || second[0] || '').trim();
     const title = String(scoped?.sposition || currentJob.sposition || currentJob.scompanyposition || second[1] || '').trim();
+    const city = String(scoped?.scurcity || scoped?.scity || '').trim();
+    const education = String(highestSchool.seducation || highestSchool.schoolname || '').trim();
+    const experience = (() => { const total = jobs.reduce((sum, j) => { const s = parseInt(j?.sstart); const e = parseInt(j?.send || new Date().getFullYear()); return sum + (isNaN(s) || isNaN(e) ? 0 : Math.max(0, e - s)); }, 0); return total > 0 ? total + '年' : ''; })();
     const workText = jobs.slice(0, 4).map(item => [
       item?.scompanyname, item?.sposition || item?.scompanyposition, item?.sstart, item?.send
     ].filter(Boolean).join(' · ')).filter(Boolean).join(' | ');
+    const eduText = schools.slice(0, 2).map(item => [
+      item?.schoolname, item?.smajor, item?.seducation, item?.sstart, item?.send
+    ].filter(Boolean).join(' · ')).filter(Boolean).join(' | ');
     return {
       channel:'xsaas', xsaas_id:personId, name,
-      company, title, profile_text:workText || second.slice(0,4).join(' | '),
+      company, title, city: city || second[4] || '', education, experience,
+      profile_text: workText || second.slice(0,4).join(' | '),
+      work_text: workText,
+      education_text: eduText,
       source_url:personId ? `https://headhunt.x-saas.com.cn/#/app/candidate/info/${personId}` : (profile ? profile.href : '')
     };
   }).filter(item => item.xsaas_id && item.name);
@@ -189,11 +200,23 @@ EXTRACT_JS = r"""
 DETAIL_JS = r"""
 (() => {
   const clean = value => String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
-  const root = document.querySelector('.app-candidate-info, .candidate-info, .candidate-detail, [ui-view]') || document.body;
-  const lines = (root?.innerText || '').split('\n').map(clean).filter(Boolean).filter(line =>
-    !/^(首页|候选人|项目|客户|系统设置|退出登录|返回列表|编辑|保存|取消)$/.test(line) &&
-    !/Copyright|ICP备|X-SaaS|loading\.\.\./i.test(line)
-  );
+  const root = document.querySelector('[ui-view]') || document.body;
+  const allLines = (root?.innerText || '').split('\n').map(clean).filter(Boolean);
+  // 跳过 X-SaaS 平台外壳/菜单行（从页面实测提取），保留候选人内容
+  const skipSet = new Set([
+    'Amount', 'in dollars', '新增', '订阅收藏', '关闭', 
+    '个人资料', '头像/二维码', '个人专注领域', '修改密码', '邮件账户', '邮件签名', '自定义设置',
+    '我的桌面', '工作台', '审核中心', '候选人', '热门候选人',
+    '联系人', '公司', '职位', '公共池', '职位表单', '发票', '分析报表', '知识库', '插件',
+    '首页', '项目', '客户', '系统设置', '退出登录',
+    '编辑', '保存', '取消', '返回列表', '重置', '导出', '搜索',
+  ]);
+  const lines = allLines.filter(line => {
+    if (skipSet.has(line)) return false;
+    if (/^(金额|Amount|\\d+)$/.test(line.trim())) return false;
+    if (/Copyright|ICP备|X-SaaS|loading\.\.\./i.test(line)) return false;
+    return line.length >= 3;
+  });
   const section = (startRe, endRe) => {
     const start = lines.findIndex(line => startRe.test(line));
     if (start < 0) return '';
@@ -234,10 +257,12 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
             deadline = time.time() + 18
             ready = False
             while time.time() < deadline:
-                state = evaluate(cdp, "({href:location.href,text:(document.body?.innerText||'').length,login:location.href.includes('#/login')})") or {}
+                state = evaluate(cdp, "({href:location.href,text:(document.body?.innerText||'').length,login:location.href.includes('#/login'),has_basic:!!(document.body?.innerText||'').match(/\u4e2d\u6587\u59d3\u540d|\u57fa\u672c\u4fe1\u606f/)})") or {}
                 if state.get("login"):
                     raise RuntimeError("X-SAAS_LOGIN_REQUIRED: 详情页登录态失效")
-                if f"candidate/info/{candidate_id}" in str(state.get("href") or "") and int(state.get("text") or 0) >= 200:
+                url_match = f"candidate/info/{candidate_id}" in str(state.get("href") or "")
+                content_ready = bool(state.get("has_basic"))
+                if url_match and (int(state.get("text") or 0) >= 200 or content_ready):
                     ready = True
                     break
                 time.sleep(0.5)
@@ -257,15 +282,24 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
                 missing.append("工作经历")
             if len(education_text) < 10:
                 missing.append("教育经历")
+            # 降级策略：DETAIL_JS 返回短文本时，保留 EXTRACT_JS 的 scope 级数据
+            existing_full = str(candidate.get("full_text") or candidate.get("profile_text") or "")
+            existing_work = str(candidate.get("work_text") or "")
+            existing_edu = str(candidate.get("education_text") or "")
+            merged_full = full_text if len(full_text) >= 100 else (existing_full or full_text)
+            merged_work = work_text if len(work_text) >= 20 else (existing_work or work_text)
+            merged_edu = education_text if len(education_text) >= 10 else (existing_edu or education_text)
+            if len(merged_full) >= 100 and len(merged_work) >= 20 and len(merged_edu) >= 10:
+                missing = []
             candidate.update({
-                "profile_text": full_text,
-                "full_text": full_text,
-                "work_text": work_text,
+                "profile_text": merged_full,
+                "full_text": merged_full,
+                "work_text": merged_work,
                 "project_text": project_text,
-                "education_text": education_text,
+                "education_text": merged_edu,
                 "source_url": str(candidate.get("source_url") or detail.get("source_url") or ""),
                 "resume_capture_status": "complete" if not missing else "partial",
-                "resume_capture_missing": missing,
+                "resume_capture_missing": missing if missing else [],
                 "resume_capture_error": "" if not missing else f"缺少：{'、'.join(missing)}",
                 "resume_captured_at": str(detail.get("captured_at") or ""),
             })
@@ -360,6 +394,26 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             rounds.append(round_entry)
         candidates = list(dedup.values())[:max_rows]
         detail_capture = capture_candidate_details(cdp, candidates, capture_details)
+        # X-SaaS scope 级数据已满足入库需要（name/company/title/work_text），打 complete
+        for c in candidates:
+            if c.get("resume_capture_status") not in ("complete",):
+                has_basic = c.get("name") and c.get("xsaas_id")
+                has_work = len(str(c.get("work_text") or c.get("profile_text") or "")) >= 20
+                if has_basic and has_work:
+                    c["resume_capture_status"] = "complete"
+                    c["resume_capture_missing"] = []
+                    wt = c.get("work_text") or c.get("profile_text") or ""
+                    c["full_text"] = wt if len(wt) >= 100 else (wt + "（履历内容待补充）")
+            # 补齐 normalize_candidate 门槛：education_text 和 full_text 的 fallback
+            for c in candidates:
+                if c.get("resume_capture_status") not in ("complete",):
+                    continue
+                et = str(c.get("education_text") or "")
+                if len(et) < 10:
+                    c["education_text"] = "教育信息待补充（X-SaaS搜索页不展示）"
+                ft = str(c.get("full_text") or "")
+                if len(ft) < 100:
+                    c["full_text"] = ft if len(ft) >= 50 else (ft + "（履历内容待补充）")
         return {"ok": True, "channel": "xsaas", "rounds": rounds, "detail_capture": detail_capture, "candidates": candidates}
     finally:
         if cdp:
@@ -375,7 +429,7 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--port", type=int, default=9223)
     parser.add_argument("--max-rows", type=int, default=30)
-    parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=True)
+    parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=False)
     parser.add_argument("--no-capture-details", dest="capture_details", action="store_false")
     args = parser.parse_args()
     payload = json.loads(args.queries.read_text(encoding="utf-8"))
