@@ -84,15 +84,27 @@ class XsaasDialectTest(unittest.TestCase):
 
     def test_companies_always_solo(self) -> None:
         out = build_xsaas_queries(["MPS 矽力杰 杰华特 FAE AE"], company_terms=self.VOCAB)
-        self.assertEqual(out, ["MPS", "矽力杰", "杰华特", "FAE AE"])
+        self.assertEqual(out, ["MPS", "矽力杰", "杰华特"])
 
     def test_company_never_combined_with_function_term(self) -> None:
         out = build_xsaas_queries(["杰华特 技术市场"], company_terms=self.VOCAB)
         self.assertEqual(out, ["杰华特", "技术市场"])
 
-    def test_dense_noncompany_query_expands_to_anchor_pairs(self) -> None:
+    def test_dense_noncompany_query_uses_distinctive_atomic_terms(self) -> None:
         out = build_xsaas_queries(["多相控制器 DrMOS POL TME FAE"])
-        self.assertEqual(out, ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"])
+        self.assertEqual(out, ["多相控制器", "DrMOS"])
+
+    def test_pc_power_queries_prioritize_companies_and_skip_ambiguous_acronyms(self) -> None:
+        out = build_xsaas_queries(
+            [
+                "PC 电源 TME",
+                "多相控制器 DrMOS POL",
+                "联想 联宝 电源工程师",
+                "MPS 矽力杰 杰华特 FAE/AE/TME",
+            ],
+            company_terms={*self.VOCAB, "联想", "联宝"},
+        )
+        self.assertEqual(out, ["联想", "联宝", "MPS", "矽力杰", "杰华特", "PC电源", "多相控制器", "DrMOS"])
 
     def test_dict_entries_use_query_field_and_malformed_safe(self) -> None:
         items = [
@@ -115,9 +127,9 @@ class XsaasDialectTest(unittest.TestCase):
         _assert_xsaas_dialect(self, out, self.VOCAB)
 
     def test_no_two_companies_invariant_without_vocab_degrades_safely(self) -> None:
-        # 词表为空时无法识别公司词（降级）：锚定对仍 ≤2 词，不抛异常
+        # 词表为空时无法识别公司词（降级）：仍按原子词输出且不抛异常
         out = build_xsaas_queries(["MPS 矽力杰 FAE"])
-        self.assertEqual(out, ["MPS 矽力杰", "MPS FAE"])
+        self.assertEqual(out, ["MPS", "矽力杰"])
         for query in out:
             self.assertLessEqual(len(query.split()), 2)
 
@@ -235,9 +247,9 @@ class RoundReplayDialectTest(unittest.TestCase):
         # round5 第 1 组"多相控制器 DrMOS POL TME FAE"五词直查 X-SaaS 0 条实证
         dense = "多相控制器 DrMOS POL TME FAE"
         xsaas = build_xsaas_queries([dense], company_terms=self.VOCAB)
-        self.assertEqual(xsaas, ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"])
+        self.assertEqual(xsaas, ["多相控制器", "DrMOS"])
         liepin = build_liepin_queries([dense], company_terms=self.VOCAB)
-        self.assertEqual(liepin, xsaas)  # 无公司词时两方言同为锚定对
+        self.assertNotEqual(liepin, xsaas)
         for query in xsaas:
             self.assertLessEqual(len(query.split()), 2)
 
@@ -251,7 +263,7 @@ class RoundReplayDialectTest(unittest.TestCase):
         xsaas = build_xsaas_queries(items, company_terms=self.VOCAB)
         self.assertEqual(
             xsaas,
-            ["多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "MPS", "矽力杰"],
+            ["MPS", "矽力杰", "多相控制器", "DrMOS"],
         )
         _assert_xsaas_dialect(self, xsaas, self.VOCAB)
 
@@ -260,7 +272,7 @@ class RoundReplayDialectTest(unittest.TestCase):
         pure = build_xsaas_queries(["MPS 矽力杰"], company_terms=self.VOCAB)
         self.assertEqual(pure, ["MPS", "矽力杰"])
         mixed_xsaas = build_xsaas_queries(["MPS 矽力杰 杰华特 FAE AE"], company_terms=self.VOCAB)
-        self.assertEqual(mixed_xsaas, ["MPS", "矽力杰", "杰华特", "FAE AE"])
+        self.assertEqual(mixed_xsaas, ["MPS", "矽力杰", "杰华特"])
         mixed_liepin = build_liepin_queries(["MPS 矽力杰 杰华特 FAE AE"], company_terms=self.VOCAB)
         self.assertEqual(mixed_liepin, ["MPS FAE", "矽力杰 FAE", "杰华特 FAE", "FAE AE"])
         _assert_xsaas_dialect(self, pure + mixed_xsaas, self.VOCAB)
@@ -381,10 +393,10 @@ class ExecuteExternalDialectWiringTest(unittest.TestCase):
             ["MPS FAE", "矽力杰 FAE", "多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"],
         )
         _assert_liepin_dialect(self, liepin, vocab)
-        # X-SaaS：公司词独立查询，单查询不得含 ≥2 公司名，≤8 组
+        # X-SaaS：公司词优先独立查询，过滤裸歧义缩写，技术词使用原子查询
         self.assertEqual(
             xsaas,
-            ["MPS", "矽力杰", "FAE", "多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"],
+            ["MPS", "矽力杰", "多相控制器", "DrMOS"],
         )
         _assert_xsaas_dialect(self, xsaas, vocab)
         self.assertNotEqual(liepin, xsaas, "双渠道方言必须在接线层分叉")

@@ -352,6 +352,25 @@ def query_matches(query: str, selected: str) -> bool:
     return bool(want) and bool(got) and (got == want or want in got)
 
 
+def merge_round_candidates(rounds: list[list[dict[str, Any]]], max_rows: int) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    max_depth = max((len(items) for items in rounds), default=0)
+    for index in range(max_depth):
+        for items in rounds:
+            if index >= len(items):
+                continue
+            candidate = items[index]
+            identity = str(candidate.get("xsaas_id") or "")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(candidate)
+            if len(merged) >= max_rows:
+                return merged
+    return merged
+
+
 def apply_position_score_gate(
     candidates: list[dict[str, Any]], db_path: Path, client: str, job: str, min_score: int,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -400,7 +419,7 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
     target_id = ""
     try:
         rounds = []
-        dedup: dict[str, dict[str, Any]] = {}
+        candidate_rounds: list[list[dict[str, Any]]] = []
         for index, query in enumerate(queries[:8]):
             query = " ".join(str(query or "").split())
             if not query:
@@ -461,10 +480,9 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             if round_entry is None:  # 防御：循环异常退出也不静默丢失该词
                 print(f"[xsaas_candidate_search] 关键词「{query}」未取得结果，标记跳过", file=sys.stderr)
                 round_entry = {"query": query, "status": "skipped", "reason": "settle_timeout", "attempts": attempts}
-            for candidate in round_candidates:
-                dedup.setdefault(str(candidate.get("xsaas_id")), candidate)
+            candidate_rounds.append(round_candidates)
             rounds.append(round_entry)
-        candidates = list(dedup.values())[:max_rows]
+        candidates = merge_round_candidates(candidate_rounds, max_rows)
         detail_capture = capture_candidate_details(cdp, candidates, capture_details)
         return {"ok": True, "channel": "xsaas", "rounds": rounds, "detail_capture": detail_capture, "candidates": candidates}
     finally:

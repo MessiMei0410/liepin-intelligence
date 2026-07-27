@@ -8,11 +8,12 @@
 1. X-SaaS 系统本身识别不了多关键词组合，多词查询直接 0 结果
    （round5 第 1 组"多相控制器 DrMOS POL TME FAE"五词 0 条实证）；
 2. 猎聘同理：候选人简历不一定包含全部关键词，往往只有一两个，
-   多词 AND 会把好人选过滤掉——两渠道统一按 ≤2 词短查询构造；
+   多词 AND 会把好人选过滤掉——猎聘按 ≤2 词短查询构造；
 3. 两个公司名组合语义必错（一人不可能同时在两家公司，round7 实证），
    公司词永不两两成对——需要公司词表识别查询里的公司 token；
-4. X-SaaS 更严格：公司词不与任何词组合，每个公司词一条独立查询，
-   职能/技术词按"锚定词 + 逐词"二字对展开。
+4. X-SaaS 更严格：公司词不与任何词组合，每个公司词一条独立查询；
+   2026-07-27 实测裸 TME 会大量命中腾讯音乐，POL/AE/FAE 也存在明显歧义，
+   因此只保留公司词和高辨识度技术原子词。
 
 渠道方言规则表：
 
@@ -20,7 +21,7 @@
 | --- | --- | --- |
 | 公司词 × 职能/技术词 | 可组合（公司 + 首个非公司词） | 不组合，公司词独立查询 |
 | 公司词 × 公司词 | 永不两两成对 | 永不（天然满足：公司词均独立） |
-| 非公司词多词组 | 锚定对，每组 ≤2 词 | 锚定对，每组 ≤2 词 |
+| 非公司词多词组 | 锚定对，每组 ≤2 词 | 高辨识度原子词 |
 | 单查询公司名上限 | <2（契约断言） | <2（契约断言） |
 | 查询总量上限 | 6（LIEPIN_QUERY_MAX_COUNT） | 8（XSAAS_QUERY_MAX_COUNT） |
 
@@ -31,6 +32,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from . import knowledge_base, strategy_v2
@@ -39,6 +41,8 @@ LIEPIN_QUERY_MAX_TERMS = 2
 LIEPIN_QUERY_MAX_COUNT = 6
 XSAAS_QUERY_MAX_TERMS = 2
 XSAAS_QUERY_MAX_COUNT = 8
+XSAAS_AMBIGUOUS_ATOMIC_TERMS = {"ae", "fae", "pc", "pol", "tme"}
+XSAAS_GENERIC_ATOMIC_TERMS = {"产品", "工程师", "总监", "技术", "电源", "经理"}
 
 
 def company_vocabulary(strategy: dict[str, Any]) -> set[str]:
@@ -92,6 +96,10 @@ def _query_text(raw: Any) -> str:
     if isinstance(raw, dict):
         raw = raw.get("query") or raw.get("q") or raw.get("keyword") or ""
     return str(raw or "")
+
+
+def _query_terms(raw: Any) -> list[str]:
+    return [term for term in re.split(r"[\s/、，,；;|]+", _query_text(raw).strip()) if term]
 
 
 def _normalized_vocab(company_terms: set[str] | None) -> set[str]:
@@ -155,24 +163,34 @@ def build_liepin_queries(queries: list[Any], *, company_terms: set[str] | None =
 
 
 def build_xsaas_queries(queries: list[Any], *, company_terms: set[str] | None = None) -> list[str]:
-    """X-SaaS 方言：公司词独立查询，职能/技术词锚定对 ≤2 词，总量 ≤8 组。
+    """X-SaaS 方言：公司词优先独立查询，高辨识度技术词原子查询，总量 ≤8 组。
 
-    X-SaaS 搜索语义不支持多关键词空格拼接（round5/7 实证 0 召回），因此：
+    X-SaaS 搜索语义不支持多关键词空格拼接（round5/7 和 2026-07-27 PC 电源岗位实证
+    均为 0 召回），因此：
     - 每个公司词单独一条查询，不与任何词组合（含其他公司词）——
       单查询天然不可能含 ≥2 个公司名（契约断言的不变量）；
-    - 非公司词 ≤XSAAS_QUERY_MAX_TERMS 原样保留，超密按锚定对展开；
+    - 所有输入组先汇总公司词，避免 8 组上限被前面的低价值技术组合占满；
+    - 非公司词按原子词查询，并合并 ``PC + 电源`` 为 ``PC电源``；
+    - 裸 TME/AE/FAE/POL/PC 歧义过高，分别会命中腾讯音乐、普通英文片段或过宽人群，
+      只保留公司定向或带电源语义的高辨识度查询；
     - 逐条执行后由 runner 合并去重（runner 既有 rounds+dedup 语义不在本层）。
     """
     vocab = _normalized_vocab(company_terms)
-    adapted: list[str] = []
+    companies: list[str] = []
+    technical: list[str] = []
     for raw in queries:
-        terms = _query_text(raw).split()
+        terms = _query_terms(raw)
         if not terms:
             continue
-        companies = [t for t in terms if is_company_token(t, vocab)]
-        others = [t for t in terms if not is_company_token(t, vocab)]
-        # 公司词独立查询：优先级高于锚定对（公司定向是 T1/T2 池主战术）
-        adapted.extend(companies)
-        if others:
-            adapted.extend(_anchor_pairs(others, XSAAS_QUERY_MAX_TERMS))
-    return _dedupe_cap(adapted, XSAAS_QUERY_MAX_COUNT)
+        group_companies = [term for term in terms if is_company_token(term, vocab)]
+        others = [term for term in terms if not is_company_token(term, vocab)]
+        companies.extend(group_companies)
+        folded = {term.casefold() for term in others}
+        if "pc" in folded and "电源" in others:
+            technical.append("PC电源")
+        for term in others:
+            key = term.casefold()
+            if key in XSAAS_AMBIGUOUS_ATOMIC_TERMS or term in XSAAS_GENERIC_ATOMIC_TERMS:
+                continue
+            technical.append(term)
+    return _dedupe_cap([*companies, *technical], XSAAS_QUERY_MAX_COUNT)

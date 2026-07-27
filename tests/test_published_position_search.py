@@ -9,6 +9,7 @@ from run_published_position_search import (
     _split_profile_terms,
     merge_resume_detail,
     score_candidate_for_profile,
+    technical_market_hard_gate,
     write_report,
 )
 
@@ -38,6 +39,64 @@ class PublishedPositionSearchReportTest(unittest.TestCase):
         )
         self.assertLessEqual(score, 49)
         self.assertTrue(any("工作年限不足" in risk for risk in risks))
+
+    def test_pc_power_technical_market_gate_rejects_structure_designer(self) -> None:
+        profile = PositionProfile(
+            slug="test", headline="技术市场经理/总监（PC电源）", default_city="", default_salary="",
+            report_title="", file_prefix="", search_rounds=[], target_companies=["联想"],
+            core_keywords=["PC", "电源"], tool_keywords=[], title_keywords=["主管"],
+            noise_keywords=[], default_noise_note="", outreach_summary="",
+            minimum_experience_years=4, minimum_education="本科",
+        )
+        score, _evidence, risks, _level = score_candidate_for_profile(
+            {
+                "raw_text": "联想 ATX PC电源项目，负责机箱结构设计、模具和散热片",
+                "current_title": "电源结构设计主管", "experience": "10年", "education": "本科",
+                "city": "深圳", "work": [],
+            },
+            "",
+            profile,
+        )
+        self.assertLessEqual(score, 49)
+        self.assertIn("缺少技术市场/FAE/产品定义硬证据", risks)
+
+    def test_pc_power_technical_market_gate_disambiguates_tme(self) -> None:
+        profile = PositionProfile(
+            slug="test", headline="技术市场经理/总监（PC电源）", default_city="", default_salary="",
+            report_title="", file_prefix="", search_rounds=[], target_companies=[],
+            core_keywords=["PC", "电源", "TME"], tool_keywords=[], title_keywords=["TME"],
+            noise_keywords=[], default_noise_note="", outreach_summary="",
+        )
+        self.assertEqual(
+            technical_market_hard_gate("腾讯音乐娱乐 TME 商务渠道 PC客户端", profile),
+            ["缺少PC 电源/多相供电硬证据"],
+        )
+        self.assertEqual(
+            technical_market_hard_gate("PC电源 DrMOS FAE 客户技术推广和产品定义", profile),
+            [],
+        )
+
+    def test_pc_power_technical_market_gate_keeps_strong_fae_candidate(self) -> None:
+        profile = PositionProfile(
+            slug="test", headline="技术市场经理/总监（PC电源）", default_city="杭州", default_salary="",
+            report_title="", file_prefix="", search_rounds=[], target_companies=["MPS"],
+            core_keywords=["PC电源", "DrMOS", "多相控制器", "FAE", "产品定义"],
+            tool_keywords=[], title_keywords=["FAE", "技术市场"], noise_keywords=[],
+            default_noise_note="", outreach_summary="", minimum_experience_years=4,
+            minimum_education="本科",
+        )
+        score, _evidence, risks, level = score_candidate_for_profile(
+            {
+                "raw_text": "MPS PC电源 FAE，负责多相控制器和DrMOS产品定义、客户技术推广及design-in",
+                "current_title": "高级FAE", "experience": "8年", "education": "硕士",
+                "city": "杭州", "work": [],
+            },
+            "杭州",
+            profile,
+        )
+        self.assertGreaterEqual(score, 65)
+        self.assertIn(level, {"A-优先推荐", "B-可沟通"})
+        self.assertFalse(any("硬证据" in risk for risk in risks))
 
     def test_card_extractor_reads_resume_id_from_tracking_metadata(self) -> None:
         self.assertIn("data-tlg-ext", EXTRACT_JS)

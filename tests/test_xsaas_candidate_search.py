@@ -9,6 +9,7 @@ from xsaas_candidate_search import (
     DETAIL_READY_JS,
     apply_position_score_gate,
     capture_candidate_details,
+    merge_round_candidates,
     query_matches,
 )
 
@@ -25,6 +26,25 @@ class XsaasQueryRoundBindingTest(unittest.TestCase):
         self.assertFalse(query_matches("MPS", ""))
         self.assertFalse(query_matches("MPS", "DrMOS 驱动"))
         self.assertFalse(query_matches("", "MPS"))
+
+    def test_round_robin_merge_prevents_first_query_from_monopolizing_limit(self) -> None:
+        rounds = [
+            [{"xsaas_id": f"mps-{index}", "query": "MPS"} for index in range(10)],
+            [{"xsaas_id": f"silergy-{index}", "query": "矽力杰"} for index in range(10)],
+            [{"xsaas_id": "shared", "query": "PC电源"}, {"xsaas_id": "mps-0", "query": "PC电源"}],
+        ]
+        merged = merge_round_candidates(rounds, 6)
+        self.assertEqual(
+            [(item["xsaas_id"], item["query"]) for item in merged],
+            [
+                ("mps-0", "MPS"),
+                ("silergy-0", "矽力杰"),
+                ("shared", "PC电源"),
+                ("mps-1", "MPS"),
+                ("silergy-1", "矽力杰"),
+                ("mps-2", "MPS"),
+            ],
+        )
 
 
 class XsaasCandidateDetailCaptureTest(unittest.TestCase):

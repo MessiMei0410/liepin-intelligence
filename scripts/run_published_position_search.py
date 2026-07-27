@@ -940,6 +940,50 @@ def keyword_hits(text: str, keywords: list[str]) -> list[str]:
     return [item for item in keywords if item and item.lower() in lower]
 
 
+def technical_market_hard_gate(all_text: str, profile: PositionProfile) -> list[str]:
+    if "技术市场" not in profile.headline:
+        return []
+    function_hit = re.search(
+        r"技术市场|产品市场|产品定义|电源产品经理|应用工程师|客户.{0,8}技术|技术.{0,8}客户|"
+        r"design[- ]?(?:in|win)|(?<![A-Za-z])(?:TME|FAE|AE)(?![A-Za-z])",
+        all_text,
+        re.I,
+    )
+    if "PC电源" in profile.headline:
+        direction_hit = re.search(
+            r"PC\s*电源|电脑电源|ATX|多相(?:控制器|电源|供电)|DrMOS|VRM|Vcore|"
+            r"CPU.{0,8}供电|GPU.{0,8}供电|Power\s*Stage|(?<![A-Za-z])POL(?![A-Za-z])",
+            all_text,
+            re.I,
+        )
+        direction_label = "PC 电源/多相供电"
+    elif "服务器" in profile.headline:
+        direction_hit = re.search(
+            r"服务器|数据中心|AI\s*服务器|多相(?:控制器|电源|供电)|DrMOS|VRM|Vcore|"
+            r"CPU.{0,8}供电|GPU.{0,8}供电|Power\s*Stage|(?<![A-Za-z])POL(?![A-Za-z])",
+            all_text,
+            re.I,
+        )
+        direction_label = "服务器三次电源"
+    elif "ADAS" in profile.headline.upper():
+        direction_hit = re.search(r"ADAS|汽车|车载|域控|座舱|ECU|AEC[- ]?Q|ISO\s*26262", all_text, re.I)
+        direction_label = "ADAS/车载电源"
+    else:
+        direction_hit = re.search(
+            r"电源|电力电子|多相(?:控制器|电源|供电)|DrMOS|VRM|Power\s*Stage|"
+            r"(?<![A-Za-z])POL(?![A-Za-z])",
+            all_text,
+            re.I,
+        )
+        direction_label = "电源技术"
+    failures: list[str] = []
+    if not direction_hit:
+        failures.append(f"缺少{direction_label}硬证据")
+    if not function_hit:
+        failures.append("缺少技术市场/FAE/产品定义硬证据")
+    return failures
+
+
 def score_candidate(candidate: dict[str, Any], target_city: str) -> tuple[int, list[str], list[str], str]:
     return score_candidate_for_profile(candidate, target_city, build_position_profile("资深机械工程师"))
 
@@ -1008,6 +1052,11 @@ def score_candidate_for_profile(
         if education_rank[education] < education_rank[profile.minimum_education]:
             hard_requirement_failed = True
             risks.append(f"学历不足：{education}，岗位要求{profile.minimum_education}及以上")
+
+    role_gate_failures = technical_market_hard_gate(all_text, profile)
+    if role_gate_failures:
+        hard_requirement_failed = True
+        risks.extend(role_gate_failures)
 
     city_text = f"{candidate.get('city', '')} {candidate.get('expected_city', '')}"
     target_city_parts = [part for part in re.split(r"[/、,，\s]+", target_city or "") if part]
