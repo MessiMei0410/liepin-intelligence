@@ -1397,6 +1397,8 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
         href = str(evaluate(cdp, "location.href", timeout=8) or "")
         if "login" in href:
             raise SystemExit("猎聘登录已过期，请在 Chrome 里登录猎聘后再继续。")
+        if "compliancecommitment" in href or "合规承诺" in str(evaluate(cdp, "document.title", timeout=8) or ""):
+            raise SystemExit("猎聘命中安全合规承诺函（合规墙），请在 Chrome 里阅读并确认后再继续。")
         custom_rounds = load_query_rounds(args.queries_json)
         rounds = custom_rounds[: args.rounds] if custom_rounds else build_rounds(args.rounds, profile)
         seen_keys: set[tuple[str, str]] = set()
@@ -1406,6 +1408,11 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
             time.sleep(random.uniform(args.min_delay, args.max_delay))
             total_text = clean_text(str(search_result.get("totalText") or ""))
             search_round.result_count = parse_total_count(total_text)
+            if search_round.result_count == 0:
+                # 合规墙复检：搜索被重定向到承诺函页时 totalText 为空会误报 0 结果（round10 实证）
+                current_href = str(evaluate(cdp, "location.href", timeout=8) or "")
+                if "compliancecommitment" in current_href or "合规承诺" in str(evaluate(cdp, "document.title", timeout=8) or ""):
+                    raise SystemExit("猎聘命中安全合规承诺函（合规墙），请在 Chrome 里阅读并确认后再继续。")
             apply_filters(cdp, search_round.filters)
             cards = evaluate(cdp, f"({EXTRACT_JS})()", timeout=12) or []
             if not isinstance(cards, list):

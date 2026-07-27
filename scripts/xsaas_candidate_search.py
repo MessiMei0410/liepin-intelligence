@@ -78,10 +78,20 @@ def clone_authenticated_tab(port: int, source_tab: dict[str, Any]) -> tuple[CDP,
                 break
             time.sleep(0.25)
         keys = ["token", "userinfo", "username", "localSystemInfo", "bPrivate", "localLoginTime"]
+        # 克隆页文档未就绪时 setItem 会"页面脚本执行失败"（round10 实证）：先等 readyState，失败重试一次
+        ready_deadline = time.time() + 5
+        while time.time() < ready_deadline:
+            if evaluate(target, "document.readyState") == "complete":
+                break
+            time.sleep(0.3)
         for key in keys:
             value = evaluate(source, f"localStorage.getItem({json_expr(key)})")
             if value is not None:
-                evaluate(target, f"localStorage.setItem({json_expr(key)},{json_expr(value)});true")
+                try:
+                    evaluate(target, f"localStorage.setItem({json_expr(key)},{json_expr(value)});true")
+                except RuntimeError:
+                    time.sleep(1)
+                    evaluate(target, f"localStorage.setItem({json_expr(key)},{json_expr(value)});true")
         evaluate(target, f"location.href='https://{XSAAS_HOST}/?{RUNNER_MARKER}#/app/candidate/list';true")
         return target, target_id
     except Exception:

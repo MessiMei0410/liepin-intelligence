@@ -51,6 +51,7 @@ def _row(row: sqlite3.Row | None) -> dict[str, Any]:
 ZERO_RESULT_ATTRIBUTIONS = (
     "no_results",
     "session_expired",
+    "compliance_wall",
     "parse_failure",
     "page_structure_changed",
     "loading_incomplete",
@@ -63,6 +64,7 @@ ZERO_RESULT_ATTRIBUTIONS = (
 # 前端映射在仓外，含义必须与这里保持一致。
 ZERO_RESULT_ATTRIBUTION_LABELS = {
     "session_expired": "登录态失效，需重新登录该渠道",
+    "compliance_wall": "命中平台合规墙（需在浏览器里确认承诺函后重试）",
     "loading_incomplete": "页面加载未完成或查询未生效",
     "page_structure_changed": "页面结构变化，解析器需要适配",
     "parse_failure": "平台有结果但解析抓取失败",
@@ -167,6 +169,8 @@ def classify_zero_result(
     error = str(result.get("error") or "")
     if "LOGIN_REQUIRED" in error or "登录已过期" in error or "登录态失效" in error:
         return "session_expired"
+    if "合规墙" in error or "合规承诺" in error or "compliancecommitment" in error.lower():
+        return "compliance_wall"
     if "加载超时" in error or "未加载" in error:
         return "loading_incomplete"
     rounds = [entry for entry in result.get("rounds") or [] if isinstance(entry, dict)]

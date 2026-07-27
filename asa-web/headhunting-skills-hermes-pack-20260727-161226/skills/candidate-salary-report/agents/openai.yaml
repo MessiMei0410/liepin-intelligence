@@ -1,0 +1,4 @@
+interface:
+  display_name: "Candidate Salary Report"
+  short_description: "Generate candidate salary reports from tax and bank evidence"
+  default_prompt: "Use $candidate-salary-report to create a candidate salary report from tax screenshots, bank records, and compensation notes."

@@ -1,0 +1,1 @@
+见 ~/.hermes/scripts/generate_resume_docx.py（本技能不重复内嵌，直接引用系统路径）。核心功能：从猎聘简历页 innerText 解析结构化数据 → python-docx 生成专业排版 .docx。

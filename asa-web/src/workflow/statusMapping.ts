@@ -70,6 +70,7 @@ export const mapWorkflowStatus = ({ status, business_outcome, steps }: WorkflowS
 export const zeroAttributionLabels: Record<string, string> = {
   no_results: '该渠道真实无匹配结果',
   session_expired: '登录态失效，需重新登录该渠道',
+  compliance_wall: '命中平台合规墙（需在浏览器里确认承诺函后重试）',
   loading_incomplete: '页面加载未完成或查询未生效',
   page_structure_changed: '页面结构变化，解析器需要适配',
   parse_failure: '平台有结果但解析抓取失败',

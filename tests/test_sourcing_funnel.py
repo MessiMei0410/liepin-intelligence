@@ -129,6 +129,10 @@ class ClassifyZeroResultTest(unittest.TestCase):
                 ("xsaas", "blocked", {"ok": False, "error": "X-SAAS_LOGIN_REQUIRED: 详情页登录态失效"}),
                 ("liepin", "failed", {"error": "猎聘登录已过期，请在 Chrome 里登录猎聘后再继续。"}),
             ],
+            "compliance_wall": [
+                ("liepin", "failed", {"error": "猎聘命中安全合规承诺函（合规墙），请在 Chrome 里阅读并确认后再继续。"}),
+                ("liepin", "failed", {"error": "redirect to https://h.liepin.com/user/compliancecommitment"}),
+            ],
             "loading_incomplete": [
                 ("xsaas", "blocked", {"ok": False, "error": "X-SaaS 候选人列表加载超时"}),
                 ("xsaas", "completed", {"ok": True, "rounds": [{"query": "q", "status": "stale_query", "result_count": 8, "extracted_count": 0}]}),
