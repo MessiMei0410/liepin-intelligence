@@ -2,10 +2,43 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from run_published_position_search import CAPTURE_LINKS_JS, EXTRACT_JS, PositionProfile, merge_resume_detail, write_report
+from run_published_position_search import (
+    CAPTURE_LINKS_JS,
+    EXTRACT_JS,
+    PositionProfile,
+    _split_profile_terms,
+    merge_resume_detail,
+    score_candidate_for_profile,
+    write_report,
+)
 
 
 class PublishedPositionSearchReportTest(unittest.TestCase):
+    def test_profile_terms_expand_channel_query_dialects(self) -> None:
+        self.assertEqual(
+            _split_profile_terms(["PC 电源 TME", "FAE/AE", "design-in/design-win"]),
+            ["PC", "电源", "TME", "FAE", "AE", "design-in", "design-win"],
+        )
+
+    def test_hard_experience_gate_caps_keyword_rich_candidate(self) -> None:
+        profile = PositionProfile(
+            slug="test", headline="技术市场经理", default_city="", default_salary="",
+            report_title="", file_prefix="", search_rounds=[], target_companies=[],
+            core_keywords=["PC", "电源", "TME"], tool_keywords=[], title_keywords=["TME"],
+            noise_keywords=[], default_noise_note="", outreach_summary="",
+            minimum_experience_years=4, minimum_education="本科",
+        )
+        score, _evidence, risks, _level = score_candidate_for_profile(
+            {
+                "raw_text": "PC 电源 TME 客户技术推广", "current_title": "TME",
+                "experience": "1年", "education": "本科", "city": "上海", "work": [],
+            },
+            "上海",
+            profile,
+        )
+        self.assertLessEqual(score, 49)
+        self.assertTrue(any("工作年限不足" in risk for risk in risks))
+
     def test_card_extractor_reads_resume_id_from_tracking_metadata(self) -> None:
         self.assertIn("data-tlg-ext", EXTRACT_JS)
         self.assertIn("res_id_encode", EXTRACT_JS)

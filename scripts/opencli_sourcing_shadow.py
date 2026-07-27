@@ -297,7 +297,7 @@ def apply_liepin_score_gate(
                 "experience": item.get("experience"),
                 "education": item.get("education"),
                 "city": item.get("city"),
-                "raw_text": item.get("recall_profile_text") or item.get("profile_text"),
+                "raw_text": item.get("full_text") or item.get("profile_text") or item.get("recall_profile_text"),
                 "skills": [],
                 "work": [],
             }
@@ -305,6 +305,9 @@ def apply_liepin_score_gate(
         if int(score) >= min_score:
             accepted.append(item)
     return accepted
+
+
+apply_position_score_gate = apply_liepin_score_gate
 
 
 def run_primary_recall(
@@ -348,11 +351,7 @@ def run_primary_recall(
             continue
         seen.add(key)
         deduped.append(item)
-    gated = (
-        apply_liepin_score_gate(deduped, db, client, job, min_score)
-        if channel == "liepin"
-        else deduped
-    )
+    gated = apply_position_score_gate(deduped, db, client, job, min_score)
     capped = gated[: max(1, detail_limit)]
     complete = sum(1 for item in capped if item.get("resume_capture_status") == "complete")
     return {

@@ -100,6 +100,19 @@ class OpenCliSourcingShadowTest(unittest.TestCase):
         self.assertEqual(rows[0]["xsaas_id"], "123")
         self.assertEqual(rows[0]["data_stage"], "detail")
 
+    def test_primary_xsaas_recall_uses_position_score_gate(self) -> None:
+        rows = [shadow.normalize_candidate("xsaas", {"candidateId": "123", "name": "A"})]
+        rows[0]["resume_capture_status"] = "complete"
+        with patch.object(shadow, "run_opencli", return_value=(rows, {})), patch.object(
+            shadow, "apply_position_score_gate", return_value=[]
+        ) as gate:
+            result = shadow.run_primary_recall(
+                "xsaas", ["PC 电源"], 10, 9223, Path("/tmp/opencli"), Path("/tmp/db"),
+                "士兰微", "技术市场经理/总监（PC电源）", 55, 3, 10,
+            )
+        gate.assert_called_once()
+        self.assertEqual(result["rows_after_gate"], 0)
+
     def test_select_baseline_is_restricted_to_the_sample_query(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "baseline.json"

@@ -65,6 +65,8 @@ class PositionProfile:
     noise_keywords: list[str]
     default_noise_note: str
     outreach_summary: str
+    minimum_experience_years: int | None = None
+    minimum_education: str = ""
 
 
 class CDP:
@@ -868,6 +870,23 @@ def build_db_position_profile(db_path: str | Path, client: str, position: str) -
     ability = values("ability_keywords_json")
     target = values("target_companies_json")
     exclusions = values("exclusion_tags_json")
+    experience_requirement = clean_text(profile["experience_requirement"] if "experience_requirement" in profile.keys() else "")
+    experience_match = re.search(r"(\d+)\s*年", experience_requirement)
+    minimum_experience_years = int(experience_match.group(1)) if experience_match else None
+    education_requirement = clean_text(profile["education_requirement"] if "education_requirement" in profile.keys() else "")
+    minimum_education = next(
+        (level for level in ("博士", "硕士", "本科", "大专") if level in education_requirement),
+        "",
+    )
+    expanded_terms = _unique_terms([
+        *ability,
+        *_split_profile_terms(ability),
+        *_split_profile_terms(queries),
+    ])
+    target_keys = {item.casefold() for item in target}
+    core_terms = [item for item in expanded_terms if item.casefold() not in target_keys]
+    role_markers = ("工程师", "经理", "总监", "专家", "主管", "技术市场", "产品定义", "TME", "FAE", "AE")
+    title_terms = [item for item in core_terms if any(marker.casefold() in item.casefold() for marker in role_markers)]
     city = clean_text(position_row["location"] if position_row is not None and "location" in position_row.keys() else "") or base.default_city
     salary = clean_text(position_row["salary"] if position_row is not None and "salary" in position_row.keys() else "") or base.default_salary
     return PositionProfile(
@@ -879,13 +898,37 @@ def build_db_position_profile(db_path: str | Path, client: str, position: str) -
         file_prefix=f"{client}_{position}_猎聘寻访",
         search_rounds=rounds,
         target_companies=target,
-        core_keywords=ability or [position],
+        core_keywords=core_terms or [position],
         tool_keywords=[],
-        title_keywords=[position, *[item for item in ability if any(token in item for token in ("工程师", "经理", "总监", "专家", "主管"))]],
+        title_keywords=_unique_terms([position, *title_terms]),
         noise_keywords=exclusions,
         default_noise_note="按 v3 岗位画像能力词、目标公司和排除项过滤",
         outreach_summary=f"{client}的{position}机会，具体职责与条件以本次岗位画像为准。",
+        minimum_experience_years=minimum_experience_years,
+        minimum_education=minimum_education,
     )
+
+
+def _split_profile_terms(values: list[str]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        terms.extend(
+            part for part in re.split(r"[\s/、，,；;|]+", clean_text(value))
+            if len(part) >= 2
+        )
+    return terms
+
+
+def _unique_terms(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = clean_text(value)
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+    return result
 
 
 def _slug_for_profile(value: str) -> str:
@@ -914,6 +957,7 @@ def score_candidate_for_profile(
     score = 30
     evidence: list[str] = []
     risks: list[str] = []
+    hard_requirement_failed = False
 
     company_hits = keyword_hits(all_text, profile.target_companies)
     if company_hits:
@@ -949,6 +993,21 @@ def score_candidate_for_profile(
         evidence.append("学历满足本科")
     elif education:
         risks.append(f"学历需复核：{education}")
+
+    experience = clean_text(candidate.get("experience", ""))
+    experience_match = re.search(r"(\d+(?:\.\d+)?)\s*年", experience)
+    experience_years = float(experience_match.group(1)) if experience_match else None
+    if profile.minimum_experience_years is not None:
+        if experience_years is not None and experience_years < profile.minimum_experience_years:
+            hard_requirement_failed = True
+            risks.append(f"工作年限不足：{experience}，岗位要求{profile.minimum_experience_years}年以上")
+        elif experience_years is None:
+            risks.append(f"工作年限待核验：岗位要求{profile.minimum_experience_years}年以上")
+    education_rank = {"大专": 1, "本科": 2, "硕士": 3, "博士": 4}
+    if profile.minimum_education and education in education_rank:
+        if education_rank[education] < education_rank[profile.minimum_education]:
+            hard_requirement_failed = True
+            risks.append(f"学历不足：{education}，岗位要求{profile.minimum_education}及以上")
 
     city_text = f"{candidate.get('city', '')} {candidate.get('expected_city', '')}"
     target_city_parts = [part for part in re.split(r"[/、,，\s]+", target_city or "") if part]
@@ -1013,6 +1072,8 @@ def score_candidate_for_profile(
         else:
             risks.append("主管/资深专家层级待核实：卡片摘要未明显体现技术负责、模块负责、团队带教或规范评审")
 
+    if hard_requirement_failed:
+        score = min(score, 49)
     score = max(0, min(100, score))
     if score >= 78:
         level = "A-优先推荐"

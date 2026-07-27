@@ -530,13 +530,11 @@ def normalize_candidate(
         missing_sections = []
         if not source_url:
             missing_sections.append("来源链接")
-        full_min = 50 if channel == "xsaas" else 100
-        if len(full_text) < full_min:
+        if len(full_text) < 100:
             missing_sections.append("完整履历")
         if len(work_text) < 20:
             missing_sections.append("工作经历")
-        edu_min = 0 if channel == "xsaas" else 10
-        if len(education_text) < edu_min:
+        if len(education_text) < 10:
             missing_sections.append("教育经历")
         if capture_status != "complete" or missing_sections:
             detail = "、".join(dict.fromkeys(missing_sections or raw.get("resume_capture_missing") or ["详情抓取失败"]))

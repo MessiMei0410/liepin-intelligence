@@ -200,7 +200,7 @@ EXTRACT_JS = r"""
 DETAIL_JS = r"""
 (() => {
   const clean = value => String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
-  const root = document.querySelector('[ui-view]') || document.body;
+  const root = document.querySelector('.app-candidate-info, .candidate-info, .candidate-detail') || document.body;
   const allLines = (root?.innerText || '').split('\n').map(clean).filter(Boolean);
   // 跳过 X-SaaS 平台外壳/菜单行（从页面实测提取），保留候选人内容
   const skipSet = new Set([
@@ -226,8 +226,16 @@ DETAIL_JS = r"""
   };
   const workText = section(/^(工作经历|工作经验|任职经历)$/, /^(项目经历|项目经验|教育经历|教育背景|培训经历|语言能力|技能|自我评价)$/);
   const projectText = section(/^(项目经历|项目经验)$/, /^(教育经历|教育背景|培训经历|语言能力|技能|自我评价)$/);
-  const educationText = section(/^(教育经历|教育背景)$/, /^(培训经历|语言能力|技能|自我评价|证书|附件)$/);
+  const educationText = section(/^(教育经历|教育背景)$/, /^(项目经历|项目经验|培训经历|语言能力|技能|自我评价|证书|附件)$/);
   const idMatch = location.href.match(/candidate\/info\/(\d+)/);
+  let scope = null;
+  try {
+    scope = root && window.angular ? angular.element(root).scope() : null;
+  } catch (_) {}
+  const candidate = scope?.oCurrentCandidate || {};
+  const basicText = lines.join('\n');
+  const education = String(candidate?.oDegree?.text || (basicText.match(/最高学历：\s*([^\s(]+)/) || [])[1] || '').trim();
+  const city = String(candidate?.oCurrentCity?.text || (basicText.match(/目前城市：\s*([^\s]+)/) || [])[1] || '').trim();
   return {
     source_url: location.href,
     xsaas_id: idMatch ? idMatch[1] : '',
@@ -235,9 +243,40 @@ DETAIL_JS = r"""
     work_text: workText,
     project_text: projectText,
     education_text: educationText,
+    company: String(candidate?.oCurrentCompany?.text || '').trim(),
+    title: String(candidate?.sCurrentPositionName || '').trim(),
+    education,
+    city,
+    experience: Number(candidate?.iWorkingLife || 0) > 0 ? `${candidate.iWorkingLife}年` : '',
     captured_at: new Date().toISOString()
   };
 })()
+"""
+
+
+DETAIL_READY_JS = r"""
+(expectedId => {
+  const root = document.querySelector('.app-candidate-info, .candidate-info, .candidate-detail');
+  const text = root?.innerText || '';
+  let scope = null;
+  try {
+    scope = root && window.angular ? angular.element(root).scope() : null;
+  } catch (_) {}
+  const candidate = scope?.oCurrentCandidate || null;
+  const candidateId = String(candidate?.iPersonId || '');
+  const loading = scope?.bVitaeloading;
+  return {
+    href: location.href,
+    login: location.href.includes('#/login'),
+    candidate_id: candidateId,
+    loading,
+    ready: candidateId === String(expectedId)
+      && loading === false
+      && /基本信息/.test(text)
+      && /工作经历|工作经验|任职经历/.test(text)
+      && /教育经历|教育背景/.test(text),
+  };
+})
 """
 
 
@@ -257,12 +296,10 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
             deadline = time.time() + 18
             ready = False
             while time.time() < deadline:
-                state = evaluate(cdp, "({href:location.href,text:(document.body?.innerText||'').length,login:location.href.includes('#/login'),has_basic:!!(document.body?.innerText||'').match(/\u4e2d\u6587\u59d3\u540d|\u57fa\u672c\u4fe1\u606f/)})") or {}
+                state = evaluate(cdp, f"({DETAIL_READY_JS})({json_expr(candidate_id)})") or {}
                 if state.get("login"):
                     raise RuntimeError("X-SAAS_LOGIN_REQUIRED: 详情页登录态失效")
-                url_match = f"candidate/info/{candidate_id}" in str(state.get("href") or "")
-                content_ready = bool(state.get("has_basic"))
-                if url_match and (int(state.get("text") or 0) >= 200 or content_ready):
+                if state.get("ready"):
                     ready = True
                     break
                 time.sleep(0.5)
@@ -282,27 +319,22 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
                 missing.append("工作经历")
             if len(education_text) < 10:
                 missing.append("教育经历")
-            # 降级策略：DETAIL_JS 返回短文本时，保留 EXTRACT_JS 的 scope 级数据
-            existing_full = str(candidate.get("full_text") or candidate.get("profile_text") or "")
-            existing_work = str(candidate.get("work_text") or "")
-            existing_edu = str(candidate.get("education_text") or "")
-            merged_full = full_text if len(full_text) >= 100 else (existing_full or full_text)
-            merged_work = work_text if len(work_text) >= 20 else (existing_work or work_text)
-            merged_edu = education_text if len(education_text) >= 10 else (existing_edu or education_text)
-            if len(merged_full) >= 100 and len(merged_work) >= 20 and len(merged_edu) >= 10:
-                missing = []
             candidate.update({
-                "profile_text": merged_full,
-                "full_text": merged_full,
-                "work_text": merged_work,
+                "profile_text": full_text,
+                "full_text": full_text,
+                "work_text": work_text,
                 "project_text": project_text,
-                "education_text": merged_edu,
+                "education_text": education_text,
                 "source_url": str(candidate.get("source_url") or detail.get("source_url") or ""),
                 "resume_capture_status": "complete" if not missing else "partial",
-                "resume_capture_missing": missing if missing else [],
+                "resume_capture_missing": missing,
                 "resume_capture_error": "" if not missing else f"缺少：{'、'.join(missing)}",
                 "resume_captured_at": str(detail.get("captured_at") or ""),
             })
+            for field in ("company", "title", "education", "city", "experience"):
+                value = str(detail.get(field) or "").strip()
+                if value:
+                    candidate[field] = value
             stats[str(candidate["resume_capture_status"])] += 1
         except Exception as exc:
             candidate.update({"resume_capture_status": "failed", "resume_capture_missing": ["完整履历"], "resume_capture_error": str(exc)[:300]})
@@ -318,6 +350,46 @@ def query_matches(query: str, selected: str) -> bool:
     want = " ".join(str(query or "").split())
     got = " ".join(str(selected or "").split())
     return bool(want) and bool(got) and (got == want or want in got)
+
+
+def apply_position_score_gate(
+    candidates: list[dict[str, Any]], db_path: Path, client: str, job: str, min_score: int,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    from run_published_position_search import build_db_position_profile, score_candidate_for_profile
+
+    profile = build_db_position_profile(db_path, client, job)
+    accepted: list[dict[str, Any]] = []
+    scored = 0
+    rejected = 0
+    for candidate in candidates:
+        if candidate.get("resume_capture_status") != "complete":
+            accepted.append(candidate)
+            continue
+        card = {
+            "name": candidate.get("name"),
+            "current_company": candidate.get("company"),
+            "current_title": candidate.get("title"),
+            "experience": candidate.get("experience"),
+            "education": candidate.get("education"),
+            "city": candidate.get("city"),
+            "raw_text": candidate.get("full_text") or candidate.get("profile_text"),
+            "skills": [],
+            "work": [],
+        }
+        score, evidence, risks, level = score_candidate_for_profile(card, None, profile)
+        candidate.update({"fit_score": score, "fit_level": level, "evidence": evidence, "risks": risks})
+        scored += 1
+        if score >= min_score:
+            accepted.append(candidate)
+        else:
+            rejected += 1
+    return accepted, {
+        "input": len(candidates),
+        "scored": scored,
+        "accepted": len(accepted),
+        "rejected_low_score": rejected,
+        "min_score": min_score,
+    }
 
 
 def run_search(port: int, queries: list[str], max_rows: int, capture_details: bool = True) -> dict[str, Any]:
@@ -394,26 +466,6 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
             rounds.append(round_entry)
         candidates = list(dedup.values())[:max_rows]
         detail_capture = capture_candidate_details(cdp, candidates, capture_details)
-        # X-SaaS scope 级数据已满足入库需要（name/company/title/work_text），打 complete
-        for c in candidates:
-            if c.get("resume_capture_status") not in ("complete",):
-                has_basic = c.get("name") and c.get("xsaas_id")
-                has_work = len(str(c.get("work_text") or c.get("profile_text") or "")) >= 20
-                if has_basic and has_work:
-                    c["resume_capture_status"] = "complete"
-                    c["resume_capture_missing"] = []
-                    wt = c.get("work_text") or c.get("profile_text") or ""
-                    c["full_text"] = wt if len(wt) >= 100 else (wt + "（履历内容待补充）")
-            # 补齐 normalize_candidate 门槛：education_text 和 full_text 的 fallback
-            for c in candidates:
-                if c.get("resume_capture_status") not in ("complete",):
-                    continue
-                et = str(c.get("education_text") or "")
-                if len(et) < 10:
-                    c["education_text"] = "教育信息待补充（X-SaaS搜索页不展示）"
-                ft = str(c.get("full_text") or "")
-                if len(ft) < 100:
-                    c["full_text"] = ft if len(ft) >= 50 else (ft + "（履历内容待补充）")
         return {"ok": True, "channel": "xsaas", "rounds": rounds, "detail_capture": detail_capture, "candidates": candidates}
     finally:
         if cdp:
@@ -429,7 +481,11 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--port", type=int, default=9223)
     parser.add_argument("--max-rows", type=int, default=30)
-    parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=False)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--client", default="")
+    parser.add_argument("--job", default="")
+    parser.add_argument("--min-score", type=int, default=55)
+    parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=True)
     parser.add_argument("--no-capture-details", dest="capture_details", action="store_false")
     args = parser.parse_args()
     payload = json.loads(args.queries.read_text(encoding="utf-8"))
@@ -438,6 +494,10 @@ def main() -> int:
         raise SystemExit("queries 文件必须是数组或包含 queries 数组")
     queries = [item.get("query") if isinstance(item, dict) else item for item in values]
     result = run_search(args.port, [str(item or "") for item in queries], max(1, min(args.max_rows, 100)), capture_details=args.capture_details)
+    if args.db and args.client and args.job:
+        result["candidates"], result["score_gate"] = apply_position_score_gate(
+            result.get("candidates") or [], args.db, args.client, args.job, args.min_score
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result.get("candidates") or [], ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({**result, "candidates": len(result.get("candidates") or []), "output": str(args.output)}, ensure_ascii=False))

@@ -328,7 +328,12 @@ class RecruitingCapabilityRuntime:
                 xsaas = {"ok": True, "recall_engine": "opencli", **primary_channels["xsaas"]}
         if xsaas is None:
             try:
-                xsaas = self._run_json([self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path), "--output", str(xsaas_path), "--port", str(cdp_port), "--max-rows", str(max(12, target * 2))], 300)
+                xsaas = self._run_json([
+                    self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path),
+                    "--output", str(xsaas_path), "--port", str(cdp_port),
+                    "--max-rows", str(max(12, target * 2)), "--db", str(self.service.db_path),
+                    "--client", client, "--job", job, "--min-score", "55",
+                ], 300)
             except Exception as exc:
                 xsaas = {"ok": False, "status": "blocked", "error": _trim_error(exc)}
                 xsaas_path.write_text("[]", encoding="utf-8")

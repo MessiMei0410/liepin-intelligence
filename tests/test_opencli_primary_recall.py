@@ -66,7 +66,7 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
         with patch.object(
             shadow, "run_opencli",
             side_effect=lambda _ch, query, *_args: ([dict(item) for item in per_query[query]], {}),
-        ), patch.object(shadow, "apply_liepin_score_gate", side_effect=lambda rows, *_args: rows):
+        ), patch.object(shadow, "apply_position_score_gate", side_effect=lambda rows, *_args: rows):
             summary = shadow.run_primary_recall(
                 "liepin", ["q1", "q2"], 24, 9223, Path("/tmp/opencli"),
                 Path("/tmp/db.sqlite"), "客户", "岗位", 55, 3, 24,
@@ -84,7 +84,7 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
         with patch.object(
             shadow, "run_opencli",
             side_effect=lambda *_args: ([_row("a", "甲", "failed")], {}),
-        ):
+        ), patch.object(shadow, "apply_position_score_gate", side_effect=lambda rows, *_args: rows):
             summary = shadow.run_primary_recall(
                 "xsaas", ["q1"], 24, 9223, Path("/tmp/opencli"),
                 Path("/tmp/db.sqlite"), "客户", "岗位", 55, 3, 24,
@@ -98,7 +98,9 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
                 raise RuntimeError("LIEPIN_LOGIN_REQUIRED: no signed-in tab")
             return ([_row("a", "甲", "complete")], {})
 
-        with patch.object(shadow, "run_opencli", side_effect=run):
+        with patch.object(shadow, "run_opencli", side_effect=run), patch.object(
+            shadow, "apply_position_score_gate", side_effect=lambda rows, *_args: rows
+        ):
             summary = shadow.run_primary_recall(
                 "xsaas", ["bad", "good"], 24, 9223, Path("/tmp/opencli"),
                 Path("/tmp/db.sqlite"), "客户", "岗位", 55, 3, 24,
@@ -123,6 +125,8 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
             with patch.object(
                 shadow, "run_opencli",
                 side_effect=lambda *_args: ([_row("x1", "机密姓名", "complete")], {}),
+            ), patch.object(
+                shadow, "apply_position_score_gate", side_effect=lambda rows, *_args: rows
             ), patch.object(sys, "argv", argv):
                 buffer = io.StringIO()
                 with contextlib.redirect_stdout(buffer):
