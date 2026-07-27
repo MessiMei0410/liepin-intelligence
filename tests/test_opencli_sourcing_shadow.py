@@ -188,6 +188,75 @@ class OpenCliSourcingShadowTest(unittest.TestCase):
     def test_runtime_missing_query_is_empty_not_string_none(self) -> None:
         self.assertEqual(RecruitingCapabilityRuntime._query_text([{}]), "")
 
+    def test_load_queries_reads_queries_envelope_and_dict_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "queries.json"
+            path.write_text(
+                json.dumps({"queries": [{"query": "a"}, "b", {"keyword": "c"}, {}]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(shadow.load_queries(path), ["a", "b", "c"])
+
+    def test_choose_sample_query_prefers_first_nonempty_baseline(self) -> None:
+        rows = [
+            shadow.normalize_candidate("xsaas", {"candidateId": "1", "name": "A", "query": "q2"}),
+            shadow.normalize_candidate("xsaas", {"candidateId": "2", "name": "B", "query": "q3"}),
+        ]
+        query, meta = shadow.choose_sample_query(rows, ["q1", "q2", "q3"], "fallback")
+        self.assertEqual(query, "q2")
+        self.assertEqual(meta["sampled_query_index"], 1)
+        self.assertEqual(meta["baseline_counts_per_query"], [0, 1, 1])
+        self.assertFalse(meta["fallback_query_used"])
+
+    def test_choose_sample_query_falls_back_to_first_query_when_all_empty(self) -> None:
+        rows = [shadow.normalize_candidate("xsaas", {"candidateId": "1", "name": "A", "query": "q9"})]
+        query, meta = shadow.choose_sample_query(rows, ["q1", "q2"], "")
+        self.assertEqual(query, "q1")
+        self.assertTrue(meta["fallback_query_used"])
+
+    def test_main_records_pre_gate_counts_and_sample_policy(self) -> None:
+        import contextlib
+        import io
+        import sys
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = root / "baseline.json"
+            baseline.write_text(json.dumps([
+                {"res_id_encode": "r1", "name": "甲", "currentCompany": "A", "currentTitle": "T", "query": "宽词"},
+                {"res_id_encode": "r2", "name": "乙", "currentCompany": "B", "currentTitle": "T", "query": "窄词"},
+            ]), encoding="utf-8")
+            queries = root / "queries.json"
+            queries.write_text(json.dumps({"queries": ["空词", "宽词"]}), encoding="utf-8")
+            rows = [
+                {"res_id_encode": "s1", "name": "丙", "currentCompany": "C", "currentTitle": "T"},
+                {"res_id_encode": "s2", "name": "丁", "currentCompany": "D", "currentTitle": "T"},
+            ]
+            diagnostics = {"status": "completed", "result_count": 2, "detail_capture": {"complete": 2}}
+            argv = [
+                "opencli_sourcing_shadow.py", "--channel", "liepin",
+                "--queries-json", str(queries), "--baseline", str(baseline),
+                "--client", "C", "--job", "J", "--port", "9223", "--limit", "12",
+            ]
+            with patch.object(shadow, "run_opencli", return_value=(
+                [shadow.normalize_candidate("liepin", item) for item in rows], diagnostics,
+            )), patch.object(
+                shadow, "apply_liepin_score_gate", side_effect=lambda items, *_args, **_kw: items[:1],
+            ), patch.object(sys, "argv", argv):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    self.assertEqual(shadow.main(), 0)
+            result = json.loads(buffer.getvalue())
+        self.assertEqual(result["query"], "宽词")
+        self.assertEqual(result["sample_policy"], "first_nonempty_baseline_else_first")
+        self.assertEqual(result["sampled_query_index"], 1)
+        comparison = result["comparison"]
+        self.assertEqual(comparison["baseline_count"], 1)
+        self.assertEqual(comparison["baseline_file_count"], 2)
+        self.assertEqual(comparison["shadow_raw_count"], 2)
+        self.assertEqual(comparison["shadow_gated_out"], 1)
+        self.assertEqual(comparison["shadow_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

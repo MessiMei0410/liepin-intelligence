@@ -93,9 +93,54 @@ def candidate_key(channel: str, item: dict[str, Any]) -> str:
     return f"identity:{identity}"
 
 
+def filter_baseline(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    return [item for item in rows if item.get("query") == query]
+
+
 def select_baseline(channel: str, path: Path, query: str) -> list[dict[str, Any]]:
     rows = [normalize_candidate(channel, item) for item in load_candidates(path)]
-    return [item for item in rows if item.get("query") == query]
+    return filter_baseline(rows, query)
+
+
+def query_text(entry: Any) -> str:
+    if isinstance(entry, dict):
+        for key in ("query", "keyword", "text", "q"):
+            value = clean_text(entry.get(key))
+            if value:
+                return value
+        return ""
+    return clean_text(entry)
+
+
+def load_queries(path: Path) -> list[str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entries = payload.get("queries") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return []
+    return [text for text in (query_text(entry) for entry in entries) if text]
+
+
+def choose_sample_query(
+    rows: list[dict[str, Any]], queries: list[str], fallback_query: str
+) -> tuple[str, dict[str, Any]]:
+    """优先采样基线非空的 query（全空时回退第一词），让跨工作流对比不再是空对空。"""
+    counts = [len(filter_baseline(rows, query)) for query in queries]
+    for index, count in enumerate(counts):
+        if count > 0:
+            return queries[index], {
+                "sample_policy": "first_nonempty_baseline_else_first",
+                "sampled_query_index": index,
+                "queries_total": len(queries),
+                "baseline_counts_per_query": counts,
+                "fallback_query_used": False,
+            }
+    return (queries[0] if queries else fallback_query), {
+        "sample_policy": "first_nonempty_baseline_else_first",
+        "sampled_query_index": 0,
+        "queries_total": len(queries),
+        "baseline_counts_per_query": counts,
+        "fallback_query_used": True,
+    }
 
 
 def opencli_endpoint(channel: str, port: int) -> tuple[str, str]:
@@ -257,6 +302,70 @@ def apply_liepin_score_gate(
     return accepted
 
 
+def run_primary_recall(
+    channel: str,
+    queries: list[str],
+    limit: int,
+    port: int,
+    opencli_bin: Path,
+    db: Path,
+    client: str,
+    job: str,
+    min_score: int,
+    max_queries: int,
+    detail_limit: int,
+) -> dict[str, Any]:
+    """OpenCLI 主渠道召回（OC1 试点）：多词召回 + 生产同款分数门/详情采集/完整度标准。
+
+    只负责召回与详情采集；入库、去重、归因、审计仍由 ASA 既有链路完成。
+    rows 写出到调用方指定文件；返回的摘要只含计数与失败原因，不含候选人明文。
+    """
+    selected = [query for query in (clean_text(value) for value in queries) if query][: max(1, max_queries)]
+    blocked: list[dict[str, str]] = []
+    merged: list[dict[str, Any]] = []
+    succeeded = 0
+    for query in selected:
+        try:
+            rows, _diagnostics = run_opencli(channel, query, limit, port, opencli_bin)
+        except Exception as exc:
+            blocked.append({"query": query, "error": str(exc)[-300:]})
+            continue
+        succeeded += 1
+        for item in rows:
+            item["query"] = query
+            item["channel"] = channel
+        merged.extend(rows)
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in merged:
+        key = candidate_key(channel, item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    gated = (
+        apply_liepin_score_gate(deduped, db, client, job, min_score)
+        if channel == "liepin"
+        else deduped
+    )
+    capped = gated[: max(1, detail_limit)]
+    complete = sum(1 for item in capped if item.get("resume_capture_status") == "complete")
+    return {
+        "ok": complete > 0,
+        "mode": "opencli_primary_recall",
+        "channel": channel,
+        "queries_attempted": len(selected),
+        "queries_succeeded": succeeded,
+        "rows_recalled": len(merged),
+        "rows_after_dedupe": len(deduped),
+        "rows_after_gate": len(gated),
+        "rows_written": len(capped),
+        "rows_complete": complete,
+        "blocked": blocked,
+        "rows": capped,
+    }
+
+
 def completeness(channel: str, rows: list[dict[str, Any]]) -> float:
     fields = ("candidate_id", "name", "company", "title", "url") if channel == "xsaas" else (
         "candidate_id", "name", "company", "title", "experience", "education", "city", "url",
@@ -305,9 +414,14 @@ def compare(channel: str, baseline: list[dict[str, Any]], shadow: list[dict[str,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ASA non-blocking read-only OpenCLI sourcing shadow")
+    parser.add_argument("--mode", choices=("shadow", "primary"), default="shadow")
     parser.add_argument("--channel", choices=("liepin", "xsaas"), required=True)
-    parser.add_argument("--query", required=True)
-    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--query", default="")
+    parser.add_argument("--queries-json", type=Path, default=None)
+    parser.add_argument("--baseline", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--detail-limit", type=int, default=24)
+    parser.add_argument("--max-queries", type=int, default=3)
     parser.add_argument("--client", required=True)
     parser.add_argument("--job", required=True)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -321,11 +435,45 @@ def main() -> int:
     if not args.opencli_bin.exists():
         raise SystemExit(f"OpenCLI not found: {args.opencli_bin}")
 
-    query = clean_text(args.query)
-    baseline = select_baseline(args.channel, args.baseline, query)
+    if args.mode == "primary":
+        queries = load_queries(args.queries_json) if args.queries_json else []
+        if not queries and clean_text(args.query):
+            queries = [clean_text(args.query)]
+        if not queries:
+            parser.error("--mode primary 需要 --queries-json 或 --query")
+        if args.output is None:
+            parser.error("--mode primary 需要 --output")
+        summary = run_primary_recall(
+            args.channel, queries, args.limit, args.port, args.opencli_bin,
+            args.db, args.client, args.job, args.min_score, args.max_queries, args.detail_limit,
+        )
+        rows = summary.pop("rows")
+        args.output.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary["output"] = str(args.output)
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
+
+    if args.baseline is None:
+        parser.error("--mode shadow 需要 --baseline")
+    baseline_rows = [normalize_candidate(args.channel, item) for item in load_candidates(args.baseline)]
+    if args.queries_json is not None:
+        queries = load_queries(args.queries_json)
+        query, sample_meta = choose_sample_query(baseline_rows, queries, clean_text(args.query))
+    else:
+        query = clean_text(args.query)
+        sample_meta = {"sample_policy": "explicit_query"}
+    if not query:
+        parser.error("--query 为空且 --queries-json 无可用查询词")
+    baseline = filter_baseline(baseline_rows, query)
     shadow, diagnostics = run_opencli(args.channel, query, args.limit, args.port, args.opencli_bin)
+    shadow_raw_keys = {candidate_key(args.channel, item) for item in shadow}
     if args.channel == "liepin":
         shadow = apply_liepin_score_gate(shadow, args.db, args.client, args.job, args.min_score)
+    comparison = compare(args.channel, baseline, shadow)
+    # 分数门/基线过滤前的原始计数：0/0 对比才能区分"召回为空"与"被分数线筛空"
+    comparison["baseline_file_count"] = len({candidate_key(args.channel, item) for item in baseline_rows})
+    comparison["shadow_raw_count"] = len(shadow_raw_keys)
+    comparison["shadow_gated_out"] = len(shadow_raw_keys) - comparison["shadow_count"]
     result = {
         "ok": True,
         "mode": "read_only_shadow",
@@ -333,8 +481,9 @@ def main() -> int:
         "affects_outreach": False,
         "channel": args.channel,
         "query": query,
+        **sample_meta,
         "diagnostics": diagnostics,
-        "comparison": compare(args.channel, baseline, shadow),
+        "comparison": comparison,
         "action_migration_eligible": False,
         "migration_reason": "Shadow samples require aggregate cross-workflow evidence before any action pilot.",
     }

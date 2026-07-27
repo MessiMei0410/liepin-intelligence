@@ -278,32 +278,60 @@ class RecruitingCapabilityRuntime:
         xsaas_queries = query_builders.build_xsaas_queries(xsaas_queries, company_terms=company_terms)
         liepin_queries_path.write_text(json.dumps({"queries": liepin_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         xsaas_queries_path.write_text(json.dumps({"queries": xsaas_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
-        command = [
-            self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
-            "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
-            "--port", str(int(request.get("cdp_port") or 9223)), "--rounds", "6",
-            "--max-cards", str(max(12, target * 2)), "--min-score", "55", "--recommend-score", "65",
-            "--capture-links", "--capture-details", "--detail-limit", str(max(12, target * 2)),
-            "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
-            "--queries-json", str(liepin_queries_path),
-        ]
-        try:
-            search = self._run_json(command, 900)
-        except Exception as exc:
-            self._record_sourcing_funnel_failure(
-                run_id=f"asa-source-{stamp}",
-                workflow_id=str(request.get("workflow_id") or ""),
-                client=client,
-                job=job,
-                channel="liepin",
-                error=_trim_error(exc),
+        # OC1 试点：opencli_primary 开启时先由 OpenCLI 适配器召回，失败/空结果自动回退生产 runner
+        opencli_primary = self._opencli_primary_enabled(request)
+        primary_channels: dict[str, Any] = {}
+        cdp_port = int(request.get("cdp_port") or 9223)
+        liepin_engine = "production_fallback" if opencli_primary else "production"
+        search: dict[str, Any] | None = None
+        if opencli_primary:
+            liepin_engine = self._attempt_opencli_primary(
+                channel="liepin", client=client, job=job, port=cdp_port,
+                queries_path=liepin_queries_path, output_path=liepin_path,
+                limit=min(max(12, target * 2), 24), detail_limit=max(12, target * 2),
+                report=primary_channels,
             )
-            raise
-        try:
-            xsaas = self._run_json([self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path), "--output", str(xsaas_path), "--port", str(int(request.get("cdp_port") or 9223)), "--max-rows", str(max(12, target * 2))], 300)
-        except Exception as exc:
-            xsaas = {"ok": False, "status": "blocked", "error": _trim_error(exc)}
-            xsaas_path.write_text("[]", encoding="utf-8")
+            if liepin_engine == "opencli":
+                search = {"ok": True, "recall_engine": "opencli", **primary_channels["liepin"]}
+        if search is None:
+            command = [
+                self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
+                "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
+                "--port", str(cdp_port), "--rounds", "6",
+                "--max-cards", str(max(12, target * 2)), "--min-score", "55", "--recommend-score", "65",
+                "--capture-links", "--capture-details", "--detail-limit", str(max(12, target * 2)),
+                "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
+                "--queries-json", str(liepin_queries_path),
+            ]
+            try:
+                search = self._run_json(command, 900)
+            except Exception as exc:
+                self._record_sourcing_funnel_failure(
+                    run_id=f"asa-source-{stamp}",
+                    workflow_id=str(request.get("workflow_id") or ""),
+                    client=client,
+                    job=job,
+                    channel="liepin",
+                    error=_trim_error(exc),
+                )
+                raise
+        xsaas_engine = "production_fallback" if opencli_primary else "production"
+        xsaas: dict[str, Any] | None = None
+        if opencli_primary:
+            xsaas_engine = self._attempt_opencli_primary(
+                channel="xsaas", client=client, job=job, port=cdp_port,
+                queries_path=xsaas_queries_path, output_path=xsaas_path,
+                limit=min(max(12, target * 2), 100), detail_limit=max(12, target * 2),
+                report=primary_channels,
+            )
+            if xsaas_engine == "opencli":
+                xsaas = {"ok": True, "recall_engine": "opencli", **primary_channels["xsaas"]}
+        if xsaas is None:
+            try:
+                xsaas = self._run_json([self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path), "--output", str(xsaas_path), "--port", str(cdp_port), "--max-rows", str(max(12, target * 2))], 300)
+            except Exception as exc:
+                xsaas = {"ok": False, "status": "blocked", "error": _trim_error(exc)}
+                xsaas_path.write_text("[]", encoding="utf-8")
         opencli_shadow = self._run_opencli_shadow(
             request=request,
             client=client,
@@ -315,6 +343,13 @@ class RecruitingCapabilityRuntime:
             liepin_path=liepin_path,
             xsaas_path=xsaas_path,
             artifact_path=candidates_path.with_name(candidates_path.stem + "-opencli-shadow.json"),
+            liepin_queries_path=liepin_queries_path,
+            xsaas_queries_path=xsaas_queries_path,
+            skip_channels={
+                channel
+                for channel, engine in (("liepin", liepin_engine), ("xsaas", xsaas_engine))
+                if engine == "opencli"
+            },
         )
         liepin_candidates = _loads(liepin_path.read_text(encoding="utf-8"), [])
         xsaas_candidates = _loads(xsaas_path.read_text(encoding="utf-8"), [])
@@ -328,8 +363,8 @@ class RecruitingCapabilityRuntime:
             workflow_id, client, job,
         )
         channel_runs = [
-            {"channel": "liepin", "status": "completed", "result": search},
-            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "result": xsaas},
+            {"channel": "liepin", "status": "completed", "recall_engine": liepin_engine, "result": search},
+            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "recall_engine": xsaas_engine, "result": xsaas},
         ]
         try:
             funnel = self._persist_sourcing_funnel(
@@ -353,6 +388,7 @@ class RecruitingCapabilityRuntime:
             "run_id": f"asa-source-{stamp}",
             "channel_runs": channel_runs,
             "opencli_shadow": opencli_shadow,
+            "opencli_primary": {"enabled": opencli_primary, "channels": primary_channels},
             "intake": {"dry_run": dry, "applied": applied, "source_file": str(candidates_path)},
             "attributions": attributions,
             "sourcing_funnel": funnel,
@@ -368,6 +404,47 @@ class RecruitingCapabilityRuntime:
         value = first.get("query") if isinstance(first, dict) else first
         return " ".join(str(value or "").split())
 
+    @staticmethod
+    def _opencli_primary_enabled(request: dict[str, Any]) -> bool:
+        """OC1 试点开关：默认关闭；请求级 opencli_primary 或环境变量 ASA_OPENCLI_PRIMARY 显式开启。"""
+        configured = request.get("opencli_primary", os.environ.get("ASA_OPENCLI_PRIMARY", "0"))
+        return str(configured).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _attempt_opencli_primary(
+        self,
+        *,
+        channel: str,
+        client: str,
+        job: str,
+        port: int,
+        queries_path: Path,
+        output_path: Path,
+        limit: int,
+        detail_limit: int,
+        report: dict[str, Any],
+    ) -> str:
+        """OC1 试点：OpenCLI 主渠道召回；失败/被阻断/无完整行一律回退生产 runner。"""
+        try:
+            summary = self._run_json(
+                [
+                    self.python, str(OPENCLI_SHADOW), "--mode", "primary",
+                    "--channel", channel, "--queries-json", str(queries_path),
+                    "--output", str(output_path),
+                    "--client", client, "--job", job,
+                    "--db", str(self.service.db_path), "--port", str(port),
+                    "--limit", str(limit), "--detail-limit", str(detail_limit),
+                    "--max-queries", "3",
+                ],
+                600,
+            )
+        except Exception as exc:
+            summary = {
+                "ok": False, "mode": "opencli_primary_recall", "channel": channel,
+                "error": _trim_error(exc),
+            }
+        report[channel] = summary
+        return "opencli" if summary.get("ok") else "production_fallback"
+
     def _run_opencli_shadow(
         self,
         *,
@@ -381,16 +458,25 @@ class RecruitingCapabilityRuntime:
         liepin_path: Path,
         xsaas_path: Path,
         artifact_path: Path,
+        liepin_queries_path: Path | None = None,
+        xsaas_queries_path: Path | None = None,
+        skip_channels: set[str] | None = None,
     ) -> dict[str, Any]:
         configured = request.get("opencli_shadow", os.environ.get("ASA_OPENCLI_SHADOW", "1"))
         enabled = str(configured).strip().lower() not in {"0", "false", "no", "off"}
         if not enabled:
             return {"enabled": False, "mode": "read_only_shadow", "affects_intake": False, "channels": []}
         channels = []
-        for channel, entries, baseline in (
-            ("liepin", liepin_queries, liepin_path),
-            ("xsaas", xsaas_queries, xsaas_path),
+        for channel, entries, baseline, queries_file in (
+            ("liepin", liepin_queries, liepin_path, liepin_queries_path),
+            ("xsaas", xsaas_queries, xsaas_path, xsaas_queries_path),
         ):
+            if skip_channels and channel in skip_channels:
+                channels.append({
+                    "channel": channel, "status": "skipped",
+                    "reason": "recall_engine_opencli", "affects_intake": False,
+                })
+                continue
             query = self._query_text(entries)
             if not query:
                 channels.append({"channel": channel, "status": "skipped", "reason": "missing_query"})
@@ -408,6 +494,8 @@ class RecruitingCapabilityRuntime:
                 "--port", str(port),
                 "--limit", str(channel_limit),
             ]
+            if queries_file is not None:
+                command += ["--queries-json", str(queries_file)]
             try:
                 result = self._run_json(command, 600)
                 channels.append({"channel": channel, "status": "completed", **result})
@@ -424,7 +512,7 @@ class RecruitingCapabilityRuntime:
             "mode": "read_only_shadow",
             "affects_intake": False,
             "affects_outreach": False,
-            "sample_policy": "first_query_per_channel",
+            "sample_policy": "first_nonempty_baseline_else_first",
             "channels": channels,
             "artifact": str(artifact_path),
         }
