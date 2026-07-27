@@ -97,6 +97,12 @@ _CLOSED_STATUS_TOKENS = ("关闭", "拆分", "迁移", "只读快照", "暂停",
 
 MAX_RANKING_ENTRIES = 50
 
+# S7-3：信号有效期与过期降权（PRD §3：默认 60 天；口径锚死，榜单打分与文末 S7-2 读取侧共用）
+# 边界契约：年龄 < 60 天有效；≥60 天过期降权（59 天有效 / 60 天起过期 / 61 天过期）
+SIGNAL_VALIDITY_DAYS = 60
+# 过期信号权重系数：降权不删除，历史信号保留可查
+EXPIRED_WEIGHT_FACTOR = 0.2
+
 
 def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -744,6 +750,35 @@ def sanitize_signals(
 
 
 # ---------------------------------------------------------------------------
+# 4.5 S7-3：信号过期判定（59/60/61 天边界契约：年龄 ≥60 天即过期；日期不可解析按过期处理）
+# ---------------------------------------------------------------------------
+
+def signal_age_days(as_of: Any, today: Any = None) -> int | None:
+    """信号 as_of 距今天数（自然日，未来日期为负）；as_of 解析失败返回 None。"""
+    from datetime import date as _date
+
+    if isinstance(today, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", today):
+        today_date = _date.fromisoformat(today)
+    elif isinstance(today, _date):
+        today_date = today
+    else:
+        today_date = _date.today()
+    try:
+        as_of_date = _date.fromisoformat(str(as_of or "")[:10])
+    except ValueError:
+        return None
+    return (today_date - as_of_date).days
+
+
+def is_signal_expired(as_of: Any, today: Any = None, *, validity_days: int = SIGNAL_VALIDITY_DAYS) -> bool:
+    """过期判定：年龄 ≥ 有效期即过期（59 天有效 / 60 天起过期）；日期不可解析按过期处理（宁降权不放过）。"""
+    age = signal_age_days(as_of, today)
+    if age is None:
+        return True
+    return age >= max(1, int(validity_days))
+
+
+# ---------------------------------------------------------------------------
 # 5. 榜单生成（公司 × 信号强度 × 在手岗位相关性；确定性打分，理由可解释）
 # ---------------------------------------------------------------------------
 
@@ -802,9 +837,13 @@ def build_ranking(
     signals: list[dict[str, Any]],
     *,
     jobs: list[dict[str, Any]],
+    today: Any = None,
+    validity_days: int = SIGNAL_VALIDITY_DAYS,
 ) -> list[dict[str, Any]]:
-    """榜单：score = Σ(类型权重×置信度系数)（公司上限封顶）+ 在手相关岗位加成（封顶）。
+    """榜单：score = Σ(类型权重×置信度系数×过期系数)（公司上限封顶）+ 在手相关岗位加成（封顶）。
 
+    S7-3 过期降权：过期信号（as_of 距今 ≥60 天）权重 ×EXPIRED_WEIGHT_FACTOR，且不再单独成为
+    上榜理由——只有未过期信号的公司才进榜；排序理由只统计未过期信号，过期信号如实标注"已降权"。
     只列有信号的公司；reason 用业务语言写清构成（信号条数分类计数 + 相关岗位数）。
     """
     by_company: dict[str, list[dict[str, Any]]] = {}
@@ -812,26 +851,38 @@ def build_ranking(
         by_company.setdefault(str(signal.get("company") or ""), []).append(signal)
     ranking: list[dict[str, Any]] = []
     for company, items in by_company.items():
-        strength = min(
-            sum(_TYPE_WEIGHT.get(str(item.get("type")), 1.0) * _CONFIDENCE_FACTOR.get(str(item.get("confidence")), 0.4) for item in items),
-            MAX_COMPANY_SIGNAL_SCORE,
-        )
+        active = [
+            item
+            for item in items
+            if not is_signal_expired(str(item.get("as_of") or ""), today, validity_days=validity_days)
+        ]
+        expired = [item for item in items if item not in active]
+        if not active:
+            continue  # 全是过期信号的公司不上榜（过期不删除，信号仍在库可查）
+        def _weight(item: dict[str, Any]) -> float:
+            base = _TYPE_WEIGHT.get(str(item.get("type")), 1.0) * _CONFIDENCE_FACTOR.get(str(item.get("confidence")), 0.4)
+            if item in expired:
+                return base * EXPIRED_WEIGHT_FACTOR
+            return base
+        strength = min(sum(_weight(item) for item in items), MAX_COMPANY_SIGNAL_SCORE)
         relevant_jobs = match_relevant_jobs(company, jobs)
         bonus = min(JOB_RELEVANCE_BONUS * len(relevant_jobs), MAX_JOB_RELEVANCE_BONUS)
         score = round(strength + bonus, 1)
         type_counts: dict[str, int] = {}
-        for item in items:
+        for item in active:
             label = SIGNAL_TYPE_LABELS.get(str(item.get("type")), str(item.get("type")))
             type_counts[label] = type_counts.get(label, 0) + 1
         type_brief = "、".join(f"{label}×{count}" for label, count in sorted(type_counts.items(), key=lambda kv: -kv[1]))
-        reason = f"信号 {len(items)} 条（{type_brief}）"
+        reason = f"信号 {len(active)} 条（{type_brief}）"
+        if expired:
+            reason += f"；另有 {len(expired)} 条信号已过 {validity_days} 天有效期，降权不计入上榜理由"
         if relevant_jobs:
             titles = "、".join(str(job.get("title") or "") for job in relevant_jobs[:3])
             reason += f"；在手相关岗位 {len(relevant_jobs)} 个（{titles}）"
-        # 建议动作取权重最高的信号（同权重按 mapping>activate>watch 的业务紧迫度）
+        # 建议动作取权重最高的未过期信号（同权重按 mapping>activate>watch 的业务紧迫度）
         action_rank = {"mapping": 0, "activate": 1, "watch": 2}
         top = max(
-            items,
+            active,
             key=lambda item: (
                 _TYPE_WEIGHT.get(str(item.get("type")), 1.0) * _CONFIDENCE_FACTOR.get(str(item.get("confidence")), 0.4),
                 -action_rank.get(str(item.get("linked_action")), 3),
@@ -843,7 +894,8 @@ def build_ranking(
                 "score": score,
                 "reason": reason,
                 "suggested_action": str(top.get("linked_action") or "watch"),
-                "signal_count": len(items),
+                "signal_count": len(active),
+                "expired_signal_count": len(expired),
                 "related_jobs": [str(job.get("title") or "") for job in relevant_jobs[:5]],
             }
         )
@@ -854,6 +906,50 @@ def build_ranking(
 # ---------------------------------------------------------------------------
 # 6. 组装 + 持久化（复用 agent_artifacts，同日幂等 upsert）+ 榜单 markdown
 # ---------------------------------------------------------------------------
+
+def _signal_dedupe_key(signal: dict[str, Any]) -> tuple[str, str, str]:
+    """去重键：(规范化公司名, 信号类型, 规范化 summary)——summary 去全部空白并小写。"""
+    norm_company = knowledge_base.normalize_client_name(str(signal.get("company") or ""))
+    summary_norm = "".join(str(signal.get("summary") or "").split()).lower()
+    return (norm_company, str(signal.get("type") or ""), summary_norm)
+
+
+def merge_with_previous_signals(
+    previous_signals: list[dict[str, Any]],
+    new_signals: list[dict[str, Any]],
+    *,
+    today: Any = None,
+    validity_days: int = SIGNAL_VALIDITY_DAYS,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """S7-3 扫描合并：新信号 ∪ 上一期未过期信号，按 (company, type, 规范化 summary) 去重，as_of 取最新。
+
+    过期旧信号不带入新文档——但历史 artifact 原样保留（过期不删除，只是不再结转到新一期）；
+    去重命中时 as_of 较新者胜出，并列取新信号（本期解读更新）。
+    返回 (merged, {"carried_over": 结转条数, "deduped": 去重合并条数})。
+    """
+    carried = [
+        signal
+        for signal in previous_signals or []
+        if isinstance(signal, dict)
+        and not is_signal_expired(str(signal.get("as_of") or ""), today, validity_days=validity_days)
+    ]
+    merged_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str]] = []
+    deduped = 0
+    for signal in list(carried) + list(new_signals or []):
+        if not isinstance(signal, dict):
+            continue
+        key = _signal_dedupe_key(signal)
+        existing = merged_by_key.get(key)
+        if existing is None:
+            merged_by_key[key] = signal
+            order.append(key)
+            continue
+        deduped += 1
+        if str(signal.get("as_of") or "") >= str(existing.get("as_of") or ""):
+            merged_by_key[key] = signal
+    return [merged_by_key[key] for key in order], {"carried_over": len(carried), "deduped": deduped}
+
 
 def build_radar_scan(
     conn: Any,
@@ -987,7 +1083,15 @@ def build_radar_scan(
         kept.append(signal)
     signals = kept
 
-    ranking = build_ranking(signals, jobs=jobs)
+    # S7-3：与上一期未过期信号去重合并（as_of 取最新；过期旧信号不结转、历史 artifact 原样保留）
+    previous_payload = get_latest_radar_scan(conn)
+    previous_signals = ((previous_payload or {}).get("radar_scan") or {}).get("signals") or []
+    signals, merge_stats = merge_with_previous_signals(previous_signals, signals, today=as_of)
+    expired_in_doc = sum(
+        1 for signal in signals if is_signal_expired(str(signal.get("as_of") or ""), as_of)
+    )
+
+    ranking = build_ranking(signals, jobs=jobs, today=as_of)
 
     doc = {
         "schema_version": SCHEMA_VERSION,
@@ -1005,6 +1109,9 @@ def build_radar_scan(
             "rejected_no_source": rejected_no_source,
             "rejected_invalid": rejected_invalid,
             "open_jobs": len(jobs),
+            "carried_over_signals": merge_stats["carried_over"],
+            "deduped_signals": merge_stats["deduped"],
+            "expired_signals": expired_in_doc,
             "failures": failures[:MAX_FAILURES_KEPT],
         },
         "trace": trace,
@@ -1052,6 +1159,8 @@ def render_ranking_markdown(doc: dict[str, Any]) -> str:
             if implication:
                 line += f"｜可能意味着：{implication}"
             line += f"｜来源：{'；'.join(signal.get('source_urls') or [])}"
+            if is_signal_expired(str(signal.get("as_of") or ""), doc.get("scan_date")):
+                line += "｜已过 60 天有效期，降权不计入上榜理由（保留可查）"
             lines.append(line)
         lines.append(f"- 建议动作：{action_label}（由顾问本人执行）")
     quiet = [
@@ -1171,7 +1280,7 @@ def get_latest_radar_scan(conn: Any) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 # PRD §3：信号有效期默认 60 天，过期信号自动降权不进榜单、不注入任何联动场景
-SIGNAL_VALIDITY_DAYS = 60
+# （SIGNAL_VALIDITY_DAYS 常量已上移到期初常量区，与 S7-3 榜单降权共用同一边界口径）
 
 _BRACKET_TOKEN = re.compile(r"[（(]([^（）()]{1,30})[）)]")
 

@@ -323,7 +323,7 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
                 # 等待搜索结果渲染完成且属于本轮关键词：固定 sleep/只看计数会读到加载中间态或
                 # 默认列表（MPS 165 条实证渲染 >4s），误判 0 召回或把上一轮结果并入本轮。
                 settled = False
-                deadline = time.time() + 20
+                deadline = time.time() + 45  # 大结果集渲染实测 >20s（技术市场 round10 实证），放宽到 45s
                 while time.time() < deadline:
                     settle_state = evaluate(cdp, f"({SETTLE_JS})({json_expr(query)})") or {}
                     if settle_state.get("queryMatch") and settle_state.get("hasCount") and not settle_state.get("loading"):
@@ -332,7 +332,7 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
                     time.sleep(0.8)
                 if not settled:
                     if attempts < 2:
-                        print(f"[xsaas_candidate_search] 关键词「{query}」第 {attempts} 次等待渲染超时（20s），换新标签页重试一次", file=sys.stderr)
+                        print(f"[xsaas_candidate_search] 关键词「{query}」第 {attempts} 次等待渲染超时（45s），换新标签页重试一次", file=sys.stderr)
                         continue
                     print(f"[xsaas_candidate_search] 关键词「{query}」重试后仍等待渲染超时，标记跳过（settle_timeout）", file=sys.stderr)
                     round_entry = {"query": query, "status": "skipped", "reason": "settle_timeout", "attempts": attempts}
