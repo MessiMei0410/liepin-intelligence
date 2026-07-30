@@ -35,11 +35,11 @@ describe('R3 工作流业务终态', () => {
     vi.unstubAllGlobals()
   })
 
-  it('blocked + completed_pool_insufficient → 显示业务文案与三个下一步按钮，不出现英文枚举', () => {
+  it('blocked + completed_pool_insufficient → 显示业务文案与 Copilot 下一步入口，不出现英文枚举', () => {
     const { container } = renderPanel(outcomeWorkflow('blocked', 'completed_pool_insufficient', { steps: finishedSteps }))
     expect(screen.getAllByText('本轮完成，合格人数不足').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: '复核现有人选' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '调整条件再搜' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '在 Copilot 中调整策略' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '结束本轮' })).toBeInTheDocument()
     expect(container).not.toHaveTextContent('completed_pool_insufficient')
     expect(container.querySelector('.workflow-progress')?.className).toContain('needs-approval')
@@ -56,7 +56,7 @@ describe('R3 工作流业务终态', () => {
     expect(screen.getAllByText('技术失败：执行多渠道寻访').length).toBeGreaterThan(0)
     expect(container.querySelector('.workflow-progress')?.className).toContain('error')
     expect(screen.queryByRole('button', { name: '复核现有人选' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '调整条件再搜' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '在 Copilot 中调整策略' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '结束本轮' })).not.toBeInTheDocument()
   })
 
@@ -70,11 +70,20 @@ describe('R3 工作流业务终态', () => {
     expect(screen.queryByRole('button', { name: '结束本轮' })).not.toBeInTheDocument()
   })
 
-  it('调整条件再搜 → 打开既有修改计划对话框（同链路 revise）', async () => {
+  it('在 Copilot 中调整策略 → 发布工作流上下文并保留详情', async () => {
     const user = userEvent.setup()
-    renderPanel(outcomeWorkflow('blocked', 'completed_needs_review', { steps: finishedSteps }))
-    await user.click(screen.getByRole('button', { name: '调整条件再搜' }))
-    expect(await screen.findByRole('dialog', { name: '修改计划' })).toBeInTheDocument()
+    const postMessage = vi.fn()
+    const close = vi.fn()
+    ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
+    const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<WorkflowPanel value={outcomeWorkflow('blocked', 'completed_needs_review', { steps: finishedSteps })} jobs={[]} close={close} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+    await user.click(screen.getByRole('button', { name: '在 Copilot 中调整策略' }))
+    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: 'showFloating' }))
+    expect(close).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: '寻访前端工程师' })).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-r3/revise'))).toBe(false)
+    delete (window as Window & { webkit?: unknown }).webkit
   })
 
   it('结束本轮 → 触发既有 archive action 并回调 archived', async () => {

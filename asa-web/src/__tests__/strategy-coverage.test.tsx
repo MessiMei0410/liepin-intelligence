@@ -89,4 +89,30 @@ describe('工作流策略区接线（WorkflowStrategy + coverage）', () => {
     expect(within(section).getByText('多渠道寻访策略')).toBeInTheDocument()
     expect(within(section).queryByText('这些信息用上了吗')).not.toBeInTheDocument()
   })
+
+  it('顾问修订约束折叠态也可见，并按类型标注', () => {
+    const revised = {
+      ...strategy,
+      consultant_constraints: [
+        { rule: '必须具备三次电源工程经验', source: 'consultant_revision', type: 'hard_requirement' },
+        { rule: '量产项目经验优先', source: 'consultant_revision', type: 'preference' },
+        { rule: '预研背景可以看，但需要评估量产转化潜力', source: 'consultant_revision', type: 'conditional_acceptance' },
+      ],
+    }
+    render(<WorkflowStrategy strategy={revised} channels={channels} gates={{}} open={false} toggle={() => undefined} />)
+    const section = document.querySelector('.workflow-strategy') as HTMLElement
+    expect(within(section).getByText('顾问修订约束')).toBeInTheDocument()
+    expect(within(section).getByText('必须具备三次电源工程经验')).toBeInTheDocument()
+    expect(within(section).getByText('量产项目经验优先')).toBeInTheDocument()
+    expect(within(section).getByText('预研背景可以看，但需要评估量产转化潜力')).toBeInTheDocument()
+    expect(within(section).getByText('硬性')).toBeInTheDocument()
+    expect(within(section).getByText('优先')).toBeInTheDocument()
+    expect(within(section).getByText('有条件')).toBeInTheDocument()
+  })
+
+  it('无顾问修订约束时不渲染约束区', () => {
+    render(<WorkflowStrategy strategy={strategy} channels={channels} gates={{}} open={false} toggle={() => undefined} />)
+    const section = document.querySelector('.workflow-strategy') as HTMLElement
+    expect(within(section).queryByText('顾问修订约束')).not.toBeInTheDocument()
+  })
 })

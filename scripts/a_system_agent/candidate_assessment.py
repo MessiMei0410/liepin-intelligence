@@ -843,6 +843,11 @@ def build_llm_payload(
     if strategy_doc:
         step1 = strategy_doc.get("step1_job_essence") if isinstance(strategy_doc.get("step1_job_essence"), dict) else {}
         step3 = strategy_doc.get("step3_level_mapping") if isinstance(strategy_doc.get("step3_level_mapping"), dict) else {}
+        evaluation_constraints = (
+            strategy_doc.get("evaluation_constraints")
+            if isinstance(strategy_doc.get("evaluation_constraints"), dict)
+            else {}
+        )
         pool: list[dict[str, str]] = []
         for entry in strategy_doc.get("step2_target_pool") or []:
             if not isinstance(entry, dict):
@@ -859,6 +864,11 @@ def build_llm_payload(
         strategy = {
             "job_essence": str(step1.get("statement") or ""),
             "accepted_levels": [str(item) for item in step3.get("accepted_levels") or []],
+            "evaluation_constraints": {
+                "locations": [str(item) for item in evaluation_constraints.get("locations") or []],
+                "levels": [str(item) for item in evaluation_constraints.get("levels") or []],
+                "scenarios": [str(item) for item in evaluation_constraints.get("scenarios") or []],
+            },
             "target_pool": pool[:20],
         }
     return {

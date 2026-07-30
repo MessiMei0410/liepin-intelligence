@@ -323,6 +323,91 @@ CREATE TABLE IF NOT EXISTS agent_sourcing_attributions (
 CREATE INDEX IF NOT EXISTS idx_agent_sourcing_attribution_job
 ON agent_sourcing_attributions(job_id,channel,source_query);
 
+CREATE TABLE IF NOT EXISTS agent_sourcing_query_cells (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    workflow_id TEXT,
+    job_id INTEGER NOT NULL DEFAULT 0,
+    plan_hash TEXT NOT NULL,
+    cell_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    query TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reported_total INTEGER,
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    extracted_count INTEGER NOT NULL DEFAULT 0,
+    unique_count INTEGER NOT NULL DEFAULT 0,
+    cursor_json TEXT NOT NULL DEFAULT '{}',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    terminal_reason TEXT,
+    last_error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(run_id,cell_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sourcing_query_cells_workflow
+ON agent_sourcing_query_cells(workflow_id,status,priority,cell_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sourcing_query_cells_plan
+ON agent_sourcing_query_cells(plan_hash,status,channel,priority);
+
+CREATE TABLE IF NOT EXISTS agent_candidate_recalls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recall_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL,
+    workflow_id TEXT,
+    job_id INTEGER NOT NULL DEFAULT 0,
+    query_cell_id TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL,
+    source_candidate_id TEXT NOT NULL DEFAULT '',
+    source_query TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    page_number INTEGER NOT NULL DEFAULT 1,
+    position_index INTEGER NOT NULL DEFAULT 0,
+    identity_key TEXT NOT NULL DEFAULT '',
+    candidate_name TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    fit_score INTEGER,
+    fit_level TEXT,
+    duplicate_state TEXT NOT NULL DEFAULT 'not_intaked',
+    exclusion_reason TEXT,
+    detail_status TEXT NOT NULL DEFAULT 'not_requested',
+    candidate_id INTEGER,
+    job_candidate_id INTEGER,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_candidate_recalls_run
+ON agent_candidate_recalls(run_id,channel,query_cell_id,page_number,position_index);
+
+CREATE INDEX IF NOT EXISTS idx_agent_candidate_recalls_job
+ON agent_candidate_recalls(job_id,channel,created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_candidate_recalls_identity
+ON agent_candidate_recalls(channel,source_candidate_id,identity_key);
+
+CREATE TABLE IF NOT EXISTS agent_sourcing_coverage_certificates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    certificate_id TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL UNIQUE,
+    workflow_id TEXT,
+    job_id INTEGER NOT NULL DEFAULT 0,
+    plan_hash TEXT NOT NULL,
+    coverage_status TEXT NOT NULL,
+    certificate_json TEXT NOT NULL,
+    issued_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sourcing_coverage_workflow
+ON agent_sourcing_coverage_certificates(workflow_id,issued_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_sourcing_funnel (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,

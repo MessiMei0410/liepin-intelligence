@@ -58,11 +58,62 @@ export const sourcingFunnelRunSchema = z.looseObject({
 })
 export type SourcingFunnelRun = z.infer<typeof sourcingFunnelRunSchema>
 
+export const coverageCertificateSchema = z.looseObject({
+  schema_version: z.literal('coverage_certificate_v1'),
+  certificate_id: z.string(),
+  coverage_status: z.string(),
+  query_cells: z.looseObject({
+    approved: z.number(),
+    executed: z.number(),
+    exhausted: z.number(),
+    platform_capped: z.number(),
+    blocked: z.number(),
+    failed: z.number(),
+    pending: z.number().default(0),
+  }),
+  candidate_recall: z.looseObject({
+    raw_occurrences: z.number(),
+    unique_identities: z.number(),
+    duplicate_occurrences: z.number(),
+    below_threshold: z.number(),
+    formally_intaked: z.number(),
+  }),
+  evidence_integrity: z.looseObject({
+    passed: z.boolean(),
+    expected_extracted_occurrences: z.number(),
+    mapped_recall_occurrences: z.number(),
+    unmapped_recall_occurrences: z.number(),
+    mismatched_query_cells: z.number(),
+  }).nullish(),
+  dimension_execution: z.looseObject({
+    retrieval_axes: z.array(z.string()),
+    platform_filters_applied: z.array(z.string()),
+    dimensions: z.record(z.string(), z.looseObject({
+      approved_values: z.array(z.string()),
+      retrieval_filter_applied: z.boolean(),
+      evaluation_mode: z.string(),
+    })),
+  }).nullish(),
+  detail_completeness: z.looseObject({
+    complete: z.number(),
+    partial: z.number(),
+    failed: z.number(),
+  }),
+  assessment: z.looseObject({ completed_unique_candidates: z.number() }),
+  claims: z.looseObject({
+    all_candidates_covered: z.boolean(),
+    defensible_claim: z.string(),
+    coverage_unknown_reasons: z.array(z.string()),
+  }),
+})
+export type CoverageCertificate = z.infer<typeof coverageCertificateSchema>
+
 export const sourcingFunnelSchema = z.looseObject({
   ok: z.boolean(),
   workflow_id: z.string().optional(),
   channels: z.array(sourcingFunnelChannelSchema),
   runs: z.array(sourcingFunnelRunSchema),
+  coverage_certificate: coverageCertificateSchema.nullish(),
 })
 export type SourcingFunnel = z.infer<typeof sourcingFunnelSchema>
 

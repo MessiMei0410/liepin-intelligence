@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -92,6 +93,181 @@ def _trim_error(text: Any, limit: int = 1000) -> str:
     """
     value = str(text or "").strip()
     return value if len(value) <= limit else value[-limit:]
+
+
+def _revision_consultant_evidence(context: dict[str, Any]) -> str:
+    """Return only the consultant evidence embedded in a workflow revision instruction."""
+    instruction = " ".join(str(context.get("revision_instruction") or "").split())
+    if not instruction:
+        return ""
+    marker = "顾问已确认的原始条件："
+    evidence = instruction.split(marker, 1)[1] if marker in instruction else instruction
+    for suffix in ("。生成前必须逐项读取", "生成前必须逐项读取"):
+        if suffix in evidence:
+            evidence = evidence.split(suffix, 1)[0]
+    return evidence.strip(" 。；;")
+
+
+def _consultant_constraint_items(evidence: str) -> list[dict[str, str]]:
+    """Extract modal constraints without asking the model to reinterpret their strength."""
+    text = " ".join(str(evidence or "").split())
+    if not text:
+        return []
+    candidates: list[tuple[str, str]] = []
+    candidates.extend(("hard_requirement", value) for value in re.findall(r"必须[^，,；;。]+", text))
+    for clause in re.split(r"[；;。]+", text):
+        cleaned = clause.strip(" ，,")
+        if not cleaned:
+            continue
+        if "优先" in cleaned or "更好" in cleaned:
+            candidates.append(("preference", cleaned))
+        if "可看" in cleaned or "可以看" in cleaned:
+            candidates.append(("conditional_acceptance", cleaned))
+        if any(token in cleaned for token in ("纠正", "术语", "不是", "不等于")):
+            candidates.append(("consultant_wording", cleaned))
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for constraint_type, rule in candidates:
+        normalized = rule.strip(" ：:，,；;。")
+        key = (constraint_type, normalized)
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        rows.append({"type": constraint_type, "rule": normalized, "source": "consultant_revision"})
+    return rows
+
+
+def _lock_consultant_constraints(
+    plan: dict[str, Any], strategy: dict[str, Any], evidence: str,
+    locked_items: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Make revision semantics auditable and prevent model-generated constraint weakening."""
+    constraints = _consultant_constraint_items(evidence)
+    kind_map = {
+        "must": "hard_requirement", "prefer": "preference",
+        "allow": "conditional_acceptance", "exclude": "exclusion",
+        "target_count": "target_count", "other": "consultant_wording",
+    }
+    seen = {(item["type"], item["rule"]) for item in constraints}
+    for item in locked_items or []:
+        if not isinstance(item, dict):
+            continue
+        rule = str(item.get("quote") or item.get("rule") or "").strip(" ：:，,；;。")
+        constraint_type = kind_map.get(str(item.get("kind") or "other"), "consultant_wording")
+        key = (constraint_type, rule)
+        if not rule or key in seen:
+            continue
+        seen.add(key)
+        constraints.append({"type": constraint_type, "rule": rule, "source": "copilot_verbatim"})
+    if not constraints:
+        return []
+    strategy["consultant_constraints"] = constraints
+    plan["consultant_constraints"] = constraints
+
+    rules = [item["rule"] for item in constraints]
+    essence = strategy.get("step1_job_essence")
+    if isinstance(essence, dict):
+        statement = str(essence.get("statement") or "").strip()
+        locked = "顾问确认：" + "；".join(rules) + "。"
+        essence["statement"] = f"{locked}{statement}" if locked not in statement else statement
+        essence["confirmed_by"] = "consultant"
+
+    hard_rules = [item["rule"] for item in constraints if item["type"] == "hard_requirement"]
+    expectation = strategy.get("step5_expectation")
+    if hard_rules and isinstance(expectation, dict):
+        expectation["fallback_plan"] = (
+            f"不得放宽顾问硬约束：{'；'.join(hard_rules)}；"
+            "召回不足时只调整同义词、渠道或目标公司池，不降低门槛。"
+        )
+
+    trace = strategy.get("classification_trace")
+    if isinstance(trace, list):
+        trace.append(f"顾问修订约束已锁定 {len(constraints)} 项，模型不得弱化")
+    summary = str(plan.get("strategy_summary") or "").strip()
+    locked_summary = "顾问约束：" + "；".join(rules)
+    plan["strategy_summary"] = f"{locked_summary}。{summary}" if locked_summary not in summary else summary
+    return constraints
+
+
+def _locked_constraint_conflicts(
+    plan: dict[str, Any], strategy: dict[str, Any], constraints: list[dict[str, str]],
+) -> list[str]:
+    """Reject model output that changes the meaning of a locked consultant phrase."""
+    if not constraints:
+        return []
+    serialized = json.dumps({"plan": plan, "strategy_v2": strategy}, ensure_ascii=False)
+    errors: list[str] = []
+    for item in constraints:
+        rule = str(item.get("rule") or "").strip()
+        if rule and rule not in serialized:
+            errors.append(f"顾问原话约束未逐字保留：{rule}")
+        if "三次电源" in rule and re.search(r"(?:三|3)次(?:以上|及以上|完整)", serialized):
+            errors.append("领域术语“三次电源”被误解为次数条件")
+    return list(dict.fromkeys(errors))
+
+
+class CommandExecutionError(RuntimeError):
+    def __init__(self, message: str, detail: dict[str, Any]):
+        super().__init__(message)
+        self.detail = detail
+
+
+class ExternalPhaseError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str,
+        partial_result: dict[str, Any],
+        detail: dict[str, Any],
+    ):
+        super().__init__(message)
+        self.phase = phase
+        self.partial_result = partial_result
+        self.detail = detail
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _command_failure_summary(stdout: str, stderr: str, returncode: int) -> tuple[str, dict[str, Any]]:
+    outer = _json_object(stdout) or _json_object(stderr)
+    nested = _json_object(outer.get("stdout")) if outer else {}
+    payload = nested or outer
+    failed_checks = [
+        check for check in payload.get("checks", [])
+        if isinstance(check, dict) and check.get("ok") is False
+    ] if isinstance(payload.get("checks"), list) else []
+    labels = [
+        str(check.get("message") or check.get("check") or "审计检查未通过").strip()
+        for check in failed_checks[:3]
+    ]
+    if labels:
+        summary = "；".join(dict.fromkeys(label for label in labels if label))
+    else:
+        raw = stderr or stdout or f"命令退出码 {returncode}"
+        summary = _trim_error(raw, 600)
+    detail = {
+        "returncode": returncode,
+        "command": outer.get("cmd") if outer else None,
+        "failed_checks": [
+            {
+                "check": check.get("check"),
+                "message": check.get("message"),
+                "client": check.get("client"),
+                "rows": check.get("rows", [])[:5] if isinstance(check.get("rows"), list) else [],
+            }
+            for check in failed_checks
+        ],
+        "stdout_tail": _trim_error(stdout, 2000),
+        "stderr_tail": _trim_error(stderr, 2000),
+    }
+    return summary, detail
 
 
 # 渠道查询方言层已模块化（S4-3c-2 / N1）：实现在 a_system_agent.query_builders。
@@ -252,91 +428,245 @@ class RecruitingCapabilityRuntime:
         client, job = str(request.get("client") or ""), str(request.get("job") or "")
         if not client or not job:
             raise ValueError("寻访任务缺少客户或岗位")
+        audit_only_result = request.get("_audit_only_result")
+        if isinstance(audit_only_result, dict):
+            sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
+            sync = self._run(
+                [self.python, str(sync_script), "--client", client, "--job", job, "--no-open"],
+                300,
+            )
+            return {
+                **audit_only_result,
+                "verified": True,
+                "audit": {
+                    "ok": True,
+                    "summary": "A 系统收尾审计通过",
+                    "returncode": sync.returncode,
+                    "recovered_without_channel_rerun": True,
+                },
+            }
+        approved_snapshot = request.get("strategy_snapshot") if isinstance(request.get("strategy_snapshot"), dict) else {}
+        query_plan = request.get("query_plan_v1") if isinstance(request.get("query_plan_v1"), dict) else {}
+        if not query_plan and isinstance(approved_snapshot.get("query_plan_v1"), dict):
+            query_plan = approved_snapshot["query_plan_v1"]
+        plan_ok, plan_errors = query_builders.validate_query_plan_v1(query_plan)
+        approved_plan_hash = str(
+            request.get("query_plan_hash") or approved_snapshot.get("query_plan_hash") or ""
+        )
+        if not plan_ok or not approved_plan_hash:
+            detail = "；".join(plan_errors) if plan_errors else "缺少审批计划哈希"
+            raise ValueError(f"缺少有效且批准的 query_plan_v1：{detail}")
+        if not secrets.compare_digest(approved_plan_hash, str(query_plan.get("plan_hash") or "")):
+            raise ValueError("批准的 query_plan_v1 哈希与执行请求不一致")
         target = max(1, min(int(request.get("target_count") or 10), 50))
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_id = str(request.get("resume_run_id") or f"asa-source-{stamp}")
         candidates_path = self.output_dir / "sourcing" / f"{_slug(client)}-{_slug(job)}-{stamp}.json"
         liepin_path = candidates_path.with_name(candidates_path.stem + "-liepin.json")
         xsaas_path = candidates_path.with_name(candidates_path.stem + "-xsaas.json")
+        liepin_raw_path = candidates_path.with_name(candidates_path.stem + "-liepin-raw.json")
+        xsaas_raw_path = candidates_path.with_name(candidates_path.stem + "-xsaas-raw.json")
         liepin_queries_path = candidates_path.with_name(candidates_path.stem + "-liepin-queries.json")
         xsaas_queries_path = candidates_path.with_name(candidates_path.stem + "-xsaas-queries.json")
         candidates_path.parent.mkdir(parents=True, exist_ok=True)
         strategy = request.get("strategy") if isinstance(request.get("strategy"), dict) else {}
-        channels = strategy.get("channels") if isinstance(strategy.get("channels"), dict) else {}
-        liepin_queries = channels.get("liepin") if isinstance(channels.get("liepin"), list) else []
-        xsaas_queries = channels.get("xsaas") if isinstance(channels.get("xsaas"), list) else []
-        if not liepin_queries or not xsaas_queries:
-            fallback = self._run_json([self.python, str(MULTICHANNEL), "plan", "--db", str(self.service.db_path), "--client", client, "--job", job, "--max-queries", "6"], 90)
-            fallback_channels = fallback.get("channels") or {}
-            liepin_queries = liepin_queries or fallback_channels.get("liepin") or []
-            xsaas_queries = xsaas_queries or fallback_channels.get("xsaas") or []
-        # 渠道查询方言层（S4-3c-2 / N1，顾问规则 2026-07-23）：
-        # 猎聘维持组合查询（公司 + 职能/技术词可组合，≤2 词/≤6 组）；
-        # X-SaaS 公司词独立查询（不与任何词组合），职能/技术词锚定对 ≤2 词/≤8 组；
-        # 公司词永不两两成对（一人不可能同时在两家公司）。
-        company_terms = query_builders.company_vocabulary(strategy)
-        liepin_queries = query_builders.build_liepin_queries(liepin_queries, company_terms=company_terms)
-        xsaas_queries = query_builders.build_xsaas_queries(xsaas_queries, company_terms=company_terms)
+        resume_requested = bool(request.get("resume_run_id"))
+        all_runnable_cells = (
+            self._resume_query_cells(run_id, query_plan, max_retries=int(request.get("max_query_retries") or 3))
+            if resume_requested
+            else [cell for cell in query_plan.get("cells") or [] if isinstance(cell, dict)]
+        )
+        if resume_requested and not all_runnable_cells:
+            raise ValueError("断点续跑没有 pending 或可重试的 failed 查询单元")
+        try:
+            cell_batch_size = max(1, min(int(request.get("max_query_cells_per_batch") or 8), 20))
+        except (TypeError, ValueError):
+            cell_batch_size = 8
+        runnable_cells = all_runnable_cells[:cell_batch_size]
+        executed_cell_ids = {
+            str(cell.get("cell_id") or "") for cell in runnable_cells if isinstance(cell, dict)
+        }
+        execution_plan = {**query_plan, "cells": runnable_cells, "cell_count": len(runnable_cells)}
+        liepin_queries = query_builders.query_plan_channel_entries(execution_plan, "liepin")
+        xsaas_queries = query_builders.query_plan_channel_entries(execution_plan, "xsaas")
+        company_terms = query_builders.query_plan_company_vocabulary(query_plan)
         liepin_queries_path.write_text(json.dumps({"queries": liepin_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
         xsaas_queries_path.write_text(json.dumps({"queries": xsaas_queries}, ensure_ascii=False, indent=2), encoding="utf-8")
-        # OC1 试点：opencli_primary 开启时先由 OpenCLI 适配器召回，失败/空结果自动回退生产 runner
-        opencli_primary = self._opencli_primary_enabled(request)
-        primary_channels: dict[str, Any] = {}
-        cdp_port = int(request.get("cdp_port") or 9223)
-        liepin_engine = "production_fallback" if opencli_primary else "production"
-        search: dict[str, Any] | None = None
-        if opencli_primary:
-            liepin_engine = self._attempt_opencli_primary(
-                channel="liepin", client=client, job=job, port=cdp_port,
-                queries_path=liepin_queries_path, output_path=liepin_path,
-                limit=min(max(12, target * 2), 24), detail_limit=max(12, target * 2),
-                report=primary_channels,
-            )
-            if liepin_engine == "opencli":
-                search = {"ok": True, "recall_engine": "opencli", **primary_channels["liepin"]}
-        if search is None:
-            command = [
-                self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
-                "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
-                "--port", str(cdp_port), "--rounds", "6",
-                "--max-cards", str(max(12, target * 2)), "--min-score", "55", "--recommend-score", "65",
-                "--capture-links", "--capture-details", "--detail-limit", str(max(12, target * 2)),
-                "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
-                "--queries-json", str(liepin_queries_path),
-            ]
-            try:
-                search = self._run_json(command, 900)
-            except Exception as exc:
-                self._record_sourcing_funnel_failure(
-                    run_id=f"asa-source-{stamp}",
-                    workflow_id=str(request.get("workflow_id") or ""),
-                    client=client,
-                    job=job,
-                    channel="liepin",
-                    error=_trim_error(exc),
-                )
-                raise
-        xsaas_engine = "production_fallback" if opencli_primary else "production"
-        xsaas: dict[str, Any] | None = None
-        if opencli_primary:
-            xsaas_engine = self._attempt_opencli_primary(
-                channel="xsaas", client=client, job=job, port=cdp_port,
-                queries_path=xsaas_queries_path, output_path=xsaas_path,
-                limit=min(max(12, target * 2), 100), detail_limit=max(12, target * 2),
-                report=primary_channels,
-            )
-            if xsaas_engine == "opencli":
-                xsaas = {"ok": True, "recall_engine": "opencli", **primary_channels["xsaas"]}
-        if xsaas is None:
-            try:
-                xsaas = self._run_json([
-                    self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path),
-                    "--output", str(xsaas_path), "--port", str(cdp_port),
-                    "--max-rows", str(max(12, target * 2)), "--db", str(self.service.db_path),
-                    "--client", client, "--job", job, "--min-score", "55",
-                ], 300)
-            except Exception as exc:
-                xsaas = {"ok": False, "status": "blocked", "error": _trim_error(exc)}
+        # 并行跑两条渠道（OC1→production fallback），取代串行等待
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _oc1 = self._opencli_primary_enabled(request)
+        _cdp = int(request.get("cdp_port") or 9223)
+        _lim = max(12, target * 2)
+        _det = max(12, target * 2)
+        _report: dict[str, Any] = {}
+
+        def _run_liepin() -> tuple[str, dict[str, Any] | None]:
+            if not liepin_queries:
+                liepin_path.write_text("[]", encoding="utf-8")
+                liepin_raw_path.write_text("[]", encoding="utf-8")
+                return "resume_skipped", {"ok": True, "status": "resume_skipped", "rounds": []}
+            eng = "production_fallback" if _oc1 else "production"
+            res: dict[str, Any] | None = None
+            if _oc1:
+                eng = self._attempt_opencli_primary(
+                    channel="liepin", client=client, job=job, port=_cdp,
+                    queries_path=liepin_queries_path, output_path=liepin_path,
+                    raw_output_path=liepin_raw_path,
+                    limit=min(_lim, 24), detail_limit=_det, report=_report)
+                if eng == "opencli":
+                    res = {**_report.get("liepin", {}), "ok": True, "recall_engine": "opencli"}
+                elif eng == "opencli_partial":
+                    primary_summary = _report.get("liepin", {})
+                    primary_rows = _loads(liepin_path.read_text(encoding="utf-8"), [])
+                    primary_raw = _loads(liepin_raw_path.read_text(encoding="utf-8"), [])
+                    fallback_entries = self._opencli_fallback_entries(
+                        liepin_queries, primary_summary, primary_raw,
+                    )
+                    fallback_queries_path = liepin_queries_path.with_name(
+                        liepin_queries_path.stem + "-paginated.json"
+                    )
+                    fallback_path = liepin_path.with_name(liepin_path.stem + "-paginated.json")
+                    fallback_raw_path = liepin_raw_path.with_name(
+                        liepin_raw_path.stem + "-paginated.json"
+                    )
+                    fallback_queries_path.write_text(
+                        json.dumps({"queries": fallback_entries}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    try:
+                        fallback_result = self._run_json([
+                            self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
+                            "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
+                            "--port", str(_cdp), "--rounds", str(len(fallback_entries)),
+                            "--max-cards", str(min(_lim, 24)), "--min-score", "55", "--recommend-score", "65",
+                            "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                            "--capture-links", "--capture-details", "--detail-limit", str(_det),
+                            "--no-open-links", "--dry-run", "--json-output", str(fallback_path),
+                            "--raw-json-output", str(fallback_raw_path),
+                            "--queries-json", str(fallback_queries_path),
+                        ], 900)
+                    except Exception as exc:
+                        fallback_result = {
+                            "ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": [],
+                        }
+                        fallback_path.write_text("[]", encoding="utf-8")
+                        fallback_raw_path.write_text("[]", encoding="utf-8")
+                    res, merged_rows, merged_raw = self._merge_opencli_completion(
+                        channel="liepin",
+                        primary_summary=primary_summary,
+                        fallback_result=fallback_result,
+                        primary_rows=primary_rows,
+                        fallback_rows=_loads(fallback_path.read_text(encoding="utf-8"), []),
+                        primary_raw=primary_raw,
+                        fallback_raw=_loads(fallback_raw_path.read_text(encoding="utf-8"), []),
+                    )
+                    liepin_path.write_text(json.dumps(merged_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+                    liepin_raw_path.write_text(json.dumps(merged_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+                    eng = "opencli_paginated"
+            if res is None:
+                try:
+                    res = self._run_json([
+                        self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
+                        "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
+                        "--port", str(_cdp), "--rounds", str(len(liepin_queries)),
+                        "--max-cards", str(min(_lim, 24)), "--min-score", "55", "--recommend-score", "65",
+                        "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                        "--capture-links", "--capture-details", "--detail-limit", str(_det),
+                        "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
+                        "--raw-json-output", str(liepin_raw_path),
+                        "--queries-json", str(liepin_queries_path),
+                    ], 900)
+                except Exception as exc:
+                    res = {"ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": []}
+                    liepin_path.write_text("[]", encoding="utf-8")
+                    liepin_raw_path.write_text("[]", encoding="utf-8")
+            return eng, res
+
+        def _run_xsaas() -> tuple[str, dict[str, Any] | None]:
+            if not xsaas_queries:
                 xsaas_path.write_text("[]", encoding="utf-8")
+                xsaas_raw_path.write_text("[]", encoding="utf-8")
+                return "resume_skipped", {"ok": True, "status": "resume_skipped", "rounds": []}
+            eng = "production_fallback" if _oc1 else "production"
+            res: dict[str, Any] | None = None
+            if _oc1:
+                eng = self._attempt_opencli_primary(
+                    channel="xsaas", client=client, job=job, port=_cdp,
+                    queries_path=xsaas_queries_path, output_path=xsaas_path,
+                    raw_output_path=xsaas_raw_path,
+                    limit=min(_lim, 100), detail_limit=_det, report=_report)
+                if eng == "opencli":
+                    res = {**_report.get("xsaas", {}), "ok": True, "recall_engine": "opencli"}
+                elif eng == "opencli_partial":
+                    primary_summary = _report.get("xsaas", {})
+                    primary_rows = _loads(xsaas_path.read_text(encoding="utf-8"), [])
+                    primary_raw = _loads(xsaas_raw_path.read_text(encoding="utf-8"), [])
+                    fallback_entries = self._opencli_fallback_entries(
+                        xsaas_queries, primary_summary, primary_raw,
+                    )
+                    fallback_queries_path = xsaas_queries_path.with_name(
+                        xsaas_queries_path.stem + "-paginated.json"
+                    )
+                    fallback_path = xsaas_path.with_name(xsaas_path.stem + "-paginated.json")
+                    fallback_raw_path = xsaas_raw_path.with_name(
+                        xsaas_raw_path.stem + "-paginated.json"
+                    )
+                    fallback_queries_path.write_text(
+                        json.dumps({"queries": fallback_entries}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    try:
+                        fallback_result = self._run_json([
+                            self.python, str(XSAAS_SEARCH), "--queries", str(fallback_queries_path),
+                            "--output", str(fallback_path), "--port", str(_cdp),
+                            "--raw-output", str(fallback_raw_path),
+                            "--max-rows", str(min(_lim, 100)), "--db", str(self.service.db_path),
+                            "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                            "--client", client, "--job", job, "--min-score", "55",
+                        ], 300)
+                    except Exception as exc:
+                        fallback_result = {"ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": []}
+                        fallback_path.write_text("[]", encoding="utf-8")
+                        fallback_raw_path.write_text("[]", encoding="utf-8")
+                    res, merged_rows, merged_raw = self._merge_opencli_completion(
+                        channel="xsaas",
+                        primary_summary=primary_summary,
+                        fallback_result=fallback_result,
+                        primary_rows=primary_rows,
+                        fallback_rows=_loads(fallback_path.read_text(encoding="utf-8"), []),
+                        primary_raw=primary_raw,
+                        fallback_raw=_loads(fallback_raw_path.read_text(encoding="utf-8"), []),
+                    )
+                    xsaas_path.write_text(json.dumps(merged_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+                    xsaas_raw_path.write_text(json.dumps(merged_raw, ensure_ascii=False, indent=2), encoding="utf-8")
+                    eng = "opencli_paginated"
+            if res is None:
+                try:
+                    res = self._run_json([
+                        self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path),
+                        "--output", str(xsaas_path), "--port", str(_cdp),
+                        "--raw-output", str(xsaas_raw_path),
+                        "--max-rows", str(min(_lim, 100)), "--db", str(self.service.db_path),
+                        "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                        "--client", client, "--job", job, "--min-score", "55",
+                    ], 300)
+                except Exception:
+                    res = {"ok": False, "status": "blocked", "error": _trim_error(sys.exc_info()[1])}
+                    xsaas_path.write_text("[]", encoding="utf-8")
+            return eng, res
+
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _futures = {
+                _pool.submit(_run_liepin): "liepin",
+                _pool.submit(_run_xsaas): "xsaas",
+            }
+            _results: dict[str, tuple[str, dict[str, Any] | None]] = {}
+            for _fut in as_completed(_futures):
+                _results[_futures[_fut]] = _fut.result()
+
+        liepin_engine, search = _results["liepin"]
+        xsaas_engine, xsaas = _results["xsaas"]
+        primary_channels = _report
         opencli_shadow = self._run_opencli_shadow(
             request=request,
             client=client,
@@ -353,27 +683,91 @@ class RecruitingCapabilityRuntime:
             skip_channels={
                 channel
                 for channel, engine in (("liepin", liepin_engine), ("xsaas", xsaas_engine))
-                if engine == "opencli"
+                if engine.startswith("opencli")
             },
         )
         liepin_candidates = _loads(liepin_path.read_text(encoding="utf-8"), [])
         xsaas_candidates = _loads(xsaas_path.read_text(encoding="utf-8"), [])
+        if not liepin_raw_path.exists():
+            liepin_raw_path.write_text(json.dumps(liepin_candidates, ensure_ascii=False, indent=2), encoding="utf-8")
+        if not xsaas_raw_path.exists():
+            xsaas_raw_path.write_text(json.dumps(xsaas_candidates, ensure_ascii=False, indent=2), encoding="utf-8")
+        liepin_raw_candidates = _loads(liepin_raw_path.read_text(encoding="utf-8"), [])
+        xsaas_raw_candidates = _loads(xsaas_raw_path.read_text(encoding="utf-8"), [])
         combined = liepin_candidates + xsaas_candidates
         candidates_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
-        dry = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path)], 120)
-        applied = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180)
         workflow_id = str(request.get("workflow_id") or "")
+        channel_runs = [
+            {"channel": "liepin", "status": "completed" if search.get("ok") else "blocked", "recall_engine": liepin_engine, "result": search},
+            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "recall_engine": xsaas_engine, "result": xsaas},
+        ]
+
+        # Persist raw channel evidence before any formal candidate intake. The later
+        # upserts only enrich these immutable occurrences with disposition receipts.
+        raw_candidates = {"liepin": liepin_raw_candidates, "xsaas": xsaas_raw_candidates}
+        recall_ledger = self._persist_candidate_recalls(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+            raw_candidates=raw_candidates,
+            applied={},
+            min_score=55,
+        )
+        query_cell_states = self._persist_query_cell_states(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+            channel_runs=channel_runs,
+            executed_cell_ids=executed_cell_ids,
+        )
+        coverage_certificate = self._build_coverage_certificate(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+        )
+
+        dry = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path)], 120)
+        recall_ledger = self._persist_candidate_recalls(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+            raw_candidates=raw_candidates,
+            applied=dry,
+            min_score=55,
+        )
+        applied = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180)
         attributions = self._persist_sourcing_attributions(
             applied, request.get("strategy") if isinstance(request.get("strategy"), dict) else {},
             workflow_id, client, job,
         )
-        channel_runs = [
-            {"channel": "liepin", "status": "completed", "recall_engine": liepin_engine, "result": search},
-            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "recall_engine": xsaas_engine, "result": xsaas},
-        ]
+        recall_ledger = self._persist_candidate_recalls(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+            raw_candidates=raw_candidates,
+            applied=applied,
+            min_score=55,
+        )
+        coverage_certificate = self._build_coverage_certificate(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            client=client,
+            job=job,
+            query_plan=query_plan,
+        )
         try:
             funnel = self._persist_sourcing_funnel(
-                run_id=f"asa-source-{stamp}",
+                run_id=run_id,
                 workflow_id=workflow_id,
                 client=client,
                 job=job,
@@ -385,21 +779,55 @@ class RecruitingCapabilityRuntime:
             )
         except Exception as exc:
             funnel = {"ok": False, "stored": 0, "error": str(exc)[:500]}
-        sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
-        sync = self._run([self.python, str(sync_script), "--client", client, "--job", job, "--no-open"], 300)
-        learning = self._capture_search_learning(client, job, [*liepin_queries, *xsaas_queries])
-        return {
+        partial_result = {
             "verified": True,
-            "run_id": f"asa-source-{stamp}",
+            "run_id": run_id,
             "channel_runs": channel_runs,
             "opencli_shadow": opencli_shadow,
-            "opencli_primary": {"enabled": opencli_primary, "channels": primary_channels},
+            "opencli_primary": {"enabled": _oc1, "channels": primary_channels},
             "intake": {"dry_run": dry, "applied": applied, "source_file": str(candidates_path)},
             "attributions": attributions,
+            "candidate_recall_ledger": recall_ledger,
+            "query_cell_states": query_cell_states,
+            "coverage_certificate": coverage_certificate,
             "sourcing_funnel": funnel,
-            "audit": {"ok": sync.returncode == 0, "summary": (sync.stdout or "")[-4000:]},
-            "learning": learning,
+            "audit": {"ok": False, "summary": "等待 A 系统收尾审计"},
         }
+        sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
+        try:
+            sync = self._run([self.python, str(sync_script), "--client", client, "--job", job, "--no-open"], 300)
+        except CommandExecutionError as exc:
+            partial_result["audit"] = {
+                "ok": False,
+                "phase": "audit",
+                "summary": str(exc),
+                "detail": exc.detail,
+            }
+            raise ExternalPhaseError(
+                f"寻访与入库已完成，但 A 系统收尾审计未通过：{exc}",
+                phase="audit",
+                partial_result=partial_result,
+                detail=exc.detail,
+            ) from exc
+        learning = self._capture_search_learning(client, job, [*liepin_queries, *xsaas_queries])
+        continuation = self._sourcing_continuation(
+            request=request,
+            run_id=run_id,
+            query_plan=query_plan,
+        )
+        final_result = {
+            **partial_result,
+            "audit": {
+                "ok": True,
+                "summary": "A 系统收尾审计通过",
+                "returncode": sync.returncode,
+            },
+            "learning": learning,
+            "continuation": continuation["summary"],
+        }
+        if continuation["request"] is not None:
+            final_result["_continuation_request"] = continuation["request"]
+        return final_result
 
     @staticmethod
     def _query_text(entries: list[Any]) -> str:
@@ -410,9 +838,166 @@ class RecruitingCapabilityRuntime:
         return " ".join(str(value or "").split())
 
     @staticmethod
+    def _query_entry_text(entry: Any) -> str:
+        value = entry.get("query") if isinstance(entry, dict) else entry
+        return " ".join(str(value or "").split())
+
+    @classmethod
+    def _opencli_fallback_entries(
+        cls,
+        entries: list[Any],
+        summary: dict[str, Any],
+        primary_rows: list[Any] | None = None,
+    ) -> list[Any]:
+        """Resume only OpenCLI query cells that did not prove exhaustion."""
+        rounds = {
+            cls._query_entry_text(item.get("query")): item
+            for item in summary.get("rounds") or []
+            if isinstance(item, dict) and cls._query_entry_text(item.get("query"))
+        }
+        fallback: list[Any] = []
+        for entry in entries:
+            query = cls._query_entry_text(entry)
+            if not query:
+                continue
+            round_item = rounds.get(query)
+            if round_item and round_item.get("terminal_state") == "exhausted":
+                continue
+            base = dict(entry) if isinstance(entry, dict) else {"query": query}
+            extracted = _round_int(round_item, "extracted_count")
+            cursor = round_item.get("cursor") if isinstance(round_item, dict) else None
+            if (
+                round_item
+                and round_item.get("terminal_state") == "platform_capped"
+                and extracted > 0
+                and isinstance(cursor, dict)
+                and int(cursor.get("page") or 0) > 1
+            ):
+                base["cursor"] = {"page": int(cursor["page"])}
+                base["collected_before"] = extracted
+                seen_keys = [
+                    key
+                    for item in primary_rows or []
+                    if isinstance(item, dict)
+                    and cls._query_entry_text(item.get("source_query") or item.get("query")) == query
+                    and (key := cls._candidate_resume_key(item))
+                ]
+                if seen_keys:
+                    base["seen_candidate_keys"] = list(dict.fromkeys(seen_keys))
+            else:
+                base.pop("cursor", None)
+                base.pop("collected_before", None)
+                base.pop("seen_candidate_keys", None)
+            fallback.append(base)
+        return fallback
+
+    @staticmethod
+    def _candidate_resume_key(item: dict[str, Any]) -> str:
+        source_id = str(
+            item.get("candidate_id") or item.get("resume_id") or item.get("res_id_encode")
+            or item.get("xsaas_id") or ""
+        ).strip()
+        if source_id:
+            return source_id
+        return "|".join(
+            " ".join(str(item.get(key) or "").split()).casefold()
+            for key in ("name", "company", "title")
+        )
+
+    @staticmethod
+    def _candidate_artifact_key(channel: str, item: dict[str, Any]) -> str:
+        source_id = str(
+            item.get("candidate_id") or item.get("resume_id") or item.get("res_id_encode")
+            or item.get("xsaas_id") or item.get("resume_url") or item.get("source_url") or ""
+        ).strip()
+        if source_id:
+            return f"{channel}:id:{source_id}"
+        identity = "|".join(
+            " ".join(str(item.get(key) or "").split()).casefold()
+            for key in ("name", "company", "current_company", "title", "current_title")
+        )
+        return f"{channel}:identity:{identity}"
+
+    @classmethod
+    def _merge_opencli_completion(
+        cls,
+        *,
+        channel: str,
+        primary_summary: dict[str, Any],
+        fallback_result: dict[str, Any],
+        primary_rows: list[Any],
+        fallback_rows: list[Any],
+        primary_raw: list[Any],
+        fallback_raw: list[Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Merge OpenCLI page 1 with paginated completion without losing occurrence evidence."""
+        accepted_seen: set[str] = set()
+        accepted: list[dict[str, Any]] = []
+        for raw in [*primary_rows, *fallback_rows]:
+            if not isinstance(raw, dict):
+                continue
+            key = cls._candidate_artifact_key(channel, raw)
+            if key in accepted_seen:
+                continue
+            accepted_seen.add(key)
+            accepted.append(raw)
+        raw_rows = [item for item in [*primary_raw, *fallback_raw] if isinstance(item, dict)]
+
+        fallback_rounds = {
+            cls._query_entry_text(item.get("query")): item
+            for item in fallback_result.get("rounds") or []
+            if isinstance(item, dict) and cls._query_entry_text(item.get("query"))
+        }
+        merged_rounds: list[dict[str, Any]] = []
+        merged_queries: set[str] = set()
+        for raw_round in primary_summary.get("rounds") or []:
+            if not isinstance(raw_round, dict):
+                continue
+            primary_round = dict(raw_round)
+            query = cls._query_entry_text(primary_round.get("query"))
+            merged_queries.add(query)
+            fallback_round = fallback_rounds.get(query)
+            if primary_round.get("terminal_state") == "exhausted" or not fallback_round:
+                merged_rounds.append(primary_round)
+                continue
+            merged = dict(fallback_round)
+            if (
+                primary_round.get("terminal_state") == "platform_capped"
+                and _round_int(primary_round, "extracted_count") > 0
+            ):
+                query_raw = [
+                    item for item in raw_rows
+                    if cls._query_entry_text(item.get("source_query") or item.get("query")) == query
+                ]
+                merged["extracted_count"] = len(query_raw)
+                merged["unique_count"] = len({cls._candidate_artifact_key(channel, item) for item in query_raw})
+                merged["pages_fetched"] = (
+                    _round_int(primary_round, "pages_fetched")
+                    + _round_int(fallback_round, "pages_fetched")
+                )
+                if fallback_round.get("result_count") is None:
+                    merged["result_count"] = primary_round.get("result_count")
+                merged["resumed_after_opencli"] = True
+            merged_rounds.append(merged)
+        merged_rounds.extend(
+            dict(item)
+            for query, item in fallback_rounds.items()
+            if query not in merged_queries
+        )
+        result = {
+            **fallback_result,
+            "mode": "opencli_primary_with_paginated_completion",
+            "opencli_primary": primary_summary,
+            "rounds": merged_rounds,
+            "candidates": len(accepted),
+            "ok": bool(fallback_result.get("ok")),
+        }
+        return result, accepted, raw_rows
+
+    @staticmethod
     def _opencli_primary_enabled(request: dict[str, Any]) -> bool:
-        """OC1 试点开关：默认关闭；请求级 opencli_primary 或环境变量 ASA_OPENCLI_PRIMARY 显式开启。"""
-        configured = request.get("opencli_primary", os.environ.get("ASA_OPENCLI_PRIMARY", "0"))
+        """OpenCLI 默认主召回；请求级参数或环境变量可显式关闭并回退生产 runner。"""
+        configured = request.get("opencli_primary", os.environ.get("ASA_OPENCLI_PRIMARY", "1"))
         return str(configured).strip().lower() in {"1", "true", "yes", "on"}
 
     def _attempt_opencli_primary(
@@ -424,21 +1009,39 @@ class RecruitingCapabilityRuntime:
         port: int,
         queries_path: Path,
         output_path: Path,
+        raw_output_path: Path,
         limit: int,
         detail_limit: int,
         report: dict[str, Any],
     ) -> str:
-        """OC1 试点：OpenCLI 主渠道召回；失败/被阻断/无完整行一律回退生产 runner。"""
+        """OpenCLI 主渠道召回；失败、被阻断或无完整合格行时回退生产 runner。"""
+        query_payload = _loads(queries_path.read_text(encoding="utf-8"), {})
+        planned_queries = query_payload.get("queries") if isinstance(query_payload, dict) else []
+        if any(
+            isinstance(item, dict)
+            and isinstance(item.get("cursor"), dict)
+            and int(item["cursor"].get("page") or 0) > 1
+            for item in (planned_queries if isinstance(planned_queries, list) else [])
+        ):
+            report[channel] = {
+                "ok": False,
+                "mode": "opencli_primary_recall",
+                "channel": channel,
+                "status": "production_fallback",
+                "reason": "resume_cursor_requires_paginated_runner",
+            }
+            return "production_fallback"
         try:
             summary = self._run_json(
                 [
                     self.python, str(OPENCLI_SHADOW), "--mode", "primary",
                     "--channel", channel, "--queries-json", str(queries_path),
                     "--output", str(output_path),
+                    "--raw-output", str(raw_output_path),
                     "--client", client, "--job", job,
                     "--db", str(self.service.db_path), "--port", str(port),
                     "--limit", str(limit), "--detail-limit", str(detail_limit),
-                    "--max-queries", "3",
+                    "--max-queries", str(max(1, len(planned_queries) if isinstance(planned_queries, list) else 0)),
                 ],
                 600,
             )
@@ -448,7 +1051,15 @@ class RecruitingCapabilityRuntime:
                 "error": _trim_error(exc),
             }
         report[channel] = summary
-        return "opencli" if summary.get("ok") else "production_fallback"
+        if summary.get("coverage_complete") or summary.get("ok"):
+            return "opencli"
+        if any(
+            isinstance(item, dict)
+            and item.get("terminal_state") in {"exhausted", "platform_capped"}
+            for item in summary.get("rounds") or []
+        ):
+            return "opencli_partial"
+        return "production_fallback"
 
     def _run_opencli_shadow(
         self,
@@ -533,6 +1144,687 @@ class RecruitingCapabilityRuntime:
             }, ensure_ascii=False) + "\n")
         payload["history"] = str(history_path)
         return payload
+
+    def _resume_query_cells(
+        self,
+        run_id: str,
+        query_plan: dict[str, Any],
+        *,
+        max_retries: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Select only unfinished/retryable cells for an explicitly resumed run."""
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                "SELECT cell_id,plan_hash,status,retry_count,cursor_json,pages_fetched,terminal_reason,"
+                "extracted_count,unique_count FROM agent_sourcing_query_cells WHERE run_id=?",
+                (run_id,),
+            ).fetchall()
+            recall_rows = conn.execute(
+                "SELECT query_cell_id,source_candidate_id FROM agent_candidate_recalls "
+                "WHERE run_id=? AND query_cell_id<>'' AND source_candidate_id<>''",
+                (run_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return [cell for cell in query_plan.get("cells") or [] if isinstance(cell, dict)]
+        plan_hash = str(query_plan.get("plan_hash") or "")
+        if any(str(row["plan_hash"] or "") != plan_hash for row in rows):
+            raise ValueError("断点续跑的 query_plan_v1 与原 run_id 不一致")
+        states = {
+            str(row["cell_id"]): (
+                str(row["status"]), int(row["retry_count"] or 0), _loads(row["cursor_json"], {}),
+                int(row["pages_fetched"] or 0), int(row["extracted_count"] or 0),
+                int(row["unique_count"] or 0), str(row["terminal_reason"] or ""),
+            )
+            for row in rows
+        }
+        seen_keys_by_cell: dict[str, list[str]] = {}
+        for row in recall_rows:
+            cell_id = str(row["query_cell_id"] or "")
+            source_id = str(row["source_candidate_id"] or "").strip()
+            if cell_id and source_id and not source_id.startswith("anon_"):
+                seen_keys_by_cell.setdefault(cell_id, []).append(source_id)
+        runnable: list[dict[str, Any]] = []
+        for cell in query_plan.get("cells") or []:
+            if not isinstance(cell, dict):
+                continue
+            status, retries, cursor, pages_fetched, extracted_count, unique_count, terminal_reason = states.get(
+                str(cell.get("cell_id") or ""), ("pending", 0, {}, 0, 0, 0, ""),
+            )
+            if (
+                status == "pending"
+                or (status == "failed" and retries < max(1, max_retries))
+                or (
+                    status == "blocked"
+                    and retries < max(1, max_retries)
+                    and not cursor
+                    and terminal_reason in {"channel_blocked_before_query", "approved_cell_not_executed"}
+                )
+            ):
+                runnable.append(cell)
+            elif (
+                status in {"platform_capped", "blocked"}
+                and retries < max(1, max_retries)
+                and isinstance(cursor, dict)
+                and int(cursor.get("page") or 0) > 1
+            ):
+                runnable.append({
+                    **cell,
+                    "execution_cursor": {"page": int(cursor["page"])},
+                    "execution_progress": {
+                        "pages_fetched": pages_fetched,
+                        "extracted_count": extracted_count,
+                        "unique_count": unique_count,
+                        "seen_candidate_keys": list(dict.fromkeys(seen_keys_by_cell.get(str(cell.get("cell_id") or ""), []))),
+                    },
+                })
+        return runnable
+
+    def _sourcing_continuation(
+        self,
+        *,
+        request: dict[str, Any],
+        run_id: str,
+        query_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a hash-bound next batch for retryable/cursor-bearing query cells."""
+        try:
+            index = max(0, int(request.get("_continuation_index") or 0))
+        except (TypeError, ValueError):
+            index = 0
+        try:
+            max_batches = max(0, min(int(request.get("max_continuation_batches") or 20), 20))
+        except (TypeError, ValueError):
+            max_batches = 20
+        runnable = self._resume_query_cells(
+            run_id,
+            query_plan,
+            max_retries=int(request.get("max_query_retries") or 3),
+        )
+        summary = {
+            "scheduled": bool(runnable and index < max_batches),
+            "run_id": run_id,
+            "completed_batches": index + 1,
+            "remaining_cells": len(runnable),
+            "limit_reached": bool(runnable and index >= max_batches),
+        }
+        if not summary["scheduled"]:
+            return {"request": None, "summary": summary}
+        next_request = {
+            key: value
+            for key, value in request.items()
+            if key not in {"_audit_only_result", "resume_run_id", "_continuation_index"}
+        }
+        next_request.update({
+            "resume_run_id": run_id,
+            "_continuation_index": index + 1,
+        })
+        return {"request": next_request, "summary": summary}
+
+    def _persist_query_cell_states(
+        self,
+        *,
+        run_id: str,
+        workflow_id: str,
+        client: str,
+        job: str,
+        query_plan: dict[str, Any],
+        channel_runs: list[dict[str, Any]],
+        executed_cell_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Persist per-query progress without turning truncation or unknown totals into completion."""
+        def normalized(value: Any) -> str:
+            return " ".join(str(value or "").split()).casefold()
+
+        def integer(value: Any, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        rounds_by_query: dict[tuple[str, str], tuple[dict[str, Any], str, dict[str, Any]]] = {}
+        channel_status: dict[str, tuple[str, dict[str, Any]]] = {}
+        for run in channel_runs:
+            if not isinstance(run, dict):
+                continue
+            channel = str(run.get("channel") or "").lower()
+            result = run.get("result") if isinstance(run.get("result"), dict) else {}
+            channel_status[channel] = (str(run.get("status") or ""), result)
+            for round_item in result.get("rounds") or []:
+                if isinstance(round_item, dict):
+                    rounds_by_query[(channel, normalized(round_item.get("query")))] = (
+                        round_item, str(run.get("status") or ""), result,
+                    )
+
+        job_id = self._job_id(client, job)
+        terminal_counts: dict[str, int] = {}
+        conn = self.service._connect()
+        try:
+            for cell in query_plan.get("cells") or []:
+                if not isinstance(cell, dict):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO agent_sourcing_query_cells
+                    (run_id,workflow_id,job_id,plan_hash,cell_id,channel,query,priority,status)
+                    VALUES (?,?,?,?,?,?,?,?, 'pending')
+                    ON CONFLICT(run_id,cell_id) DO NOTHING
+                    """,
+                    (
+                        run_id, workflow_id or None, job_id, str(query_plan.get("plan_hash") or ""),
+                        str(cell.get("cell_id") or ""), str(cell.get("channel") or ""),
+                        str(cell.get("query") or ""), integer(cell.get("priority")),
+                    ),
+                )
+
+            for cell in query_plan.get("cells") or []:
+                if not isinstance(cell, dict):
+                    continue
+                channel = str(cell.get("channel") or "").lower()
+                cell_id = str(cell.get("cell_id") or "")
+                match = rounds_by_query.get((channel, normalized(cell.get("query"))))
+                existing = conn.execute(
+                    "SELECT status,reported_total,pages_fetched,extracted_count,unique_count "
+                    "FROM agent_sourcing_query_cells WHERE run_id=? AND cell_id=?",
+                    (run_id, cell_id),
+                ).fetchone()
+                existing_status = str(existing["status"] or "") if existing else ""
+                if executed_cell_ids is not None and cell_id not in executed_cell_ids:
+                    if existing_status in {"exhausted", "platform_capped", "blocked", "failed"}:
+                        terminal_counts[existing_status] = terminal_counts.get(existing_status, 0) + 1
+                    continue
+                if not match and existing_status in {"exhausted", "platform_capped", "blocked"}:
+                    terminal_counts[existing_status] = terminal_counts.get(existing_status, 0) + 1
+                    continue
+                reported_total: int | None = None
+                extracted = 0
+                unique_count = 0
+                pages_fetched = 0
+                cursor: Any = {}
+                last_error = None
+                if match:
+                    round_item, run_status, channel_result = match
+                    raw_total = round_item.get("result_count")
+                    if raw_total is not None and str(raw_total).strip() != "":
+                        reported_total = max(0, integer(raw_total))
+                    extracted = max(0, integer(round_item.get("extracted_count")))
+                    unique_count = max(0, integer(round_item.get("unique_count"), extracted))
+                    pages_fetched = max(0, integer(round_item.get("pages_fetched"), 1))
+                    cursor = round_item.get("cursor") or {}
+                    round_status = str(round_item.get("status") or run_status or "completed")
+                    explicit_terminal = str(round_item.get("terminal_state") or "")
+                    if explicit_terminal in {"exhausted", "platform_capped", "blocked", "failed"}:
+                        status = explicit_terminal
+                        reason = str(round_item.get("terminal_reason") or explicit_terminal)
+                    elif round_status == "failed":
+                        status, reason = "failed", str(round_item.get("reason") or "query_failed")
+                    elif round_status in {"blocked", "skipped", "stale_query"}:
+                        status, reason = "blocked", str(round_item.get("reason") or round_status)
+                    elif reported_total is None:
+                        status, reason = "platform_capped", "reported_total_unknown"
+                    elif extracted >= reported_total:
+                        status, reason = "exhausted", "reported_total_exhausted"
+                    else:
+                        status, reason = "platform_capped", "reported_total_not_exhausted"
+                    last_error = str(round_item.get("error") or channel_result.get("error") or "") or None
+                    if existing_status in {"platform_capped", "blocked", "failed"}:
+                        pages_fetched += max(0, integer(existing["pages_fetched"]))
+                        extracted += max(0, integer(existing["extracted_count"]))
+                        unique_count += max(0, integer(existing["unique_count"]))
+                        if reported_total is None and existing["reported_total"] is not None:
+                            reported_total = max(0, integer(existing["reported_total"]))
+                    ledger = conn.execute(
+                        "SELECT COUNT(*) AS occurrences,"
+                        "COUNT(DISTINCT COALESCE(NULLIF(source_candidate_id,''),identity_key)) AS unique_count "
+                        "FROM agent_candidate_recalls WHERE run_id=? AND query_cell_id=?",
+                        (run_id, cell_id),
+                    ).fetchone()
+                    ledger_occurrences = int(ledger["occurrences"] or 0) if ledger else 0
+                    ledger_unique = int(ledger["unique_count"] or 0) if ledger else 0
+                    if ledger_occurrences or extracted == 0:
+                        extracted = ledger_occurrences
+                        unique_count = ledger_unique
+                    if status == "exhausted" and reported_total is not None and unique_count < reported_total:
+                        status = "platform_capped" if isinstance(cursor, dict) and cursor else "blocked"
+                        reason = "duplicate_candidates_before_reported_total"
+                else:
+                    run_status, channel_result = channel_status.get(channel, ("", {}))
+                    if run_status == "failed":
+                        status, reason = "failed", "channel_failed_before_query"
+                    elif run_status == "blocked":
+                        status, reason = "blocked", "channel_blocked_before_query"
+                    else:
+                        status, reason = "blocked", "approved_cell_not_executed"
+                    last_error = str(channel_result.get("error") or "") or None
+                conn.execute(
+                    """
+                    UPDATE agent_sourcing_query_cells
+                       SET status=?,reported_total=?,pages_fetched=?,extracted_count=?,unique_count=?,
+                           cursor_json=?,retry_count=retry_count+CASE WHEN ? IN ('failed','blocked') THEN 1 ELSE 0 END,
+                           terminal_reason=?,last_error=?,started_at=COALESCE(started_at,datetime('now','localtime')),
+                           finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime')
+                     WHERE run_id=? AND cell_id=?
+                    """,
+                    (
+                        status, reported_total, pages_fetched, extracted, unique_count,
+                        json.dumps(cursor, ensure_ascii=False), status, reason, last_error,
+                        run_id, str(cell.get("cell_id") or ""),
+                    ),
+                )
+                terminal_counts[status] = terminal_counts.get(status, 0) + 1
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "run_id": run_id, "stored": sum(terminal_counts.values()), "terminal_counts": terminal_counts}
+
+    def _persist_candidate_recalls(
+        self,
+        *,
+        run_id: str,
+        workflow_id: str,
+        client: str,
+        job: str,
+        query_plan: dict[str, Any],
+        raw_candidates: dict[str, list[Any]],
+        applied: dict[str, Any],
+        min_score: int,
+    ) -> dict[str, Any]:
+        """Persist every extracted card before formal candidate intake or score filtering."""
+        def normalized(value: Any) -> str:
+            return re.sub(r"\s+", "", str(value or "")).casefold()
+
+        def identity(item: dict[str, Any], channel: str, query: str) -> tuple[str, str, str, str, str]:
+            return (
+                normalized(channel), normalized(query), normalized(item.get("name")),
+                normalized(item.get("company") or item.get("current_company")),
+                normalized(item.get("title") or item.get("current_title")),
+            )
+
+        cell_by_query = {
+            (str(cell.get("channel") or ""), normalized(cell.get("query"))): str(cell.get("cell_id") or "")
+            for cell in query_plan.get("cells") or []
+            if isinstance(cell, dict)
+        }
+        staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
+        disposition: dict[tuple[str, str, str, str, str], str] = {}
+        staged_by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        for key, state in (("accepted", "accepted"), ("existing", "existing"), ("batch_duplicates", "batch_duplicate")):
+            for raw in staged.get(key) or []:
+                if not isinstance(raw, dict):
+                    continue
+                channel = str(raw.get("channel") or raw.get("source") or "").lower()
+                query = str(raw.get("source_query") or raw.get("query") or "")
+                item_identity = identity(raw, channel, query)
+                disposition[item_identity] = state
+                staged_by_identity[item_identity] = raw
+        for error in staged.get("errors") or []:
+            raw = error.get("raw") if isinstance(error, dict) and isinstance(error.get("raw"), dict) else {}
+            channel = str(raw.get("channel") or raw.get("source") or "").lower()
+            query = str(raw.get("source_query") or raw.get("query") or "")
+            item_identity = identity(raw, channel, query)
+            disposition[item_identity] = "invalid"
+            staged_by_identity[item_identity] = raw
+
+        receipts = (
+            applied.get("intake", {}).get("receipts") or []
+            if isinstance(applied.get("intake"), dict)
+            else []
+        )
+        accepted = [item for item in staged.get("accepted") or [] if isinstance(item, dict)]
+        receipt_by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        receipts_by_name: dict[str, list[dict[str, Any]]] = {}
+        for accepted_item, receipt in zip(accepted, receipts, strict=False):
+            if not isinstance(receipt, dict):
+                continue
+            accepted_channel = str(accepted_item.get("channel") or accepted_item.get("source") or "").lower()
+            accepted_query = str(accepted_item.get("source_query") or accepted_item.get("query") or "")
+            receipt_by_identity[identity(accepted_item, accepted_channel, accepted_query)] = receipt
+            receipt_name = normalized(receipt.get("name"))
+            if receipt_name:
+                receipts_by_name.setdefault(receipt_name, []).append(receipt)
+        job_id = self._job_id(client, job)
+        stored = 0
+        by_state: dict[str, int] = {}
+        conn = self.service._connect()
+        try:
+            for channel, values in raw_candidates.items():
+                normalized_channel = str(channel or "unknown").lower()
+                for index, raw in enumerate(values if isinstance(values, list) else [], 1):
+                    if not isinstance(raw, dict):
+                        continue
+                    source_query = " ".join(str(raw.get("source_query") or raw.get("query") or "").split())
+                    source_id = str(
+                        raw.get("source_candidate_id") or raw.get("candidate_id") or raw.get("resume_id")
+                        or raw.get("res_id_encode")
+                        or raw.get("xsaas_id") or raw.get("resume_url") or raw.get("source_url") or ""
+                    ).strip()
+                    name = str(raw.get("name") or "").strip()
+                    company = str(raw.get("company") or raw.get("current_company") or "").strip()
+                    title = str(raw.get("title") or raw.get("current_title") or "").strip()
+                    identity_key = "|".join((normalized(name), normalized(company), normalized(title)))
+                    if not source_id:
+                        source_id = "anon_" + hashlib.sha256(identity_key.encode("utf-8")).hexdigest()[:20]
+                    try:
+                        score = int(raw["fit_score"]) if raw.get("fit_score") is not None else None
+                    except (TypeError, ValueError):
+                        score = None
+                    item_identity = identity(raw, normalized_channel, source_query)
+                    state = disposition.get(item_identity, "not_intaked")
+                    staged_item = staged_by_identity.get(item_identity, {})
+                    exclusion_reason = None
+                    if score is not None and score < min_score:
+                        exclusion_reason = "score_below_threshold"
+                    elif state == "existing":
+                        exclusion_reason = "existing_candidate"
+                    elif state == "batch_duplicate":
+                        exclusion_reason = "same_batch_duplicate"
+                    elif state == "invalid":
+                        exclusion_reason = "normalization_error"
+                    elif state == "not_intaked":
+                        exclusion_reason = "not_in_intake_output"
+                    receipt: dict[str, Any] = {}
+                    if state == "accepted":
+                        receipt = receipt_by_identity.get(
+                            identity(raw, normalized_channel, source_query),
+                            {},
+                        )
+                        if not receipt:
+                            same_name = receipts_by_name.get(normalized(name), [])
+                            if len(same_name) == 1:
+                                receipt = same_name[0]
+                    receipt_status = str(receipt.get("status") or "")
+                    if receipt_status in {"existing", "existing_relation"}:
+                        state = receipt_status
+                        exclusion_reason = "existing_candidate" if receipt_status == "existing" else "existing_relation"
+                    page_number = max(1, int(raw.get("page_number") or raw.get("page") or 1))
+                    position_index = max(0, int(raw.get("position_index") or index))
+                    query_cell_id = cell_by_query.get((normalized_channel, normalized(source_query)), "")
+                    recall_identity = "|".join((
+                        run_id, normalized_channel, query_cell_id, source_id,
+                        str(page_number), str(position_index), normalized(source_query),
+                    ))
+                    recall_id = "recall_" + hashlib.sha256(recall_identity.encode("utf-8")).hexdigest()[:24]
+                    conn.execute(
+                        """
+                        INSERT INTO agent_candidate_recalls
+                        (recall_id,run_id,workflow_id,job_id,query_cell_id,channel,source_candidate_id,
+                         source_query,source_url,page_number,position_index,identity_key,candidate_name,
+                         company,title,fit_score,fit_level,duplicate_state,exclusion_reason,detail_status,
+                         candidate_id,job_candidate_id,raw_json)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(recall_id) DO UPDATE SET
+                          fit_score=excluded.fit_score,fit_level=excluded.fit_level,
+                          duplicate_state=excluded.duplicate_state,exclusion_reason=excluded.exclusion_reason,
+                          detail_status=excluded.detail_status,candidate_id=excluded.candidate_id,
+                          job_candidate_id=excluded.job_candidate_id,raw_json=excluded.raw_json,
+                          updated_at=datetime('now','localtime')
+                        """,
+                        (
+                            recall_id, run_id, workflow_id or None, job_id, query_cell_id,
+                            normalized_channel, source_id, source_query,
+                            str(raw.get("resume_url") or raw.get("source_url") or raw.get("url") or ""),
+                            page_number, position_index, identity_key, name, company, title, score,
+                            str(raw.get("fit_level") or "") or None, state, exclusion_reason,
+                            str(
+                                staged_item.get("resume_capture_status")
+                                or staged_item.get("detail_status")
+                                or raw.get("resume_capture_status")
+                                or raw.get("detail_status")
+                                or "not_requested"
+                            ),
+                            int(receipt.get("candidate_id") or 0) or None,
+                            int(receipt.get("job_candidate_id") or 0) or None,
+                            json.dumps(raw, ensure_ascii=False),
+                        ),
+                    )
+                    stored += 1
+                    by_state[state] = by_state.get(state, 0) + 1
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "stored": stored, "run_id": run_id, "by_state": by_state}
+
+    def _build_coverage_certificate(
+        self,
+        *,
+        run_id: str,
+        workflow_id: str,
+        client: str,
+        job: str,
+        query_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Issue an auditable coverage certificate without claiming a hidden platform population."""
+        job_id = self._job_id(client, job)
+        conn = self.service._connect()
+        try:
+            cell_rows = conn.execute(
+                "SELECT * FROM agent_sourcing_query_cells WHERE run_id=? ORDER BY priority,cell_id",
+                (run_id,),
+            ).fetchall()
+            recall_row = conn.execute(
+                """
+                SELECT COUNT(*) AS raw_occurrences,
+                       COUNT(DISTINCT channel || ':' || COALESCE(NULLIF(source_candidate_id,''),identity_key)) AS channel_unique_identities,
+                       COUNT(DISTINCT CASE
+                           WHEN REPLACE(identity_key,'|','')<>'' THEN identity_key
+                           ELSE channel || ':' || source_candidate_id END) AS global_unique_identities,
+                       SUM(CASE WHEN duplicate_state IN ('existing','existing_relation','batch_duplicate') THEN 1 ELSE 0 END) AS duplicate_occurrences,
+                       SUM(CASE WHEN exclusion_reason='score_below_threshold' THEN 1 ELSE 0 END) AS below_threshold,
+                       SUM(CASE WHEN query_cell_id='' THEN 1 ELSE 0 END) AS unmapped_occurrences,
+                       COUNT(DISTINCT CASE WHEN job_candidate_id IS NOT NULL THEN job_candidate_id END) AS formally_intaked,
+                       SUM(CASE WHEN detail_status='complete' THEN 1 ELSE 0 END) AS detail_complete,
+                       SUM(CASE WHEN detail_status='partial' THEN 1 ELSE 0 END) AS detail_partial,
+                       SUM(CASE WHEN detail_status='failed' THEN 1 ELSE 0 END) AS detail_failed
+                FROM agent_candidate_recalls WHERE run_id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            ledger_rows = conn.execute(
+                """
+                SELECT query_cell_id,COUNT(*) AS occurrences
+                FROM agent_candidate_recalls
+                WHERE run_id=? AND query_cell_id<>''
+                GROUP BY query_cell_id
+                """,
+                (run_id,),
+            ).fetchall()
+            assessment_count = int(conn.execute(
+                """
+                SELECT COUNT(DISTINCT a.job_candidate_id)
+                FROM agent_candidate_recalls r
+                JOIN agent_candidate_assessments a ON a.job_candidate_id=r.job_candidate_id AND a.is_current=1
+                WHERE r.run_id=?
+                """,
+                (run_id,),
+            ).fetchone()[0])
+
+            status_counts = {
+                status: 0 for status in ("pending", "exhausted", "platform_capped", "blocked", "failed")
+            }
+            state_by_cell: dict[str, dict[str, Any]] = {}
+            ledger_by_cell = {str(row["query_cell_id"]): int(row["occurrences"] or 0) for row in ledger_rows}
+            executed = 0
+            platform_totals: dict[str, dict[str, int | None]] = {}
+            for row in cell_rows:
+                item = _row(row)
+                state_by_cell[str(item.get("cell_id") or "")] = item
+                status = str(item.get("status") or "")
+                if status in status_counts:
+                    status_counts[status] += 1
+                if status in {"exhausted", "platform_capped", "failed"} or int(item.get("pages_fetched") or 0) > 0:
+                    executed += 1
+                channel = str(item.get("channel") or "unknown")
+                totals = platform_totals.setdefault(
+                    channel,
+                    {"reported_query_total": 0, "reported_total_known_cells": 0, "extracted_occurrences": 0},
+                )
+                if item.get("reported_total") is not None:
+                    totals["reported_query_total"] = int(totals["reported_query_total"] or 0) + int(item["reported_total"])
+                    totals["reported_total_known_cells"] = int(totals["reported_total_known_cells"] or 0) + 1
+                totals["extracted_occurrences"] = int(totals["extracted_occurrences"] or 0) + int(item.get("extracted_count") or 0)
+
+            expected_extracted = sum(int(item.get("extracted_count") or 0) for item in state_by_cell.values())
+            mapped_occurrences = sum(ledger_by_cell.values())
+            unmapped_occurrences = int(_row(recall_row).get("unmapped_occurrences") or 0)
+            mismatched_cells = sum(
+                int(item.get("extracted_count") or 0) != int(ledger_by_cell.get(cell_id, 0))
+                for cell_id, item in state_by_cell.items()
+            )
+            evidence_integrity_passed = bool(
+                unmapped_occurrences == 0
+                and expected_extracted == mapped_occurrences
+                and mismatched_cells == 0
+            )
+
+            all_companies: set[str] = set()
+            all_groups: set[str] = set()
+            executed_companies: set[str] = set()
+            executed_groups: set[str] = set()
+            for cell in query_plan.get("cells") or []:
+                if not isinstance(cell, dict):
+                    continue
+                state = state_by_cell.get(str(cell.get("cell_id") or ""), {})
+                was_executed = str(state.get("status") or "") in {"exhausted", "platform_capped", "failed"} or int(state.get("pages_fetched") or 0) > 0
+                for ref in cell.get("provenance") or []:
+                    if not isinstance(ref, dict):
+                        continue
+                    company = str(ref.get("company") or "").strip()
+                    group = str(ref.get("group") or "").strip()
+                    if company:
+                        all_companies.add(company)
+                        if was_executed:
+                            executed_companies.add(company)
+                    if group:
+                        all_groups.add(group)
+                        if was_executed:
+                            executed_groups.add(group)
+
+            approved = len([cell for cell in query_plan.get("cells") or [] if isinstance(cell, dict)])
+            dimensions = query_plan.get("dimensions") if isinstance(query_plan.get("dimensions"), dict) else {}
+            semantics = (
+                query_plan.get("execution_semantics")
+                if isinstance(query_plan.get("execution_semantics"), dict)
+                else {}
+            )
+            evaluation_modes = (
+                semantics.get("evaluation_constraints")
+                if isinstance(semantics.get("evaluation_constraints"), dict)
+                else {}
+            )
+            dimension_execution = {
+                "retrieval_axes": semantics.get("retrieval_axes") or ["channel", "query"],
+                "platform_filters_applied": semantics.get("platform_filters") or [],
+                "dimensions": {
+                    key: {
+                        "approved_values": [str(value) for value in dimensions.get(key) or []],
+                        "retrieval_filter_applied": False,
+                        "evaluation_mode": str(evaluation_modes.get(key) or "post_recall_evaluation"),
+                    }
+                    for key in ("locations", "levels", "scenarios")
+                },
+            }
+            if not evidence_integrity_passed:
+                coverage_status = "coverage_unknown"
+                defensible_claim = "查询执行记录与原始召回台账不一致，候选人覆盖未知"
+            elif approved > 0 and status_counts["exhausted"] == approved:
+                coverage_status = "approved_query_cells_exhausted"
+                defensible_claim = "已穷尽批准的渠道关键词查询单元；地点、职级、场景未作为平台筛选执行"
+            elif status_counts["platform_capped"]:
+                coverage_status = "platform_truncated"
+                defensible_claim = "已执行部分批准查询单元，但平台截断导致候选人总体覆盖未知"
+            else:
+                coverage_status = "coverage_unknown"
+                defensible_claim = "批准的渠道关键词查询单元尚未完全执行，候选人总体覆盖未知"
+            unknown_reasons: list[str] = []
+            if status_counts["platform_capped"]:
+                unknown_reasons.append("platform_truncated")
+            if status_counts["blocked"]:
+                unknown_reasons.append("blocked_query_cells")
+            if status_counts["failed"]:
+                unknown_reasons.append("failed_query_cells")
+            if status_counts["pending"]:
+                unknown_reasons.append("pending_query_cells")
+            if not evidence_integrity_passed:
+                unknown_reasons.append("recall_ledger_mismatch")
+            unknown_reasons.append("platform_candidate_population_denominator_unavailable")
+
+            recall = _row(recall_row)
+            certificate_id = "coverage_" + hashlib.sha256(
+                f"{run_id}|{query_plan.get('plan_hash') or ''}".encode("utf-8")
+            ).hexdigest()[:24]
+            certificate = {
+                "schema_version": "coverage_certificate_v1",
+                "certificate_id": certificate_id,
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "job_id": job_id,
+                "plan_hash": str(query_plan.get("plan_hash") or ""),
+                "issued_at": datetime.now().isoformat(timespec="seconds"),
+                "coverage_status": coverage_status,
+                "strategy_elements": {
+                    "companies_approved": len(all_companies),
+                    "companies_executed": len(executed_companies),
+                    "keyword_groups_approved": len(all_groups),
+                    "keyword_groups_executed": len(executed_groups),
+                },
+                "dimension_execution": dimension_execution,
+                "query_cells": {
+                    "approved": approved,
+                    "executed": executed,
+                    **status_counts,
+                },
+                "platform_query_totals": platform_totals,
+                "candidate_recall": {
+                    "raw_occurrences": int(recall.get("raw_occurrences") or 0),
+                    "unique_identities": int(recall.get("global_unique_identities") or 0),
+                    "global_unique_identities": int(recall.get("global_unique_identities") or 0),
+                    "channel_unique_identities": int(recall.get("channel_unique_identities") or 0),
+                    "duplicate_occurrences": int(recall.get("duplicate_occurrences") or 0),
+                    "below_threshold": int(recall.get("below_threshold") or 0),
+                    "formally_intaked": int(recall.get("formally_intaked") or 0),
+                },
+                "evidence_integrity": {
+                    "passed": evidence_integrity_passed,
+                    "expected_extracted_occurrences": expected_extracted,
+                    "mapped_recall_occurrences": mapped_occurrences,
+                    "unmapped_recall_occurrences": unmapped_occurrences,
+                    "mismatched_query_cells": mismatched_cells,
+                },
+                "detail_completeness": {
+                    "complete": int(recall.get("detail_complete") or 0),
+                    "partial": int(recall.get("detail_partial") or 0),
+                    "failed": int(recall.get("detail_failed") or 0),
+                },
+                "assessment": {"completed_unique_candidates": assessment_count},
+                "claims": {
+                    "all_candidates_covered": False,
+                    "defensible_claim": defensible_claim,
+                    "coverage_unknown_reasons": list(dict.fromkeys(unknown_reasons)),
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO agent_sourcing_coverage_certificates
+                (certificate_id,run_id,workflow_id,job_id,plan_hash,coverage_status,certificate_json)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                  certificate_id=excluded.certificate_id,workflow_id=excluded.workflow_id,
+                  job_id=excluded.job_id,plan_hash=excluded.plan_hash,
+                  coverage_status=excluded.coverage_status,certificate_json=excluded.certificate_json,
+                  issued_at=datetime('now','localtime')
+                """,
+                (
+                    certificate_id, run_id, workflow_id or None, job_id,
+                    str(query_plan.get("plan_hash") or ""), coverage_status,
+                    json.dumps(certificate, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return certificate
+        finally:
+            conn.close()
 
     def _persist_sourcing_attributions(
         self, applied: dict[str, Any], strategy: dict[str, Any], workflow_id: str, client: str, job: str,
@@ -677,6 +1969,75 @@ class RecruitingCapabilityRuntime:
         conn = self.service._connect()
         try:
             for row in rows:
+                cell_rows = conn.execute(
+                    """
+                    SELECT cell_id,query,status,reported_total,pages_fetched,extracted_count,
+                           unique_count,terminal_reason,last_error
+                    FROM agent_sourcing_query_cells
+                    WHERE run_id=? AND channel=?
+                    ORDER BY priority,cell_id
+                    """,
+                    (run_id, row["channel"]),
+                ).fetchall()
+                recall_stats = _row(conn.execute(
+                    """
+                    SELECT COUNT(*) AS raw_occurrences,
+                           COUNT(DISTINCT CASE
+                               WHEN REPLACE(identity_key,'|','')<>'' THEN identity_key
+                               ELSE channel || ':' || source_candidate_id END) AS unique_identities,
+                           SUM(CASE WHEN detail_status='complete' THEN 1 ELSE 0 END) AS detail_complete,
+                           SUM(CASE WHEN detail_status='partial' THEN 1 ELSE 0 END) AS detail_partial,
+                           SUM(CASE WHEN detail_status='failed' THEN 1 ELSE 0 END) AS detail_failed,
+                           SUM(CASE WHEN duplicate_state IN ('existing','existing_relation','batch_duplicate') THEN 1 ELSE 0 END) AS intake_duplicates,
+                           COUNT(DISTINCT CASE WHEN duplicate_state='accepted' AND job_candidate_id IS NOT NULL THEN job_candidate_id END) AS intake_new,
+                           COUNT(DISTINCT CASE WHEN fit_score IS NOT NULL
+                               THEN COALESCE(NULLIF(source_candidate_id,''),identity_key) END) AS assessed,
+                           COUNT(DISTINCT CASE WHEN fit_score>=65
+                               THEN COALESCE(NULLIF(source_candidate_id,''),identity_key) END) AS high_score
+                    FROM agent_candidate_recalls
+                    WHERE run_id=? AND channel=?
+                    """,
+                    (run_id, row["channel"]),
+                ).fetchone())
+                if cell_rows:
+                    cell_items = [_row(item) for item in cell_rows]
+                    statuses = {str(item.get("status") or "") for item in cell_items}
+                    if "failed" in statuses:
+                        row["status"] = "failed"
+                    elif "blocked" in statuses:
+                        row["status"] = "blocked"
+                    elif "platform_capped" in statuses:
+                        row["status"] = "platform_capped"
+                    elif statuses == {"exhausted"}:
+                        row["status"] = "completed"
+                    row["query_count"] = len(cell_items)
+                    row["queries_json"] = json.dumps(cell_items, ensure_ascii=False)
+                    row["recall_count"] = sum(
+                        int(item.get("reported_total") or 0)
+                        for item in cell_items if item.get("reported_total") is not None
+                    )
+                    row["extracted_count"] = sum(int(item.get("extracted_count") or 0) for item in cell_items)
+                raw_occurrences = int(recall_stats.get("raw_occurrences") or 0)
+                unique_identities = int(recall_stats.get("unique_identities") or 0)
+                row["dedupe_count"] = max(0, int(row["extracted_count"]) - unique_identities)
+                row["unique_count"] = unique_identities
+                row["detail_complete"] = max(
+                    int(row["detail_complete"]), int(recall_stats.get("detail_complete") or 0),
+                )
+                row["detail_partial"] = max(
+                    int(row["detail_partial"]), int(recall_stats.get("detail_partial") or 0),
+                )
+                row["detail_failed"] = max(
+                    int(row["detail_failed"]), int(recall_stats.get("detail_failed") or 0),
+                )
+                row["intake_duplicate_count"] = max(
+                    int(row["intake_duplicate_count"]), int(recall_stats.get("intake_duplicates") or 0),
+                )
+                row["intake_new_count"] = int(recall_stats.get("intake_new") or 0)
+                row["assessed_count"] = int(recall_stats.get("assessed") or 0)
+                row["high_score_count"] = int(recall_stats.get("high_score") or 0)
+                if raw_occurrences > 0:
+                    row["zero_attribution"] = None
                 conn.execute(
                     """
                     INSERT INTO agent_sourcing_funnel
@@ -761,8 +2122,9 @@ class RecruitingCapabilityRuntime:
     def _run(self, command: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
         proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         if proc.returncode != 0:
-            message = (proc.stderr or proc.stdout or f"命令退出码 {proc.returncode}").strip()
-            raise RuntimeError(_trim_error(message, 2000))
+            message, detail = _command_failure_summary(proc.stdout, proc.stderr, proc.returncode)
+            detail["command"] = command
+            raise CommandExecutionError(message, detail)
         return proc
 
     def _run_json(self, command: list[str], timeout: int = 300) -> dict[str, Any]:
@@ -1388,6 +2750,56 @@ class RecruitingCapabilityRuntime:
             stored += 1
         return {"stored_memories": stored, "queries": len(query_values)}
 
+    def _query_plan_learning_metrics(self, job_id: int) -> list[dict[str, Any]]:
+        """Aggregate prior marginal yield, overlap and downstream business feedback per query."""
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT qc.channel,qc.query,COUNT(DISTINCT qc.run_id) AS runs,
+                       COUNT(r.id) AS raw_occurrences,
+                       COUNT(DISTINCT r.channel || ':' || COALESCE(NULLIF(r.source_candidate_id,''),r.identity_key)) AS unique_identities
+                FROM agent_sourcing_query_cells qc
+                LEFT JOIN agent_candidate_recalls r
+                  ON r.run_id=qc.run_id AND r.query_cell_id=qc.cell_id
+                WHERE qc.job_id=?
+                GROUP BY qc.channel,qc.query
+                """,
+                (job_id,),
+            ).fetchall()
+            feedback_rows = conn.execute(
+                """
+                SELECT sa.channel,sa.source_query,COALESCE(SUM(sf.weight),0) AS business_score
+                FROM agent_sourcing_attributions sa
+                LEFT JOIN agent_sourcing_feedback sf ON sf.attribution_id=sa.id
+                WHERE sa.job_id=?
+                GROUP BY sa.channel,sa.source_query
+                """,
+                (job_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        feedback = {
+            (str(row["channel"] or ""), " ".join(str(row["source_query"] or "").split()).casefold()): float(row["business_score"] or 0)
+            for row in feedback_rows
+        }
+        metrics: list[dict[str, Any]] = []
+        for row in rows:
+            runs = max(1, int(row["runs"] or 0))
+            raw = max(0, int(row["raw_occurrences"] or 0))
+            unique = max(0, int(row["unique_identities"] or 0))
+            channel = str(row["channel"] or "")
+            query = str(row["query"] or "")
+            metrics.append({
+                "channel": channel,
+                "query": query,
+                "runs": runs,
+                "unique_yield_per_run": round(unique / runs, 4),
+                "overlap_rate": round(1 - unique / raw, 4) if raw else 0.0,
+                "business_score": feedback.get((channel, " ".join(query.split()).casefold()), 0.0),
+            })
+        return metrics
+
     def _job_id(self, client: str, job: str) -> int:
         conn = self.service._connect()
         try:
@@ -1401,6 +2813,7 @@ class RecruitingCapabilityRuntime:
 
     def run_search_strategy(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         job = self._job(context)
+        knowledge_health = strategy_v2.knowledge_base_health()
         max_queries = min(12, int(inputs.get("max_queries") or 6))
         command = [self.python, str(MULTICHANNEL), "plan", "--db", str(self.service.db_path), "--client", str(job["client"]), "--job", str(job["title"]), "--max-queries", str(max_queries)]
         try:
@@ -1419,9 +2832,29 @@ class RecruitingCapabilityRuntime:
         # 放行/锚点回复经工作流上下文 strategy_clarification 传入（ consultant_override /
         # consultant_answers ），推断项按 PRD §1 保持 inferred:true + confidence。
         clarification = context.get("strategy_clarification") if isinstance(context.get("strategy_clarification"), dict) else {}
+        revision_evidence = _revision_consultant_evidence(context)
+        understanding = context.get("intent_understanding") if isinstance(context.get("intent_understanding"), dict) else {}
+        locked_items = [
+            {"quote": str(item.get("quote") or "").strip(), "kind": str(item.get("kind") or "other")}
+            for item in (understanding.get("constraints") or [])
+            if isinstance(item, dict) and str(item.get("quote") or "").strip()
+        ]
+        for quote in context.get("locked_constraints") or []:
+            normalized_quote = str(quote or "").strip()
+            if normalized_quote and not any(item["quote"] == normalized_quote for item in locked_items):
+                locked_items.append({"quote": normalized_quote, "kind": "other"})
+        consultant_answers = "；".join(
+            value
+            for value in (
+                str(clarification.get("consultant_answers") or "").strip(),
+                revision_evidence,
+                "；".join(item["quote"] for item in locked_items),
+            )
+            if value
+        )
         consultant = {
             "consultant_override": bool(clarification.get("consultant_override")),
-            "consultant_answers": str(clarification.get("consultant_answers") or ""),
+            "consultant_answers": consultant_answers,
         }
         archetype, archetype_trace = strategy_v2.match_job_archetype(job.get("client"), job.get("title"))
         classification = strategy_v2.classify_strategy_input(
@@ -1519,8 +2952,14 @@ class RecruitingCapabilityRuntime:
             graph_pool=graph_pool,
             restricted_rules=knowledge_base.restricted_negative_rules(restricted_info),
             negative_checklist=negative_checklist,
+            canonical_position=payload["canonical_position"],
         )
+        consultant_constraints = _lock_consultant_constraints(plan, v2, revision_evidence, locked_items)
         v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
+        constraint_errors = _locked_constraint_conflicts(plan, v2, consultant_constraints)
+        if constraint_errors:
+            v2_ok = False
+            v2_errors = [*v2_errors, *constraint_errors]
         # S4-3c-4（N6）：策略全要素消费检查 —— 对照命中原型的种子要素清单（T1/T2/T3 各层
         # 公司池、地点策略、排除规则、有效关键词组）核对 strategy_v2 是否全部消费，未使用项
         # 显式列出供顾问确认页展示；种子未命中（无原型岗位）coverage_report=None 留痕不算缺失。
@@ -1541,15 +2980,32 @@ class RecruitingCapabilityRuntime:
             "summary": "已由大模型基于岗位事实、历史实验和长期记忆生成寻访策略，并完成无依据关键词校验。",
             "strategy": plan,
             "input_level": classification["input_level"],
+            "knowledge_health": knowledge_health,
             "references": self._job_reference(job),
         }
+        if consultant_constraints:
+            result["consultant_constraints"] = consultant_constraints
         if v2_ok:
+            query_plan = query_builders.schedule_query_plan_v1(
+                query_builders.compile_query_plan_v1(v2),
+                self._query_plan_learning_metrics(int(job.get("id") or 0)),
+            )
+            golden_replay = strategy_v2.build_golden_candidate_replay(archetype, query_plan)
             result["strategy_v2"] = v2
+            result["query_plan_v1"] = query_plan
+            result["golden_candidate_replay_v1"] = golden_replay
             content = "# 多渠道寻访策略（strategy_v2）\n\n```json\n" + json.dumps(v2, ensure_ascii=False, indent=2) + "\n```"
             result["artifacts"] = [
                 self._artifact(
                     "search_strategy", "多渠道寻访策略", content=content,
-                    metadata={"plan": plan, "strategy_v2": v2, "schema_version": strategy_v2.STRATEGY_V2_VERSION, "coverage_report": coverage_report},
+                    metadata={
+                        "plan": plan,
+                        "strategy_v2": v2,
+                        "query_plan_v1": query_plan,
+                        "golden_candidate_replay_v1": golden_replay,
+                        "schema_version": strategy_v2.STRATEGY_V2_VERSION,
+                        "coverage_report": coverage_report,
+                    },
                 )
             ]
         else:
@@ -1560,6 +3016,17 @@ class RecruitingCapabilityRuntime:
     def run_multi_channel_sourcing(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         job = self._job(context)
         strategy = self._workflow_strategy(inputs)
+        approved_snapshot = self._approved_sourcing_snapshot(str(inputs.get("workflow_id") or ""))
+        if approved_snapshot:
+            strategy = {
+                "strategy_summary": approved_snapshot.get("summary") or "",
+                "channels": approved_snapshot.get("channels") or {},
+                "target_companies": [
+                    item.get("name") for item in (approved_snapshot.get("company_pool") or [])
+                    if isinstance(item, dict) and item.get("name")
+                ],
+                "consultant_constraints": approved_snapshot.get("locked_constraints") or [],
+            }
         try:
             preflight = self._run_json([self.python, str(MULTICHANNEL), "preflight", "--db", str(self.service.db_path), "--client", str(job["client"]), "--job", str(job["title"]), "--port", str(int(inputs.get("cdp_port") or 9223))], 90)
         except Exception as exc:
@@ -1568,9 +3035,13 @@ class RecruitingCapabilityRuntime:
         ticket = {
             "client": job["client"], "job": job["title"], "preflight": preflight,
             "workflow_id": str(inputs.get("workflow_id") or ""),
-            "target_count": int(inputs.get("target_count") or self._target_count(inputs.get("objective")) or 10),
+            "target_count": int(approved_snapshot.get("target_count") or inputs.get("target_count") or self._target_count(inputs.get("objective")) or 10),
             "cdp_port": int(inputs.get("cdp_port") or 9223),
             "strategy": strategy,
+            "strategy_snapshot": approved_snapshot,
+            "strategy_hash": str(approved_snapshot.get("strategy_hash") or ""),
+            "query_plan_v1": approved_snapshot.get("query_plan_v1") or {},
+            "query_plan_hash": str(approved_snapshot.get("query_plan_hash") or ""),
             "required_result": {"verified": True, "channel_runs": [], "intake": {}, "audit": {}},
         }
         return {
@@ -1593,6 +3064,27 @@ class RecruitingCapabilityRuntime:
             ).fetchone()
             output = _loads(row["output_json"], {}) if row else {}
             return output.get("strategy") if isinstance(output.get("strategy"), dict) else {}
+        finally:
+            conn.close()
+
+    def _approved_sourcing_snapshot(self, workflow_id: str) -> dict[str, Any]:
+        if not workflow_id:
+            return {}
+        conn = self.service._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT preflight_json FROM agent_approvals
+                WHERE workflow_id=? AND action_type='multi_channel_sourcing' AND status='approved'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            preflight = _loads(row["preflight_json"], {}) if row else {}
+            snapshot = preflight.get("strategy_snapshot") if isinstance(preflight.get("strategy_snapshot"), dict) else {}
+            if snapshot and preflight.get("strategy_hash") == snapshot.get("strategy_hash"):
+                return snapshot
+            return {}
         finally:
             conn.close()
 

@@ -7,13 +7,20 @@ BUNDLE="$PWD/build/${APP_NAME}.app"
 EXECUTABLE="asa-floating"
 ICONSET="$PWD/build/AppIcon.iconset"
 SIGN_IDENTITY="ASA Floating Local Code Signing"
+DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
+SIGNING_TIMEOUT_SECONDS="${ASA_SIGNING_TIMEOUT_SECONDS:-60}"
+ARCH="$(uname -m)"
+SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"
 
 rm -rf "$BUNDLE" build "$EXECUTABLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 
 swiftc \
+  -target "${ARCH}-apple-macos${DEPLOYMENT_TARGET}" \
   -o "$EXECUTABLE" \
   src/main.swift \
+  src/WebSecurityPolicy.swift \
+  src/NativeContextPrivacy.swift \
   src/AppDelegate.swift \
   -framework Cocoa \
   -framework Vision \
@@ -54,9 +61,11 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.18</string>
+  <string>0.2.20</string>
   <key>CFBundleVersion</key>
-  <string>41</string>
+  <string>43</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>__DEPLOYMENT_TARGET__</string>
   <key>LSUIElement</key>
   <false/>
   <key>NSAppleEventsUsageDescription</key>
@@ -68,6 +77,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+sed -i '' "s/__DEPLOYMENT_TARGET__/${DEPLOYMENT_TARGET}/g" "$BUNDLE/Contents/Info.plist"
 
 find "$BUNDLE" -name '*.cstemp' -delete
 
@@ -75,8 +85,9 @@ sign_with_timeout() {
   codesign --force --deep --sign "$SIGN_IDENTITY" "$BUNDLE" >/dev/null &
   local sign_pid=$!
   local attempts=0
+  local max_attempts=$((SIGNING_TIMEOUT_SECONDS * 10))
   while kill -0 "$sign_pid" 2>/dev/null; do
-    if (( attempts >= 100 )); then
+    if (( attempts >= max_attempts )); then
       kill "$sign_pid" 2>/dev/null || true
       wait "$sign_pid" 2>/dev/null || true
       return 1
@@ -87,16 +98,33 @@ sign_with_timeout() {
   wait "$sign_pid"
 }
 
-# Preserve the stable local identity for TCC permissions, but never let a
-# keychain approval prompt block an unattended build indefinitely.
-if security find-identity -v -p codesigning | grep "$SIGN_IDENTITY" >/dev/null \
-  && sign_with_timeout; then
-  :
-else
-  find "$BUNDLE" -name '*.cstemp' -delete
-  rm -rf "$BUNDLE/Contents/_CodeSignature"
-  codesign --force --deep --sign - "$BUNDLE" >/dev/null
-fi
+discard_unsigned_bundle() {
+  find "$BUNDLE" -name '*.cstemp' -delete 2>/dev/null || true
+  rm -rf "$BUNDLE/Contents/_CodeSignature" "$BUNDLE"
+}
+
+case "$SIGNING_MODE" in
+  stable)
+    if ! security find-identity -v -p codesigning | grep "$SIGN_IDENTITY" >/dev/null; then
+      echo "Missing stable signing identity: $SIGN_IDENTITY" >&2
+      discard_unsigned_bundle
+      exit 1
+    fi
+    if ! sign_with_timeout; then
+      echo "Stable signing failed or timed out; unlock the signing key and rerun." >&2
+      discard_unsigned_bundle
+      exit 1
+    fi
+    ;;
+  adhoc)
+    echo "Warning: explicit ad-hoc signing; TCC permissions may not persist." >&2
+    codesign --force --deep --sign - "$BUNDLE" >/dev/null
+    ;;
+  *)
+    echo "ASA_SIGNING_MODE must be stable or adhoc" >&2
+    exit 2
+    ;;
+esac
 codesign --verify --deep --strict "$BUNDLE"
 
 echo "$BUNDLE"

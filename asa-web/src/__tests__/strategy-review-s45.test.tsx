@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { clearStrategyReviewCache } from '../api'
 import { StrategyReview } from '../workflows/StrategyReview'
 import { mockResponse } from './helpers'
 
@@ -80,6 +81,7 @@ const stubReviewFetch = (payload: unknown = reviewPayload) => {
 afterEach(() => {
   vi.unstubAllGlobals()
   window.localStorage.clear()
+  clearStrategyReviewCache()
 })
 
 describe('S4-5 复盘卡：N4 渠道降权建议', () => {

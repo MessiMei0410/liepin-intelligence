@@ -15,7 +15,7 @@ from pathlib import Path
 
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment
 from a_system_agent import AgentService, FakeLLM
-from a_system_agent import strategy_v2
+from a_system_agent import query_builders, strategy_v2
 
 
 KB_SEED_FIXTURE = {
@@ -146,6 +146,48 @@ class StrategyV2ClassificationTest(unittest.TestCase):
         assert miss is None
         assert any("未命中" in line for line in trace)
 
+    def test_runtime_kb_matches_changyue_software_and_mechanical_archetypes(self) -> None:
+        archetypes, trace = strategy_v2.load_job_archetypes()
+        archetype_ids = {item["archetype_id"] for item in archetypes}
+        assert "changyue_bonding_motion_control" in archetype_ids, trace
+        assert "changyue_precision_equipment_mechanical" in archetype_ids, trace
+
+        software, _ = strategy_v2.match_job_archetype("长越科技", "自动化软件高级工程师", archetypes)
+        mechanical, _ = strategy_v2.match_job_archetype("长越科技", "机械高级工程师", archetypes)
+        assert software is not None and software["archetype_id"] == "changyue_bonding_motion_control"
+        assert mechanical is not None and mechanical["archetype_id"] == "changyue_precision_equipment_mechanical"
+        assert software["golden_candidates"]
+        assert mechanical["golden_candidates"]
+        other_client, _ = strategy_v2.match_job_archetype("其他客户", "机械设计工程师", archetypes)
+        assert other_client is None, "长越岗位原型不得因标题相似而污染其他客户策略"
+
+    def test_changyue_golden_candidates_are_covered_by_compiled_query_grid(self) -> None:
+        archetypes, _ = strategy_v2.load_job_archetypes()
+        for client, title in (
+            ("长越科技", "自动化软件高级工程师"),
+            ("长越科技", "机械高级工程师"),
+        ):
+            archetype, _ = strategy_v2.match_job_archetype(client, title, archetypes)
+            assert archetype is not None
+            classification = strategy_v2.classify_strategy_input(
+                {"client": client, "title": title, "summary": archetype["essence"]},
+                archetype=archetype,
+            )
+            v2 = strategy_v2.build_strategy_v2(
+                {"channels": {}, "target_companies": [], "strategy_summary": archetype["essence"]},
+                classification,
+                archetype=archetype,
+            )
+            query_plan = query_builders.compile_query_plan_v1(v2)
+            replay = strategy_v2.build_golden_candidate_replay(archetype, query_plan)
+
+            assert replay is not None
+            assert replay["candidate_count"] >= 3
+            assert replay["covered_count"] == replay["candidate_count"]
+            assert replay["recall_rate"] == 1.0
+            assert replay["passed"] is True
+            assert replay["uncovered_profile_ids"] == []
+
     def test_archetype_missing_or_broken_kb_falls_back_with_trace(self) -> None:
         import tempfile
 
@@ -224,6 +266,42 @@ class StrategyV2SchemaTest(unittest.TestCase):
         assert v2["anchors"]["product_tech_line"]["confidence"] == "medium"
         assert "待确认" in v2["step2_target_pool"][0]["rationale"]
         assert v2["step2_target_pool"][0]["companies"][0]["source"] == "llm_inferred"
+
+    def test_explicit_negative_rule_keeps_graph_companies_out_of_target_pool(self) -> None:
+        v2 = strategy_v2.build_strategy_v2(
+            {"channels": {}},
+            self._classification(),
+            llm_fragment={
+                "step2_target_pool": [
+                    {
+                        "path": "same_layer",
+                        "tier": "T1",
+                        "companies": [{"name": "台达", "source": "client_doc", "confidence": "high"}],
+                        "rationale": "VPD/VRM 模块电源原厂",
+                    }
+                ],
+                "negative_rules": [
+                    {
+                        "type": "行业排除",
+                        "rule": "不得搜索或推荐2家kb_graph公司：上海微电子装备、芯钛科半导体设备",
+                        "source": "consultant_confirmed_exclusion",
+                    }
+                ],
+            },
+            graph_pool=[
+                {"name": "上海微电子装备", "confidence": "medium"},
+                {"name": "芯钛科半导体设备", "confidence": "high"},
+            ],
+        )
+
+        companies = [
+            company["name"]
+            for entry in v2["step2_target_pool"]
+            for company in entry["companies"]
+        ]
+        assert companies == ["台达"]
+        assert v2["step2_source_distribution"] == {"client_doc": 1}
+        assert any("图谱公司命中显式排除规则" in line for line in v2["classification_trace"])
 
     def test_extract_strategy_v2_from_v1_metadata_returns_none(self) -> None:
         assert strategy_v2.extract_strategy_v2({"plan": {"channels": {}}}) is None
@@ -469,6 +547,10 @@ class StrategyV2StorageTest(AgentDbCase):
         assert artifact["metadata"]["schema_version"] == "strategy_v2"
         assert artifact["metadata"]["strategy_v2"]["step5_expectation"]["fallback_plan"] == "T1不足放宽T3"
         assert "plan" in artifact["metadata"], "v1 plan 读取侧兼容保留"
+        query_plan = result["query_plan_v1"]
+        assert query_plan["cells"]
+        assert query_plan["plan_hash"] == query_builders.query_plan_hash(query_plan)
+        assert artifact["metadata"]["query_plan_v1"] == query_plan
         assert result["strategy"]["generation"]["input_level"] == "L3"
 
     def test_workflow_persists_strategy_v2_artifact(self) -> None:

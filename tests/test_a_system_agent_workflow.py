@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import sqlite3
 import threading
@@ -7,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment, workbench_server
 from a_system_agent import AgentService, FakeLLM
+from a_system_agent.context import build_candidate_context
 
 
 class UnsafePlannerLLM(FakeLLM):
@@ -69,6 +72,33 @@ class WorkflowEngineTest(AgentDbCase):
             state = self.service.get_workflow(workflow_id)
         return state
 
+    def test_waiting_assessment_coalesces_with_active_run_until_terminal(self) -> None:
+        context = build_candidate_context(self.db_path, 30)
+        snapshot_hash = self.service._snapshot_key(context)
+        key = (30, snapshot_hash)
+        self.service._active_by_snapshot[key] = "agent_active"
+        calls = 0
+
+        def fake_get_run(run_id: str) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "status": "running" if calls == 1 else "completed",
+                "assessment": {"fit_score": 80},
+            }
+
+        self.service.get_run = fake_get_run  # type: ignore[method-assign]
+        try:
+            result = self.service.submit_assessment(30, wait=True, timeout=1)
+        finally:
+            self.service._active_by_snapshot.pop(key, None)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["coalesced"])
+        self.assertGreaterEqual(calls, 2)
+
     def test_goal_planner_builds_lifecycle_plan_and_pauses_external_action(self) -> None:
         result = self.service.create_goal(
             "给长越科技机械高级工程师补充10位合适人选",
@@ -91,6 +121,14 @@ class WorkflowEngineTest(AgentDbCase):
         assert waiting["approvals"][0]["preflight"]["external_effect"] is True
         assert waiting["approvals"][0]["preflight"]["object_label"] == "长越科技 / 机械高级工程师"
         assert waiting["approvals"][0]["preflight"]["channel"] == "猎聘 + X-SaaS"
+        snapshot = waiting["approvals"][0]["preflight"]["strategy_snapshot"]
+        assert snapshot["ready"] is True
+        assert snapshot["strategy_hash"] == waiting["approvals"][0]["preflight"]["strategy_hash"]
+        assert snapshot["target_count"] == 10
+        assert snapshot["channels"]
+        assert snapshot["query_plan_v1"]["cells"]
+        assert snapshot["query_plan_hash"] == snapshot["query_plan_v1"]["plan_hash"]
+        assert waiting["approvals"][0]["preflight"]["query_plan_hash"] == snapshot["query_plan_hash"]
 
         summary = self.service.get_workflow_summary(workflow_id)
         assert summary["workflow_id"] == workflow_id
@@ -100,6 +138,351 @@ class WorkflowEngineTest(AgentDbCase):
         assert summary["automation_policy"]["R0"].startswith("内部")
         assert "审批" in summary["automation_policy"]["R2"]
         assert "永久禁止" in summary["automation_policy"]["R4"]
+
+    def test_semantic_understanding_routes_implicit_sourcing_and_preserves_verbatim_constraints(self) -> None:
+        def interpret(payload: dict) -> dict:
+            message = payload["current_message"]
+            if message == "可以":
+                return {
+                    "speech_act": "confirm", "action": "candidate_sourcing",
+                    "objective": "为当前岗位再找一轮", "target": {"type": "job", "id": 10},
+                    "constraints": [], "refers_to_previous": True, "confidence": 0.96,
+                    "needs_clarification": False, "missing_fields": [], "clarification_question": "",
+                }
+            return {
+                "speech_act": "propose", "action": "candidate_sourcing",
+                "objective": "为当前岗位再找一轮", "target": {"type": "job", "id": 10},
+                "constraints": [
+                    {"quote": "必须具备三次电源经验", "kind": "must"},
+                    {"quote": "先要10人", "kind": "target_count"},
+                ],
+                "refers_to_previous": True, "confidence": 0.96,
+                "needs_clarification": False, "missing_fields": [], "clarification_question": "",
+            }
+
+        self.service.llm = FakeLLM(
+            fake_assessment(), chat_text="已理解你的目标。", intent_understanding=interpret,
+        )
+        proposed = self.service.copilot(
+            "这个岗位再来一轮，必须具备三次电源经验，先要10人",
+            session_id="semantic_sourcing_test",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        assert proposed["workflow"] is not None
+        assert proposed["workflow"]["status"] == "planned"
+        assert proposed["intent_understanding"]["action"] == "candidate_sourcing"
+        assert proposed["goal"]["context"]["locked_constraints"] == [
+            "必须具备三次电源经验", "先要10人",
+        ]
+        assert "必须具备三次电源经验" in proposed["goal"]["objective"]
+        assert "三次以上" not in proposed["goal"]["objective"]
+
+        confirmed = self.service.copilot(
+            "可以",
+            session_id="semantic_sourcing_test",
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert confirmed["workflow"] is not None
+        assert confirmed["workflow_id"] == proposed["workflow_id"]
+        assert confirmed["workflow"]["status"] in {"queued", "running", "waiting_approval"}
+        assert "按确认计划开始准备" in confirmed["answer"]
+        assert "建立并启动新一轮" not in confirmed["answer"]
+        waiting = self.wait_for(confirmed["workflow_id"], {"waiting_approval", "failed"})
+        assert waiting["workflow"]["status"] == "waiting_approval"
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        snapshot = approval["preflight"]["strategy_snapshot"]
+        assert approval["risk_level"] == "R3"
+        assert snapshot["target_count"] == 10
+        constraint_rules = [
+            item.get("rule") if isinstance(item, dict) else str(item)
+            for item in snapshot["locked_constraints"]
+        ]
+        assert "必须具备三次电源经验" in constraint_rules
+        assert waiting["steps"][3]["status"] == "waiting_approval"
+
+    def test_sourcing_question_never_creates_a_workflow(self) -> None:
+        self.service.llm = FakeLLM(
+            fake_assessment(),
+            chat_text="建议先看现有人才池覆盖再决定。",
+            intent_understanding={
+                # Even a model misclassification cannot turn explicit question syntax into an action.
+                "speech_act": "execute", "action": "candidate_sourcing",
+                "objective": "为当前岗位补充候选人", "target": {"type": "job", "id": 10},
+                "constraints": [], "refers_to_previous": False, "confidence": 0.98,
+                "needs_clarification": False, "missing_fields": [], "clarification_question": "",
+            },
+        )
+        conn = sqlite3.connect(self.db_path)
+        before = conn.execute("SELECT COUNT(*) FROM agent_workflows").fetchone()[0]
+        conn.close()
+
+        result = self.service.copilot(
+            "这个岗位现在要不要继续寻访？",
+            session_id="question_has_no_workflow",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        conn = sqlite3.connect(self.db_path)
+        after = conn.execute("SELECT COUNT(*) FROM agent_workflows").fetchone()[0]
+        conn.close()
+        assert result["workflow_id"] is None
+        assert result["intent_understanding"]["speech_act"] == "ask"
+        assert result["turn_decision"]["effect"] == "answer"
+        assert result["turn_decision"]["safe_for_action"] is False
+        assert after == before
+
+    def test_plan_control_language_is_not_stored_as_a_sourcing_constraint(self) -> None:
+        message = "给长越科技机械高级工程师补充10位合适人选，先生成计划，不要执行"
+        self.service.llm = FakeLLM(
+            fake_assessment(),
+            chat_text="已生成计划，尚未执行。",
+            intent_understanding={
+                "speech_act": "propose", "action": "candidate_sourcing",
+                "objective": "为当前岗位补充10位合适人选",
+                "target": {"type": "job", "id": 10},
+                "constraints": [
+                    {"quote": "补充10位合适人选", "kind": "target_count"},
+                    {"quote": "先生成计划，不要执行", "kind": "exclude"},
+                ],
+                "constraint_changes": [
+                    {"operation": "add", "quote": "先生成计划，不要执行", "kind": "exclude"},
+                ],
+                "refers_to_previous": False, "confidence": 0.98,
+                "needs_clarification": False, "missing_fields": [], "clarification_question": "",
+            },
+        )
+
+        result = self.service.copilot(
+            message,
+            session_id="plan_control_constraint_test",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        assert result["workflow"]["status"] == "planned"
+        locked = result["goal"]["context"]["locked_constraints"]
+        assert "补充10位合适人选" in locked
+        assert all("不要执行" not in item and "生成计划" not in item for item in locked)
+
+    def test_exact_plan_confirmation_rejects_plan_drift(self) -> None:
+        created = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10, "page": "positions"},
+        )
+        plan_ref = created["plan_ref"]
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute(
+            "SELECT plan_json FROM agent_workflows WHERE workflow_id=?",
+            (created["workflow"]["workflow_id"],),
+        ).fetchone()
+        plan = json.loads(row[0])
+        plan["objective"] += "，审批前发生漂移"
+        conn.execute(
+            "UPDATE agent_workflows SET plan_json=? WHERE workflow_id=?",
+            (json.dumps(plan, ensure_ascii=False), created["workflow"]["workflow_id"]),
+        )
+        conn.commit()
+        conn.close()
+
+        with self.assertRaisesRegex(ValueError, "计划内容已变化"):
+            self.service.start_workflow(
+                created["workflow"]["workflow_id"],
+                expected_plan_version=plan_ref["version"],
+                expected_plan_hash=plan_ref["plan_hash"],
+            )
+
+    def test_copilot_cancel_calls_the_real_workflow_cancellation(self) -> None:
+        def interpret(payload: dict) -> dict:
+            message = payload["current_message"]
+            return {
+                "speech_act": "cancel" if message == "取消这个计划" else "propose",
+                "action": "candidate_sourcing",
+                "objective": "为当前岗位补充候选人",
+                "target": {"type": "job", "id": 10},
+                "constraints": [], "refers_to_previous": message == "取消这个计划",
+                "confidence": 0.98, "needs_clarification": False,
+                "missing_fields": [], "clarification_question": "",
+            }
+
+        self.service.llm = FakeLLM(fake_assessment(), chat_text="测试回答", intent_understanding=interpret)
+        proposed = self.service.copilot(
+            "给这个岗位补充候选人",
+            session_id="cancel_real_workflow",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        cancelled = self.service.copilot(
+            "取消这个计划",
+            session_id="cancel_real_workflow",
+            context={"type": "global", "source": "asa_floating"},
+        )
+
+        assert cancelled["turn_decision"]["effect"] == "cancel_plan"
+        assert cancelled["workflow"]["status"] == "cancelled"
+        assert self.service.get_workflow(proposed["workflow_id"])["workflow"]["status"] == "cancelled"
+        assert cancelled["business_focus"]["pending_workflow"] == {}
+
+    def test_r3_rejects_when_strategy_changes_after_the_approval_card_is_issued(self) -> None:
+        created = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10, "page": "positions"},
+        )
+        workflow_id = created["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+
+        conn = self.service._connect()
+        row = conn.execute(
+            "SELECT id,metadata_json FROM agent_artifacts WHERE workflow_id=? AND artifact_type='search_strategy' ORDER BY id DESC LIMIT 1",
+            (workflow_id,),
+        ).fetchone()
+        metadata = json.loads(row["metadata_json"])
+        metadata["plan"]["strategy_summary"] = "审批卡签发后被修改的策略"
+        conn.execute("UPDATE agent_artifacts SET metadata_json=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False), row["id"]))
+        conn.commit()
+        conn.close()
+
+        with self.assertRaisesRegex(ValueError, "策略已变化"):
+            self.service.decide_workflow_approval(approval["approval_id"], "approve")
+
+    def test_r3_readiness_depends_on_query_plan_not_legacy_channels(self) -> None:
+        created = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10, "page": "positions"},
+        )
+        workflow_id = created["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        assert waiting["workflow"]["status"] == "waiting_approval"
+
+        conn = self.service._connect()
+        try:
+            row = conn.execute(
+                "SELECT id,metadata_json FROM agent_artifacts WHERE workflow_id=? "
+                "AND artifact_type='search_strategy' ORDER BY id DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+            metadata = json.loads(row["metadata_json"])
+            metadata["plan"]["channels"] = {}
+            conn.execute(
+                "UPDATE agent_artifacts SET metadata_json=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False), row["id"]),
+            )
+            conn.commit()
+            snapshot = self.service.workflow_engine._sourcing_strategy_snapshot(conn, workflow_id)
+        finally:
+            conn.close()
+
+        assert snapshot["channels"] == {}
+        assert snapshot["query_plan_v1"]["cells"]
+        assert snapshot["golden_candidate_replay_v1"]["recall_rate"] == 1.0
+        assert snapshot["golden_candidate_replay_v1"]["passed"] is True
+        assert snapshot["ready"] is True
+
+        conn = self.service._connect()
+        try:
+            metadata["golden_candidate_replay_v1"]["passed"] = False
+            conn.execute(
+                "UPDATE agent_artifacts SET metadata_json=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False), row["id"]),
+            )
+            conn.commit()
+            blocked_snapshot = self.service.workflow_engine._sourcing_strategy_snapshot(conn, workflow_id)
+        finally:
+            conn.close()
+        assert blocked_snapshot["ready"] is False
+
+    def test_semantic_correction_does_not_execute_and_keeps_domain_term_verbatim(self) -> None:
+        self.service.llm = FakeLLM(
+            fake_assessment(),
+            chat_text="明白，三次电源是行业术语，不是次数条件。",
+            intent_understanding={
+                "speech_act": "correct", "action": "candidate_sourcing",
+                "objective": "", "target": {"type": "job", "id": 10},
+                "constraints": [{"quote": "三次电源是行业术语，不是次数条件", "kind": "must"}],
+                "refers_to_previous": True, "confidence": 0.99,
+                "needs_clarification": False, "missing_fields": [], "clarification_question": "",
+            },
+        )
+        result = self.service.copilot(
+            "纠正一下，三次电源是行业术语，不是次数条件",
+            session_id="semantic_correction_test",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        assert result["workflow"] is None
+        assert result["workflow_id"] is None
+        assert result["intent_understanding"]["speech_act"] == "correct"
+        assert result["intent_understanding"]["constraints"][0]["quote"] == "三次电源是行业术语，不是次数条件"
+        assert "已启动" not in result["answer"]
+
+    def test_semantic_correction_revises_the_pending_plan_before_confirmation(self) -> None:
+        def interpret(payload: dict) -> dict:
+            message = payload["current_message"]
+            common = {
+                "target": {"type": "job", "id": 10},
+                "confidence": 0.96,
+                "needs_clarification": False,
+                "missing_fields": [],
+                "clarification_question": "",
+            }
+            if message == "纠正一下，三次电源是行业术语，不是次数条件":
+                return {
+                    **common, "speech_act": "correct", "action": "none",
+                    "objective": "为当前岗位再找一轮",
+                    "constraints": [{"quote": message.removeprefix("纠正一下，"), "kind": "other"}],
+                    "refers_to_previous": True,
+                }
+            if message == "可以":
+                return {
+                    **common, "speech_act": "confirm", "action": "candidate_sourcing",
+                    "objective": "为当前岗位再找一轮", "constraints": [], "refers_to_previous": True,
+                }
+            return {
+                **common, "speech_act": "propose", "action": "candidate_sourcing",
+                "objective": "为当前岗位再找一轮",
+                "constraints": [
+                    {"quote": "必须具备三次电源经验", "kind": "must"},
+                    {"quote": "先要10人", "kind": "target_count"},
+                ],
+                "refers_to_previous": True,
+            }
+
+        self.service.llm = FakeLLM(
+            fake_assessment(), chat_text="已按行业术语理解，确认后开始。", intent_understanding=interpret,
+        )
+        session_id = "semantic_correction_revision_test"
+        proposed = self.service.copilot(
+            "这个岗位再来一轮，必须具备三次电源经验，先要10人",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        corrected = self.service.copilot(
+            "纠正一下，三次电源是行业术语，不是次数条件",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        assert corrected["workflow"] is not None
+        assert corrected["workflow_id"] != proposed["workflow_id"]
+        assert corrected["workflow"]["status"] == "planned"
+        assert corrected["turn_decision"]["effect"] == "revise_plan"
+        assert self.service.get_workflow(proposed["workflow_id"])["workflow"]["status"] == "superseded"
+
+        confirmed = self.service.copilot(
+            "可以",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert confirmed["workflow_id"] == corrected["workflow_id"]
+        assert confirmed["turn_decision"]["authorization"]["plan_hash"] == corrected["plan_ref"]["plan_hash"]
+        waiting = self.wait_for(confirmed["workflow_id"], {"waiting_approval", "failed"})
+        assert waiting["workflow"]["status"] == "waiting_approval"
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        snapshot = approval["preflight"]["strategy_snapshot"]
+        assert snapshot["target_count"] == 10
+        serialized_constraints = json.dumps(snapshot["locked_constraints"], ensure_ascii=False)
+        assert "三次电源是行业术语，不是次数条件" in serialized_constraints
+        assert "三次以上" not in json.dumps(snapshot, ensure_ascii=False)
 
     def test_existing_assessments_are_visible_from_a_workflow_with_no_new_candidates(self) -> None:
         assessed = self.service.submit_assessment(30, wait=True)
@@ -202,6 +585,38 @@ class WorkflowEngineTest(AgentDbCase):
         assert result["strategy"]["generation"]["mode"] == "llm"
         assert result["strategy"]["generation"]["removed_unsupported_queries"]
 
+    def test_search_strategy_blocks_three_phase_power_term_rewritten_as_a_count(self) -> None:
+        self.service.llm = FakeLLM(
+            fake_assessment(),
+            search_strategy={
+                "strategy_summary": "必须有三次以上完整电源项目经验",
+                "channels": {
+                    "liepin": [{"query": "精密机械 运动台", "purpose": "核心能力", "evidence": "岗位要求"}],
+                    "xsaas": [{"query": "机械设计 半导体设备", "purpose": "内部检索", "evidence": "岗位要求"}],
+                },
+                "strategy_v2": {
+                    "step1_job_essence": {
+                        "statement": "要求三次以上完整电源项目经验",
+                        "value_chain_role": "研发", "confirmed_by": "inferred",
+                    },
+                },
+            },
+        )
+        self.service.capability_runtime.service = self.service
+        result = self.service.capability_runtime.run_search_strategy(
+            {
+                "type": "job", "id": 10,
+                "intent_understanding": {
+                    "constraints": [{"quote": "必须具备三次电源经验", "kind": "must"}],
+                },
+                "locked_constraints": ["必须具备三次电源经验"],
+            },
+            {"objective": "补充10位候选人"},
+        )
+
+        assert "strategy_v2" not in result
+        assert any("三次电源" in error and "次数" in error for error in result["strategy_v2_error"]["errors"])
+
     def test_sourcing_intake_persists_strategy_attribution(self) -> None:
         strategy = {
             "generation": {"model": "fake-search-model"},
@@ -296,6 +711,166 @@ class WorkflowEngineTest(AgentDbCase):
         assert stale_click["workflow"]["status"] == "waiting_approval"
         assert len([item for item in stale_click["approvals"] if item["status"] == "pending"]) == 1
 
+    def test_workflow_revision_supersedes_old_approval_and_preserves_round(self) -> None:
+        original = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        original_id = original["workflow"]["workflow_id"]
+        self.service.start_workflow(original_id)
+        waiting = self.wait_for(original_id, {"waiting_approval", "failed"})
+        old_approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        self.service.llm.plan_workflow = lambda payload: {  # type: ignore[method-assign]
+            "steps": [{"capability_id": "job_diagnosis", "reason": "模型误改了修订版流程", "depends_on": [], "inputs": {}}]
+        }
+
+        revised = self.service.revise_workflow(
+            original_id,
+            "必须有精密设备量产经验；预研背景可看，但量产项目经验优先",
+        )
+
+        old_state = self.service.get_workflow(original_id)
+        assert old_state["workflow"]["status"] == "superseded"
+        assert not [item for item in old_state["approvals"] if item["status"] == "pending"]
+        assert next(item for item in old_state["approvals"] if item["approval_id"] == old_approval["approval_id"])["status"] == "superseded"
+        assert next(step for step in old_state["steps"] if step["capability_id"] == "multi_channel_sourcing")["status"] == "cancelled"
+
+        assert revised["goal"]["title"] == "长越科技｜机械高级工程师｜第1轮寻访 · 10人 · 修订1"
+        assert revised["goal"]["context"]["revision_of_workflow_id"] == original_id
+        assert revised["goal"]["context"]["revision_root_workflow_id"] == original_id
+        assert revised["goal"]["context"]["revision_number"] == 1
+        assert "量产项目经验优先" in revised["goal"]["objective"]
+        assert [step["capability_id"] for step in revised["steps"]] == [
+            "job_diagnosis", "talent_pool_search", "search_strategy",
+            "multi_channel_sourcing", "candidate_batch_assessment",
+        ]
+
+        stale_click = self.service.decide_workflow_approval(old_approval["approval_id"], "approve")
+        assert stale_click["workflow"]["status"] == "superseded"
+        assert not [item for item in stale_click["approvals"] if item["status"] == "pending"]
+
+        second_revision = self.service.revise_workflow(
+            revised["workflow"]["workflow_id"],
+            "量产闭环作为优先项，其他条件保持不变",
+        )
+        root_state = self.service.get_workflow(original_id)
+        first_revision_state = self.service.get_workflow(revised["workflow"]["workflow_id"])
+        assert root_state["superseded_by_workflow_id"] == revised["workflow"]["workflow_id"]
+        assert root_state["latest_revision_workflow_id"] == second_revision["workflow"]["workflow_id"]
+        assert first_revision_state["superseded_by_workflow_id"] == second_revision["workflow"]["workflow_id"]
+        assert first_revision_state["latest_revision_workflow_id"] == second_revision["workflow"]["workflow_id"]
+        assert second_revision["superseded_by_workflow_id"] is None
+        assert second_revision["latest_revision_workflow_id"] == second_revision["workflow"]["workflow_id"]
+        assert second_revision["goal"]["title"] == "长越科技｜机械高级工程师｜第1轮寻访 · 10人 · 修订2"
+        assert second_revision["goal"]["context"]["revision_root_workflow_id"] == original_id
+        assert "量产闭环作为优先项" in second_revision["goal"]["objective"]
+        assert "必须有精密设备量产经验" not in second_revision["goal"]["objective"]
+        assert [step["capability_id"] for step in second_revision["steps"]] == [
+            "job_diagnosis", "talent_pool_search", "search_strategy",
+            "multi_channel_sourcing", "candidate_batch_assessment",
+        ]
+
+    def test_revision_strategy_locks_consultant_modal_strength_against_model_weakening(self) -> None:
+        self.service.llm = FakeLLM(
+            fake_assessment(),
+            search_strategy={
+                "strategy_summary": "模型把硬条件误写成普通偏好",
+                "channels": {
+                    "liepin": [{"query": "精密设备 量产", "purpose": "测试", "evidence": "岗位事实"}],
+                    "xsaas": [{"query": "精密设备 量产", "purpose": "测试", "evidence": "岗位事实"}],
+                },
+                "strategy_v2": {
+                    "step1_job_essence": {
+                        "statement": "有工程经验更好",
+                        "value_chain_role": "工程研发",
+                        "confirmed_by": "inferred",
+                    },
+                    "step3_level_mapping": {"accepted_levels": ["工程师"], "calibration_rule": "酌情判断"},
+                    "step4_keyword_groups": [{"group": "工程", "targets": "工程人选", "terms": ["精密设备"]}],
+                    "step5_expectation": {
+                        "expected_recall_per_tier": {"T1": 0},
+                        "fallback_plan": "召回不足时取消工程经验要求",
+                    },
+                    "negative_rules": [],
+                },
+            },
+        )
+        self.service.capability_runtime.service = self.service
+        context = {
+            "type": "job",
+            "id": 10,
+            "revision_instruction": (
+                "仅修订当前工作流的寻访策略。顾问已确认的原始条件："
+                "必须具备精密设备工程经验；量产项目经验优先；"
+                "预研背景可以看，但需要评估量产转化潜力。"
+                "生成前必须逐项读取原 strategy_v2。"
+            ),
+        }
+
+        result = self.service.capability_runtime.run_search_strategy(context, {"objective": "修订寻访策略"})
+        strategy = result["strategy_v2"]
+        content = result["artifacts"][0]["content"]
+
+        assert "必须具备精密设备工程经验" in strategy["step1_job_essence"]["statement"]
+        assert "量产项目经验优先" in strategy["step1_job_essence"]["statement"]
+        assert "预研背景可以看，但需要评估量产转化潜力" in strategy["step1_job_essence"]["statement"]
+        assert strategy["step1_job_essence"]["confirmed_by"] == "consultant"
+        assert strategy["step5_expectation"]["fallback_plan"].startswith("不得放宽顾问硬约束")
+        assert "取消工程经验要求" not in strategy["step5_expectation"]["fallback_plan"]
+        assert "必须具备精密设备工程经验" in content
+        assert result["consultant_constraints"] == strategy["consultant_constraints"]
+
+    def test_copilot_strategy_discussion_only_creates_a_confirmation_patch(self) -> None:
+        original = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        original_id = original["workflow"]["workflow_id"]
+        self.service.start_workflow(original_id)
+        self.wait_for(original_id, {"waiting_approval", "failed"})
+        session_id = "strategy_revision_from_copilot"
+        conn = self.service._connect()
+        conn.executemany(
+            """
+            INSERT INTO agent_copilot_messages
+            (session_id,context_type,context_id,role,content,structured_json)
+            VALUES (?,?,?,?,?,?)
+            """,
+            [
+                (session_id, "job", 10, "user", "需要精密设备工程经验，纯研究背景不够", "{}"),
+                (session_id, "job", 10, "assistant", "把原策略中的 ACDC、DCDC、PMIC 全部删除。", "{}"),
+                (session_id, "job", 10, "user", "都可以看，但是有量产项目经验更好", "{}"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        self.service.llm._strategy_patch = {
+            "changes": [
+                {"type": "add_filter", "value": "纯研究背景需评估量产转化", "confidence": 0.9},
+                {"type": "add_keyword", "value": "精密设备量产", "confidence": 0.8},
+            ],
+        }
+
+        result = self.service.copilot(
+            "现在有长越科技机械高级工程师的第一轮寻访工作流，可以在寻访策略部分做下修改",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+
+        assert result["workflow_revision"] is None
+        assert result["workflow_id"] is None
+        patch = result["strategy_patch"]
+        assert patch["workflow_id"] == original_id
+        assert any("精密设备工程经验" in item for item in patch["consultant_evidence"])
+        assert any("量产项目经验更好" in item for item in patch["consultant_evidence"])
+        assert "ACDC" not in "；".join(patch["consultant_evidence"])
+        assert "PMIC" not in "；".join(patch["consultant_evidence"])
+        assert "不得声称删除原策略中不存在的词" in patch["instruction_suffix"]
+        assert [item["value"] for item in patch["changes"]] == ["纯研究背景需评估量产转化", "精密设备量产"]
+        old_state = self.service.get_workflow(original_id)
+        assert old_state["workflow"]["status"] == "waiting_approval"
+        assert any(item["status"] == "pending" for item in old_state["approvals"])
+
     def test_failed_external_step_can_be_reapproved_after_retry(self) -> None:
         self.service.schedule_external_workflow_step = lambda *args, **kwargs: None  # type: ignore[method-assign]
         result = self.service.create_goal(
@@ -321,6 +896,150 @@ class WorkflowEngineTest(AgentDbCase):
         statuses = {item["approval_id"]: item["status"] for item in approved["approvals"]}
         assert statuses[second["approval_id"]] == "approved"
         assert statuses[first["approval_id"]].startswith("approved_history_")
+
+    def test_external_cursor_continuation_is_checkpointed_before_reschedule(self) -> None:
+        scheduled: list[tuple[int, str, dict]] = []
+        self.service.schedule_external_workflow_step = (  # type: ignore[method-assign]
+            lambda step_id, capability_id, request: scheduled.append((step_id, capability_id, request))
+        )
+        created = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        workflow_id = created["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        self.service.decide_workflow_approval(approval["approval_id"], "approve")
+        external = self.wait_for(workflow_id, {"waiting_external", "failed"})
+        step = next(item for item in external["steps"] if item["capability_id"] == "multi_channel_sourcing")
+        initial_request = step["output"]["external_request"]
+        continuation_request = {
+            **initial_request,
+            "resume_run_id": "asa-source-continuation",
+            "_continuation_index": 1,
+        }
+        self.service.capability_runtime.execute_external = lambda capability_id, request: {  # type: ignore[method-assign]
+            "verified": True,
+            "run_id": "asa-source-continuation",
+            "coverage_certificate": {"coverage_status": "platform_truncated"},
+            "continuation": {"completed_batches": 1, "remaining_cells": 2, "scheduled": True},
+            "_continuation_request": continuation_request,
+        }
+
+        self.service._execute_external_workflow_step(step["id"], "multi_channel_sourcing", initial_request)
+
+        assert scheduled == [(step["id"], "multi_channel_sourcing", continuation_request)]
+        checkpointed = self.service.get_workflow(workflow_id)
+        current_step = next(item for item in checkpointed["steps"] if item["id"] == step["id"])
+        assert current_step["status"] == "waiting_external"
+        assert current_step["recovery"]["retry_mode"] == "sourcing_continuation"
+        assert current_step["recovery"]["request"]["resume_run_id"] == "asa-source-continuation"
+        assert current_step["output"]["continuation_history"][-1]["remaining_cells"] == 2
+        assert any(
+            event["event_type"] == "external_continuation_checkpointed"
+            for event in checkpointed["events"]
+        )
+
+        recovered: list[tuple[int, str, dict]] = []
+        self.service.close()
+        with patch.object(
+            AgentService,
+            "schedule_external_workflow_step",
+            lambda service, step_id, capability_id, request: recovered.append((step_id, capability_id, request)),
+        ):
+            self.service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="测试回答"))
+        assert recovered == [(step["id"], "multi_channel_sourcing", continuation_request)]
+
+    def test_post_intake_audit_failure_blocks_and_retries_audit_only(self) -> None:
+        scheduled: list[tuple[int, str, dict]] = []
+        self.service.schedule_external_workflow_step = (  # type: ignore[method-assign]
+            lambda step_id, capability_id, request: scheduled.append((step_id, capability_id, request))
+        )
+        result = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        workflow_id = result["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        self.service.decide_workflow_approval(approval["approval_id"], "approve")
+        external = self.wait_for(workflow_id, {"waiting_external", "failed"})
+        step = next(item for item in external["steps"] if item["capability_id"] == "multi_channel_sourcing")
+        partial = {
+            "verified": True,
+            "run_id": "source-partial",
+            "channel_runs": [{
+                "channel": "liepin", "status": "completed", "recall_engine": "opencli",
+            }],
+            "opencli_primary": {
+                "enabled": True,
+                "channels": {"liepin": {"ok": True, "mode": "opencli_primary_recall"}},
+            },
+            "opencli_shadow": {
+                "enabled": True,
+                "mode": "read_only_shadow",
+                "channels": [{"channel": "liepin", "status": "skipped", "reason": "recall_engine_opencli"}],
+            },
+            "intake": {"applied": {"intake": {"inserted": 3}}},
+            "audit": {"ok": False},
+        }
+
+        blocked = self.service.workflow_engine.fail_external_step(
+            step["id"],
+            "寻访与入库已完成，但 A 系统收尾审计未通过：台账断链",
+            {
+                "phase": "audit",
+                "external_action_executed": True,
+                "partial_result": partial,
+                "retry_mode": "audit_only",
+                "request": {"client": "长越科技", "job": "机械高级工程师"},
+            },
+        )
+
+        self.assertEqual(blocked["workflow"]["status"], "blocked")
+        self.assertIsNone(blocked["business_outcome"])
+        self.assertTrue(blocked["steps"][3]["output"]["external_action_executed"])
+        self.assertTrue(any(event["event_type"] == "external_audit_failed" for event in blocked["events"]))
+
+        retried = self.service.retry_workflow_step(step["id"])
+
+        self.assertEqual(retried["workflow"]["status"], "waiting_external")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][1], "multi_channel_sourcing")
+        self.assertEqual(scheduled[0][2]["_audit_only_result"]["run_id"], "source-partial")
+        self.assertTrue(scheduled[0][2]["_audit_only_result"]["opencli_primary"]["enabled"])
+        self.assertEqual(
+            scheduled[0][2]["_audit_only_result"]["channel_runs"][0]["recall_engine"],
+            "opencli",
+        )
+        self.assertTrue(any("不重复渠道寻访" in event["summary"] for event in retried["events"]))
+
+        recovered = self.service.complete_external_workflow_step(
+            step["id"],
+            {
+                **partial,
+                "audit": {
+                    "ok": True,
+                    "summary": "A 系统收尾审计通过",
+                    "recovered_without_channel_rerun": True,
+                },
+            },
+        )
+        recovered_events = [
+            event for event in recovered["events"]
+            if event["event_type"] == "external_audit_recovered"
+        ]
+        self.assertTrue(recovered_events)
+        self.assertEqual(recovered_events[-1]["status"], "resolved")
+        self.assertFalse(any(event["event_type"] == "external_audit_failed" for event in recovered["events"]))
+        sourcing_step = next(
+            item for item in recovered["steps"] if item["capability_id"] == "multi_channel_sourcing"
+        )
+        external_result = sourcing_step["output"]["external_result"]
+        self.assertTrue(external_result["opencli_primary"]["enabled"])
+        self.assertEqual(external_result["channel_runs"][0]["recall_engine"], "opencli")
 
     def test_recoverable_postcondition_failure_replans_and_retries_once(self) -> None:
         attempts = 0
@@ -401,6 +1120,189 @@ class WorkflowEngineTest(AgentDbCase):
         history = self.service.get_copilot_session(session_id)
         assert history["business_focus"]["context"]["id"] == 10
 
+    def test_copilot_replenishes_new_candidates_from_unique_job_focus(self) -> None:
+        session_id = "new_candidate_outreach_focus_test"
+        self.service.copilot(
+            "推进长越科技机械高级工程师岗位",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        # This is a continuation of an active job, not a first-time sourcing intake.
+        # A strategy questionnaire must not turn it into generic advice.
+        self.service._sourcing_strategy_gate = lambda *args, **kwargs: {"action": "ask", "answer": "不应触发"}  # type: ignore[method-assign]
+
+        result = self.service.copilot(
+            "都不回复，需要再触达一些候选人",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+
+        assert result["workflow"] is not None, result
+        assert result["goal"]["context"]["type"] == "job"
+        assert result["goal"]["context"]["id"] == 10
+        assert "补充并准备触达新候选人" in result["goal"]["objective"]
+        capabilities = [step["capability_id"] for step in result["workflow"]["plan"]["steps"]]
+        assert capabilities == [
+            "job_diagnosis", "talent_pool_search", "search_strategy",
+            "multi_channel_sourcing", "candidate_batch_assessment",
+        ]
+        assert "已触达" not in result["answer"]
+
+    def test_floating_stream_uses_canonical_workflow_for_new_candidate_outreach(self) -> None:
+        session_id = "stream_new_candidate_outreach_test"
+        self.service.copilot(
+            "推进长越科技机械高级工程师岗位",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        events = "".join(self.service.copilot_stream_generator(
+            "都不回复，需要再触达一些候选人",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        ))
+
+        assert "event: done" in events
+        assert "workflow_id" in events
+        assert "补充并准备触达新候选人" in events
+
+    def test_new_candidate_outreach_without_unique_job_asks_one_question(self) -> None:
+        result = self.service.copilot(
+            "都不回复，需要再触达一些候选人",
+            session_id="new_candidate_outreach_missing_scope_test",
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+
+        assert result["workflow"] is None
+        assert result["answer"] == "你要为哪个岗位补充并触达新候选人？"
+
+    def test_client_and_job_shorthand_resolves_a_clear_job_winner(self) -> None:
+        conn = self.service._connect()
+        conn.executemany(
+            """
+            INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at)
+            VALUES (?,?,?,'杭州','已发布','',datetime('now','localtime'))
+            """,
+            [(11, 1, "自动化软件高级工程师"), (12, 1, "电气高级工程师")],
+        )
+        conn.commit()
+        conn.close()
+
+        assert self.service._mentioned_jobs_for_copilot("长越的机械岗位再触达一些人选") == [
+            {
+                "id": 10, "client": "长越科技", "job": "机械高级工程师",
+                "status": "已发布", "summary": "精密设备机械核心岗", "priority": "",
+            }
+        ]
+        result = self.service.copilot(
+            "长越的机械岗位再触达一些人选",
+            session_id="client_job_shorthand_test",
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert result["workflow"] is not None, result
+        assert result["goal"]["context"]["id"] == 10
+        assert "补充并准备触达新候选人" in result["goal"]["objective"]
+
+    def test_software_job_shorthand_creates_workflow_on_the_first_turn(self) -> None:
+        conn = self.service._connect()
+        conn.execute("INSERT INTO clients(id,name) VALUES (2,'芯力科')")
+        conn.executemany(
+            """
+            INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at)
+            VALUES (?,?,?,'杭州','已发布','',datetime('now','localtime'))
+            """,
+            [
+                (11, 1, "自动化软件高级工程师"),
+                (12, 1, "电气高级工程师"),
+                (13, 2, "上位机软件工程师"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        result = self.service.copilot(
+            "长越的软件岗位再触达一些候选人",
+            session_id="software_job_shorthand_test",
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+
+        assert result["workflow"] is not None, result
+        assert result["goal"]["context"]["id"] == 11
+        assert result["goal"]["objective"].startswith("为长越科技自动化软件高级工程师补充并准备触达新候选人")
+        assert "顾问原始目标：长越的软件岗位再触达一些候选人" in result["goal"]["objective"]
+
+    def test_job_clarification_resumes_the_original_action(self) -> None:
+        conn = self.service._connect()
+        conn.execute(
+            "INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at) VALUES (11,1,'自动化软件高级工程师','杭州','已发布','',datetime('now','localtime'))"
+        )
+        conn.commit()
+        conn.close()
+        session_id = "job_scope_clarification_test"
+
+        first = self.service.copilot(
+            "长越的岗位再触达一些候选人",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert first["workflow"] is None
+        assert first["answer"] == "你要为哪个岗位补充并触达新候选人？"
+
+        resolved = self.service.copilot(
+            "长越的自动化软件岗位",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert resolved["workflow"] is not None, resolved
+        assert resolved["goal"]["context"]["id"] == 11
+        assert "补充并准备触达新候选人" in resolved["goal"]["objective"]
+
+    def test_continue_sourcing_phrase_creates_a_job_workflow(self) -> None:
+        session_id = "continue_sourcing_phrase_test"
+        self.service.copilot(
+            "查看长越机械高级工程师岗位",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        result = self.service.copilot(
+            "再寻访一些候选人",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert result["workflow"] is not None, result
+        assert result["goal"]["context"]["id"] == 10
+
+    def test_reinterprets_legacy_global_history_to_recover_the_job(self) -> None:
+        conn = self.service._connect()
+        conn.execute(
+            "INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at) VALUES (11,1,'自动化软件高级工程师','杭州','已发布','',datetime('now','localtime'))"
+        )
+        session_id = "legacy_global_history_recovery_test"
+        conn.executemany(
+            """
+            INSERT INTO agent_copilot_messages(session_id,context_type,context_id,role,content,structured_json)
+            VALUES (?,'global',NULL,?,?, '{}')
+            """,
+            [
+                (session_id, "user", "长越的软件岗位再触达一些候选人"),
+                (session_id, "assistant", "请先复核旧候选人。"),
+                (session_id, "user", "长越的自动化软件岗位"),
+                (session_id, "assistant", "确认缺口后再补搜。"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        result = self.service.copilot(
+            "再寻访一些候选人",
+            session_id=session_id,
+            context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
+        )
+        assert result["workflow"] is not None, result
+        assert result["goal"]["context"]["id"] == 11
+
+    def test_existing_batch_followup_is_not_reclassified_as_new_candidate_outreach(self) -> None:
+        assert self.service._copilot_action_kind("给这12个人再跟一次") == "candidate_outreach"
+
     def test_copilot_starts_followup_sourcing_after_contextual_confirmation(self) -> None:
         session_id = "followup_sourcing_confirmation_test"
         first = self.service.copilot(
@@ -433,7 +1335,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert state["workflow"]["status"] == "waiting_approval"
         assert state["steps"][3]["capability_id"] == "multi_channel_sourcing"
         assert state["steps"][3]["status"] == "waiting_approval"
-        assert "启动" in confirmed["answer"]
+        assert "开始准备" in confirmed["answer"]
 
     def test_copilot_short_ack_starts_proposed_followup_sourcing(self) -> None:
         session_id = "followup_sourcing_short_ack_test"
@@ -629,6 +1531,35 @@ class WorkflowEngineTest(AgentDbCase):
         timeline = self.service.get_runtime_timeline()
         assert timeline["context_snapshots"][0]["source"] == "native"
         assert timeline["context_snapshots"][0]["title"] == "猎聘候选人"
+        assert timeline["context_snapshots"][0]["payload"]["clipboard"] == {}
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE agent_context_snapshots SET payload_json=? WHERE snapshot_id=?",
+                (
+                    json.dumps(
+                        {
+                            "surface": "native",
+                            "clipboard": {
+                                "has_text": True,
+                                "change_count": 9,
+                                "length": 18,
+                                "preview": "password=top-secret",
+                            },
+                        }
+                    ),
+                    snapshot["snapshot_id"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        legacy_timeline = self.service.get_runtime_timeline()
+        assert legacy_timeline["context_snapshots"][0]["payload"]["clipboard"] == {
+            "has_text": True,
+            "change_count": 9,
+        }
         assert timeline["tool_calls"][0]["call_id"] == tool["call_id"]
         assert timeline["permission_audit"][0]["permission_id"] == permission["permission_id"]
 
@@ -1185,6 +2116,8 @@ class WorkflowEngineTest(AgentDbCase):
         assert completed["workflow"]["status"] == "blocked"
         assert "目标 10 位合适人选尚未完全达成" in completed["goal"]["result_summary"]
         assert any(event["event_type"] == "goal_target_checked" for event in completed["events"])
+        sourcing_ticket = next(item for item in completed["artifacts"] if item["artifact_type"] == "sourcing_ticket")
+        assert sourcing_ticket["validation_status"] == "passed"
 
     def test_outreach_prepare_locks_message_and_approval_shows_exact_batch(self) -> None:
         result = self.service.create_goal(

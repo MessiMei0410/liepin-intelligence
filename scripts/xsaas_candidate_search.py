@@ -13,10 +13,31 @@ from typing import Any
 CDP_DIR = Path("/Users/messi/.codex/skills/liepin-cdp-search/scripts")
 sys.path.insert(0, str(CDP_DIR))
 from cdp_client import CDP  # noqa: E402
+from a_system_agent.sourcing_pagination import PageResult, collect_pages, seek_to_page  # noqa: E402
 
 
 XSAAS_HOST = "headhunt.x-saas.com.cn"
 RUNNER_MARKER = "asa_search_runner=1"
+
+
+def query_execution_spec(value: Any) -> tuple[str, int, int]:
+    item = value if isinstance(value, dict) else {"query": value}
+    query = " ".join(str(item.get("query") or "").split())
+    cursor = item.get("cursor") if isinstance(item.get("cursor"), dict) else {}
+    try:
+        start_page = max(1, int(cursor.get("page") or 1))
+    except (TypeError, ValueError):
+        start_page = 1
+    try:
+        collected_before = max(0, int(item.get("collected_before") or 0))
+    except (TypeError, ValueError):
+        collected_before = 0
+    return query, start_page, collected_before
+
+
+def query_seen_candidate_keys(value: Any) -> set[str]:
+    item = value if isinstance(value, dict) else {}
+    return {str(key).strip() for key in item.get("seen_candidate_keys") or [] if str(key).strip()}
 
 
 def load_json(url: str) -> Any:
@@ -197,6 +218,46 @@ EXTRACT_JS = r"""
 """
 
 
+PAGINATION_STATE_JS = r"""
+(() => {
+  const nodes = Array.from(document.querySelectorAll(
+    '.pagination li, .pagination a, .pagination button, .pager li, .pager a, [ng-click*="selectPage"]'
+  ));
+  const node = nodes.find(item => {
+    const text = String(item.innerText || item.textContent || '').trim();
+    const title = String(item.getAttribute('title') || item.getAttribute('aria-label') || '');
+    return /^(下一页|next|›|»|>)$/i.test(text) || /下一页|next/i.test(title);
+  });
+  if (!node) return {hasNext:false, reason:'next_control_missing'};
+  const container = node.closest('li') || node;
+  const disabled = container.matches('.disabled,:disabled,[disabled]')
+    || container.getAttribute('aria-disabled') === 'true';
+  return {hasNext:!disabled, reason:disabled ? 'next_disabled' : ''};
+})()
+"""
+
+
+NEXT_PAGE_JS = r"""
+(() => {
+  const nodes = Array.from(document.querySelectorAll(
+    '.pagination li, .pagination a, .pagination button, .pager li, .pager a, [ng-click*="selectPage"]'
+  ));
+  const node = nodes.find(item => {
+    const text = String(item.innerText || item.textContent || '').trim();
+    const title = String(item.getAttribute('title') || item.getAttribute('aria-label') || '');
+    return /^(下一页|next|›|»|>)$/i.test(text) || /下一页|next/i.test(title);
+  });
+  if (!node) return false;
+  const container = node.closest('li') || node;
+  const disabled = container.matches('.disabled,:disabled,[disabled]')
+    || container.getAttribute('aria-disabled') === 'true';
+  if (disabled) return false;
+  (node.querySelector('a,button') || node).click();
+  return true;
+})()
+"""
+
+
 DETAIL_JS = r"""
 (() => {
   const clean = value => String(value || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
@@ -258,6 +319,7 @@ DETAIL_READY_JS = r"""
 (expectedId => {
   const root = document.querySelector('.app-candidate-info, .candidate-info, .candidate-detail');
   const text = root?.innerText || '';
+  const bodyText = document.body?.innerText || '';
   let scope = null;
   try {
     scope = root && window.angular ? angular.element(root).scope() : null;
@@ -270,6 +332,7 @@ DETAIL_READY_JS = r"""
     login: location.href.includes('#/login'),
     candidate_id: candidateId,
     loading,
+    encrypted: /加密/.test(text) || /加密/.test(bodyText),
     ready: candidateId === String(expectedId)
       && loading === false
       && /基本信息/.test(text)
@@ -281,7 +344,7 @@ DETAIL_READY_JS = r"""
 
 
 def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enabled: bool) -> dict[str, int]:
-    stats = {"requested": len(candidates), "complete": 0, "partial": 0, "failed": 0}
+    stats = {"requested": len(candidates), "complete": 0, "partial": 0, "failed": 0, "skipped_encrypted": 0}
     if not enabled:
         return stats
     for candidate in candidates:
@@ -295,14 +358,25 @@ def capture_candidate_details(cdp: CDP, candidates: list[dict[str, Any]], enable
             evaluate(cdp, f"location.href={json_expr(url)};true")
             deadline = time.time() + 18
             ready = False
+            encrypted = False
             while time.time() < deadline:
                 state = evaluate(cdp, f"({DETAIL_READY_JS})({json_expr(candidate_id)})") or {}
                 if state.get("login"):
                     raise RuntimeError("X-SAAS_LOGIN_REQUIRED: 详情页登录态失效")
+                if state.get("encrypted"):
+                    encrypted = True
+                    break
                 if state.get("ready"):
                     ready = True
                     break
                 time.sleep(0.5)
+            if encrypted:
+                candidate.update({
+                    "resume_capture_status": "skipped_encrypted",
+                    "resume_capture_error": "该候选人处于加密状态，需联系Frank Wang",
+                })
+                stats["skipped_encrypted"] += 1
+                continue
             if not ready:
                 raise RuntimeError("X-SaaS 候选人详情页未加载出可读内容")
             detail = evaluate(cdp, DETAIL_JS) or {}
@@ -395,7 +469,9 @@ def apply_position_score_gate(
             "skills": [],
             "work": [],
         }
-        score, evidence, risks, level = score_candidate_for_profile(card, None, profile)
+        score, evidence, risks, level = score_candidate_for_profile(
+            card, getattr(profile, "default_city", None), profile,
+        )
         candidate.update({"fit_score": score, "fit_level": level, "evidence": evidence, "risks": risks})
         scored += 1
         if score >= min_score:
@@ -411,7 +487,13 @@ def apply_position_score_gate(
     }
 
 
-def run_search(port: int, queries: list[str], max_rows: int, capture_details: bool = True) -> dict[str, Any]:
+def run_search(
+    port: int,
+    queries: list[Any],
+    max_rows: int,
+    capture_details: bool = True,
+    max_pages: int = 50,
+) -> dict[str, Any]:
     source = choose_authenticated_tab(port)
     browser_ws = load_json(f"http://127.0.0.1:{port}/json/version")["webSocketDebuggerUrl"]
     browser = CDP(browser_ws)
@@ -420,8 +502,25 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
     try:
         rounds = []
         candidate_rounds: list[list[dict[str, Any]]] = []
-        for index, query in enumerate(queries[:8]):
-            query = " ".join(str(query or "").split())
+        raw_candidates: list[dict[str, Any]] = []
+        for index, query_spec in enumerate(queries):
+            query, start_page, collected_before = query_execution_spec(query_spec)
+            seen_candidate_keys = query_seen_candidate_keys(query_spec)
+            query_item = query_spec if isinstance(query_spec, dict) else {}
+            evaluation_constraints = (
+                query_item.get("evaluation_constraints")
+                if isinstance(query_item.get("evaluation_constraints"), dict)
+                else {}
+            )
+            execution_filters = (
+                query_item.get("execution_filters")
+                if isinstance(query_item.get("execution_filters"), dict)
+                else {}
+            )
+            if execution_filters:
+                raise RuntimeError(
+                    "XSAAS_UNSUPPORTED_EXECUTION_FILTER: query_plan requested unavailable platform filters"
+                )
             if not query:
                 continue
             # 每组独立克隆标签页：X-SaaS 是 hash 路由 SPA，已选条件（筛选 chips）保留在页面内存态，
@@ -464,7 +563,6 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
                     break
                 extracted = evaluate(cdp, EXTRACT_JS) or {}
                 selected = str(extracted.get("selected_query") or "")
-                candidates = extracted.get("candidates") if isinstance(extracted.get("candidates"), list) else []
                 if not query_matches(query, selected):
                     # 轮次绑定校验失败：结果集不属于本轮关键词（串词），不得并入，重试一次。
                     if attempts < 2:
@@ -473,18 +571,118 @@ def run_search(port: int, queries: list[str], max_rows: int, capture_details: bo
                     print(f"[xsaas_candidate_search] 关键词「{query}」重试后结果仍不匹配（页面已选条件：{selected or '空'}），标记跳过（stale_query），结果不并入", file=sys.stderr)
                     round_entry = {"query": query, "status": "stale_query", "selected_query": selected, "attempts": attempts}
                     break
-                for candidate in candidates[:max_rows]:
-                    candidate["query"] = query
-                round_candidates = candidates[:max_rows]
-                round_entry = {"query": query, "status": "completed", "selected_query": selected, "result_count": int(extracted.get("result_count") or 0), "extracted_count": len(round_candidates), "attempts": attempts}
+                last_signature = ""
+
+                def fetch_page(page_number: int) -> PageResult:
+                    nonlocal last_signature
+                    page_payload = evaluate(cdp, EXTRACT_JS) or {}
+                    page_selected = str(page_payload.get("selected_query") or "")
+                    if not query_matches(query, page_selected):
+                        raise RuntimeError("XSAAS_STALE_QUERY_DURING_PAGINATION")
+                    page_candidates = (
+                        page_payload.get("candidates")
+                        if isinstance(page_payload.get("candidates"), list)
+                        else []
+                    )
+                    page_candidates = [
+                        candidate for candidate in page_candidates[:max_rows] if isinstance(candidate, dict)
+                    ]
+                    for position_index, candidate in enumerate(page_candidates, 1):
+                        candidate["query"] = query
+                        candidate["page_number"] = page_number
+                        candidate["position_index"] = position_index
+                    last_signature = "|".join(
+                        str(candidate.get("xsaas_id") or "") for candidate in page_candidates[:3]
+                    )
+                    page_total = int(page_payload.get("result_count") or 0)
+                    pagination_state = evaluate(cdp, PAGINATION_STATE_JS) or {}
+                    return PageResult(
+                        items=page_candidates,
+                        reported_total=None if page_total == 0 and page_candidates else page_total,
+                        has_next=bool(pagination_state.get("hasNext")),
+                    )
+
+                def advance_page(_next_page: int) -> bool:
+                    nonlocal last_signature
+                    previous_signature = last_signature
+                    if evaluate(cdp, NEXT_PAGE_JS) is not True:
+                        return False
+                    deadline = time.time() + 30
+                    while time.time() < deadline:
+                        time.sleep(0.8)
+                        state = evaluate(cdp, f"({SETTLE_JS})({json_expr(query)})") or {}
+                        if state.get("loading") or not state.get("queryMatch"):
+                            continue
+                        next_payload = evaluate(cdp, EXTRACT_JS) or {}
+                        next_candidates = (
+                            next_payload.get("candidates")
+                            if isinstance(next_payload.get("candidates"), list)
+                            else []
+                        )
+                        signature = "|".join(
+                            str(candidate.get("xsaas_id") or "")
+                            for candidate in next_candidates[:3]
+                            if isinstance(candidate, dict)
+                        )
+                        if signature and signature != previous_signature:
+                            last_signature = signature
+                            return True
+                    return False
+
+                seek_failure = seek_to_page(
+                    fetch_page=fetch_page,
+                    advance_page=advance_page,
+                    start_page=start_page,
+                )
+                pagination = seek_failure or collect_pages(
+                    fetch_page=fetch_page,
+                    advance_page=advance_page,
+                    start_page=start_page,
+                    max_pages=max_pages,
+                    collected_before=collected_before,
+                    seen_before_keys=seen_candidate_keys,
+                    item_key=lambda candidate: str(
+                        candidate.get("xsaas_id")
+                        or "|".join(
+                            str(candidate.get(key) or "").strip().casefold()
+                            for key in ("name", "company", "title")
+                        )
+                    ),
+                )
+                round_candidates = pagination.items
+                round_entry = {
+                    "query": query,
+                    "status": "completed",
+                    "selected_query": selected,
+                    "result_count": pagination.reported_total,
+                    "extracted_count": len(round_candidates),
+                    "unique_count": len({str(item.get("xsaas_id") or "") for item in round_candidates}),
+                    "pages_fetched": pagination.pages_fetched,
+                    "terminal_state": pagination.terminal_state,
+                    "terminal_reason": pagination.terminal_reason,
+                    "cursor": pagination.cursor,
+                    "attempts": attempts,
+                }
             if round_entry is None:  # 防御：循环异常退出也不静默丢失该词
                 print(f"[xsaas_candidate_search] 关键词「{query}」未取得结果，标记跳过", file=sys.stderr)
                 round_entry = {"query": query, "status": "skipped", "reason": "settle_timeout", "attempts": attempts}
+            round_entry["filter_receipt"] = {
+                "platform_filters_applied": [],
+                "evaluation_only": evaluation_constraints,
+            }
             candidate_rounds.append(round_candidates)
+            raw_candidates.extend(round_candidates)
             rounds.append(round_entry)
         candidates = merge_round_candidates(candidate_rounds, max_rows)
         detail_capture = capture_candidate_details(cdp, candidates, capture_details)
-        return {"ok": True, "channel": "xsaas", "rounds": rounds, "detail_capture": detail_capture, "candidates": candidates}
+        return {
+            "ok": True,
+            "channel": "xsaas",
+            "rounds": rounds,
+            "detail_capture": detail_capture,
+            "candidates": candidates,
+            "raw_candidates": raw_candidates,
+        }
     finally:
         if cdp:
             cdp.close()
@@ -497,8 +695,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Restricted read-only X-SaaS candidate search")
     parser.add_argument("--queries", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--port", type=int, default=9223)
     parser.add_argument("--max-rows", type=int, default=30)
+    parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--db", type=Path)
     parser.add_argument("--client", default="")
     parser.add_argument("--job", default="")
@@ -510,14 +710,30 @@ def main() -> int:
     values = payload.get("queries") if isinstance(payload, dict) else payload
     if not isinstance(values, list):
         raise SystemExit("queries 文件必须是数组或包含 queries 数组")
-    queries = [item.get("query") if isinstance(item, dict) else item for item in values]
-    result = run_search(args.port, [str(item or "") for item in queries], max(1, min(args.max_rows, 100)), capture_details=args.capture_details)
+    queries = [
+        item for item in values
+        if (isinstance(item, dict) and str(item.get("query") or "").strip())
+        or (not isinstance(item, dict) and str(item or "").strip())
+    ]
+    result = run_search(
+        args.port,
+        queries,
+        max(1, min(args.max_rows, 100)),
+        capture_details=args.capture_details,
+        max_pages=max(1, args.max_pages),
+    )
     if args.db and args.client and args.job:
         result["candidates"], result["score_gate"] = apply_position_score_gate(
             result.get("candidates") or [], args.db, args.client, args.job, args.min_score
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result.get("candidates") or [], ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.raw_output:
+        args.raw_output.parent.mkdir(parents=True, exist_ok=True)
+        args.raw_output.write_text(
+            json.dumps(result.get("raw_candidates") or [], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     print(json.dumps({**result, "candidates": len(result.get("candidates") or []), "output": str(args.output)}, ensure_ascii=False))
     return 0
 

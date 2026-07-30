@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
@@ -30,8 +31,25 @@ from .database import DEFAULT_DB, migrate
 from .service import CoreService
 
 
-ASA_WEB_DIST = Path(os.environ.get("ASA_WEB_DIST", "/Users/messi/Documents/ASA/dist")).expanduser()
+ASA_WEB_DIST = Path(os.environ.get("ASA_WEB_DIST", str(REPO_DIR / "asa-web" / "dist"))).expanduser()
 ASA_APP_USER_AGENT_PREFIX = "ASAApp/"
+TRUSTED_BROWSER_ORIGINS = {
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
+    "chrome-extension://aihpahceageafhjhedhmeikhcfbfoffn",
+    "chrome-extension://cecifklpjckkbclegnmapegnedelapjh",
+}
+
+
+def trusted_browser_origins(host: str, port: int) -> set[str]:
+    origins = set(TRUSTED_BROWSER_ORIGINS)
+    if str(host or "").strip().lower() in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
+        origins.update({f"http://127.0.0.1:{int(port)}", f"http://localhost:{int(port)}"})
+    return origins
+
+# Bootstrap 接口内存缓存 (TTL 5 秒)
+_bootstrap_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_BOOTSTRAP_CACHE_TTL = 5.0
 
 
 class WriteEnvelope(BaseModel):
@@ -47,6 +65,8 @@ class WorkflowCreate(WriteEnvelope):
 class WorkflowAction(WriteEnvelope):
     instruction: str = ""
     note: str = ""
+    expected_plan_version: int | None = None
+    expected_plan_hash: str = ""
 
 
 class ApprovalDecision(WriteEnvelope):
@@ -58,6 +78,12 @@ class CopilotMessage(WriteEnvelope):
     message: str = Field(min_length=1)
     session_id: str = ""
     context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CopilotEvent(WriteEnvelope):
+    session_id: str = ""
+    event: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class CopilotIntentConfirm(WriteEnvelope):
@@ -136,6 +162,17 @@ class CandidateAction(BaseModel):
     preflight_token: str = ""
 
 
+class ProposalGenerate(WriteEnvelope):
+    job_candidate_ids: list[int] = Field(default_factory=list)
+    limit: int = Field(default=12, ge=1, le=50)
+
+
+class ProposalDecision(WriteEnvelope):
+    confirmation_token: str = Field(min_length=1)
+    decision: str = Field(min_length=1)
+    note: str = ""
+
+
 class LegacyRuntime:
     def __init__(self, external_host: str, external_port: int) -> None:
         self.server = None
@@ -179,13 +216,24 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     app = FastAPI(title="ASA Core", version="1.0.0", lifespan=lifespan)
     app.state.core = core
     app.state.legacy = runtime
+    browser_origins = trusted_browser_origins(host, port)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
-        allow_origin_regex=r"https://([A-Za-z0-9-]+\.)*(liepin\.com|x-saas\.com\.cn)",
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=sorted(browser_origins),
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type", "Idempotency-Key", "X-Requested-With"],
+        max_age=600,
     )
+
+    @app.middleware("http")
+    async def enforce_browser_origin_boundary(request: Request, call_next):
+        origin = str(request.headers.get("origin") or "").rstrip("/")
+        if request.url.path.startswith("/api/") and origin and origin not in browser_origins:
+            return JSONResponse(
+                {"ok": False, "error": "browser origin is not authorized for the local ASA API"},
+                status_code=403,
+            )
+        return await call_next(request)
 
     @app.exception_handler(LookupError)
     async def not_found(_: Request, exc: LookupError) -> JSONResponse:
@@ -196,10 +244,47 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return {"ok": True, "service": "asa-core", "version": "1.0.0", "db": str(db_path)}
 
     @app.get("/api/v1/bootstrap")
-    def bootstrap() -> dict[str, Any]: return core.bootstrap()
+    def bootstrap() -> dict[str, Any]:
+        now = time.time()
+        cache_key = "_bootstrap"
+        if cache_key in _bootstrap_cache:
+            cached_at, cached_data = _bootstrap_cache[cache_key]
+            if now - cached_at < _BOOTSTRAP_CACHE_TTL:
+                return cached_data
+        data = core.bootstrap()
+        _bootstrap_cache[cache_key] = (now, data)
+        return data
 
     @app.get("/api/v1/dashboard")
     def dashboard() -> dict[str, Any]: return core.dashboard()
+
+    @app.get("/api/v1/agent/proposals")
+    def agent_proposals(status: str = "pending", limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
+        try:
+            return core.list_agent_proposals(status, limit)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/agent/proposals/generate")
+    def agent_proposals_generate(body: ProposalGenerate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem("agent.proposals_generate", body, idempotency_key, "agent_proposal", "generate",
+                    lambda: core.generate_agent_proposals(body.job_candidate_ids, body.limit))
+
+    @app.post("/api/v1/agent/proposals/{proposal_id}/preflight")
+    def agent_proposal_preflight(proposal_id: str, body: WriteEnvelope) -> dict[str, Any]:
+        try:
+            return core.preflight_agent_proposal(proposal_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/agent/proposals/{proposal_id}/decision")
+    def agent_proposal_decision(proposal_id: str, body: ProposalDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem("agent.proposal_decision", body, idempotency_key, "agent_proposal", proposal_id,
+                    lambda: core.decide_agent_proposal(proposal_id, body.confirmation_token, body.decision, body.note))
+
+    @app.get("/api/v1/agent/metrics")
+    def agent_action_metrics(days: int = Query(7, ge=1, le=30)) -> dict[str, Any]:
+        return core.agent_action_metrics(days)
 
     @app.get("/api/v1/jobs")
     def jobs(q: str = "", status: str = "", include_archived: bool = False, limit: int = Query(100, le=200), offset: int = 0) -> dict[str, Any]:
@@ -429,6 +514,68 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("copilot.message", body, idempotency_key, "copilot_session", body.session_id or "new",
                     lambda: core.copilot(body.message, session_id=body.session_id, context=body.context))
 
+    @app.post("/api/v1/copilot/stream")
+    async def copilot_stream(
+        body: CopilotMessage,
+        request: Request,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+    ) -> StreamingResponse:
+        """Canonical Copilot decision exposed as SSE transport."""
+        key = idempotency_key or f"copilot-stream-{body.request_id}"
+        try:
+            result, _ = core.execute_idempotent(
+                operation="copilot.message",
+                request_id=body.request_id,
+                idempotency_key=key,
+                payload=body.model_dump(),
+                target_type="copilot_session",
+                target_id=body.session_id or "new",
+                action=lambda: core.copilot(body.message, session_id=body.session_id, context=body.context),
+                surface="asa_copilot_stream",
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        async def stream():
+            context_payload = {
+                "session_id": result.get("session_id"),
+                "context": result.get("context") or {},
+                "references": result.get("references") or [],
+                "suggested_actions": result.get("suggested_actions") or [],
+            }
+            yield f"event: context\ndata: {json.dumps(context_payload, ensure_ascii=False)}\n\n"
+            answer = str(result.get("answer") or "")
+            for offset in range(0, len(answer), 80):
+                if await request.is_disconnected():
+                    return
+                yield f"event: text\ndata: {json.dumps({'content': answer[offset:offset + 80]}, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps(result, ensure_ascii=False)}\n\n"
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/api/v1/copilot/agent")
+    def copilot_agent(
+        body: CopilotMessage,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        """Compatibility alias; user turns use the canonical Copilot decision path."""
+        key = idempotency_key or f"copilot-agent-{body.request_id}"
+        return idem(
+            "copilot.message",
+            body,
+            key,
+            "copilot_session",
+            body.session_id or "new",
+            lambda: core.copilot(body.message, session_id=body.session_id, context=body.context),
+        )
+
+    @app.post("/api/v1/copilot/events")
+    def copilot_event(body: CopilotEvent) -> dict[str, Any]:
+        """Copilot 埋点（PRD §9）：本地统计语义，轻量写入不做幂等。"""
+        try:
+            return core.record_copilot_event(body.session_id, body.event, body.payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     @app.post("/api/v1/copilot/intents/confirm")
     def copilot_intent_confirm(body: CopilotIntentConfirm, idempotency_key: str = Header(alias="Idempotency-Key")):
         if not body.candidate_id:
@@ -464,8 +611,13 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.post("/api/v1/workflows/{workflow_id}/{action_name}")
     def workflow_action(workflow_id: str, action_name: str, body: WorkflowAction, idempotency_key: str = Header(alias="Idempotency-Key")):
         actions = {
-            "start": lambda: agent.start_workflow(workflow_id),
+            "start": lambda: agent.start_workflow(
+                workflow_id,
+                expected_plan_version=body.expected_plan_version,
+                expected_plan_hash=body.expected_plan_hash,
+            ),
             "revise": lambda: agent.revise_workflow(workflow_id, body.instruction),
+            "revert_revision": lambda: agent.revert_workflow_revision(workflow_id),
             "cancel": lambda: agent.cancel_workflow(workflow_id, body.note),
             "archive": lambda: agent.archive_workflow(workflow_id),
         }
@@ -519,6 +671,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return FileResponse(index)
 
     @app.get("/asa-app", include_in_schema=False)
+    @app.get("/asa-app/", include_in_schema=False)
     def app_web(request: Request) -> Response:
         if not app_ui_allowed(request):
             return app_disabled_response()
@@ -550,9 +703,13 @@ async def proxy_legacy(request: Request, runtime: LegacyRuntime | None, override
     if not runtime or not runtime.port:
         return JSONResponse({"ok": False, "error": "legacy compatibility unavailable"}, status_code=503)
     body = await request.body()
+    from urllib.parse import urljoin, urlencode, parse_qs
     path = override_path or request.url.path
-    query = f"?{request.url.query}" if request.url.query else ""
-    url = f"http://127.0.0.1:{runtime.port}{path}{query}"
+    safe_path = "/" + path.lstrip("/").replace("..", "")
+    query_string = request.url.query
+    url = urljoin(f"http://127.0.0.1:{runtime.port}", safe_path)
+    if query_string:
+        url = f"{url}?{query_string}"
     headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "content-length", "connection"}}
     req = urllib.request.Request(url, data=body or None, method=request.method, headers=headers)
     try:
@@ -570,7 +727,13 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    uvicorn.run(create_app(db_path=Path(args.db).expanduser(), host=args.host, port=args.port), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(
+        create_app(db_path=Path(args.db).expanduser(), host=args.host, port=args.port),
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        access_log=False,
+    )
     return 0
 
 

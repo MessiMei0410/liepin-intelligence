@@ -104,6 +104,82 @@ describe('R8 渠道寻访漏斗', () => {
     expect(screen.getByText('召回 40 · 抽取 16')).toBeInTheDocument()
   })
 
+  it('覆盖证书区分批准网格穷尽与平台候选人总体未知', async () => {
+    stubFunnel({
+      ok: true,
+      workflow_id: 'wf-1',
+      channels: [liepinChannel],
+      runs: [liepinRun],
+      coverage_certificate: {
+        schema_version: 'coverage_certificate_v1',
+        certificate_id: 'coverage-1',
+        coverage_status: 'approved_query_cells_exhausted',
+        query_cells: { approved: 12, executed: 12, exhausted: 12, platform_capped: 0, blocked: 0, failed: 0, pending: 0 },
+        candidate_recall: { raw_occurrences: 240, unique_identities: 183, duplicate_occurrences: 57, below_threshold: 31, formally_intaked: 42 },
+        evidence_integrity: { passed: true, expected_extracted_occurrences: 240, mapped_recall_occurrences: 240, unmapped_recall_occurrences: 0, mismatched_query_cells: 0 },
+        dimension_execution: {
+          retrieval_axes: ['channel', 'query'],
+          platform_filters_applied: [],
+          dimensions: {
+            locations: { approved_values: ['杭州'], retrieval_filter_applied: false, evaluation_mode: 'post_recall_soft_score' },
+            levels: { approved_values: ['资深工程师'], retrieval_filter_applied: false, evaluation_mode: 'post_recall_assessment' },
+            scenarios: { approved_values: ['运动控制'], retrieval_filter_applied: false, evaluation_mode: 'post_recall_assessment_context' },
+          },
+        },
+        detail_completeness: { complete: 110, partial: 63, failed: 10 },
+        assessment: { completed_unique_candidates: 42 },
+        claims: {
+          all_candidates_covered: false,
+          defensible_claim: '已穷尽批准的渠道关键词查询单元；地点、职级、场景未作为平台筛选执行',
+          coverage_unknown_reasons: ['platform_candidate_population_denominator_unavailable'],
+        },
+      },
+    })
+
+    const { container } = renderFunnel()
+    await screen.findByText('覆盖证明')
+    const certificate = container.querySelector('.coverage-certificate')!
+    expect(certificate).toHaveTextContent('查询单元 12 / 12')
+    expect(certificate).toHaveTextContent('原始召回 240')
+    expect(certificate).toHaveTextContent('唯一身份 183')
+    expect(certificate).toHaveTextContent('证据链 完整')
+    expect(certificate).toHaveTextContent('平台筛选 未使用')
+    expect(certificate).toHaveTextContent('已穷尽批准的渠道关键词查询单元')
+    expect(certificate).toHaveTextContent('候选人总体未知')
+    expect(certificate).not.toHaveTextContent('所有候选人已覆盖')
+  })
+
+  it('召回台账不守恒时显示证据链异常和覆盖未知', async () => {
+    stubFunnel({
+      ok: true,
+      workflow_id: 'wf-1',
+      channels: [liepinChannel],
+      runs: [liepinRun],
+      coverage_certificate: {
+        schema_version: 'coverage_certificate_v1',
+        certificate_id: 'coverage-gap',
+        coverage_status: 'coverage_unknown',
+        query_cells: { approved: 12, executed: 12, exhausted: 12, platform_capped: 0, blocked: 0, failed: 0 },
+        candidate_recall: { raw_occurrences: 238, unique_identities: 181, duplicate_occurrences: 57, below_threshold: 31, formally_intaked: 42 },
+        evidence_integrity: { passed: false, expected_extracted_occurrences: 240, mapped_recall_occurrences: 238, unmapped_recall_occurrences: 0, mismatched_query_cells: 1 },
+        detail_completeness: { complete: 110, partial: 63, failed: 10 },
+        assessment: { completed_unique_candidates: 42 },
+        claims: {
+          all_candidates_covered: false,
+          defensible_claim: '查询执行记录与原始召回台账不一致，候选人覆盖未知',
+          coverage_unknown_reasons: ['recall_ledger_mismatch'],
+        },
+      },
+    })
+
+    const { container } = renderFunnel()
+    await screen.findByText('覆盖证明')
+    const certificate = container.querySelector('.coverage-certificate')!
+    expect(certificate).toHaveTextContent('覆盖未知')
+    expect(certificate).toHaveTextContent('证据链 异常')
+    expect(certificate).toHaveTextContent('查询执行记录与原始召回台账不一致')
+  })
+
   // 渲染行数字链：查询 N 组 → 召回 X → 抽取 Y → 排重后 Z → 详情（完整 a / 部分 b / 失败 c）→ 入库新增 e（排重命中 d）→ 评估 f（高分 g）
   const FUNNEL_LINE_PATTERN = /查询 (\d+) 组\s*→\s*召回 (\d+)\s*→\s*抽取 (\d+)\s*→\s*排重后 (\d+)\s*→\s*详情（完整 (\d+) \/ 部分 (\d+) \/ 失败 (\d+)）\s*→\s*入库新增 (\d+)（排重命中 (\d+)）\s*→\s*评估 (\d+)（高分 (\d+)）/
 

@@ -67,35 +67,35 @@
   };
 
   function postToWorkbench(path, payload) {
-    return fetch(`${WORKBENCH_BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      keepalive: true
-    })
-      .then(async res => {
-        const body = await res.json().catch(() => null);
-        if (!body) {
-          return {
-            ok: false,
-            error: `本机同步服务返回格式异常（HTTP ${res.status}）`,
-            status: res.status,
-            transport_error: 'non_json'
-          };
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: 'asa-workbench-request', method: 'POST', path, payload },
+        response => {
+          if (chrome.runtime.lastError || !response) {
+            resolve({
+              ok: false,
+              error: chrome.runtime.lastError?.message || '扩展后台未响应',
+              transport_error: 'extension'
+            });
+            return;
+          }
+          if (!response.body && response.status) {
+            resolve({
+              ok: false,
+              error: response.error || `本机同步服务返回格式异常（HTTP ${response.status}）`,
+              status: response.status,
+              transport_error: 'non_json'
+            });
+            return;
+          }
+          resolve(response.ok ? (response.body || { ok: true }) : {
+            ...response,
+            error: response.error || response.body?.reason || `HTTP ${response.status}`,
+            transport_error: response.transport_error || 'http'
+          });
         }
-        if (res.ok) return body || { ok: true };
-        return {
-          ok: false,
-          error: body?.error || body?.reason || body?.stderr || `HTTP ${res.status}`,
-          status: res.status,
-          transport_error: 'http'
-        };
-      })
-      .catch(error => ({
-        ok: false,
-        error: error?.message || '本机同步服务未连接',
-        transport_error: 'network'
-      }));
+      );
+    });
   }
 
   function workbenchSyncFailureMessage(result, fallbackPayload = {}) {
@@ -126,12 +126,12 @@
       if (text) query.set(key, text);
     });
     const suffix = query.toString() ? `?${query.toString()}` : '';
-    return fetch(`${WORKBENCH_BASE}${path}${suffix}`, {
-      method: 'GET',
-      cache: 'no-store'
-    })
-      .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-      .catch(() => null);
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: 'asa-workbench-request', method: 'GET', path: `${path}${suffix}` },
+        response => resolve(chrome.runtime.lastError || !response || !response.ok ? null : response.body)
+      );
+    });
   }
 
   function openAsaFloating() {

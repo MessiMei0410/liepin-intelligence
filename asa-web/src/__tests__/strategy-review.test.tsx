@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { api } from '../api'
+import { api, clearStrategyReviewCache } from '../api'
 import { RevisePlanDialog } from '../components/RevisePlanDialog'
 import { StrategyReview } from '../workflows/StrategyReview'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
@@ -91,6 +91,7 @@ const stubReviewFetch = (payload: unknown = reviewPayload) => {
 afterEach(() => {
   vi.unstubAllGlobals()
   window.localStorage.clear()
+  clearStrategyReviewCache()
 })
 
 describe('策略复盘展示（StrategyReview）', () => {
@@ -119,9 +120,10 @@ describe('策略复盘展示（StrategyReview）', () => {
     expect(within(section).getByText(/按 fallback_plan 放宽目标池/)).toBeInTheDocument()
     expect(within(section).getByText('关键词组 · 替换')).toBeInTheDocument()
     expect(within(section).getByText('「核心词」功率半导体、MOSFET')).toBeInTheDocument()
-    // 决策标记：diff-1 本地已采纳，diff-2 待决策
-    expect(within(section).getByText('已采纳')).toBeInTheDocument()
-    expect(within(section).getAllByText('待决策')).toHaveLength(1)
+    // 主面板不再读取浏览器本地决策，复盘只展示后端事实。
+    expect(within(section).getAllByText('待决策')).toHaveLength(2)
+    expect(within(section).getByText('在 Copilot 中讨论并确认应用')).toBeInTheDocument()
+    expect(within(section).queryByText('已采纳')).not.toBeInTheDocument()
     expect(within(section).queryByText('已拒绝')).not.toBeInTheDocument()
     // 备注如实呈现
     expect(within(section).getByText('知识库暂无可增补的目标池公司，step2 修订待顾问补充')).toBeInTheDocument()
@@ -174,6 +176,7 @@ describe('typed client：strategyReview / rebuildStrategyReview', () => {
   it('404 返回 null，其余错误携带 status 抛出', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404)))
     await expect(api.strategyReview('wf-1')).resolves.toBeNull()
+    clearStrategyReviewCache() // 清除404缓存，确保500请求不被缓存拦截
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ detail: 'boom' }, false, 500)))
     await expect(api.strategyReview('wf-1')).rejects.toMatchObject({ status: 500 })
   })
@@ -271,27 +274,21 @@ describe('修改计划对话框接 revision_diff（RevisePlanDialog）', () => {
   })
 })
 
-describe('工作流面板：调整条件再搜 → diff 采纳 → revise 提交链路', () => {
-  it('采纳预填后提交，revise 请求体带预填内容与逐项决策后缀', async () => {
+describe('工作流面板：策略编辑统一交给 Copilot', () => {
+  it('发布工作流上下文后唤起 Copilot，保留详情且不发 revise 请求', async () => {
     const user = userEvent.setup()
-    const fetchMock = vi.fn<typeof fetch>(async input => {
-      const url = String(input)
-      if (url.includes('/strategy-review')) return mockResponse(reviewPayload)
-      return mockResponse({ ok: true })
-    })
+    const postMessage = vi.fn()
+    const close = vi.fn()
+    ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
+    const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
-    render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '修改计划' }))
-    const dialog = await screen.findByRole('dialog')
-    const region = await within(dialog).findByLabelText('修订建议')
-    await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
-    await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
-    expect(reviseCall).toBeDefined()
-    expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({
-      instruction: '增列目标公司池：T2：甲公司、乙公司\n【逐项采纳】diff-1',
-    })
+    render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={close} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+    await user.click(screen.getByRole('button', { name: '在 Copilot 中讨论策略' }))
+    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: 'showFloating' }))
+    expect(close).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: plannedWorkflow.goal.title })).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))).toBe(false)
+    delete (window as Window & { webkit?: unknown }).webkit
   })
 })
 
@@ -369,46 +366,9 @@ describe('S4-3c 决策后端持久化（PATCH /strategy-review/diffs）', () => 
     })
   })
 
-  it('提交时 PATCH 与 revise 双发且幂等键不同，PATCH 体为逐项决策快照', async () => {
-    const user = userEvent.setup()
-    const fetchMock = vi.fn<typeof fetch>(async input => {
-      const url = String(input)
-      if (url.includes('/strategy-review/diffs')) {
-        return mockResponse({ ok: true, workflow_id: 'wf-1', artifact_id: 'strategy_review_wf-1', updated: 2, revision_diff: [] })
-      }
-      if (url.includes('/strategy-review')) return mockResponse(reviewPayload)
-      return mockResponse({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
+  it('工作流面板不再提供本地 revise 入口', () => {
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '修改计划' }))
-    const dialog = await screen.findByRole('dialog')
-    const region = await within(dialog).findByLabelText('修订建议')
-    await user.click(within(region).getAllByRole('button', { name: '采纳' })[0])
-    await user.click(within(region).getAllByRole('button', { name: '拒绝' })[1])
-    fetchMock.mockClear()
-    await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
-    const patchCalls = fetchMock.mock.calls.filter(
-      ([input, init]) => String(input).includes('/strategy-review/diffs') && (init as RequestInit | undefined)?.method === 'PATCH',
-    )
-    expect(reviseCall).toBeDefined()
-    expect(patchCalls).toHaveLength(1)
-    const reviseKey = ((reviseCall?.[1] as RequestInit).headers as Record<string, string>)['Idempotency-Key']
-    const patchKey = ((patchCalls[0][1] as RequestInit).headers as Record<string, string>)['Idempotency-Key']
-    expect(patchKey).toContain('/strategy-review/diffs')
-    expect(reviseKey).not.toBe(patchKey)
-    expect(JSON.parse(String((patchCalls[0][1] as RequestInit).body))).toMatchObject({
-      request_id: expect.stringMatching(/^web_/),
-      decisions: [
-        { diff_id: 'diff-1', status: 'accepted' },
-        { diff_id: 'diff-2', status: 'rejected' },
-      ],
-    })
-    // instruction 后缀保留作审计痕
-    expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({
-      instruction: '增列目标公司池：T2：甲公司、乙公司\n【逐项采纳】diff-1 【逐项拒绝】diff-2',
-    })
+    expect(screen.queryByRole('button', { name: '修改计划' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '调整条件再搜' })).not.toBeInTheDocument()
   })
 })

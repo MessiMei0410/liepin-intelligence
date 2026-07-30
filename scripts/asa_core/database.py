@@ -256,6 +256,61 @@ def ensure_stop_reason_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE job_candidates ADD COLUMN stop_reason TEXT")
 
 
+def ensure_idempotency_recovery_schema(conn: sqlite3.Connection) -> None:
+    """Add failure/recovery fields and close abandoned processing leases."""
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(api_idempotency)")}
+    if "error_json" not in columns:
+        conn.execute("ALTER TABLE api_idempotency ADD COLUMN error_json TEXT")
+    if "updated_at" not in columns:
+        conn.execute("ALTER TABLE api_idempotency ADD COLUMN updated_at TEXT")
+    conn.execute(
+        "UPDATE api_idempotency SET updated_at=COALESCE(updated_at,created_at) WHERE updated_at IS NULL"
+    )
+    stale = conn.execute(
+        """
+        SELECT id,idempotency_key,operation,request_id
+          FROM api_idempotency
+         WHERE status='processing'
+           AND datetime(COALESCE(expires_at,datetime(created_at,'+5 minutes'))) <= datetime('now','localtime')
+        """
+    ).fetchall()
+    if not stale:
+        return
+    error_json = json.dumps(
+        {
+            "type": "abandoned_processing",
+            "message": "processing lease expired before a result was recorded",
+            "outcome": "unknown",
+        },
+        ensure_ascii=False,
+    )
+    for row in stale:
+        conn.execute(
+            """
+            UPDATE api_idempotency
+               SET status='failed',response_status=500,error_json=?,updated_at=datetime('now','localtime'),expires_at=NULL
+             WHERE id=? AND status='processing'
+            """,
+            (error_json, int(row["id"])),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO audit_events
+                (event_id,actor,surface,request_id,operation,target_type,target_id,result,metadata_json)
+            VALUES (?,?,?,?,?,'idempotency',?,'failed',?)
+            """,
+            (
+                f"idempotency_recovery_{int(row['id'])}",
+                "system",
+                "asa_core_startup",
+                str(row["request_id"]),
+                str(row["operation"]),
+                str(row["idempotency_key"]),
+                error_json,
+            ),
+        )
+
+
 def _backup(db_path: Path) -> Path:
     backup_dir = db_path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -325,8 +380,11 @@ def migrate(db_path: Path = DEFAULT_DB, *, backup: bool = True) -> dict[str, Any
             conn.commit()
             applied.append(version)
         ensure_stop_reason_schema(conn)
+        ensure_idempotency_recovery_schema(conn)
         _backfill_source_links(conn)
+        conn.commit()
         _integrity(conn)
+        conn.execute("PRAGMA optimize")
         fk_issues = [dict(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
     finally:
         conn.close()

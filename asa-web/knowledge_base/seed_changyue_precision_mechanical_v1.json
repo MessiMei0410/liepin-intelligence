@@ -1,0 +1,132 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-07-30",
+    "source": "case_changyue_equipment_v1.json + v3 anonymous positive-profile calibration",
+    "usage": "Runtime archetype and pre-approval golden-candidate replay",
+    "privacy": "No names, contact details, source candidate ids, or resume text"
+  },
+  "job_archetype": {
+    "archetype_id": "changyue_precision_equipment_mechanical",
+    "title": "精密设备机械高级工程师",
+    "client": "长越科技",
+    "client_scoped": true,
+    "essence": "微米级精密设备整机结构设计：刚性、振动与热变形分析，有限元优化，紧固件设计及精密运动元器件选型",
+    "directions": [
+      {
+        "name": "先进封装及精密设备",
+        "customers": ["封测厂", "半导体设备产线"],
+        "products": ["键合设备", "精密运动平台", "检测设备"],
+        "competitors": ["ASMPT", "K&S", "BESI", "新益昌"]
+      }
+    ],
+    "target_functions": ["机械设计", "结构设计", "机械研发", "整机设计"],
+    "location_policy": "杭州本地优先；异地人选正常进入召回，推进前确认 relocation"
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 键合封装及精密设备同行",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "high",
+      "rationale": "精密结构与设备场景同时对口",
+      "companies": [
+        {"name": "ASMPT"},
+        {"name": "K&S"},
+        {"name": "BESI"},
+        {"name": "新益昌"},
+        {"name": "凯格精机"},
+        {"name": "华封科技"},
+        {"name": "恩纳基智能装备"},
+        {"name": "普莱信"},
+        {"name": "大族封测"},
+        {"name": "快克智能"},
+        {"name": "拓荆科技"},
+        {"name": "晶盛机电"},
+        {"name": "浙江达仕科技"},
+        {"name": "上海光键"},
+        {"name": "苏州艾科瑞思"},
+        {"name": "嘉兴景焱"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 微米级精密设备机械",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "medium",
+      "rationale": "半导体前道、精密测量、光学平台和 3C 自动化的机械能力可迁移",
+      "companies": [
+        {"name": "上海微电子"},
+        {"name": "东方晶源"},
+        {"name": "中科飞测"},
+        {"name": "长川科技"},
+        {"name": "大族激光"},
+        {"name": "欣奕华智能"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "precision_mechanical_core",
+      "targets": "T1/T2 精密机械",
+      "terms": ["精密设备", "机械设计", "结构设计", "有限元", "结构刚性", "振动", "热变形", "紧固件"]
+    },
+    {
+      "group": "precision_motion_components",
+      "targets": "精密运动平台元器件",
+      "terms": ["直线电机", "丝杠", "导轨", "轴承", "光栅尺", "微米级", "亚微米级"]
+    },
+    {
+      "group": "equipment_scene",
+      "targets": "半导体及封装设备场景",
+      "terms": ["键合", "固晶", "贴片", "半导体设备", "检测设备", "精密平台"]
+    }
+  ],
+  "negative_rules": [
+    "普通非标机械但无微米级精密设备证据的候选人不进入优先池",
+    "只命中有限元工具名但无振动、热变形或结构优化项目证据时必须标记待核验",
+    "异地不是召回排除项，但推进前必须确认杭州 relocation 意愿"
+  ],
+  "level_mapping": {
+    "accepted_candidate_levels": ["高级工程师", "资深工程师", "机械主管", "机械经理", "机械负责人"],
+    "note": "按整机复杂度、精度等级和仿真闭环能力定档，不按 title 机械过滤"
+  },
+  "golden_replay_min_recall": 1.0,
+  "golden_candidates": [
+    {
+      "profile_id": "direct_drive_platform_mechanical",
+      "company_type": "精密运动平台企业",
+      "function": "高级机械设计",
+      "search_signals": ["直线电机", "有限元", "精密设备"],
+      "outcome_label": "A_priority_review"
+    },
+    {
+      "profile_id": "semiconductor_lithography_mechanical",
+      "company_type": "半导体装备企业",
+      "function": "机械设计",
+      "search_signals": ["半导体设备", "机械设计", "热变形"],
+      "outcome_label": "A_verify_first"
+    },
+    {
+      "profile_id": "precision_laser_structure",
+      "company_type": "精密激光设备企业",
+      "function": "结构设计",
+      "search_signals": ["结构设计", "振动", "有限元"],
+      "outcome_label": "A_priority_review"
+    },
+    {
+      "profile_id": "bonding_equipment_mechanical",
+      "company_type": "封装键合设备企业",
+      "function": "机械研发",
+      "search_signals": ["键合", "光栅尺", "机械设计"],
+      "outcome_label": "A_verify_first"
+    },
+    {
+      "profile_id": "automation_precision_mechanical",
+      "company_type": "精密自动化企业",
+      "function": "整机结构设计",
+      "search_signals": ["结构设计", "丝杠", "导轨"],
+      "outcome_label": "A_priority_review"
+    }
+  ]
+}

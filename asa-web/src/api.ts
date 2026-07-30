@@ -29,6 +29,15 @@ export type JobDetail = Job & {
   events: Array<{ id: number; event_type: string; event_status?: string; event_time?: string; summary?: string; job_candidate_id?: number }>;
   followups: Array<Record<string, unknown> & { id?: string | number }>;
   next_keywords?: string[]; metric_target_companies?: string[]; exclude_terms?: string[];
+  latest_effective_strategy?: {
+    status: string; plan_version: number; generated_at?: string; summary?: string; input_level?: string;
+    company_tiers: Array<{ path?: string; tier?: string; companies: string[]; rationale?: string }>;
+    level_mapping: Record<string, unknown>;
+    keyword_groups: Array<{ group?: string; targets?: string; terms: string[] }>;
+    expectation: Record<string, unknown>;
+    consultant_constraints: Array<{ type: string; rule: string }>;
+    audit: { workflow_id?: string; artifact_id?: string; schema_version?: string };
+  } | null;
 }
 
 export type Candidate = {
@@ -67,6 +76,7 @@ export type ContractAnchor = [
   paths['/api/v1/events']['get'],
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
+  paths['/api/v1/agent/metrics']['get'],
   // R10 增补：停止原因摘要路由入锚。
   paths['/api/v1/candidates/stop-reasons/summary']['get'],
   // S4-3 增补：策略复盘读取与按需重算路由入锚。
@@ -95,7 +105,7 @@ type StrategyReviewDiffsPatchAnchor = RoutePatchOp<paths, '/api/v1/workflows/{wo
 // 响应形状：Core 返回动态 dict（openapi 只描述为 object），按实际 payload 收窄声明；
 // 工作流详情不在这里声明，由 workflowModel 的 zod schema 在边界校验（parseWorkflow）。
 export type DashboardCounts = {
-  active_jobs?: number; candidates?: number; pending_candidates?: number; pending_approvals?: number;
+  active_jobs?: number; candidates?: number; pending_candidates?: number; pending_approvals?: number; pending_proposals?: number; executed_proposals?: number; failed_proposals?: number;
 }
 export type DashboardWorkflow = {
   workflow_id: string; status: string; business_outcome?: string | null; title?: string; current_stage?: string; updated_at?: string; progress?: number;
@@ -112,6 +122,21 @@ export type Bootstrap = {
 }
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
+export type AgentProposal = {
+  proposal_id: string; status: 'pending' | 'approved' | 'rejected' | 'executed' | 'failed';
+  action_type: string; risk_level: string; title: string; rationale?: string; candidate?: string;
+  company?: string; candidate_title?: string; client?: string; job?: string; request?: Record<string, unknown>;
+  preflight?: Record<string, unknown>; expires_at?: string;
+}
+export type AgentProposalPreflight = {
+  ok: boolean; proposal_id: string; action_type: string; request: Record<string, unknown>;
+  policy: { decision?: string; risk_level?: string; reason?: string }; confirmation_token: string; expires_in: number;
+}
+export type AgentActionMetrics = {
+  action_cards_generated: number; confirmed: number; rejected: number; executed: number; failed: number; needs_clarification: number;
+  confirmation_rate: number | null; rejection_rate: number | null; execution_failure_rate: number | null;
+  r3_approvals: { total: number; approved: number; approval_rate: number | null };
+}
 
 // S4-3 策略复盘：Core 返回动态 dict（openapi 只描述为 object），按 strategy_review.py 实际 payload 收窄声明。
 // revision_diff 逐项可采纳/拒绝（status: pending → accepted/rejected）；S4-3c 起决策经
@@ -378,6 +403,12 @@ export type JobProfileFeedbackResult = {
   ok?: boolean; status?: string; already_disputed?: boolean; item_type?: string; item_key?: string
 }
 
+// 策略复盘客户端缓存：30 秒 TTL，避免切换 tab 时重复请求。
+// 导出 clearStrategyReviewCache 供测试重置。
+const STRATEGY_REVIEW_CACHE_TTL = 30_000
+const _strategyReviewCache = new Map<string, { payload: StrategyReviewPayload | null; ts: number }>()
+export const clearStrategyReviewCache = () => _strategyReviewCache.clear()
+
 const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } })
   const body: unknown = await response.json().catch(() => ({ error: response.statusText }))
@@ -394,6 +425,15 @@ const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
 export const api = {
   bootstrap: () => json<Bootstrap>('/api/v1/bootstrap'),
   dashboard: () => json<Dashboard>('/api/v1/dashboard'),
+  agentProposals: (status = 'pending', limit = 20) =>
+    json<{ ok: boolean; status: string; proposals: AgentProposal[] }>(`/api/v1/agent/proposals?status=${encodeURIComponent(status)}&limit=${limit}`),
+  agentActionMetrics: (days = 7) => json<{ ok: boolean; window_days: number; metrics: AgentActionMetrics }>(`/api/v1/agent/metrics?days=${days}`),
+  generateAgentProposals: (jobCandidateIds: number[] = [], limit = 12) =>
+    write<{ ok: boolean; proposals: AgentProposal[]; skipped: Array<Record<string, unknown>> }>('/api/v1/agent/proposals/generate', { job_candidate_ids: jobCandidateIds, limit }),
+  preflightAgentProposal: (proposalId: string) =>
+    write<AgentProposalPreflight>(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/preflight`, {}),
+  decideAgentProposal: (proposalId: string, confirmationToken: string, decision: 'approve' | 'reject', note = '') =>
+    write<WriteAck>(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/decision`, { confirmation_token: confirmationToken, decision, note }),
   jobs: (q = '') => json<{items: Job[]; total: number}>(`/api/v1/jobs?limit=200&q=${encodeURIComponent(q)}`),
   job: (id: number) => json<{job: JobDetail}>(`/api/v1/jobs/${id}`),
   candidates: (q = '', jobId?: number) => json<{items: Candidate[]; total: number}>(`/api/v1/candidates?limit=200&q=${encodeURIComponent(q)}${jobId ? `&job_id=${jobId}` : ''}`),
@@ -412,17 +452,29 @@ export const api = {
   workflowSourcingFunnel: async (id: string): Promise<SourcingFunnel> =>
     parseSourcingFunnel(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/sourcing-funnel`)),
   // S4-3 策略复盘：无复盘或工作流不存在时 Core 返回 404，此处收敛为 null（其余错误照常抛出，携带 status）。
+  // 30 秒客户端缓存：同一 workflow_id 切换 tab 时不重复请求。
   strategyReview: async (id: string): Promise<StrategyReviewPayload | null> => {
+    const cached = _strategyReviewCache.get(id)
+    if (cached && Date.now() - cached.ts < STRATEGY_REVIEW_CACHE_TTL) return cached.payload
     try {
-      return await json<StrategyReviewPayload>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review`)
+      const payload = await json<StrategyReviewPayload>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review`)
+      _strategyReviewCache.set(id, { payload, ts: Date.now() })
+      return payload
     } catch (error) {
-      if ((error as { status?: number }).status === 404) return null
+      if ((error as { status?: number }).status === 404) {
+        _strategyReviewCache.set(id, { payload: null, ts: Date.now() })
+        return null
+      }
       throw error
     }
   },
   // 按需重算（终局工作流补生成）：幂等走 write 封装；非终局 Core 返回 409，错误带 status 由调用方呈现。
-  rebuildStrategyReview: (id: string) =>
-    write<StrategyReviewRebuildResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/rebuild`, {}),
+  // 成功后清除该 workflow_id 的缓存，以便 strategyReview 重新拉取。
+  rebuildStrategyReview: async (id: string) => {
+    const result = await write<StrategyReviewRebuildResult>(`/api/v1/workflows/${encodeURIComponent(id)}/strategy-review/rebuild`, {})
+    _strategyReviewCache.delete(id)
+    return result
+  },
   // S4-3c 逐项采纳/拒绝回写：upsert 可重复覆盖，与 revise 各自幂等（不同 Idempotency-Key）。
   // 404=工作流/复盘不存在，409=diff_id 未知或状态非法；错误带 status 由调用方决定降级策略。
   patchStrategyReviewDiffs: (id: string, decisions: StrategyReviewDiffDecision[]) =>

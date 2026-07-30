@@ -2,6 +2,7 @@ import Cocoa
 import ApplicationServices
 import Carbon.HIToolbox
 import ImageIO
+import OSLog
 import Vision
 import WebKit
 
@@ -30,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var statusItem: NSStatusItem!
     private var statusTimer: Timer?
     private var nativeContextTimer: Timer?
+    private var localKeyMonitor: Any?
     private var screenshotTask: Process?
     private var globalHotKeyRefs: [EventHotKeyRef] = []
     private var globalHotKeyHandlerRef: EventHandlerRef?
@@ -38,10 +40,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var lastContextApplication: NSRunningApplication?
     private var activationContextWorkItem: DispatchWorkItem?
     private var coreRecoveryGeneration = 0
+    private var mainPageLoadGeneration = 0
+    private var floatingPageLoadGeneration = 0
     private let hotKeyLogPath = "/tmp/asa_floating_hotkeys.log"
+    private let webLogger = Logger(subsystem: "local.asa.floating", category: "WebView")
     private let serviceBaseURL = URL(string: "http://127.0.0.1:8765")!
+    private lazy var webSecurityPolicy = ASAWebSecurityPolicy(serviceBaseURL: serviceBaseURL)
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.18"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.20"
     }
     private lazy var floatingURL = serviceBaseURL.appendingPathComponent("asa-floating").appending(queryItems: [URLQueryItem(name: "ui", value: appVersion)])
     private lazy var stateURL = serviceBaseURL.appendingPathComponent("api/asa/floating/state")
@@ -51,6 +57,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private lazy var healthURL = serviceBaseURL.appendingPathComponent("api/v1/health")
     private let launchAgentLabel = "ai.hermes.liepin-workbench"
     private let coreHealthRetryDelays: [TimeInterval] = [0.4, 0.8, 1.5, 2.5, 4.0]
+
+    private func webSurfaceName(for target: WKWebView) -> String {
+        target === mainWebView ? "agent" : "copilot"
+    }
+
+    private func loggableWebLocation(_ url: URL?) -> String {
+        guard let url else { return "missing-url" }
+        guard let scheme = url.scheme, let host = url.host else {
+            return url.absoluteString == "about:blank" ? "about:blank" : "non-network-url"
+        }
+        let port = url.port.map { ":\($0)" } ?? ""
+        let origin = "\(scheme)://\(host)\(port)"
+        let isLocalService = scheme == serviceBaseURL.scheme
+            && host == serviceBaseURL.host
+            && url.port == serviceBaseURL.port
+        return isLocalService ? "\(origin)\(url.path)" : origin
+    }
+
+    private func isNavigationCancellation(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -77,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             object: nil
         )
 
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift],
@@ -90,11 +118,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 return nil
             }
             if flags == [.command], key == "v" {
+                guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
                 self?.panel.makeKey()
                 self?.pasteClipboardIntoWebView()
                 return nil
             }
             if flags == [.command], let selector = self?.standardEditSelector(for: key) {
+                guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
                 self?.panel.makeKey()
                 self?.webView.window?.makeFirstResponder(self?.webView)
                 NSApp.sendAction(selector, to: nil, from: self)
@@ -108,6 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         statusTimer?.invalidate()
         nativeContextTimer?.invalidate()
         activationContextWorkItem?.cancel()
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+        }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         for globalHotKeyRef in globalHotKeyRefs {
             UnregisterEventHotKey(globalHotKeyRef)
@@ -413,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let screenshotItem = NSMenuItem(title: "截图", action: #selector(startScreenshotCapture), keyEquivalent: "s")
         screenshotItem.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(screenshotItem)
-        menu.addItem(NSMenuItem(title: "重新加载", action: #selector(reloadFloatingPage), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "刷新 ASA 页面", action: #selector(reloadASA), keyEquivalent: "r"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 ASA", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
@@ -422,7 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func webConfiguration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
-        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let controller = WKUserContentController()
         controller.add(self, name: "asaNative")
         config.userContentController = controller
@@ -473,7 +506,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
-        loadFloatingPage()
 
         let content = NSView(frame: rect)
         content.autoresizingMask = [.width, .height]
@@ -572,6 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             url = canonicalAgentURL(from: restored)
         }
         UserDefaults.standard.set(url.absoluteString, forKey: "asa.lastRoute")
+        mainPageLoadGeneration += 1
         mainWebView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 20))
     }
 
@@ -695,9 +728,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             lastContextApplication = app
         }
         let window = frontmostWindowInfo(for: pid)
-        let clipboardText = NSPasteboard.general.string(forType: .string) ?? ""
-        let clipboardPreview = String(clipboardText.prefix(280))
-        let signature = [appName, bundleID, String(pid), String(describing: window["title"] ?? ""), clipboardPreview].joined(separator: "|")
+        let pasteboard = NSPasteboard.general
+        let clipboardHasText = pasteboard.availableType(from: [.string]) != nil
+        let signature = [
+            appName,
+            bundleID,
+            String(pid),
+            String(describing: window["title"] ?? ""),
+            String(pasteboard.changeCount),
+        ].joined(separator: "|")
         if !force && signature == lastNativeContextSignature && !isWeChatApp(name: appName, bundleID: bundleID) {
             return
         }
@@ -716,12 +755,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 "pid": Int(pid),
             ],
             "window": window,
-            "clipboard": [
-                "has_text": !clipboardText.isEmpty,
-                "length": clipboardText.count,
-                "preview": clipboardPreview,
-                "change_count": NSPasteboard.general.changeCount,
-            ],
+            "clipboard": NativeContextPrivacy.clipboardMetadata(
+                hasText: clipboardHasText,
+                changeCount: pasteboard.changeCount
+            ),
             "context": [
                 "type": "page",
                 "page": "native",
@@ -1451,6 +1488,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         collapsedPanel.orderFrontRegardless()
     }
 
+    @objc private func reloadASA() {
+        loadMainWindow()
+        loadFloatingPage()
+        refreshCollapsedStatus()
+    }
+
     @objc private func reloadFloatingPage() {
         loadFloatingPage()
         refreshCollapsedStatus()
@@ -1469,6 +1512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         let appURL = canonicalAgentURL(from: url)
         UserDefaults.standard.set(appURL.absoluteString, forKey: "asa.lastRoute")
+        mainPageLoadGeneration += 1
         mainWebView.load(URLRequest(url: appURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 20))
         showMainWindow()
     }
@@ -1556,6 +1600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
             timeoutInterval: 20
         )
+        floatingPageLoadGeneration += 1
         webView.load(request)
     }
 
@@ -1619,19 +1664,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func showServiceUnavailablePages(_ detail: String, generation: Int) {
+        let mainGeneration = mainPageLoadGeneration
+        let floatingGeneration = floatingPageLoadGeneration
         performServiceDiagnostics { [weak self] diagnostics in
             guard let self, generation == self.coreRecoveryGeneration else { return }
-            self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.mainWebView)
-            self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.webView)
+            if mainGeneration == self.mainPageLoadGeneration {
+                self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.mainWebView)
+            }
+            if floatingGeneration == self.floatingPageLoadGeneration {
+                self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.webView)
+            }
         }
     }
 
     private func showServiceUnavailablePage(_ detail: String, in target: WKWebView? = nil) {
-        let generation = coreRecoveryGeneration
+        guard let resolvedTarget = target ?? webView else { return }
+        let generation = pageLoadGeneration(for: resolvedTarget)
         performServiceDiagnostics { [weak self, weak target] diagnostics in
-            guard let self, generation == self.coreRecoveryGeneration else { return }
-            self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: target ?? self.webView)
+            guard let self, let currentTarget = target ?? self.webView else { return }
+            guard generation == self.pageLoadGeneration(for: currentTarget) else { return }
+            self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: currentTarget)
         }
+    }
+
+    private func pageLoadGeneration(for target: WKWebView) -> Int {
+        target === mainWebView ? mainPageLoadGeneration : floatingPageLoadGeneration
     }
 
     private func renderServiceUnavailablePage(_ detail: String, diagnostics: [ServiceDiagnostic], in target: WKWebView) {
@@ -1752,25 +1809,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else {
+            webLogger.error("navigation deny surface=\(self.webSurfaceName(for: webView), privacy: .public) reason=missing-url")
             decisionHandler(.cancel)
             return
         }
-        if url.host == "127.0.0.1" || url.host == "localhost" {
+        if url.absoluteString == "about:blank" {
+            webLogger.debug("navigation allow surface=\(self.webSurfaceName(for: webView), privacy: .public) url=about:blank")
+            decisionHandler(.allow)
+            return
+        }
+        let surface: ASAWebSurface = webView === mainWebView ? .agent : .copilot
+        if webSecurityPolicy.allowsNavigation(to: url, on: surface) {
+            webLogger.info("navigation allow surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(url), privacy: .public)")
             if webView === mainWebView {
-                let appURL = canonicalAgentURL(from: url)
-                if url.path != "/asa-app" || url.query != nil || url.host == "localhost" {
-                    mainWebView.load(URLRequest(url: appURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 20))
-                    UserDefaults.standard.set(appURL.absoluteString, forKey: "asa.lastRoute")
-                    decisionHandler(.cancel)
-                    return
-                }
-                UserDefaults.standard.set(appURL.absoluteString, forKey: "asa.lastRoute")
+                UserDefaults.standard.set(canonicalAgentURL(from: url).absoluteString, forKey: "asa.lastRoute")
             }
             decisionHandler(.allow)
             return
         }
-        NSWorkspace.shared.open(url)
+        if webSecurityPolicy.allowsExternalURL(url), navigationAction.navigationType == .linkActivated {
+            NSWorkspace.shared.open(url)
+        }
+        webLogger.error("navigation deny surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(url), privacy: .public)")
         decisionHandler(.cancel)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        webLogger.info("navigation start surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(webView.url), privacy: .public)")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        webLogger.info("navigation commit surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(webView.url), privacy: .public)")
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webLogger.info("navigation finish surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(webView.url), privacy: .public)")
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -1778,16 +1851,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
               let url = navigationAction.request.url else {
             return nil
         }
+        guard webSecurityPolicy.allowsExternalURL(url) else { return nil }
         NSWorkspace.shared.open(url)
         return nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let nsError = error as NSError
+        if isNavigationCancellation(error) {
+            webLogger.debug("navigation cancelled surface=\(self.webSurfaceName(for: webView), privacy: .public)")
+            return
+        }
+        webLogger.error("navigation provisional-failure surface=\(self.webSurfaceName(for: webView), privacy: .public) domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
         showServiceUnavailablePage(error.localizedDescription, in: webView)
         refreshCollapsedStatus()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let nsError = error as NSError
+        if isNavigationCancellation(error) {
+            webLogger.debug("navigation cancelled-after-commit surface=\(self.webSurfaceName(for: webView), privacy: .public)")
+            return
+        }
+        webLogger.error("navigation failure surface=\(self.webSurfaceName(for: webView), privacy: .public) domain=\(nsError.domain, privacy: .public) code=\(nsError.code)")
         showServiceUnavailablePage(error.localizedDescription, in: webView)
         refreshCollapsedStatus()
     }
@@ -1796,6 +1882,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard message.name == "asaNative",
               let body = message.body as? [String: Any],
               let type = body["type"] as? String else { return }
+        let origin = message.frameInfo.securityOrigin
+        guard message.frameInfo.isMainFrame,
+              webSecurityPolicy.isTrustedOrigin(scheme: origin.protocol, host: origin.host, port: origin.port),
+              let sourceWebView = message.webView else { return }
+        let surface: ASAWebSurface = sourceWebView === mainWebView ? .agent : .copilot
+        guard sourceWebView === mainWebView || sourceWebView === webView,
+              webSecurityPolicy.allowsBridgeAction(type, on: surface) else { return }
         if type == "screenshot" {
             startScreenshotCapture()
         } else if type == "recognizeWeChatImage" {
@@ -1826,7 +1919,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             presentPanel()
         } else if type == "hideFloating" {
             collapsePanel()
-        } else if type == "openExternal", let urlString = body["url"] as? String, let url = URL(string: urlString) {
+        } else if type == "openExternal", let urlString = body["url"] as? String,
+                  let url = URL(string: urlString), webSecurityPolicy.allowsExternalURL(url) {
             NSWorkspace.shared.open(url)
         } else if type == "startWorkbenchService" {
             startWorkbenchService()

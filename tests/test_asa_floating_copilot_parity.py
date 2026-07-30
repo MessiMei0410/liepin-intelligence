@@ -8,7 +8,7 @@
    /api/v1/copilot/messages，Idempotency-Key=floating-{sessionId}-{messageHash}
    （FNV-1a 32 位稳定散列），request_id 同理派生；v1 失败回退
    legacy /api/agent/copilot 一次并 console 留痕。
-3. R9 确认卡（R12-b）——响应/恢复消息携带 pending_intent 时在对应消息下
+3. R9 确认卡（R12-b）——响应/恢复消息携带 pending_intent/action_card 时在对应消息下
    渲染确认卡（confirm_text + 候选人摘要 + 确认/取消），确认打
    /api/v1/copilot/intents/confirm（Idempotency-Key=
    floating-confirm-{sessionId}-{intentHash 前 12 位}），四态语义
@@ -48,19 +48,21 @@ def test_floating_focus_bar_rendering_contract() -> None:
     source = _server_text()
     for marker in [
         'id="focusBar"',
-        ".focus-bar.empty",
-        ".focus-bar.conflict",
+        ".task-ribbon.empty",
+        ".task-ribbon.conflict",
         "renderFocusBar",
         "focusBarLabel",
         "FOCUS_ACTION_LABELS",
         "state.businessFocus",
         "result.business_focus",
         "needs_clarification === true",
-        "需要确认",
-        "当前焦点",
+        "focus?.current_workflow || focus?.pending_workflow",
+        "等待外部寻访授权",
+        "页面对象与当前任务不一致",
+        '<span class="task-ribbon-label">任务</span>',
+        '<span class="task-ribbon-label">页面</span>',
         "focus?.candidate?.name",
         "focus?.client, focus?.job?.title",
-        "focus.directions.join(' / ')",
         "businessFocus:null",
     ]:
         assert marker in source, marker
@@ -73,6 +75,7 @@ def test_floating_focus_bar_rendering_contract() -> None:
         "job_split:'拆分岗位'",
         "job_publish:'发布岗位'",
         "candidate_sourcing:'寻访人选'",
+        "strategy_revision:'修订寻访策略'",
         "candidate_outreach:'触达人选'",
         "candidate_review:'复核人选'",
         "recommendation:'客户推荐'",
@@ -83,9 +86,9 @@ def test_floating_focus_bar_rendering_contract() -> None:
 
 def test_floating_focus_bar_data_sources_contract() -> None:
     source = _server_text()
-    # 三条数据源路径都把 business_focus 落到 state.businessFocus：
-    # sendMessage 响应、restoreCurrentSession、loadSession。
-    assert source.count("state.businessFocus = result.business_focus;") == 3
+    # 四条数据源路径都把 business_focus 落到 state.businessFocus：
+    # 普通/Agent 发送响应、restoreCurrentSession、loadSession。
+    assert source.count("state.businessFocus = result.business_focus;") == 4
     # 焦点条渲染挂进 renderMessages，且焦点条在 context-panels 之外
     # （updateContextPanelsVisibility 语义不变）。
     assert "renderAttachments();\n  renderFocusBar();" in source
@@ -141,6 +144,31 @@ def test_floating_send_message_uses_v1_with_legacy_fallback() -> None:
     )[0]
     assert transport.count("api('/api/v1/copilot/messages'") == 1
     assert transport.count("api('/api/agent/copilot'") == 1
+
+
+def test_floating_execution_cards_recover_and_explain_approval_scope() -> None:
+    source = _server_text()
+    for marker in [
+        "workflow_progress",
+        "resumeWorkflowCards",
+        "pending_approvals",
+        "preflight.impact || preflight.scope || preflight.summary",
+        "有效至 ${approval.expires_at}",
+        "void monitorWorkflow(progress.workflow_id, 120000, index);",
+    ]:
+        assert marker in source, marker
+    handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
+    assert '"workflow_progress": structured.get("workflow_progress"),' in handler
+
+
+def test_floating_candidate_intent_consumes_action_card_evidence() -> None:
+    source = _server_text()
+    section = source.split("function renderFloatingIntentCard", 1)[1].split("function renderWorkflowCard", 1)[0]
+    assert "const actionCard = message?.action_card || {};" in section
+    assert "actionCard.risk_level" in section
+    assert "actionCard.evidence" in section
+    assert "intent-card-evidence" in section
+    assert "action_card: result.action_card || null" in source
 
 
 def test_legacy_copilot_endpoint_forward_semantics_unchanged() -> None:
@@ -381,8 +409,8 @@ def test_floating_intent_card_data_wiring_contract() -> None:
     assert "cancelFloatingIntent(Number(button.dataset.intentCancel))" in source
     # 恢复链：get_copilot_session 透传持久化的 pending_intent，
     # restoreCurrentSession/loadSession 经统一 renderMessages 重渲染出卡
-    agent_service = (ROOT / "scripts" / "a_system_agent" / "service.py").read_text(encoding="utf-8")
-    assert '"pending_intent": structured.get("pending_intent"),' in agent_service
+    copilot_handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
+    assert '"pending_intent": structured.get("pending_intent"),' in copilot_handler
 
 
 # ---------------------------------------------------------------------------

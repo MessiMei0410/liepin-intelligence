@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { clearStrategyReviewCache } from '../api'
 import { RevisePlanDialog } from '../components/RevisePlanDialog'
 import { StrategyReview } from '../workflows/StrategyReview'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
@@ -152,6 +153,7 @@ const stubReviewFetch = (payload: unknown = reviewPayload) => {
 afterEach(() => {
   vi.unstubAllGlobals()
   window.localStorage.clear()
+  clearStrategyReviewCache()
 })
 
 describe('复盘卡扩区：池枯竭信号 + 扩池决策树（StrategyExpansionTree）', () => {
@@ -215,15 +217,16 @@ describe('复盘卡扩区：池枯竭信号 + 扩池决策树（StrategyExpansio
     expect(steps[4].textContent).toContain('5. 转 Mapping 直挖')
   })
 
-  it('回显本地树决策标记（已采纳/已拒绝），与 diff 标记互不干扰', async () => {
+  it('忽略本地树决策，只展示后端回传的待决策状态', async () => {
     window.localStorage.setItem(treeKey, JSON.stringify({ 'exp-2': 'accepted', 'exp-5': 'rejected' }))
     stubReviewFetch()
     const { container } = render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
     await screen.findByRole('region', { name: '没成的原因' })
     const tree = container.querySelector('.review-tree') as HTMLElement
-    expect(within(tree).getByText('已采纳')).toBeInTheDocument()
-    expect(within(tree).getByText('已拒绝')).toBeInTheDocument()
-    expect(within(tree).getAllByText('待决策')).toHaveLength(3)
+    expect(within(tree).queryByText('已采纳')).not.toBeInTheDocument()
+    expect(within(tree).queryByText('已拒绝')).not.toBeInTheDocument()
+    expect(within(tree).getAllByText('待决策')).toHaveLength(5)
+    expect(within(tree).getByText(/在 Copilot 中讨论并确认应用/)).toBeInTheDocument()
   })
 
   it('无信号无树的旧复盘不渲染新区块', async () => {
@@ -326,26 +329,10 @@ describe('修改计划对话框接扩池决策树（RevisePlanDialog）', () => 
   })
 })
 
-describe('工作流面板：调整条件再搜 → 树步骤采纳 → revise 提交链路', () => {
-  it('采纳树步骤预填后提交，revise 请求体带预填内容与采纳步骤后缀', async () => {
-    const user = userEvent.setup()
-    const fetchMock = vi.fn<typeof fetch>(async input => {
-      const url = String(input)
-      if (url.includes('/strategy-review')) return mockResponse(reviewPayload)
-      return mockResponse({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
+describe('工作流面板：不再提供本地树决策入口', () => {
+  it('仅展示 Copilot 交接入口', () => {
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '修改计划' }))
-    const dialog = await screen.findByRole('dialog')
-    const tree = await within(dialog).findByLabelText('人不够时的扩圈建议')
-    await user.click(within(tree).getAllByRole('button', { name: '采纳' })[1])
-    await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
-    expect(reviseCall).toBeDefined()
-    expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({
-      instruction: '扩池：向 T2（客户整机厂）扩展\n扩向 T2（客户整机厂）：立讯精密、工业富联\n依据：客户整机厂设有同款技术市场职能\n【采纳步骤】exp-2',
-    })
+    expect(screen.getByRole('button', { name: '在 Copilot 中讨论策略' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '修改计划' })).not.toBeInTheDocument()
   })
 })

@@ -119,9 +119,32 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         self.assertTrue(hasattr(server, "candidate_assistant_origin_decision"), "缺少来源权限判定")
         decide = server.candidate_assistant_origin_decision
         self.assertEqual(decide("null"), "allow")
-        self.assertEqual(decide("https://h.liepin.com"), "allow")
-        self.assertEqual(decide("https://headhunt.x-saas.com.cn"), "allow")
+        self.assertEqual(decide("chrome-extension://aihpahceageafhjhedhmeikhcfbfoffn"), "allow")
+        self.assertEqual(decide("chrome-extension://cecifklpjckkbclegnmapegnedelapjh"), "allow")
+        self.assertEqual(decide("https://h.liepin.com"), "deny")
+        self.assertEqual(decide("https://headhunt.x-saas.com.cn"), "deny")
         self.assertEqual(decide("https://evil.example"), "deny")
+
+    def test_xsaas_intake_without_project_is_pending_review_and_never_writes(self) -> None:
+        payload = {
+            "kind": "xsaas_intake",
+            "candidate": "缺项目测试人选",
+            "company": "测试公司",
+            "title": "测试职位",
+            "xsaas_id": "missing-project-test",
+            "client": "",
+            "job": "",
+        }
+        dry_run = server.apply_talent_action_batch({**payload, "write": False})
+        write = server.apply_talent_action_batch({**payload, "write": True})
+        self.assertTrue(dry_run["ok"])
+        self.assertTrue(dry_run["dry_run"])
+        self.assertEqual(dry_run["sync"]["result"]["summary"]["pending_review"], 1)
+        self.assertEqual(dry_run["sync"]["result"]["summary"]["would_write"], 0)
+        self.assertEqual(dry_run["batch_path"], "")
+        self.assertFalse(write["ok"])
+        self.assertEqual(write["returncode"], 2)
+        self.assertEqual(write["batch_path"], "")
 
     def test_preflight_token_commits_reply_event_task_and_stage_once(self) -> None:
         self.assertTrue(hasattr(server, "candidate_message_preflight"), "缺少候选人消息预检")

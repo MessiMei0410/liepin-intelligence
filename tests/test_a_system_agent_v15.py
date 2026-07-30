@@ -28,6 +28,16 @@ class AgentV15ServiceTest(AgentDbCase):
         self.assertEqual(skills["outreach_prepare"]["risk_level"], "R1")
         self.assertIn("single_action_confirmation", skills["outreach_execute"]["required_permissions"])
         self.assertEqual(skills["communication_draft"]["risk_level"], "R1")
+        self.assertEqual(skills["multi_channel_sourcing"]["action_kind"], "external_write")
+        self.assertEqual(skills["multi_channel_sourcing"]["preflight_mode"], "required")
+        self.assertEqual(skills["multi_channel_sourcing"]["confirmation_surface"], "workflow_approval")
+        self.assertEqual(skills["multi_channel_sourcing"]["post_check"], "external_evidence")
+        self.assertEqual(skills["job_diagnosis"]["action_kind"], "read")
+        self.assertEqual(skills["job_diagnosis"]["audit_event_type"], "capability.job_diagnosis")
+        with self.assertRaisesRegex(ValueError, "人工预检|单次审批"):
+            service.execute_skill("identity_merge_preflight", context={"type": "candidate"}, inputs={})
+        with self.assertRaisesRegex(ValueError, "人工预检|单次审批"):
+            service.execute_skill("multi_channel_sourcing", context={"type": "job"}, inputs={})
         with self.assertRaisesRegex(ValueError, "未注册"):
             service.execute_skill("shell", context={"type": "global"}, inputs={})
         service.close()
@@ -291,6 +301,20 @@ class AgentV15ServiceTest(AgentDbCase):
         self.assertEqual(proposals["proposals"][0]["proposal_id"], proposal_id)
         service.close()
 
+    def test_expired_proposal_confirmation_token_is_rejected(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        service.submit_assessment(30, wait=True)
+        proposal = service.generate_proposals([30])["proposals"][0]
+        preflight = service.proposal_preflight(proposal["proposal_id"])
+        with service._lock:
+            service._proposal_confirmations[preflight["confirmation_token"]]["expires_at"] = time.time() - 1
+        with self.assertRaisesRegex(ValueError, "无效或已过期"):
+            service.decide_proposal(
+                proposal["proposal_id"], preflight["confirmation_token"], "approve"
+            )
+        self.assertEqual(service.list_proposals("pending")["proposals"][0]["proposal_id"], proposal["proposal_id"])
+        service.close()
+
     def test_proposal_reject_does_not_execute(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment()))
         service.submit_assessment(30, wait=True)
@@ -301,6 +325,27 @@ class AgentV15ServiceTest(AgentDbCase):
         )
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(service.list_proposals("pending")["proposals"], [])
+        service.close()
+
+    def test_unknown_proposal_action_is_failed_without_agent_action(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        service.submit_assessment(30, wait=True)
+        proposal = service.generate_proposals([30])["proposals"][0]
+        conn = service._connect()
+        conn.execute(
+            "UPDATE agent_action_proposals SET action_type='external_unknown',status='approved' WHERE proposal_id=?",
+            (proposal["proposal_id"],),
+        )
+        conn.commit()
+        conn.close()
+        proposal["action_type"] = "external_unknown"
+        with self.assertRaisesRegex(ValueError, "不支持自动执行动作"):
+            service.execute_proposal(proposal)
+        failed = service.list_proposals("failed")["proposals"]
+        self.assertEqual(failed[0]["proposal_id"], proposal["proposal_id"])
+        conn = service._connect()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_actions").fetchone()[0], 0)
+        conn.close()
         service.close()
 
     def test_failed_execution_can_be_regenerated_on_same_snapshot(self) -> None:

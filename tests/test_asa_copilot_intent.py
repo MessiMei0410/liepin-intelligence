@@ -192,6 +192,11 @@ def test_pending_intent_confirm_full_chain(db_path: Path) -> None:
         pending = body["pending_intent"]
         assert pending["action"] == "stop"
         assert pending["confirm_text"] == "将停止推进 黄**，确认？"
+        card = body["action_card"]
+        assert card["proposal_id"] is None  # candidate writes retain their existing preflight/commit chain
+        assert card["capability_id"] == "candidate_action"
+        assert card["risk_level"] == "R2"
+        assert card["next_actions"][0]["type"] == "confirm_candidate_intent"
         # 确认前未写入
         assert _candidate_row(db_path) == ACTIVE_STAGE
         assert client.get(f"/api/v1/candidates/{CANDIDATE_ID}").json()["candidate"]["is_stopped"] is False

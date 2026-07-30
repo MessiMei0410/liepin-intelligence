@@ -10,7 +10,13 @@ from fastapi.testclient import TestClient
 
 from asa_core.app import create_app
 from asa_core.database import migrate
-from asa_core.service import _explicit_candidate_update
+from asa_core.service import (
+    _explicit_candidate_update,
+    _public_effective_strategy,
+    _resume_overview_summary,
+    _workflow_action_card,
+)
+from a_system_agent.context import build_candidate_context
 import liepin_workbench_server as legacy
 
 
@@ -21,6 +27,222 @@ def test_read_no_reply_update_requires_a_statement_or_write_intent() -> None:
     assert _explicit_candidate_update("记录一下，这个人选消息已读未回") == "read_no_reply"
     assert _explicit_candidate_update("这个人选已读不回") == "read_no_reply"
     assert _explicit_candidate_update("这个人选已读不回怎么办") == ""
+
+
+def test_resume_summary_excludes_work_and_project_body() -> None:
+    summary = _resume_overview_summary(
+        {
+            "profile_text": "张三\n在职，看看新机会\n求职意向\n算法工程师\n工作经历\n示例科技\n职责业绩：不应显示\n项目经历\n保密项目"
+        }
+    )
+    assert summary == "张三\n在职，看看新机会\n求职意向\n算法工程师"
+    assert "职责业绩" not in summary
+    assert "保密项目" not in summary
+
+
+def test_workflow_action_card_requires_a_real_workflow_and_preserves_r3_approval() -> None:
+    assert _workflow_action_card({}) is None
+    card = _workflow_action_card({
+        "workflow_id": "workflow_real",
+        "goal": {"title": "士兰微寻访"},
+        "workflow": {"status": "waiting_approval", "current_stage": "多渠道寻访"},
+        "plan_summary": [{"capability_id": "multi_channel_sourcing", "label": "执行多渠道寻访", "status": "waiting_approval"}],
+        "approvals": [{"approval_id": "approval_r3", "risk_level": "R3", "status": "pending"}],
+    })
+    assert card is not None
+    assert card["context"]["id"] == "workflow_real"
+    assert card["risk_level"] == "R3"
+    assert card["next_actions"][-1] == {
+        "type": "workflow_approval", "id": "approval_r3", "label": "批准本次外部寻访"
+    }
+    assert card["blocked_reasons"] == ["外部动作仍需 R3 单次审批"]
+
+
+def test_public_effective_strategy_excludes_restricted_rules_and_companies() -> None:
+    strategy = _public_effective_strategy(
+        {
+            "schema_version": "strategy_v2",
+            "plan": {"consultant_constraints": [{"type": "must", "rule": "必须有服务器电源经验"}]},
+            "strategy_v2": {
+                "input_level": "L2",
+                "step1_job_essence": {"statement": "服务器电源核心岗"},
+                "step2_target_pool": [{
+                    "tier": "T1",
+                    "companies": [
+                        {"name": "公开目标公司", "source": "kb_profile"},
+                        {"name": "禁挖公司", "source": "restricted_client"},
+                    ],
+                }],
+                "step4_keyword_groups": [{"group": "core", "terms": ["服务器电源"]}],
+                "negative_rules": [{"type": "禁挖名单", "rule": "禁挖公司", "source": "restricted_client"}],
+            },
+        },
+        {
+            "workflow_status": "waiting_approval",
+            "context_json": json.dumps({"revision_number": 1}),
+            "created_at": "2026-07-30 09:00:00",
+            "workflow_id": "workflow_1",
+            "artifact_id": "artifact_1",
+        },
+    )
+
+    assert strategy["plan_version"] == 2
+    assert strategy["company_tiers"][0]["companies"] == ["公开目标公司"]
+    assert "negative_rules" not in strategy
+    assert "禁挖公司" not in json.dumps(strategy, ensure_ascii=False)
+
+
+def test_agent_mode_hides_executable_suggestions_without_a_real_workflow(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        client.app.state.core.agent_service.copilot = lambda *_args, **_kwargs: {
+            "ok": True,
+            "session_id": "agent_without_workflow",
+            "answer": "候选人寻访已启动。",
+            "suggested_actions": [
+                {"type": "start_sourcing", "id": 111, "label": "开始寻访"},
+                {"type": "open_job", "id": 111, "label": "打开岗位"},
+            ],
+        }
+        response = client.post("/api/v1/copilot/agent", json={
+            "request_id": "agent-without-workflow",
+            "session_id": "agent_without_workflow",
+            "message": "查看这个岗位的候选人覆盖情况",
+            "context": {"type": "job", "id": 111},
+        })
+        assert response.status_code == 200, response.json()
+        body = response.json()
+        assert "尚未创建寻访工作流" in body["answer"]
+        assert "action_card" not in body
+        assert body["suggested_actions"] == [{"type": "open_job", "id": 111, "label": "打开岗位"}]
+
+
+def test_agent_mode_returns_r3_action_card_only_after_real_workflow(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        client.app.state.core.agent_service.copilot = lambda *_args, **_kwargs: {
+            "ok": True,
+            "session_id": "agent_with_workflow",
+            "answer": "已生成寻访执行计划。",
+            "workflow_id": "workflow_agent_real",
+            "goal": {"title": "士兰微电源专家寻访"},
+            "workflow": {"status": "waiting_approval", "current_stage": "多渠道寻访"},
+            "plan_summary": [{"capability_id": "multi_channel_sourcing", "label": "多渠道寻访", "status": "pending"}],
+            "approvals": [{"approval_id": "approval_agent_r3", "risk_level": "R3", "status": "pending"}],
+            "suggested_actions": [{"type": "start_sourcing", "id": 111, "label": "开始寻访"}],
+        }
+        response = client.post("/api/v1/copilot/agent", json={
+            "request_id": "agent-with-workflow",
+            "session_id": "agent_with_workflow",
+            "message": "给士兰微电源专家补充人选",
+            "context": {"type": "job", "id": 111},
+        })
+        assert response.status_code == 200
+        body = response.json()
+        assert body["suggested_actions"] == []
+        assert body["action_card"]["context"]["id"] == "workflow_agent_real"
+        assert body["action_card"]["risk_level"] == "R3"
+        assert body["action_card"]["next_actions"][-1] == {
+            "type": "workflow_approval", "id": "approval_agent_r3", "label": "批准本次外部寻访"
+        }
+
+
+def test_stream_replays_the_canonical_copilot_result_idempotently(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        calls = 0
+
+        def canonical(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "ok": True,
+                "session_id": "stream-parity",
+                "answer": "统一决策结果",
+                "context": {"type": "job", "id": 111},
+                "references": [],
+                "suggested_actions": [],
+                "turn_decision": {"version": "turn_decision_v2", "effect": "answer"},
+            }
+
+        client.app.state.core.copilot = canonical
+        payload = {
+            "request_id": "stream-parity-request",
+            "session_id": "stream-parity",
+            "message": "这个岗位要不要继续寻访？",
+            "context": {"type": "job", "id": 111},
+        }
+        headers = {"Idempotency-Key": "stream-parity-key"}
+        first = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+        replay = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert calls == 1
+        assert "event: done" in first.text
+        assert "turn_decision_v2" in replay.text
+        assert '"idempotent_replay": true' in replay.text
+
+
+def test_legacy_agent_endpoint_is_a_canonical_idempotent_alias(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        calls = 0
+
+        def canonical(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return {
+                "ok": True,
+                "session_id": "agent-alias",
+                "answer": "统一入口",
+                "suggested_actions": [],
+                "turn_decision": {"version": "turn_decision_v2", "effect": "answer"},
+            }
+
+        client.app.state.core.copilot = canonical
+        payload = {
+            "request_id": "agent-alias-request",
+            "session_id": "agent-alias",
+            "message": "查看岗位覆盖",
+            "context": {"type": "job", "id": 111},
+        }
+        headers = {"Idempotency-Key": "agent-alias-key"}
+        first = client.post("/api/v1/copilot/agent", json=payload, headers=headers)
+        replay = client.post("/api/v1/copilot/agent", json=payload, headers=headers)
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert calls == 1
+        assert replay.json()["receipt"]["idempotent_replay"] is True
+        assert replay.json()["turn_decision"]["version"] == "turn_decision_v2"
+
+
+def test_agent_mode_action_card_persistence_preserves_strategy_patch(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """INSERT INTO agent_copilot_messages
+                   (session_id,context_type,context_id,role,content,structured_json)
+                   VALUES ('agent-persist','workflow','workflow-1','assistant','原回答',?)""",
+                (json.dumps({"strategy_patch": {"workflow_id": "workflow-1", "changes": [{"field": "query"}]}}),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        card = {"risk_level": "R3", "context": {"type": "workflow", "id": "workflow-1"}}
+        client.app.state.core._persist_agent_action_cards({
+            "session_id": "agent-persist",
+            "action_card": card,
+            "action_cards": [card],
+            "suggested_actions": [],
+        })
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = json.loads(conn.execute(
+                "SELECT structured_json FROM agent_copilot_messages WHERE session_id='agent-persist'"
+            ).fetchone()[0])
+        finally:
+            conn.close()
+        assert stored["strategy_patch"]["workflow_id"] == "workflow-1"
+        assert stored["action_card"] == card
 
 
 @pytest.fixture()
@@ -42,6 +264,145 @@ def test_migrations_are_idempotent(db_path: Path) -> None:
     assert first["ok"] is True
     assert second["applied"] == []
     assert second["foreign_key_issues"] == []
+
+
+def test_migration_recovers_abandoned_idempotency_processing_records(db_path: Path) -> None:
+    migrate(db_path, backup=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO api_idempotency
+                (idempotency_key,operation,request_id,request_hash,status,created_at)
+            VALUES ('abandoned-key','candidate.commit','abandoned-request','hash','processing',datetime('now','localtime','-10 minutes'))
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrate(db_path, backup=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        recovered = conn.execute(
+            "SELECT status,response_status,error_json FROM api_idempotency WHERE idempotency_key='abandoned-key'"
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT result FROM audit_events WHERE request_id='abandoned-request' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert recovered is not None
+    assert recovered[0] == "failed"
+    assert recovered[1] == 500
+    assert json.loads(recovered[2])["outcome"] == "unknown"
+    assert audit == ("failed",)
+
+
+def test_core_v1_proposal_card_preflight_decision_and_audit(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        agent = client.app.state.core.agent_service
+        conn = sqlite3.connect(db_path)
+        try:
+            candidate_id = conn.execute(
+                """
+                SELECT id FROM job_candidates
+                WHERE COALESCE(clean_stage,'') NOT LIKE '%初筛不通过%'
+                  AND lower(COALESCE(raw_status,'')) NOT IN ('screen_rejected','rejected','stopped','closed')
+                ORDER BY id LIMIT 1
+                """
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        context = build_candidate_context(db_path, candidate_id)
+        snapshot_hash = agent._snapshot_key(context)
+        proposal_id = f"core_proposal_{uuid.uuid4().hex[:10]}"
+        dedupe_key = f"core-proposal-{uuid.uuid4().hex}"
+        request = {
+            "job_candidate_id": candidate_id,
+            "task_type": "agent_verification",
+            "reason": "核验当前关键证据",
+            "priority": 2,
+            "write": True,
+        }
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_action_proposals
+                (proposal_id,job_candidate_id,snapshot_hash,dedupe_key,action_type,risk_level,title,rationale,request_json,expires_at)
+                VALUES (?,?,?,?,?,'R1',?,?,?,datetime('now','+1 day'))
+                """,
+                (
+                    proposal_id, candidate_id, snapshot_hash, dedupe_key, "create_task",
+                    "创建内部核验任务", "需要人工补充当前证据", json.dumps(request, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        listed = client.get("/api/v1/agent/proposals?status=pending").json()
+        card = next(item["action_card"] for item in listed["proposals"] if item["proposal_id"] == proposal_id)
+        assert card["proposal_id"] == proposal_id
+        assert card["capability_id"] == "verification_plan"
+        assert card["risk_level"] == "R1"
+        assert card["next_actions"][0]["type"] == "preflight"
+        preflight = client.post(
+            f"/api/v1/agent/proposals/{proposal_id}/preflight",
+            json={"request_id": "core-proposal-preflight"},
+        )
+        assert preflight.status_code == 200
+        token = preflight.json()["confirmation_token"]
+        decision = client.post(
+            f"/api/v1/agent/proposals/{proposal_id}/decision",
+            headers={"Idempotency-Key": "core-proposal-decision"},
+            json={"request_id": "core-proposal-decision", "confirmation_token": token, "decision": "approve"},
+        )
+        assert decision.status_code == 200
+        assert decision.json()["status"] == "executed"
+        assert decision.json()["post_check"]["status"] == "verified"
+        assert decision.json()["receipt"]["idempotent_replay"] is False
+        conn = sqlite3.connect(db_path)
+        try:
+            proposal = conn.execute(
+                "SELECT status,action_id FROM agent_action_proposals WHERE proposal_id=?", (proposal_id,)
+            ).fetchone()
+            action = conn.execute("SELECT action_type,status FROM agent_actions WHERE idempotency_key=?", (dedupe_key,)).fetchone()
+        finally:
+            conn.close()
+        assert proposal[0] == "executed"
+        assert proposal[1] is not None
+        assert action == ("create_task", "executed")
+
+
+def test_agent_action_metrics_expose_the_seven_day_action_card_loop(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        agent = client.app.state.core.agent_service
+        conn = sqlite3.connect(db_path)
+        try:
+            candidate_id = conn.execute("SELECT id FROM job_candidates ORDER BY id LIMIT 1").fetchone()[0]
+            snapshot_hash = agent._snapshot_key(build_candidate_context(db_path, candidate_id))
+            for status in ("pending", "rejected", "executed", "failed"):
+                suffix = uuid.uuid4().hex[:10]
+                conn.execute(
+                    """INSERT INTO agent_action_proposals
+                       (proposal_id,job_candidate_id,snapshot_hash,dedupe_key,action_type,risk_level,title,status,created_at,updated_at,reviewed_at)
+                       VALUES (?,?,?,?,?,'R1','指标测试',?,datetime('now','localtime'),datetime('now','localtime'),datetime('now','localtime'))""",
+                    (f"metric_{status}_{suffix}", candidate_id, snapshot_hash, f"metric-{status}-{suffix}", "create_task", status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        response = client.get("/api/v1/agent/metrics?days=7")
+        assert response.status_code == 200
+        metrics = response.json()["metrics"]
+        assert metrics["action_cards_generated"] >= 4
+        assert metrics["confirmed"] >= 2
+        assert metrics["rejected"] >= 1
+        assert metrics["executed"] >= 1
+        assert metrics["failed"] >= 1
+        assert set(metrics) >= {"confirmation_rate", "rejection_rate", "execution_failure_rate", "needs_clarification", "r3_approvals"}
 
 
 def test_read_contract_uses_real_v3_data(db_path: Path) -> None:
@@ -72,20 +433,38 @@ def test_workbench_ui_is_app_only(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         assert client.get("/workbench").status_code == 403
         assert client.get("/asa-app").status_code == 403
+        assert client.get("/asa-app/").status_code == 403
         response = client.get("/asa-app", headers={"User-Agent": "ASAApp/0.2.16"})
         assert response.status_code in {200, 503}
+        slash_response = client.get("/asa-app/", headers={"User-Agent": "ASAApp/0.2.16"})
+        assert slash_response.status_code in {200, 503}
         assert client.get("/api/v1/health").status_code == 200
 
 
 @pytest.mark.parametrize(
     "origin",
     [
-        "https://h.liepin.com",
-        "https://headhunt.x-saas.com.cn",
+        "chrome-extension://aihpahceageafhjhedhmeikhcfbfoffn",
+        "chrome-extension://cecifklpjckkbclegnmapegnedelapjh",
     ],
 )
 def test_candidate_extensions_can_preflight_context_bridge(origin: str, db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = client.options(
+            "/api/asa/floating/context",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_app_origin_tracks_the_configured_local_core_port(db_path: Path) -> None:
+    origin = "http://127.0.0.1:8876"
+    with TestClient(create_app(db_path=db_path, port=8876, start_legacy=False)) as client:
         response = client.options(
             "/api/asa/floating/context",
             headers={
@@ -108,8 +487,20 @@ def test_context_bridge_rejects_lookalike_origins(db_path: Path) -> None:
                 "Access-Control-Request-Headers": "content-type",
             },
         )
-        assert response.status_code == 400
+        assert response.status_code == 403
         assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.parametrize("origin", ["https://h.liepin.com", "https://headhunt.x-saas.com.cn"])
+def test_recruiting_pages_cannot_call_local_api_directly(origin: str, db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = client.post(
+            "/api/v1/copilot/events",
+            headers={"Origin": origin},
+            json={"request_id": "blocked-browser-write", "session_id": "blocked", "event": "test"},
+        )
+        assert response.status_code == 403
+        assert response.json()["error"] == "browser origin is not authorized for the local ASA API"
 
 
 def test_dashboard_and_jobs_exclude_stopped_and_empty_left_join_rows(db_path: Path) -> None:
@@ -584,7 +975,8 @@ def test_copilot_candidate_synonym_creates_sourcing_workflow(db_path: Path) -> N
         assert response.status_code == 200
         body = response.json()
         assert body["workflow_id"]
-        assert any(item["type"] == "start_workflow" for item in body["suggested_actions"])
+        assert all(item["type"] != "start_workflow" for item in body["suggested_actions"])
+        assert any(item["type"] == "start_workflow" for item in body["action_card"]["next_actions"])
         assert any(step["capability_id"] == "multi_channel_sourcing" for step in body["plan_summary"])
 
 
@@ -609,7 +1001,7 @@ def test_workflow_archive_hides_current_card_but_preserves_detail(db_path: Path)
             headers={"Idempotency-Key": archive_id},
             json={"request_id": archive_id},
         )
-        assert response.status_code == 200
+        assert response.status_code == 200, response.json()
         assert response.json()["workflow"]["archived_at"]
         assert all(item["workflow_id"] != workflow_id for item in client.get("/api/v1/dashboard").json()["workflows"])
         detail = client.get(f"/api/v1/workflows/{workflow_id}")
@@ -662,7 +1054,8 @@ def test_copilot_job_split_creates_job_library_update_workflow(db_path: Path) ->
         assert response.status_code == 200
         body = response.json()
         assert body["workflow_id"]
-        assert any(item["type"] == "start_workflow" for item in body["suggested_actions"])
+        assert all(item["type"] != "start_workflow" for item in body["suggested_actions"])
+        assert any(item["type"] == "start_workflow" for item in body["action_card"]["next_actions"])
         assert any(step["capability_id"] == "job_library_update" for step in body["plan_summary"])
 
 
@@ -741,6 +1134,106 @@ def test_candidate_write_is_idempotent_and_preflight_is_single_use(db_path: Path
         assert replay.status_code == 200
         assert replay.json()["receipt"]["idempotent_replay"] is True
         assert reused.status_code == 409
+
+
+def test_failed_idempotent_action_is_audited_and_never_left_processing(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        core = client.app.state.core
+        attempts = 0
+
+        def fail_after_claim() -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("simulated action failure")
+
+        kwargs = {
+            "operation": "test.failure",
+            "request_id": "test-failure-request",
+            "idempotency_key": "test-failure-key",
+            "payload": {"value": 1},
+            "target_type": "test",
+            "target_id": "1",
+            "action": fail_after_claim,
+        }
+        with pytest.raises(RuntimeError, match="simulated action failure"):
+            core.execute_idempotent(**kwargs)
+        with pytest.raises(ValueError, match="previous request failed"):
+            core.execute_idempotent(**kwargs)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            record = conn.execute(
+                "SELECT status,response_status,error_json FROM api_idempotency WHERE idempotency_key='test-failure-key'"
+            ).fetchone()
+            audit = conn.execute(
+                "SELECT result FROM audit_events WHERE operation='test.failure' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert attempts == 1
+        assert record is not None
+        assert record[0] == "failed"
+        assert record[1] == 500
+        assert json.loads(record[2])["type"] == "RuntimeError"
+        assert audit == ("failed",)
+
+
+def test_candidate_learning_failure_preserves_committed_business_write(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE job_candidates SET clean_stage='S1 新增寻访/待复核',flow_bucket='待复核',raw_status='search_shortlisted' WHERE id=558"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        def fail_learning(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise RuntimeError("simulated learning failure")
+
+        monkeypatch.setattr(
+            client.app.state.core.agent_service,
+            "record_sourcing_business_signal",
+            fail_learning,
+        )
+        preflight = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": "learning-failure-preflight", "candidate_id": 558, "action": "advance"},
+        ).json()
+        response = client.post(
+            "/api/v1/candidate-actions/commit",
+            headers={"Idempotency-Key": "learning-failure-commit"},
+            json={
+                "request_id": "learning-failure-commit",
+                "candidate_id": 558,
+                "action": "advance",
+                "preflight_token": preflight["token"],
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["stage"] == "S2 复核通过/待联系"
+        assert payload["sourcing_learning"]["recorded"] is False
+        assert payload["sourcing_learning"]["error_type"] == "RuntimeError"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            stage = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=558").fetchone()[0]
+            idem_status = conn.execute(
+                "SELECT status FROM api_idempotency WHERE idempotency_key='learning-failure-commit'"
+            ).fetchone()[0]
+            learning_audit = conn.execute(
+                "SELECT result FROM audit_events WHERE operation='candidate.learning_backflow' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stage == "S2 复核通过/待联系"
+        assert idem_status == "completed"
+        assert learning_audit == ("failed",)
 
 
 def test_user_business_actions_update_sourcing_keyword_memory(db_path: Path) -> None:

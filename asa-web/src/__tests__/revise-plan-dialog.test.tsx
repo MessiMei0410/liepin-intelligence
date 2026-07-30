@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { RevisePlanDialog } from '../components/RevisePlanDialog'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
@@ -43,20 +43,20 @@ describe('修改计划对话框', () => {
     expect(onCancel).toHaveBeenCalledTimes(2)
   })
 
-  it('工作流面板中以相同参数调用 revise 接口（与 prompt 时代一致）', async () => {
+  it('工作流面板只交接到 Copilot，不再从本地对话框调用 revise 接口', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
-    const reload = vi.fn()
-    render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={reload} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '修改计划' }))
-    const dialog = await screen.findByRole('dialog')
-    await user.type(within(dialog).getByRole('textbox'), '  提高学历门槛 ')
-    await user.click(within(dialog).getByRole('button', { name: '确认修改' }))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const postMessage = vi.fn()
+    const close = vi.fn()
+    ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
+    render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={close} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+    await user.click(screen.getByRole('button', { name: '在 Copilot 中讨论策略' }))
+    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: 'showFloating' }))
+    expect(close).not.toHaveBeenCalled()
+    expect(screen.getByRole('heading', { name: plannedWorkflow.goal.title })).toBeInTheDocument()
     const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
-    expect(reviseCall).toBeDefined()
-    expect(JSON.parse(String((reviseCall?.[1] as RequestInit).body))).toMatchObject({ instruction: '提高学历门槛' })
-    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+    expect(reviseCall).toBeUndefined()
+    delete (window as Window & { webkit?: unknown }).webkit
   })
 })

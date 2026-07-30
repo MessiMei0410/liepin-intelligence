@@ -8,10 +8,10 @@ import { Overview } from '../pages/Overview'
 import { Jobs } from '../pages/Jobs'
 import { Candidates } from '../pages/Candidates'
 import { Progress } from '../pages/Progress'
-import { RadarPage } from '../pages/Radar'
 import { JobPanel } from '../panels/JobPanel'
 import { CandidatePanel } from '../panels/CandidatePanel'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
+import { resolveWorkflowRevision } from '../workflow/workflowRevision'
 import { Diagnostics } from './Diagnostics'
 
 export function App() {
@@ -34,72 +34,69 @@ export function App() {
       .catch(e => setError(String(e.message || e)))
   }, [refreshKey])
 
+  // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
+  // dashboard 计数由统一轮询自然收敛。
+  const refreshCandidateList = async () => {
+    try { setCandidates((await api.candidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
+  }
+
+  // 合并双轮询：单一定时器统一刷新 dashboard + 候选人详情，避免两个独立 setInterval(2000)。
   useEffect(() => {
     let active = true
-    let refreshing = false
-    const refreshDashboard = async () => {
-      if (!active || refreshing || document.hidden) return
-      refreshing = true
-      try {
-        const next = await api.dashboard()
-        if (active) setDashboard(next)
-      } catch {
-        // The full bootstrap path surfaces persistent connection failures.
-      } finally {
-        refreshing = false
+    let refreshingDashboard = false
+    let refreshingCandidate = false
+    const tick = async () => {
+      if (!active || document.hidden) return
+      // 刷新 dashboard
+      if (!refreshingDashboard) {
+        refreshingDashboard = true
+        try {
+          const next = await api.dashboard()
+          if (active) setDashboard(next)
+        } catch {
+          // The full bootstrap path surfaces persistent connection failures.
+        } finally {
+          refreshingDashboard = false
+        }
+      }
+      // 刷新候选人详情（当详情面板打开时）
+      const cid = candidateStateRef.current?.id
+      if (cid && !refreshingCandidate) {
+        refreshingCandidate = true
+        try {
+          const fresh = (await api.candidate(cid)).candidate
+          if (!active || candidateStateRef.current?.id !== cid) return
+          const current = candidateStateRef.current
+          const changed = !current
+            || current.updated_at !== fresh.updated_at
+            || current.clean_stage !== fresh.clean_stage
+            || current.raw_status !== fresh.raw_status
+            || current.events.length !== fresh.events.length
+          if (changed) {
+            candidateStateRef.current = fresh
+            setCandidate(fresh)
+            void refreshCandidateList()
+          }
+        } catch {
+          // Keep the current detail visible during a transient core restart.
+        } finally {
+          refreshingCandidate = false
+        }
       }
     }
-    const timer = window.setInterval(refreshDashboard, 2000)
-    const onVisible = () => { if (!document.hidden) void refreshDashboard() }
-    window.addEventListener('focus', refreshDashboard)
+    const timer = window.setInterval(tick, 2000)
+    const onVisible = () => { if (!document.hidden) void tick() }
+    window.addEventListener('focus', tick)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
       active = false
       window.clearInterval(timer)
-      window.removeEventListener('focus', refreshDashboard)
+      window.removeEventListener('focus', tick)
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [])
 
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
-
-  // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
-  // dashboard 计数由既有 2s 轮询自然收敛。
-  const refreshCandidateList = async () => {
-    try { setCandidates((await api.candidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
-  }
-
-  useEffect(() => {
-    const candidateId = candidate?.id
-    if (!candidateId) return
-    let active = true
-    const refreshCandidate = async () => {
-      try {
-        const fresh = (await api.candidate(candidateId)).candidate
-        if (!active || candidateStateRef.current?.id !== candidateId) return
-        const current = candidateStateRef.current
-        const changed = !current
-          || current.updated_at !== fresh.updated_at
-          || current.clean_stage !== fresh.clean_stage
-          || current.raw_status !== fresh.raw_status
-          || current.events.length !== fresh.events.length
-        if (changed) {
-          candidateStateRef.current = fresh
-          setCandidate(fresh)
-          void refreshCandidateList()
-        }
-      } catch {
-        // Keep the current detail visible during a transient core restart.
-      }
-    }
-    const timer = window.setInterval(refreshCandidate, 2000)
-    window.addEventListener('focus', refreshCandidate)
-    return () => {
-      active = false
-      window.clearInterval(timer)
-      window.removeEventListener('focus', refreshCandidate)
-    }
-  }, [candidate?.id])
 
   useEffect(() => {
     const openHash = () => {
@@ -132,16 +129,41 @@ export function App() {
     catch (e) { setError(humanizeActionError(e, '归档失败，请重试。')) }
   }
   const openWorkflow = async (id: string) => {
-    try { setJob(undefined); setCandidate(undefined); setWorkflow(await api.workflow(id)); location.hash = `workflow=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try {
+      setJob(undefined); setCandidate(undefined)
+      const resolved = await resolveWorkflowRevision(id, api.workflow)
+      setWorkflow(resolved.value)
+      const nextHash = `workflow=${encodeURIComponent(resolved.id)}`
+      if (resolved.id !== id) history.replaceState(null, '', `${location.pathname}${location.search}#${nextHash}`)
+      else location.hash = nextHash
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); history.replaceState(null, '', location.pathname) }
   const visibleJobs = jobs.filter(j => !query || `${j.id} ${j.client} ${j.title} ${j.status}`.toLowerCase().includes(query.toLowerCase()))
   const visibleCandidates = candidates.filter(c => !query || `${c.name} ${c.current_company} ${c.current_title} ${c.job} ${c.client}`.toLowerCase().includes(query.toLowerCase()))
-  const copilotContext = candidate ? { type: 'candidate', id: candidate.id, candidate: candidate.name, client: candidate.client, job: candidate.job } : job ? { type: 'job', id: job.id, client: job.client, job: job.title } : workflow ? { type: 'workflow', id: workflow.workflow.workflow_id } : { type: 'page', page: tab }
+  const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
+  const workflowJobId = Number(workflowContext?.id || 0)
+  const workflowJob = jobs.find(item => item.id === workflowJobId)
+  const copilotContext = candidate
+    ? { type: 'candidate', id: candidate.id, candidate: candidate.name, client: candidate.client, job: candidate.job, mode: 'candidate_review', page: tab }
+    : job
+      ? { type: 'job', id: job.id, client: job.client, job: job.title, mode: 'job_review', page: tab }
+      : workflow
+        ? {
+            type: 'workflow', id: workflow.workflow.workflow_id,
+            client: String(workflowContext?.client || workflowJob?.client || ''),
+            job: String(workflowContext?.job || workflowJob?.title || ''),
+            mode: String(workflowContext?.mode || 'workflow_review'),
+            page: tab,
+          }
+        : { type: 'page', page: tab, mode: 'page_review' }
   const copilotContextSignature = JSON.stringify(copilotContext)
   useEffect(() => {
-    if (copilotContext.type === 'page') return
-    void publishCopilotContext(copilotContext, 'selection', true)
+    void publishCopilotContext(
+      copilotContext,
+      copilotContext.type === 'page' ? 'navigation' : 'selection',
+      false,
+    )
   }, [copilotContextSignature])
 
   if (error && !boot) return <Diagnostics error={error} retry={() => setRefreshKey(x => x + 1)} />
@@ -159,11 +181,10 @@ export function App() {
         <button className="button copilot-launch" title="打开 ASA Copilot 浮窗" aria-label="打开 ASA Copilot 浮窗" onClick={()=>openCopilotWindow(copilotContext)}><MessageSquareText/><span>Copilot</span></button>
       </header>
       <div className="content">
-        {tab === 'overview' && <Overview dashboard={dashboard} jobs={jobs} candidates={candidates} openWorkflow={openWorkflow} openCandidate={openCandidate} archiveWorkflow={archiveWorkflow} />}
+        {tab === 'overview' && <Overview dashboard={dashboard} jobs={jobs} candidates={candidates} openWorkflow={openWorkflow} openCandidate={openCandidate} archiveWorkflow={archiveWorkflow} openCopilot={() => openCopilotWindow(copilotContext)} />}
         {tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
         {tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
         {tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
-        {tab === 'radar' && <RadarPage jobs={jobs} />}
       </div>
     </main>
     {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}

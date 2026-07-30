@@ -10,6 +10,7 @@ from xsaas_candidate_search import (
     apply_position_score_gate,
     capture_candidate_details,
     merge_round_candidates,
+    query_execution_spec,
     query_matches,
 )
 
@@ -26,6 +27,15 @@ class XsaasQueryRoundBindingTest(unittest.TestCase):
         self.assertFalse(query_matches("MPS", ""))
         self.assertFalse(query_matches("MPS", "DrMOS 驱动"))
         self.assertFalse(query_matches("", "MPS"))
+
+    def test_execution_spec_preserves_resume_cursor(self) -> None:
+        self.assertEqual(
+            query_execution_spec({
+                "query": "  精密 机械  ", "cursor": {"page": 51}, "collected_before": 1000,
+            }),
+            ("精密 机械", 51, 1000),
+        )
+        self.assertEqual(query_execution_spec("机械工程师"), ("机械工程师", 1, 0))
 
     def test_round_robin_merge_prevents_first_query_from_monopolizing_limit(self) -> None:
         rounds = [

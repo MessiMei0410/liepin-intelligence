@@ -456,6 +456,20 @@ class AutoTriggerTest(ReviewDbCase):
         events = [event["event_type"] for event in self.service.get_workflow(workflow_id)["events"]]
         assert "strategy_review_generated" in events
 
+    def test_rebuild_supersedes_the_previous_timeline_verdict(self) -> None:
+        workflow_id, _state = self.drive_sourcing_to_terminal(
+            "给长越科技机械高级工程师补充10位合适人选"
+        )
+
+        rebuilt = self.service.rebuild_strategy_review(workflow_id)
+        events = self.service.get_workflow(workflow_id)["events"]
+        superseded = [item for item in events if item["event_type"] == "strategy_review_superseded"]
+        latest = [item for item in events if item["event_type"] == "strategy_review_rebuilt"]
+
+        assert rebuilt["review"]["version"] == 2
+        assert superseded and superseded[-1]["status"] == "resolved"
+        assert latest and rebuilt["review"]["verdict_label"] in latest[-1]["summary"]
+
     def test_terminal_review_uses_available_funnel_rows(self) -> None:
         result = self.service.create_goal("给长越科技机械高级工程师补充10位合适人选", {"type": "job", "id": 10})
         workflow_id = result["workflow"]["workflow_id"]

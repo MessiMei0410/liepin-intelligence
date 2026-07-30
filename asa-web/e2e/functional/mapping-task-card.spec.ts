@@ -4,7 +4,7 @@ import { MAPPING_WORKFLOW_ID, openWorkflow } from '../support/nav'
 skipIfNoBackend()
 
 // S5-2 Mapping 任务卡主流程（隔离实例；正式库副本含真实 artifact mapping_task_workflow_15fc23c21ce8，
-// job 154，17 团队 / 10 候选；该工作流复盘含 escalate_mapping 步）：
+// job 154，17 团队 / 至少 2 名可操作候选；该工作流复盘含 escalate_mapping 步）：
 // 打开任务卡（17 团队渲染）→ 确认 1 人（破冰区块出现）→ 改已接触 → 再确认 1 人 →
 // 刷新后状态持久 → 入库按钮存在。JS 原生对话框护栏由 fixtures 自动加载。
 // 注意：正式库人选状态随业务推进漂移（顾问真实使用会确认/接触候选人），选人目标按
@@ -19,9 +19,10 @@ test('Mapping 任务卡：团队树渲染 + 确认破冰 + 状态持久 + 入库
 
   const card = panel.getByRole('region', { name: 'Mapping 任务卡' })
   await expect(card).toBeVisible()
-  // 真实 artifact：17 团队 / 10 候选
+  // 真实 artifact 的候选池会随顾问补充而增长，数量不应成为业务回归前置条件。
   await expect(card.locator('.mapping-team')).toHaveCount(17)
-  await expect(card.locator('.mapping-candidate')).toHaveCount(10)
+  await expect(card.locator('.mapping-candidate')).not.toHaveCount(0)
+  expect(await card.locator('.mapping-candidate').count()).toBeGreaterThanOrEqual(2)
   await expect(card.getByRole('region', { name: '这份名单的效果' })).toContainText('线索有效率')
 
   // 按「有确认按钮的卡」找 pending 人选（确认/已接触不改变卡片顺序，序号跨刷新稳定）

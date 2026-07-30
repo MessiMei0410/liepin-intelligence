@@ -34,7 +34,7 @@ export type WorkflowStatusMapping = {
 // 与 main.tsx 原 status→中文映射一致（搬运，行为等价）；Overview 与 WorkflowPanel 共用。
 export const workflowStatusLabel: Record<string, string> = {
   planned: '计划就绪', queued: '正在排队', running: '执行中', waiting_approval: '等待审批', waiting_external: '等待外部结果',
-  blocked: '已阻塞', failed: '执行失败', completed: '已完成', cancelled: '已取消', paused: '已暂停',
+  blocked: '已阻塞', failed: '执行失败', completed: '已完成', cancelled: '已取消', paused: '已暂停', superseded: '已被修订版替代',
 }
 
 // 非业务终态分支的语义色调近似；面板对 kind==='default' 仍按原 stepTone(status) 取 CSS class。
@@ -60,7 +60,7 @@ export const mapWorkflowStatus = ({ status, business_outcome, steps }: WorkflowS
   if (status === 'blocked' && !business_outcome)
     return { label: '流程阻塞，待处理', tone: 'muted', kind: 'flow_blocked', showNextActions: false }
   // 其余状态（含 business_outcome 未知新值）：沿用 status 原有文案与色调。
-  return { label: workflowStatusLabel[status] || status, tone: statusTone(status), kind: 'default', showNextActions: false }
+  return { label: workflowStatusLabel[status] || '状态待同步', tone: statusTone(status), kind: 'default', showNextActions: false }
 }
 
 // R8 零结果归因映射：以后端 classify_zero_result 的枚举为准（agent_sourcing_funnel.zero_attribution）。

@@ -1,0 +1,135 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-07-30",
+    "source": "case_changyue_equipment_v1.json + v3 anonymous positive-profile calibration",
+    "usage": "Runtime archetype and pre-approval golden-candidate replay",
+    "privacy": "No names, contact details, source candidate ids, or resume text"
+  },
+  "job_archetype": {
+    "archetype_id": "changyue_bonding_motion_control",
+    "title": "键合设备运动控制软件高级工程师",
+    "client": "长越科技",
+    "client_scoped": true,
+    "essence": "键合设备整机运动控制软件：多轴实时控制、EtherCAT、PLC/RTOS、精密定位、闭环控制与设备节拍优化",
+    "directions": [
+      {
+        "name": "先进封装键合设备",
+        "customers": ["封测厂", "先进封装产线"],
+        "products": ["键合机", "固晶机", "多轴精密平台"],
+        "competitors": ["ASMPT", "K&S", "BESI", "华封科技"]
+      }
+    ],
+    "target_functions": ["运动控制研发", "控制算法", "设备软件", "软件架构"],
+    "location_policy": "杭州本地优先；异地人选正常进入召回，推进前确认 relocation"
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 键合及封装设备同行",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "high",
+      "rationale": "设备场景和多轴实时控制技术栈同时对口",
+      "companies": [
+        {"name": "ASMPT"},
+        {"name": "K&S（库力索法）"},
+        {"name": "BESI"},
+        {"name": "新益昌"},
+        {"name": "凯格精机"},
+        {"name": "华封科技"},
+        {"name": "恩纳基智能装备"},
+        {"name": "普莱信"},
+        {"name": "大族封测"},
+        {"name": "快克智能"},
+        {"name": "拓荆科技"},
+        {"name": "晶盛机电"},
+        {"name": "浙江达仕科技"},
+        {"name": "上海光键"},
+        {"name": "苏州艾科瑞思"},
+        {"name": "常州铭赛机器人"},
+        {"name": "芯钛科（上海）"},
+        {"name": "博纳半导体（浙江）"},
+        {"name": "嘉兴景焱"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 半导体及精密设备运动控制",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "medium",
+      "rationale": "实时控制与精密平台能力可迁移，需补封装工艺场景",
+      "companies": [
+        {"name": "中微公司"},
+        {"name": "北方华创"},
+        {"name": "华海清科"},
+        {"name": "上海微电子"},
+        {"name": "中科飞测"},
+        {"name": "长川科技"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "motion_control_core",
+      "targets": "T1/T2 运动控制软件",
+      "terms": ["运动控制", "EtherCAT", "TwinCAT", "Codesys", "多轴", "RTOS", "闭环控制", "精密定位"]
+    },
+    {
+      "group": "equipment_scene",
+      "targets": "T1 键合与封装设备",
+      "terms": ["键合机", "固晶机", "die bonder", "贴片机", "封装设备", "半导体设备"]
+    },
+    {
+      "group": "software_stack",
+      "targets": "跨设备软件技术兜底",
+      "terms": ["C++", "Python", "PLC", "PID", "压力控制", "温控"]
+    }
+  ],
+  "negative_rules": [
+    "纯电气选型或 PLC 配置、无实时运动控制软件开发证据的候选人不进入优先池",
+    "只命中技能标签但无项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "异地不是召回排除项，但推进前必须确认杭州 relocation 意愿"
+  ],
+  "level_mapping": {
+    "accepted_candidate_levels": ["高级工程师", "资深工程师", "技术经理", "软件架构师", "研发负责人"],
+    "note": "按实时控制深度、整机交付范围和技术领导力定档，不按 title 机械过滤"
+  },
+  "golden_replay_min_recall": 1.0,
+  "golden_candidates": [
+    {
+      "profile_id": "motion_platform_rnd",
+      "company_type": "高端智能装备企业",
+      "function": "运动控制研发",
+      "search_signals": ["运动控制", "EtherCAT", "多轴"],
+      "outcome_label": "A_priority_review"
+    },
+    {
+      "profile_id": "precision_measurement_architect",
+      "company_type": "精密测量及半导体设备企业",
+      "function": "设备软件架构",
+      "search_signals": ["精密定位", "RTOS", "EtherCAT"],
+      "outcome_label": "A_priority_review"
+    },
+    {
+      "profile_id": "packaging_equipment_software",
+      "company_type": "封装及贴装设备企业",
+      "function": "设备软件研发",
+      "search_signals": ["贴片机", "压力控制", "运动控制"],
+      "outcome_label": "B_verify_first"
+    },
+    {
+      "profile_id": "robot_control_algorithm",
+      "company_type": "工业机器人企业",
+      "function": "控制算法",
+      "search_signals": ["Codesys", "EtherCAT", "闭环控制"],
+      "outcome_label": "A_verify_first"
+    },
+    {
+      "profile_id": "semiconductor_equipment_platform",
+      "company_type": "半导体设备企业",
+      "function": "控制软件负责人",
+      "search_signals": ["半导体设备", "TwinCAT", "运动控制"],
+      "outcome_label": "B_verify_first"
+    }
+  ]
+}

@@ -88,8 +88,12 @@ def normalize_candidate(channel: str, item: dict[str, Any]) -> dict[str, Any]:
 
 
 def candidate_key(channel: str, item: dict[str, Any]) -> str:
-    if channel == "xsaas" and item.get("candidate_id"):
-        return f"id:{item['candidate_id']}"
+    source_id = clean_text(
+        item.get("candidate_id") or item.get("resume_id") or item.get("res_id_encode")
+        or item.get("xsaas_id")
+    )
+    if source_id:
+        return f"id:{source_id}"
     identity = "|".join(clean_text(item.get(key)).casefold() for key in ("name", "company", "title"))
     return f"identity:{identity}"
 
@@ -236,6 +240,7 @@ def capture_opencli_details(
 
 def run_opencli(
     channel: str, query: str, limit: int, port: int, opencli_bin: Path,
+    capture_details: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     endpoint, target_id = opencli_endpoint(channel, port)
     started = time.perf_counter()
@@ -265,14 +270,21 @@ def run_opencli(
             raise RuntimeError("OpenCLI candidate-search did not return a JSON array")
         rows = [normalize_candidate(channel, item) for item in raw if isinstance(item, dict)]
         detail_started = time.perf_counter()
-        detail_capture = capture_opencli_details(channel, rows, port, endpoint)
+        detail_capture = (
+            capture_opencli_details(channel, rows, port, endpoint)
+            if capture_details
+            else {"requested": 0, "status": "deferred_for_cross_query_dedupe"}
+        )
         detail_duration_ms = round((time.perf_counter() - detail_started) * 1000)
+        result_count = raw[0].get("resultCount") if raw and isinstance(raw[0], dict) else None
+        if rows and not result_count:
+            result_count = None
         diagnostics = {
             "duration_ms": round((time.perf_counter() - started) * 1000),
             "adapter_duration_ms": duration_ms,
             "detail_duration_ms": detail_duration_ms,
             "status": "completed_empty" if empty else "completed",
-            "result_count": raw[0].get("resultCount") if raw and isinstance(raw[0], dict) else 0,
+            "result_count": result_count,
             "detail_capture": detail_capture,
         }
         return rows, diagnostics
@@ -301,13 +313,42 @@ def apply_liepin_score_gate(
                 "skills": [],
                 "work": [],
             }
-            score, _, _, _ = score_candidate_for_profile(card, None, profile)
+            score, _, _, _ = score_candidate_for_profile(card, profile.default_city, profile)
         if int(score) >= min_score:
             accepted.append(item)
     return accepted
 
 
 apply_position_score_gate = apply_liepin_score_gate
+
+
+def capture_primary_details(
+    channel: str,
+    rows: list[dict[str, Any]],
+    detail_limit: int,
+    port: int,
+) -> dict[str, Any]:
+    selected = rows[: max(0, detail_limit)]
+    pending = [
+        item for item in selected
+        if item.get("resume_capture_status") not in {"complete", "partial", "failed"}
+    ]
+    if pending:
+        endpoint, target_id = opencli_endpoint(channel, port)
+        try:
+            capture_opencli_details(channel, pending, port, endpoint)
+        finally:
+            close_target(port, target_id)
+    counts = {
+        status: sum(item.get("resume_capture_status") == status for item in selected)
+        for status in ("complete", "partial", "failed")
+    }
+    return {
+        "requested": len(selected),
+        **counts,
+        "skipped_by_limit": max(0, len(rows) - len(selected)),
+        "status": "completed" if selected else "completed_empty",
+    }
 
 
 def run_primary_recall(
@@ -323,7 +364,7 @@ def run_primary_recall(
     max_queries: int,
     detail_limit: int,
 ) -> dict[str, Any]:
-    """OpenCLI 主渠道召回（OC1 试点）：多词召回 + 生产同款分数门/详情采集/完整度标准。
+    """OpenCLI 默认主渠道召回：多词召回 + 生产同款分数门/详情采集/完整度标准。
 
     只负责召回与详情采集；入库、去重、归因、审计仍由 ASA 既有链路完成。
     rows 写出到调用方指定文件；返回的摘要只含计数与失败原因，不含候选人明文。
@@ -331,18 +372,52 @@ def run_primary_recall(
     selected = [query for query in (clean_text(value) for value in queries) if query][: max(1, max_queries)]
     blocked: list[dict[str, str]] = []
     merged: list[dict[str, Any]] = []
+    rounds: list[dict[str, Any]] = []
     succeeded = 0
     for query in selected:
         try:
-            rows, _diagnostics = run_opencli(channel, query, limit, port, opencli_bin)
+            rows, diagnostics = run_opencli(channel, query, limit, port, opencli_bin, False)
         except Exception as exc:
             blocked.append({"query": query, "error": str(exc)[-300:]})
+            rounds.append({
+                "query": query,
+                "status": "failed",
+                "result_count": None,
+                "extracted_count": 0,
+                "pages_fetched": 0,
+                "terminal_state": "failed",
+                "terminal_reason": "opencli_query_failed",
+            })
             continue
         succeeded += 1
-        for item in rows:
+        for position_index, item in enumerate(rows, 1):
             item["query"] = query
             item["channel"] = channel
+            item["page_number"] = 1
+            item["position_index"] = position_index
         merged.extend(rows)
+        raw_reported = diagnostics.get("result_count") if isinstance(diagnostics, dict) else None
+        try:
+            reported_total = int(raw_reported) if raw_reported is not None else None
+        except (TypeError, ValueError):
+            reported_total = None
+        if reported_total is None:
+            terminal_state, terminal_reason = "platform_capped", "opencli_reported_total_unknown"
+        elif len(rows) >= reported_total:
+            terminal_state, terminal_reason = "exhausted", "reported_total_exhausted"
+        else:
+            terminal_state, terminal_reason = "platform_capped", "opencli_limit_below_reported_total"
+        rounds.append({
+            "query": query,
+            "status": "completed",
+            "result_count": reported_total,
+            "extracted_count": len(rows),
+            "unique_count": len({candidate_key(channel, item) for item in rows}),
+            "pages_fetched": 1,
+            "cursor": {"page": 2} if terminal_state == "platform_capped" and rows else None,
+            "terminal_state": terminal_state,
+            "terminal_reason": terminal_reason,
+        })
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
     for item in merged:
@@ -351,11 +426,17 @@ def run_primary_recall(
             continue
         seen.add(key)
         deduped.append(item)
+    detail_capture = capture_primary_details(channel, deduped, detail_limit, port)
     gated = apply_position_score_gate(deduped, db, client, job, min_score)
-    capped = gated[: max(1, detail_limit)]
-    complete = sum(1 for item in capped if item.get("resume_capture_status") == "complete")
+    accepted = gated
+    complete = sum(1 for item in accepted if item.get("resume_capture_status") == "complete")
+    all_exhausted = bool(rounds) and all(item.get("terminal_state") == "exhausted" for item in rounds)
     return {
-        "ok": complete > 0,
+        # Keep intake readiness separate from coverage completion. A query can be
+        # exhausted even when every recalled card is low-score or detail capture failed.
+        "ok": complete > 0 and all_exhausted,
+        "coverage_complete": all_exhausted,
+        "intake_ready": complete > 0,
         "mode": "opencli_primary_recall",
         "channel": channel,
         "queries_attempted": len(selected),
@@ -363,10 +444,13 @@ def run_primary_recall(
         "rows_recalled": len(merged),
         "rows_after_dedupe": len(deduped),
         "rows_after_gate": len(gated),
-        "rows_written": len(capped),
+        "rows_written": len(accepted),
         "rows_complete": complete,
+        "detail_capture": detail_capture,
         "blocked": blocked,
-        "rows": capped,
+        "rounds": rounds,
+        "rows": accepted,
+        "raw_rows": merged,
     }
 
 
@@ -424,6 +508,7 @@ def main() -> int:
     parser.add_argument("--queries-json", type=Path, default=None)
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--raw-output", type=Path, default=None)
     parser.add_argument("--detail-limit", type=int, default=24)
     parser.add_argument("--max-queries", type=int, default=3)
     parser.add_argument("--client", required=True)
@@ -452,7 +537,10 @@ def main() -> int:
             args.db, args.client, args.job, args.min_score, args.max_queries, args.detail_limit,
         )
         rows = summary.pop("rows")
+        raw_rows = summary.pop("raw_rows")
         args.output.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.raw_output is not None:
+            args.raw_output.write_text(json.dumps(raw_rows, ensure_ascii=False, indent=2), encoding="utf-8")
         summary["output"] = str(args.output)
         print(json.dumps(summary, ensure_ascii=False))
         return 0

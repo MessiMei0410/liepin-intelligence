@@ -34,6 +34,7 @@ from a_system_agent.native_attachments import (
     visible_attachment_names,
     visible_wechat_attachment_path,
 )
+from a_system_agent.privacy import sanitize_context_snapshot
 from a_system_agent.schema import ensure_schema as ensure_agent_schema
 from asa_core.stop_reasons import normalize_stop_reason
 
@@ -135,6 +136,10 @@ ASA_FLOATING_APP_CANDIDATES = [
     Path("/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/asa-floating-app/build/ASA Floating.app"),
 ]
 _TALENT_SYNC_MODULE: Any | None = None
+CANDIDATE_ASSISTANT_EXTENSION_IDS = {
+    "aihpahceageafhjhedhmeikhcfbfoffn",
+    "cecifklpjckkbclegnmapegnedelapjh",
+}
 
 
 def row_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -262,9 +267,7 @@ def candidate_assistant_origin_decision(origin: str) -> str:
         return "allow"
     parsed = urllib.parse.urlparse(origin)
     host = clean(parsed.hostname).lower()
-    allowed = parsed.scheme in {"http", "https"} and (
-        host == "headhunt.x-saas.com.cn" or host == "liepin.com" or host.endswith(".liepin.com")
-    )
+    allowed = parsed.scheme == "chrome-extension" and host in CANDIDATE_ASSISTANT_EXTENSION_IDS
     return "allow" if allowed else "deny"
 
 
@@ -459,6 +462,8 @@ def update_floating_context(data: dict[str, Any]) -> dict[str, Any]:
     context = sanitize_bridge_value(data)
     if not isinstance(context, dict):
         context = {}
+    if surface == "native":
+        context = sanitize_context_snapshot(context)
     context["surface"] = surface
     context["updated_at"] = now
     context["connected"] = True
@@ -588,10 +593,10 @@ def floating_db_rows(db_path: Path) -> dict[str, Any]:
                            (SELECT COUNT(*) FROM agent_approvals a WHERE a.goal_id=g.goal_id AND a.status='pending') AS pending_approvals
                     FROM agent_goals g
                     LEFT JOIN agent_workflows w ON w.goal_id=g.goal_id
-                    WHERE status NOT IN ('completed','cancelled','superseded')
-                      AND (status != 'failed' OR updated_at >= datetime('now','-1 day'))
-                    ORDER BY CASE status WHEN 'waiting_approval' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
-                             updated_at DESC
+                    WHERE g.status NOT IN ('completed','cancelled','superseded')
+                      AND (g.status != 'failed' OR g.updated_at >= datetime('now','-1 day'))
+                    ORDER BY CASE g.status WHEN 'waiting_approval' THEN 0 WHEN 'running' THEN 1 WHEN 'queued' THEN 2 ELSE 3 END,
+                             g.updated_at DESC
                     LIMIT 8
                     """
                 ).fetchall()
@@ -1230,7 +1235,12 @@ def floating_recent_contexts(contexts: dict[str, dict[str, Any]], now: datetime,
 def build_floating_state(state: "WorkbenchState") -> dict[str, Any]:
     now = datetime.now()
     with ASA_FLOATING_LOCK:
-        contexts = {key: dict(value) for key, value in ASA_FLOATING_CONTEXTS.items()}
+        contexts = {
+            key: sanitize_context_snapshot(dict(value))
+            if key == "native" or key.startswith("native:")
+            else dict(value)
+            for key, value in ASA_FLOATING_CONTEXTS.items()
+        }
         queues = {key: len(value) for key, value in ASA_FLOATING_COMMANDS.items()}
         history = list(ASA_FLOATING_COMMAND_HISTORY[:20])
         command_results = list(ASA_FLOATING_COMMAND_RESULTS[:20])
@@ -1403,11 +1413,16 @@ def route_floating_action(state: "WorkbenchState", data: dict[str, Any]) -> dict
         workflow_id = clean(data.get("workflow_id") or data.get("id"))
         if not workflow_id:
             raise ValueError("缺少 workflow_id")
+        raw_plan_ref = data.get("plan_ref") if isinstance(data.get("plan_ref"), dict) else {}
         return {
             "ok": True,
             "status": "queued",
             "message": "目标已进入执行队列。",
-            "workflow": state.agent_service.start_workflow(workflow_id),
+            "workflow": state.agent_service.start_workflow(
+                workflow_id,
+                expected_plan_version=parse_optional_int(raw_plan_ref.get("version")),
+                expected_plan_hash=clean(raw_plan_ref.get("plan_hash")),
+            ),
         }
     return {"ok": False, "status": "blocked", "message": f"暂不支持该浮窗动作：{action}"}
 
@@ -1536,10 +1551,26 @@ def asa_floating_html() -> str:
     .msg-actions { display:flex; gap:7px; flex-wrap:wrap; margin:8px 2px 0; }
     .msg-action { border-color:#d0d7e2; background:#fff; border-radius:999px; padding:5px 9px; font-size:12px; color:#1f2937; }
     .msg-action:hover { background:#f8fafc; }
+    .strategy-patch-done { margin:8px 2px 0; font-size:12px; color:#15803d; }
+    .patch-modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.38); display:flex; align-items:center; justify-content:center; z-index:80; }
+    .patch-modal { width:min(340px, calc(100vw - 32px)); max-height:76vh; overflow:auto; background:#fff; border-radius:12px; box-shadow:0 18px 44px rgba(15,23,42,.22); padding:12px 14px; display:grid; gap:10px; }
+    .patch-modal-head { display:flex; align-items:center; gap:8px; }
+    .patch-modal-head b { font-size:14px; }
+    .patch-modal-head span { flex:1; font-size:11px; color:var(--muted,#6b7280); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .patch-modal-body { display:grid; gap:10px; }
+    .patch-group { display:grid; gap:5px; }
+    .patch-group>b { font-size:12px; color:#374151; }
+    .patch-item { display:flex; align-items:flex-start; gap:7px; font-size:12.5px; line-height:1.5; cursor:pointer; }
+    .patch-item input { margin-top:3px; }
+    .patch-modal-status { font-size:12px; color:#b45309; min-height:0; }
+    .patch-modal-status:empty { display:none; }
+    .patch-modal-foot { display:flex; justify-content:flex-end; gap:8px; }
     .intent-card { margin:8px 2px 0; display:grid; gap:7px; padding:10px 11px; border:1px solid #d0d7e2; border-radius:10px; background:#fbfcfe; }
     .intent-card.drift { border-color:#fecdca; background:#fff5f4; }
     .intent-card-text { margin:0; font-size:13px; color:#1f2937; line-height:1.55; }
     .intent-card-candidate { margin:0; font-size:12px; color:#475467; }
+    .intent-card-risk { margin:0; font-size:12px; color:#9a3412; }
+    .intent-card-evidence { display:grid; gap:3px; margin:0; font-size:12px; color:#475467; }
     .intent-card-actions { display:flex; gap:7px; }
     .intent-card-actions button { border-radius:999px; padding:5px 12px; font-size:12px; }
     .intent-card-state { margin:0; font-size:12px; color:#667085; }
@@ -1579,13 +1610,51 @@ def asa_floating_html() -> str:
     .history-item { width:100%; text-align:left; display:grid; gap:3px; padding:9px; border-radius:10px; }
     .history-item.active { border-color:#b8ccff; background:#f5f8ff; }
     .history-item b { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .focus-bar { flex:0 0 auto; margin:10px 12px 0; display:flex; align-items:baseline; gap:6px; border:1px solid #d6e3ff; background:#f5f8ff; border-radius:10px; padding:6px 9px; font-size:12px; overflow:hidden; }
-    .focus-bar.empty { display:none; }
-    .focus-bar .focus-label { flex:0 0 auto; color:#1d4ed8; font-size:11px; font-weight:760; white-space:nowrap; }
-    .focus-bar .focus-title { flex:0 1 auto; min-width:0; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .focus-bar .focus-meta { flex:0 1 auto; min-width:0; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .focus-bar.conflict { border-color:#fedf89; background:#fffaeb; }
-    .focus-bar.conflict .focus-label { color:var(--amber); }
+    .task-ribbon { flex:0 0 auto; display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr) auto; align-items:center; gap:8px; border-bottom:1px solid #e6eaf0; background:#f8fafc; padding:7px 12px; font-size:11px; overflow:hidden; }
+    .task-ribbon.empty { display:none; }
+    .task-ribbon-item { min-width:0; display:grid; grid-template-columns:auto minmax(0,1fr); align-items:baseline; gap:5px; }
+    .task-ribbon-label { color:#667085; font-size:10px; font-weight:760; white-space:nowrap; text-transform:uppercase; }
+    .task-ribbon-value { min-width:0; color:#1f2937; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .task-ribbon-plan { color:#475467; white-space:nowrap; }
+    .task-ribbon-conflict { grid-column:1/-1; color:#9a3412; font-weight:650; }
+    .task-ribbon.conflict { border-bottom-color:#f7c978; background:#fffaeb; }
+    @media (max-width:360px) { .task-ribbon { grid-template-columns:minmax(0,1fr) auto; } .task-ribbon-page { grid-column:1/-1; grid-row:2; } }
+    /* Phase 2: 工具调用标签 */
+    .tool-summary { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+    .tool-tag { display:inline-block; font-size:11px; padding:2px 7px; border-radius:6px; }
+    .tool-tag.tool-ok { background:#ecfdf3; color:#067647; border:1px solid #abefc6; }
+    .tool-tag.tool-err { background:#fef3f2; color:#b42318; border:1px solid #fecdca; }
+    .tool-details { margin-top:7px; border:1px solid #e3e8ef; border-radius:8px; background:#fbfcfe; overflow:hidden; }
+    .tool-details summary { padding:7px 9px; color:#475467; font-size:11px; font-weight:650; cursor:pointer; }
+    .tool-details summary::-webkit-details-marker { display:none; }
+    .tool-result { margin:0; max-height:180px; overflow:auto; border-top:1px solid #edf1f7; padding:8px 9px; color:#475467; background:#fff; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; }
+    .workflow-card { display:grid; gap:7px; margin:9px 2px 0; padding:10px 11px; border:1px solid #bfd3ff; border-radius:10px; background:#f5f8ff; }
+    .workflow-card.waiting_approval { border-color:#fedf89; background:#fffaeb; }
+    .workflow-card.failed,.workflow-card.blocked { border-color:#fecdca; background:#fff5f4; }
+    .workflow-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .workflow-card-head b { font-size:12px; color:#1d2939; }
+    .workflow-card-head span,.workflow-card p { margin:0; color:#475467; font-size:11px; }
+    .workflow-meter { height:5px; overflow:hidden; border-radius:99px; background:#dbe6fa; }
+    .workflow-meter i { display:block; height:100%; border-radius:inherit; background:#0f62fe; }
+    .workflow-approval { display:grid; gap:6px; padding-top:7px; border-top:1px solid #f3d995; }
+    .workflow-approval b { color:#7a4b00; font-size:12px; }
+    .workflow-approval-actions { display:flex; gap:7px; }
+    .workflow-approval-actions button { border-radius:999px; padding:5px 10px; font-size:11px; }
+    .proposal-cards { display:grid; gap:7px; margin:0 12px; }
+    .proposal-cards.empty { display:none; }
+    .proposal-card { display:grid; gap:6px; padding:10px 11px; border:1px solid #d6e3ff; border-radius:8px; background:#f8fbff; }
+    .proposal-card b { font-size:12px; color:#1d2939; }
+    .proposal-card p,.proposal-card span { margin:0; font-size:11px; color:#475467; line-height:1.45; }
+    .proposal-card-actions { display:flex; gap:7px; }
+    .proposal-card-actions button { border-radius:999px; padding:5px 10px; font-size:11px; }
+    .proposal-card .proposal-risk { color:#9a6700; }
+    .proposal-card .proposal-result { color:#067647; }
+    .proactive-suggestions { display:grid; gap:6px; margin-top:9px; }
+    .proactive-suggestion { width:100%; border:1px solid #d0d7e2; border-left:3px solid #98a2b3; border-radius:7px; background:#fff; padding:8px 9px; text-align:left; cursor:pointer; }
+    .proactive-suggestion.high { border-left-color:#d92d20; }
+    .proactive-suggestion.medium { border-left-color:#dc6803; }
+    .proactive-suggestion b { display:block; font-size:12px; color:#1d2939; }
+    .proactive-suggestion span { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
   </style>
 </head>
 <body>
@@ -1614,7 +1683,8 @@ def asa_floating_html() -> str:
   </header>
   <div class="chat-shell">
     <div id="historyPanel" class="history-panel"></div>
-    <div id="focusBar" class="focus-bar empty"></div>
+    <div id="focusBar" class="task-ribbon empty"></div>
+    <div id="proposalCards" class="proposal-cards empty"></div>
     <div class="context-panels">
       <div id="contextActions" class="context-actions"></div>
       <div id="runSummary" class="run-summary empty"></div>
@@ -1635,7 +1705,7 @@ def asa_floating_html() -> str:
   </div>
 </div>
 <script>
-const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null, intentConfirmBusy:false };
+const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, contextKey:'', messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null, intentConfirmBusy:false, proposals:[], proposalCards:{}, proposalReceipts:[] };
 localStorage.setItem('asaFloatingSession', state.sessionId);
 function esc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function floatingInline(value){
@@ -1706,13 +1776,13 @@ function renderFloatingMarkdown(value){
     html += `<p>${floatingInline(line)}</p>`;
   });
   closeSection();
-  return `<div class="msg-body">${html || '<p>暂无回复。</p>'}</div>`;
+  return html ? `<div class="msg-body">${html}</div>` : '';
 }
 function renderFloatingMessage(message, index){
   const role = message?.role === 'user' ? 'user' : 'assistant';
   if (role === 'user') return `<div class="msg user">${esc(message?.content || '')}</div>`;
   const actionList = Array.isArray(message?.suggested_actions) ? [...message.suggested_actions] : [];
-  const content = String(message?.content || '');
+  const content = String(message?.content || '').replace(/\n*💡\s*建议关注[:：][\s\S]*$/, '');
   if (!actionList.length && /补全简历并定位|页面采集|入库预检/.test(content)) {
     actionList.push({type:'floating_action', id:'fill_resume', label:'补全简历并定位'});
   }
@@ -1720,18 +1790,149 @@ function renderFloatingMessage(message, index){
     .filter(action => action && (action.type === 'floating_action' || action.type === 'open_candidate' || action.id))
     .filter(action => !(action.type === 'open_candidate' && actionList.length === 1))
     .slice(0, 3)
-    .map(action => `<button class="msg-action" data-action-type="${esc(action.type || 'floating_action')}" data-action-id="${esc(action.id || action.action || '')}">${esc(action.label || action.title || '执行动作')}</button>`)
+    .map(action => `<button class="msg-action" data-action-type="${esc(action.type || 'floating_action')}" data-action-id="${esc(action.id || action.action || '')}" data-plan-version="${esc(action?.plan_ref?.version || '')}" data-plan-hash="${esc(action?.plan_ref?.plan_hash || '')}">${esc(action.label || action.title || '执行动作')}</button>`)
     .join('');
-  return `<div class="msg assistant">${renderFloatingMarkdown(message?.content || '')}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${renderFloatingIntentCard(message, index)}</div>`;
+  // Agent 工具调用
+  const toolCalls = message?.tool_calls;
+  const toolSummary = toolCalls && toolCalls.length
+    ? `<div class="tool-summary">${toolCalls.map(tc => `<span class="tool-tag ${tc.result?.success ? 'tool-ok' : 'tool-err'}">${tc.result?.success ? '✅' : '❌'} ${tc.tool}</span>`).join('')}</div>`
+    : '';
+  const toolDetails = toolCalls && toolCalls.length ? `<details class="tool-details"><summary>查看 ${toolCalls.length} 项查询结果</summary>${toolCalls.map(tc => `<pre class="tool-result">${esc(`${tc.tool}\n${JSON.stringify(tc.result?.data ?? tc.result ?? {}, null, 2)}`)}</pre>`).join('')}</details>` : '';
+  const body = renderFloatingMarkdown(content);
+  const workflowCard = renderWorkflowCard(message, index);
+  const intentCard = renderFloatingIntentCard(message, index);
+  const patchBar = renderStrategyPatchBar(message, index);
+  // 流式响应会先写入空壳消息；在首段文本到达前只显示思考状态，不显示伪回复。
+  if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar) return '';
+  return `<div class="msg assistant">${body}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${toolSummary}${toolDetails}${workflowCard}${intentCard}${patchBar}</div>`;
 }
 function renderThinkingMessage(){
   return '<div class="msg assistant"><div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>ASA 正在分析当前上下文</span></div></div>';
 }
+// --- asa-floating-strategy-patch ---
+// Copilot 策略建议同步：响应/会话恢复携带 strategy_patch 时，消息底部渲染
+// 「应用到策略 / 复制 / 忽略」操作栏；应用到策略打开 Diff 预览弹层（按类型分组、逐项勾选，
+// 默认全选），确认后把勾选项拼回 instruction_prefix/suffix 走 POST /api/v1/workflows/{id}/revise
+// 修订链落地（不原地改写策略）。已应用/已撤回会经既有事件通道写回会话，修订生成后
+// 主窗口自动跳到最新版，浮窗会话保持可撤回。
+const STRATEGY_PATCH_TYPE_LABELS = {add_keyword:'关键词', add_company:'对标公司', add_scene:'场景词', add_filter:'过滤条件'};
+const STRATEGY_PATCH_REVERT_WINDOW_MS = 30000;
+// 埋点（PRD §9）：失败静默，不打扰对话；策略终态同时借此持久化到会话。
+function trackCopilotEvent(event, payload){
+  try {
+    return fetch('/api/v1/copilot/events', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({request_id:`floating_evt_${state.sessionId}_${Date.now()}`, session_id:state.sessionId, event, payload:payload || {}})}).catch(() => null);
+  } catch (_) { return Promise.resolve(null); }
+}
+function renderStrategyPatchBar(message, index){
+  const patch = message?.strategy_patch;
+  if (!patch || !Array.isArray(patch.changes) || !patch.changes.length) return '';
+  if (message.strategy_patch_reverted) return `<div class="strategy-patch-done">✓ 已撤回，策略恢复到修订前版本${message.strategy_patch_restored_workflow_id ? `（${esc(message.strategy_patch_restored_workflow_id)}）` : ''}。</div>`;
+  if (message.strategy_patch_applied) {
+    const revertButton = message.strategy_patch_revert_expired ? '' : `<button class="msg-action" data-patch-revert="${index}">撤回</button>`;
+    const revisedLabel = message.strategy_patch_revised_workflow_id ? `（${esc(message.strategy_patch_revised_workflow_id)}）` : '';
+    return `<div class="msg-actions strategy-patch-actions"><span class="strategy-patch-done">✓ 已应用到策略${revisedLabel}，主窗口已打开新修订。</span>${revertButton}</div>`;
+  }
+  if (message.strategy_patch_ignored) return '';
+  if (!message.strategy_patch_tracked) {
+    message.strategy_patch_tracked = true;
+    trackCopilotEvent('copilot_strategy_patch_shown', {workflow_id: patch.workflow_id || '', changes: patch.changes.length});
+  }
+  return `<div class="msg-actions strategy-patch-actions"><button class="msg-action" data-patch-apply="${index}">应用到策略</button><button class="msg-action" data-patch-copy="${index}">复制</button><button class="msg-action" data-patch-ignore="${index}">忽略</button></div>`;
+}
+function openStrategyPatchModal(index){
+  const message = state.messages[index];
+  const patch = message?.strategy_patch;
+  if (!patch || !Array.isArray(patch.changes) || !patch.changes.length) return;
+  closeStrategyPatchModal();
+  trackCopilotEvent('copilot_strategy_diff_opened', {workflow_id: patch.workflow_id || '', changes: patch.changes.length});
+  const groups = {};
+  patch.changes.forEach((change, changeIndex) => {
+    const label = STRATEGY_PATCH_TYPE_LABELS[change?.type] || '其他';
+    (groups[label] = groups[label] || []).push({change, changeIndex});
+  });
+  const body = Object.entries(groups).map(([label, items]) => `<div class="patch-group"><b>${esc(label)}</b>${items.map(({change, changeIndex}) => `<label class="patch-item"><input type="checkbox" data-patch-change="${changeIndex}" checked><span>${esc(change?.value || '')}</span></label>`).join('')}</div>`).join('');
+  const consultantEvidence = Array.isArray(patch.consultant_evidence) && patch.consultant_evidence.length
+    ? `<div class="patch-group"><b>已确认约束</b>${patch.consultant_evidence.map(item => `<span class="patch-evidence">${esc(item)}</span>`).join('')}</div>`
+    : '';
+  const overlay = document.createElement('div');
+  overlay.id = 'strategyPatchModal';
+  overlay.className = 'patch-modal-backdrop';
+  overlay.innerHTML = `<div class="patch-modal" role="dialog" aria-modal="true"><div class="patch-modal-head"><b>策略变更预览</b><span>${esc(patch.workflow_title || patch.workflow_id || '')} · 变更项 ${patch.changes.length} 个</span><button class="ghost" data-patch-close>×</button></div><div class="patch-modal-body">${consultantEvidence}${body}</div><div class="patch-modal-status" id="strategyPatchStatus"></div><div class="patch-modal-foot"><button class="ghost" data-patch-all>全选</button><button class="ghost" data-patch-cancel>取消</button><button class="primary" data-patch-confirm>确认应用</button></div></div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-patch-close]').addEventListener('click', closeStrategyPatchModal);
+  overlay.querySelector('[data-patch-cancel]').addEventListener('click', closeStrategyPatchModal);
+  overlay.querySelector('[data-patch-all]').addEventListener('click', () => overlay.querySelectorAll('[data-patch-change]').forEach(box => { box.checked = true; }));
+  overlay.querySelector('[data-patch-confirm]').addEventListener('click', () => void applyStrategyPatch(index));
+  overlay.addEventListener('click', event => { if (event.target === overlay) closeStrategyPatchModal(); });
+}
+function closeStrategyPatchModal(){
+  document.getElementById('strategyPatchModal')?.remove();
+}
+function copyStrategyPatch(index){
+  const patch = state.messages[index]?.strategy_patch;
+  if (!patch || !Array.isArray(patch.changes) || !patch.changes.length) return;
+  const text = patch.changes.map(change => `- ${STRATEGY_PATCH_TYPE_LABELS[change?.type] || change?.type || '建议'}：${change?.value || ''}`).join('\n');
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => { document.getElementById('chatStatus').textContent = '已复制建议清单。'; }).catch(() => {});
+}
+async function applyStrategyPatch(index){
+  const message = state.messages[index];
+  const patch = message?.strategy_patch;
+  const overlay = document.getElementById('strategyPatchModal');
+  if (!patch || !Array.isArray(patch.changes) || !overlay) return;
+  const status = document.getElementById('strategyPatchStatus');
+  const selected = [...overlay.querySelectorAll('[data-patch-change]')].filter(box => box.checked).map(box => patch.changes[Number(box.dataset.patchChange)]).filter(Boolean);
+  if (!selected.length) { if (status) status.textContent = '请至少勾选一项变更。'; return; }
+  const workflowId = String(patch.workflow_id || '');
+  if (!workflowId) { if (status) status.textContent = '缺少目标工作流，请重新提问后再试。'; return; }
+  const instruction = String(patch.instruction_prefix || '') + selected.map(change => change.clause || `${change.type}:${change.value}`).join('；') + String(patch.instruction_suffix || '');
+  const confirmButton = overlay.querySelector('[data-patch-confirm]');
+  if (confirmButton) confirmButton.disabled = true;
+  if (status) status.textContent = '正在应用...';
+  try {
+    const revised = await api(`/api/v1/workflows/${encodeURIComponent(workflowId)}/revise`, {method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':floatingCopilotIdempotencyKey(state.sessionId, `patch-${workflowId}-${instruction}`)}, body:JSON.stringify({request_id:`floating_patch_${state.sessionId}_${Date.now()}`, instruction}), timeoutMs:45000});
+    const revisedWorkflowId = String(revised?.workflow?.workflow_id || '');
+    if (!revisedWorkflowId) throw new Error('策略修订未返回新的工作流。');
+    message.strategy_patch_applied = true;
+    message.strategy_patch_revised_workflow_id = revisedWorkflowId;
+    await trackCopilotEvent('copilot_strategy_applied', {workflow_id: workflowId, revised_workflow_id: revisedWorkflowId, applied: selected.length, total: patch.changes.length});
+    if (selected.length < patch.changes.length) {
+      trackCopilotEvent('copilot_strategy_partial_apply', {workflow_id: workflowId, applied: selected.length, total: patch.changes.length});
+    }
+    // PRD §5.4：30 秒内可撤回（后端另有状态守卫：修订被启动/处理后 409）
+    setTimeout(() => { if (!message.strategy_patch_reverted) { message.strategy_patch_revert_expired = true; renderMessages(); } }, STRATEGY_PATCH_REVERT_WINDOW_MS);
+    closeStrategyPatchModal();
+    openWorkbenchUrl(`/asa-app#workflow=${encodeURIComponent(message.strategy_patch_revised_workflow_id)}`);
+    document.getElementById('chatStatus').textContent = '✓ 已应用，主窗口已打开新的策略修订。';
+    renderMessages();
+  } catch (err) {
+    if (confirmButton) confirmButton.disabled = false;
+    if (status) status.textContent = err?.message || '应用失败，请重试。';
+  }
+}
+async function revertStrategyPatch(index){
+  const message = state.messages[index];
+  const revisedId = String(message?.strategy_patch_revised_workflow_id || '');
+  if (!revisedId || message.strategy_patch_reverted) return;
+  document.getElementById('chatStatus').textContent = '正在撤回...';
+  try {
+    const restored = await api(`/api/v1/workflows/${encodeURIComponent(revisedId)}/revert_revision`, {method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':floatingCopilotIdempotencyKey(state.sessionId, `revert-${revisedId}`)}, body:JSON.stringify({request_id:`floating_revert_${state.sessionId}_${Date.now()}`}), timeoutMs:45000});
+    const restoredWorkflowId = String(restored?.workflow?.workflow_id || '');
+    message.strategy_patch_reverted = true;
+    message.strategy_patch_restored_workflow_id = restoredWorkflowId;
+    await trackCopilotEvent('copilot_strategy_reverted', {workflow_id: revisedId, restored_workflow_id: restoredWorkflowId});
+    if (restoredWorkflowId) openWorkbenchUrl(`/asa-app#workflow=${encodeURIComponent(restoredWorkflowId)}`);
+    document.getElementById('chatStatus').textContent = restoredWorkflowId ? '✓ 已撤回，主窗口已恢复修订前版本。' : '✓ 已撤回，策略恢复到修订前版本。';
+    renderMessages();
+  } catch (err) {
+    document.getElementById('chatStatus').textContent = err?.message || '撤回失败，请重试。';
+  }
+}
+// --- end asa-floating-strategy-patch ---
 // business_focus 焦点条：与 React Copilot 焦点卡同语义——候选人姓名优先，
 // 其次「客户 / 岗位标题」；needs_clarification 为真时切冲突态，提示需要确认对象。
 // 数据来自每条 copilot 响应与 /api/agent/copilot/session 恢复响应的 business_focus 字段；
 // 响应没有该字段（旧 Core）时保持不渲染。
-const FOCUS_ACTION_LABELS = {job_archive:'归档岗位', job_split:'拆分岗位', job_publish:'发布岗位', candidate_sourcing:'寻访人选', candidate_outreach:'触达人选', candidate_review:'复核人选', recommendation:'客户推荐', salary:'谈薪处理'};
+const FOCUS_ACTION_LABELS = {job_archive:'归档岗位', job_split:'拆分岗位', job_publish:'发布岗位', candidate_sourcing:'寻访人选', strategy_revision:'修订寻访策略', candidate_outreach:'触达人选', candidate_review:'复核人选', recommendation:'客户推荐', salary:'谈薪处理'};
 function focusBarLabel(focus){
   if (!focus || typeof focus !== 'object') return '';
   return String(focus?.candidate?.name || [focus?.client, focus?.job?.title].filter(Boolean).join(' / ') || focus?.client || '').trim();
@@ -1740,18 +1941,33 @@ function renderFocusBar(){
   const node = document.getElementById('focusBar');
   if (!node) return;
   const focus = state.businessFocus;
-  const title = focusBarLabel(focus);
-  if (!title) {
-    node.className = 'focus-bar empty';
+  const active = state.data?.active_context || {};
+  const taskObject = focusBarLabel(focus);
+  const taskTitle = String(focus?.objective || (focus?.action ? `${FOCUS_ACTION_LABELS[String(focus.action)] || focus.action}${taskObject ? ` · ${taskObject}` : ''}` : '')).trim();
+  const pageTitle = String(active?.title || '').trim();
+  if (!taskTitle && !pageTitle) {
+    node.className = 'task-ribbon empty';
     node.innerHTML = '';
     return;
   }
-  const conflict = focus?.needs_clarification === true;
-  const action = String(focus?.action || '');
-  const directions = Array.isArray(focus?.directions) && focus.directions.length ? ` · ${focus.directions.join(' / ')}` : '';
-  const meta = action ? `${FOCUS_ACTION_LABELS[action] || action}${directions}` : '';
-  node.className = `focus-bar ${conflict ? 'conflict' : ''}`;
-  node.innerHTML = `<span class="focus-label">${conflict ? '需要确认' : '当前焦点'}</span><span class="focus-title">${esc(title)}</span>${meta ? `<span class="focus-meta">${esc(meta)}</span>` : ''}`;
+  const taskContext = focus?.context || {};
+  const activeType = String(active?.type || '');
+  const activeId = String(active?.id || '');
+  const taskType = String(taskContext?.type || '');
+  const taskId = String(taskContext?.id || '');
+  const objectMismatch = Boolean(
+    activeId && taskId && activeType === taskType && activeId !== taskId
+    && ['job', 'candidate', 'workflow'].includes(activeType)
+  );
+  const conflict = focus?.needs_clarification === true || objectMismatch;
+  const latestProgress = [...state.messages].reverse().find(item => item?.workflow_progress)?.workflow_progress || {};
+  const workflow = focus?.current_workflow || focus?.pending_workflow || {};
+  const workflowStatus = String(latestProgress?.workflow_id === workflow?.workflow_id ? latestProgress.status : workflow?.status || '');
+  const statusLabels = {planned:'待确认',queued:'准备中',running:'执行中',waiting_approval:'等待外部寻访授权',waiting_external:'等待渠道结果',blocked:'已阻塞',failed:'技术失败',completed:'已完成',cancelled:'已取消',superseded:'已被修订'};
+  const planVersion = Number(workflow?.version || 0);
+  const planText = workflow?.workflow_id ? `v${planVersion || 1} · ${statusLabels[workflowStatus] || workflowStatus || '状态同步中'}` : '无待确认计划';
+  node.className = `task-ribbon ${conflict ? 'conflict' : ''}`;
+  node.innerHTML = `<div class="task-ribbon-item"><span class="task-ribbon-label">任务</span><span class="task-ribbon-value">${esc(taskTitle || '未建立')}</span></div><div class="task-ribbon-item task-ribbon-page"><span class="task-ribbon-label">页面</span><span class="task-ribbon-value">${esc(pageTitle || '未连接')}</span></div><span class="task-ribbon-plan">${esc(planText)}</span>${conflict ? '<span class="task-ribbon-conflict">页面对象与当前任务不一致，请确认本轮要操作的对象。</span>' : ''}`;
 }
 async function api(path, opts={}){
   const timeoutMs = Number(opts.timeoutMs || 12000);
@@ -1800,6 +2016,63 @@ async function postCopilotMessage(payload, idempotencyKey, requestId){
   }
 }
 // --- end asa-floating-copilot-transport ---
+
+async function sendMessageStream(text, readyAttachments){
+  const context = floatingMessageContext();
+  context.uploaded_attachments = readyAttachments.map(item => ({attachment_id:item.attachment_id, file_name:item.file_name, file_type:item.file_type, mime_type:item.mime_type, size_bytes:item.size_bytes, content_available:item.content_available, extracted_text:item.extracted_text || '', truncated:Boolean(item.truncated), status:item.status || '', is_image:Boolean(item.is_image), image_analysis:item.image_analysis || {}}));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120000);
+  const response = await fetch('/api/v1/copilot/stream', {
+    method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':floatingCopilotIdempotencyKey(state.sessionId, text)},
+    body:JSON.stringify({request_id:floatingCopilotRequestId(state.sessionId, text), session_id:state.sessionId, message:text, context}), signal:controller.signal,
+  });
+  if (!response.ok || !response.body) {
+    clearTimeout(timer);
+    throw new Error(`流式回答不可用：HTTP ${response.status}`);
+  }
+  const streamed = {role:'assistant', content:'', suggested_actions:[], pending_intent:null, proactive_suggestions:[]};
+  state.messages.push(streamed);
+  renderMessages();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let done = null;
+  const consume = frame => {
+    const event = (frame.match(/^event:\s*(.+)$/m) || [])[1] || 'message';
+    const dataText = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('');
+    if (!dataText) return;
+    const data = JSON.parse(dataText);
+    if (event === 'context' && data.session_id) {
+      state.sessionId = data.session_id;
+      saveCurrentSession();
+    } else if (event === 'text') {
+      streamed.content += String(data.content || '');
+      renderMessages();
+    } else if (event === 'done') {
+      done = data;
+    } else if (event === 'error') {
+      throw new Error(data.error || '流式回答失败');
+    }
+  };
+  try {
+    while (true) {
+      const {value, done: readerDone} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream:!readerDone});
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+        consume(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+      }
+      if (readerDone) break;
+    }
+    if (buffer.trim()) consume(buffer);
+    if (!done) throw new Error('流式回答未返回完成事件');
+    return {...done, _streamed:true};
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+}
 // --- asa-floating-copilot-intent-confirm ---
 // R9 确认卡（R12-b 浮窗 parity，语义对齐已下线 React IntentCard 四态：pending/confirmed/cancelled/drift）：
 // copilot 响应与会话恢复消息携带 pending_intent 时，在对应消息下渲染确认卡
@@ -1855,6 +2128,7 @@ function floatingIntentCandidateLine(intent){
 function renderFloatingIntentCard(message, index){
   const intent = message?.pending_intent;
   if (!intent || !intent.intent_hash) return '';
+  const actionCard = message?.action_card || {};
   if (!message.intentCard) message.intentCard = {state:'pending', error:''};
   const card = message.intentCard;
   const candidateLine = floatingIntentCandidateLine(intent);
@@ -1866,7 +2140,59 @@ function renderFloatingIntentCard(message, index){
     : card.state === 'cancelled' ? '已取消，未执行任何写操作。'
     : card.state === 'drift' ? String(card.error || '候选人状态已变化，意图签名不再有效，请重新发起指令。')
     : '';
-  return `<div class="intent-card ${esc(card.state)}"><p class="intent-card-text">${esc(intent.confirm_text || '该操作需要确认后才会执行。')}</p>${candidateLine ? `<p class="intent-card-candidate">${esc(candidateLine)}</p>` : ''}${buttons}${stateText ? `<p class="intent-card-state">${esc(stateText)}</p>` : ''}</div>`;
+  const evidence = Array.isArray(actionCard.evidence) ? actionCard.evidence.filter(item => item?.value).slice(0, 2) : [];
+  const evidenceHtml = evidence.map(item => `<span>${esc(`${item.label || '依据'}：${item.value}`)}</span>`).join('');
+  const risk = actionCard.risk_level ? `<p class="intent-card-risk">${esc(`风险 ${actionCard.risk_level} · 已完成预检`)}</p>` : '';
+  return `<div class="intent-card ${esc(card.state)}"><p class="intent-card-text">${esc(intent.confirm_text || '该操作需要确认后才会执行。')}</p>${candidateLine ? `<p class="intent-card-candidate">${esc(candidateLine)}</p>` : ''}${risk}${evidenceHtml ? `<p class="intent-card-evidence">${evidenceHtml}</p>` : ''}${buttons}${stateText ? `<p class="intent-card-state">${esc(stateText)}</p>` : ''}</div>`;
+}
+function renderWorkflowCard(message, index){
+  const progress = message?.workflow_progress;
+  if (!progress?.workflow_id) return '';
+  const total = Math.max(1, Number(progress.total || 0));
+  const completed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
+  const percent = Math.round((completed / total) * 100);
+  const status = String(progress.status || 'queued');
+  const statusLabels = {planned:'待开始',queued:'排队中',running:'执行中',waiting_approval:'待审批',waiting_external:'等待渠道回执',blocked:'已阻塞',failed:'技术失败',completed:'已完成',cancelled:'已取消',superseded:'已被新修订替代'};
+  const approvals = Array.isArray(progress.pending_approvals) ? progress.pending_approvals : [];
+  const approvalHtml = approvals.map((approval, approvalIndex) => {
+    const preflight = approval.preflight || {};
+    const snapshot = preflight.strategy_snapshot || {};
+    const constraints = Array.isArray(snapshot.locked_constraints) ? snapshot.locked_constraints.map(item => typeof item === 'string' ? item : item?.rule || item?.quote).filter(Boolean) : [];
+    const companyPool = Array.isArray(snapshot.company_pool) ? snapshot.company_pool.map(item => item?.name).filter(Boolean) : [];
+    const channels = snapshot.channels && typeof snapshot.channels === 'object' ? Object.entries(snapshot.channels).filter(([,items]) => Array.isArray(items) && items.length).map(([name,items]) => `${name === 'liepin' ? '猎聘' : name === 'xsaas' ? 'X-SaaS' : name} ${items.length}组`) : [];
+    const sourcingApproval = String(approval.action_type || '') === 'multi_channel_sourcing';
+    const snapshotReady = !sourcingApproval || (snapshot.ready === true && Boolean(snapshot.strategy_hash || preflight.strategy_hash) && Number(snapshot.target_count || preflight.target_count || 0) > 0 && channels.length > 0);
+    const strategyLines = snapshotReady && sourcingApproval ? [
+      `目标 ${snapshot.target_count || preflight.target_count || 0} 人 · ${channels.join(' / ') || '渠道待确认'}`,
+      constraints.length ? `原话约束：${constraints.slice(0, 3).join('；')}` : '',
+      companyPool.length ? `公司池：${companyPool.slice(0, 5).join('、')}` : '',
+      Array.isArray(snapshot.missing_anchors) && snapshot.missing_anchors.length ? `缺失锚点：${snapshot.missing_anchors.join('、')}` : '',
+      snapshot.strategy_hash ? `策略版本：${String(snapshot.strategy_version || 'v2')} · ${String(snapshot.strategy_hash).slice(0, 10)}` : '',
+    ].filter(Boolean) : [String(preflight.impact || preflight.scope || preflight.summary || '策略快照不完整，请刷新后再审批')];
+    const expires = approval.expires_at ? `有效至 ${approval.expires_at}` : '一次性审批';
+    return `<div class="workflow-approval"><b>需要审批：${esc(approval.title || approval.action_type || '高风险动作')}</b><span>${esc(approval.risk_level || 'R2/R3')} · ${esc(expires)}</span>${strategyLines.map(line => `<span>${esc(line)}</span>`).join('')}<div class="workflow-approval-actions"><button class="primary" data-workflow-approval="${index}:${approvalIndex}"${snapshotReady ? '' : ' disabled'}>${sourcingApproval ? '批准本次外部寻访' : '批准执行'}</button><button data-workflow-reject="${index}:${approvalIndex}">不执行</button></div></div>`;
+  }).join('');
+  return `<section class="workflow-card ${esc(status)}"><div class="workflow-card-head"><b>执行计划</b><span>${esc(statusLabels[status] || '状态待同步')}</span></div><p>${esc(progress.label || '准备执行')}</p><div class="workflow-meter"><i style="width:${percent}%"></i></div><p>${completed}/${total} 步 · <button class="ghost" data-workflow-open="${index}">查看计划</button></p>${approvalHtml}</section>`;
+}
+async function decideWorkflowApproval(messageIndex, approvalIndex, decision){
+  const message = state.messages[messageIndex];
+  const approval = message?.workflow_progress?.pending_approvals?.[approvalIndex];
+  if (!approval?.approval_id || state.intentConfirmBusy) return;
+  state.intentConfirmBusy = true;
+  renderMessages();
+  try {
+    const stamp = Date.now();
+    await api(`/api/v1/approvals/${encodeURIComponent(approval.approval_id)}/decision`, {method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':`floating-approval-${approval.approval_id}-${stamp}`}, body:JSON.stringify({request_id:`floating-approval-${stamp}`, decision, note:''})});
+    message.workflow_progress.pending_approvals.splice(approvalIndex, 1);
+    message.workflow_progress.status = decision === 'approve' ? 'queued' : 'cancelled';
+    document.getElementById('chatStatus').textContent = decision === 'approve' ? '审批已记录，ASA 正在继续执行。' : '已记录为不执行。';
+    if (decision === 'approve') void monitorWorkflow(message.workflow_progress.workflow_id, 120000, messageIndex);
+  } catch (err) {
+    document.getElementById('chatStatus').textContent = err?.message || '审批失败，请重试。';
+  } finally {
+    state.intentConfirmBusy = false;
+    renderMessages();
+  }
 }
 async function confirmFloatingIntent(index){
   const message = state.messages[index];
@@ -2020,6 +2346,7 @@ window.addEventListener('asa-native-attachment-analysis', event => {
 async function loadState(){
   try{
     state.data = await api('/api/asa/floating/state');
+    await Promise.all([syncWorkflowSession(), loadActionCards()]);
     render();
   }catch(err){
     renderConnectionError(err);
@@ -2071,6 +2398,7 @@ function render(){
   syncPill.textContent = active.status || '未连接';
   syncPill.className = `pill ${active.connected ? 'ok' : 'warn'}`;
   document.getElementById('chatStatus').textContent = '';
+  renderActionCards();
   renderContextActions();
   renderRunSummary();
   renderContextSnapshot();
@@ -2079,11 +2407,13 @@ function render(){
 }
 function openWorkbench(){
   const url = workbenchTargetUrl(false);
-  if (native('openWorkbench', {url})) return;
-  window.open(url, '_blank');
+  openWorkbenchUrl(url);
 }
 function openWorkbenchRun(){
   const url = workbenchTargetUrl(true);
+  openWorkbenchUrl(url);
+}
+function openWorkbenchUrl(url){
   if (native('openWorkbench', {url})) return;
   window.open(url, '_blank');
 }
@@ -2136,6 +2466,89 @@ function renderContextActions(){
     button.addEventListener('click', () => runMessageAction(button.dataset.contextActionType, button.dataset.contextAction));
   });
   updateContextPanelsVisibility();
+}
+function proposalRequestId(proposalId, suffix=''){
+  return `floating_proposal_${String(proposalId || '').slice(-18)}_${suffix || Date.now()}`;
+}
+async function loadActionCards(){
+  try {
+    const result = await api('/api/v1/agent/proposals?status=pending&limit=4');
+    state.proposals = Array.isArray(result.proposals) ? result.proposals : [];
+  } catch (_) {
+    state.proposals = [];
+  }
+}
+function renderActionCards(){
+  const node = document.getElementById('proposalCards');
+  if (!node) return;
+  const proposals = Array.isArray(state.proposals) ? state.proposals : [];
+  const receipts = Array.isArray(state.proposalReceipts) ? state.proposalReceipts : [];
+  if (!proposals.length && !receipts.length) {
+    node.className = 'proposal-cards empty';
+    node.innerHTML = '';
+    return;
+  }
+  node.className = 'proposal-cards';
+  const pendingHtml = proposals.map(proposal => {
+    const id = String(proposal.proposal_id || '');
+    const card = state.proposalCards[id] || {};
+    const target = [proposal.candidate, proposal.client, proposal.job].filter(Boolean).join(' / ');
+    const policy = card.preflight?.policy || {};
+    const impact = card.preflight?.request?.reason || proposal.rationale || '执行范围以预检结果为准';
+    const controls = card.status === 'preflight'
+      ? `<p class="proposal-risk">${esc(`预检：${policy.risk_level || proposal.risk_level || 'R1'} · ${policy.reason || impact}`)}</p><div class="proposal-card-actions"><button class="primary" data-proposal-decision="approve" data-proposal-id="${esc(id)}">确认执行</button><button data-proposal-decision="reject" data-proposal-id="${esc(id)}">不执行</button></div>`
+      : card.status === 'result'
+        ? `<p class="proposal-result">${esc(card.message || '已处理。')}</p>`
+        : `<div class="proposal-card-actions"><button data-proposal-preflight="${esc(id)}">查看预检</button></div>`;
+    return `<section class="proposal-card"><b>${esc(proposal.title || 'Agent 行动建议')}</b>${target ? `<span>${esc(target)}</span>` : ''}<p>${esc(proposal.rationale || '建议创建内部跟进任务。')}</p>${controls}</section>`;
+  }).join('');
+  const receiptHtml = receipts.map(receipt => `<section class="proposal-card"><b>${esc(receipt.title || 'Agent 行动建议')}</b><p class="proposal-result">${esc(receipt.message || '已处理。')}</p><span>${esc(receipt.postCheck || '')}</span>${receipt.candidateId ? `<div class="proposal-card-actions"><button data-proposal-open-candidate="${esc(receipt.candidateId)}">打开人选</button></div>` : ''}</section>`).join('');
+  node.innerHTML = pendingHtml + receiptHtml;
+  node.querySelectorAll('[data-proposal-preflight]').forEach(button => {
+    button.addEventListener('click', () => void preflightActionCard(button.dataset.proposalPreflight));
+  });
+  node.querySelectorAll('[data-proposal-decision]').forEach(button => {
+    button.addEventListener('click', () => void decideActionCard(button.dataset.proposalId, button.dataset.proposalDecision));
+  });
+  node.querySelectorAll('[data-proposal-open-candidate]').forEach(button => {
+    button.addEventListener('click', () => runMessageAction('open_candidate', button.dataset.proposalOpenCandidate));
+  });
+}
+async function preflightActionCard(proposalId){
+  if (!proposalId) return;
+  try {
+    const preflight = await api(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/preflight`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({request_id:proposalRequestId(proposalId, 'preflight')})
+    });
+    state.proposalCards[proposalId] = {status:'preflight', preflight};
+    renderActionCards();
+  } catch (err) {
+    document.getElementById('chatStatus').textContent = err?.message || '提案预检失败，请重试。';
+  }
+}
+async function decideActionCard(proposalId, decision){
+  const card = state.proposalCards[proposalId];
+  const token = String(card?.preflight?.confirmation_token || '');
+  if (!proposalId || !token || !['approve', 'reject'].includes(decision)) return;
+  try {
+    const result = await api(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/decision`, {
+      method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':proposalRequestId(proposalId, decision)},
+      body:JSON.stringify({request_id:proposalRequestId(proposalId, decision), confirmation_token:token, decision, note:''})
+    });
+    const proposal = (state.proposals || []).find(item => String(item.proposal_id || '') === proposalId) || {};
+    const postCheck = result.post_check || {};
+    const message = result.status === 'executed' ? '已确认，内部跟进任务已创建。' : '已记录为不执行。';
+    state.proposalCards[proposalId] = {status:'result', message};
+    state.proposalReceipts = [
+      {proposal_id:proposalId, title:proposal.title || 'Agent 行动建议', message, postCheck:postCheck.summary || '', candidateId:proposal.job_candidate_id || ''},
+      ...state.proposalReceipts.filter(item => item.proposal_id !== proposalId),
+    ].slice(0, 3);
+    state.proposals = state.proposals.filter(item => String(item.proposal_id || '') !== proposalId);
+    renderActionCards();
+  } catch (err) {
+    document.getElementById('chatStatus').textContent = err?.message || '提案确认失败，请重新预检。';
+  }
 }
 function runSummaryHasAttention(approvals, goals, artifacts){
   const diagnostics = Array.isArray(state.data?.diagnostics) ? state.data.diagnostics : [];
@@ -2241,7 +2654,7 @@ window.addEventListener('asa-native-status', event => {
   if (message) document.getElementById('chatStatus').textContent = message;
   if (event.detail?.action === 'imageAnalysisReady') answerAfterNativeImage();
 });
-function newChat(){ state.sessionId = `floating_${Math.random().toString(16).slice(2)}`; localStorage.setItem('asaFloatingSession', state.sessionId); state.messages=[]; state.attachments=[]; state.historyOpen=false; state.businessFocus=null; renderHistory(); renderMessages(); }
+function newChat(){ state.sessionId = `floating_${Math.random().toString(16).slice(2)}`; saveCurrentSession(); state.messages=[]; state.attachments=[]; state.historyOpen=false; state.businessFocus=null; renderHistory(); renderMessages(); }
 function bindComposer(){
   const input = document.getElementById('input');
   if (!input) return;
@@ -2266,13 +2679,38 @@ function renderMessages(){
   const base = state.messages.map(renderFloatingMessage).join('') || `<div class="msg assistant">${renderFloatingMarkdown('说一个目标，ASA 会按当前对象生成可审计的执行计划。外部触达、发布和推荐仍会先进入审批。')}</div>`;
   document.getElementById('messages').innerHTML = base + (state.loading ? renderThinkingMessage() : '');
   document.querySelectorAll('[data-action-id]').forEach(button => {
-    button.addEventListener('click', () => runMessageAction(button.dataset.actionType, button.dataset.actionId));
+    button.addEventListener('click', () => runMessageAction(
+      button.dataset.actionType,
+      button.dataset.actionId,
+      button.dataset.planHash ? {version:Number(button.dataset.planVersion || 0), plan_hash:button.dataset.planHash} : null,
+    ));
+  });
+  document.querySelectorAll('[data-workflow-open]').forEach(button => {
+    button.addEventListener('click', () => { const message = state.messages[Number(button.dataset.workflowOpen)]; if (message?.workflow_progress?.workflow_id) runMessageAction('open_workflow', message.workflow_progress.workflow_id); });
+  });
+  document.querySelectorAll('[data-workflow-approval]').forEach(button => {
+    button.addEventListener('click', () => { const [messageIndex, approvalIndex] = String(button.dataset.workflowApproval).split(':').map(Number); void decideWorkflowApproval(messageIndex, approvalIndex, 'approve'); });
+  });
+  document.querySelectorAll('[data-workflow-reject]').forEach(button => {
+    button.addEventListener('click', () => { const [messageIndex, approvalIndex] = String(button.dataset.workflowReject).split(':').map(Number); void decideWorkflowApproval(messageIndex, approvalIndex, 'reject'); });
   });
   document.querySelectorAll('[data-intent-confirm]').forEach(button => {
     button.addEventListener('click', () => confirmFloatingIntent(Number(button.dataset.intentConfirm)));
   });
   document.querySelectorAll('[data-intent-cancel]').forEach(button => {
     button.addEventListener('click', () => cancelFloatingIntent(Number(button.dataset.intentCancel)));
+  });
+  document.querySelectorAll('[data-patch-apply]').forEach(button => {
+    button.addEventListener('click', () => openStrategyPatchModal(Number(button.dataset.patchApply)));
+  });
+  document.querySelectorAll('[data-patch-copy]').forEach(button => {
+    button.addEventListener('click', () => copyStrategyPatch(Number(button.dataset.patchCopy)));
+  });
+  document.querySelectorAll('[data-patch-ignore]').forEach(button => {
+    button.addEventListener('click', () => { const message = state.messages[Number(button.dataset.patchIgnore)]; if (message) { message.strategy_patch_ignored = true; trackCopilotEvent('copilot_strategy_ignored', {workflow_id: message.strategy_patch?.workflow_id || ''}); } renderMessages(); });
+  });
+  document.querySelectorAll('[data-patch-revert]').forEach(button => {
+    button.addEventListener('click', () => void revertStrategyPatch(Number(button.dataset.patchRevert)));
   });
   const messages = document.getElementById('messages');
   messages.scrollTop = messages.scrollHeight;
@@ -2297,10 +2735,14 @@ function recoverStuckRequest(){
   document.getElementById('chatStatus').textContent = '上一次请求已中断，可以重新发送。';
   renderMessages();
 }
-function runMessageAction(type, id){
+function runMessageAction(type, id, planRef=null){
   if (type === 'open_candidate') {
     const suffix = id ? `#candidate=${encodeURIComponent(id)}` : '';
-    window.open(`/asa-app${suffix}`, '_blank');
+    openWorkbenchUrl(`/asa-app${suffix}`);
+    return;
+  }
+  if (type === 'open_job' && id) {
+    openWorkbenchUrl(`/asa-app#job=${encodeURIComponent(id)}`);
     return;
   }
   if (type === 'native_action') {
@@ -2314,7 +2756,21 @@ function runMessageAction(type, id){
   if (type === 'floating_action' && id?.startsWith('open_wechat_attachment::')) {
     state.pendingNativeContext = state.data?.active_context_raw || null;
   }
-  runFloatingAction(type, id);
+  runFloatingAction(type, id, planRef);
+}
+function runProactiveSuggestion(type, id){
+  if (type === 'open_candidate' && id) {
+    openWorkbenchUrl(`/asa-app#candidate=${encodeURIComponent(id)}`);
+    return;
+  }
+  if ((type === 'open_job' || type === 'start_sourcing') && id) {
+    // 寻访建议只定位到岗位；真正启动仍要经过 ASA 的工作流与审批链。
+    openWorkbenchUrl(`/asa-app#job=${encodeURIComponent(id)}`);
+    return;
+  }
+  if (type === 'open_queue') {
+    openWorkbenchUrl('/asa-app');
+  }
 }
 function floatingMessageContext(){
   const active = state.data?.active_context || {};
@@ -2339,6 +2795,26 @@ function floatingMessageContext(){
     return {type:'global', id:null, source:'asa_floating', display_mode:'floating_compact', bridge:raw};
   }
   return {type:active.type || 'global', id:active.id || null, source:'asa_floating', display_mode:'floating_compact', bridge:raw};
+}
+function workflowContextKey(){
+  const active = state.data?.active_context || {};
+  return active.type === 'workflow' && active.id ? `workflow:${active.id}` : '';
+}
+function saveCurrentSession(){
+  localStorage.setItem('asaFloatingSession', state.sessionId);
+  if (state.contextKey) localStorage.setItem(`asaFloatingSession:${state.contextKey}`, state.sessionId);
+}
+async function syncWorkflowSession(){
+  const nextKey = workflowContextKey();
+  if (!nextKey || state.contextKey === nextKey) return;
+  state.contextKey = nextKey;
+  state.sessionId = localStorage.getItem(`asaFloatingSession:${nextKey}`) || `floating_${Math.random().toString(16).slice(2)}`;
+  saveCurrentSession();
+  state.messages = [];
+  state.attachments = [];
+  state.businessFocus = null;
+  state.restored = false;
+  await restoreCurrentSession();
 }
 async function answerAfterNativeImage(){
   if (state.loading) return;
@@ -2385,7 +2861,7 @@ async function answerAfterNativeAttachment(){
     renderMessages();
   }
 }
-async function runFloatingAction(type, id){
+async function runFloatingAction(type, id, planRef=null){
   const action = type && type !== 'floating_action' ? type : id;
   if (!action || state.loading) return;
   if (action.startsWith('open_wechat_attachment::') && !state.pendingNativeContext) {
@@ -2399,6 +2875,7 @@ async function runFloatingAction(type, id){
     const payload = {action};
     if (id && id !== action) payload.id = id;
     if (['start_workflow', 'open_workflow'].includes(action) && id) payload.workflow_id = id;
+    if (action === 'start_workflow' && planRef?.plan_hash) payload.plan_ref = planRef;
     const result = await api('/api/asa/floating/action', {method:'POST', body:JSON.stringify(payload)});
     retryPrevious = result.retry_previous === true;
     state.messages.push({role:'assistant', content:result.message || '动作已提交。'});
@@ -2429,7 +2906,7 @@ async function runFloatingAction(type, id){
     if (retryPrevious) setTimeout(answerAfterNativeAttachment, 2500);
   }
 }
-async function monitorWorkflow(workflowId, timeoutMs=120000){
+async function monitorWorkflow(workflowId, timeoutMs=120000, messageIndex=-1){
   const started = Date.now();
   let lastSignature = '';
   while (Date.now() - started < timeoutMs) {
@@ -2445,6 +2922,10 @@ async function monitorWorkflow(workflowId, timeoutMs=120000){
       lastSignature = signature;
       const label = active?.business_label || workflow.current_stage || '准备执行';
       document.getElementById('chatStatus').textContent = `目标 ${status} · ${completed}/${steps.length} · ${label}`;
+      if (messageIndex >= 0 && state.messages[messageIndex]) {
+        state.messages[messageIndex].workflow_progress = {workflow_id:workflowId, status, completed, total:steps.length, label, pending_approvals:(payload.approvals || []).filter(item => item.status === 'pending')};
+        renderMessages();
+      }
     }
     if (['waiting_approval','waiting_external','blocked','failed','completed','cancelled'].includes(status)) {
       const failed = steps.find(step => step.status === 'failed');
@@ -2456,24 +2937,30 @@ async function monitorWorkflow(workflowId, timeoutMs=120000){
         completed: `目标已完成，共执行 ${steps.length} 步。`,
         cancelled: '目标已取消。',
       };
-      state.messages.push({role:'assistant', content:messages[status] || `目标状态：${status}`});
+      if (messageIndex >= 0 && state.messages[messageIndex]) {
+        state.messages[messageIndex].content += `\n\n${messages[status] || `目标状态：${status}`}`;
+      } else state.messages.push({role:'assistant', content:messages[status] || `目标状态：${status}`});
       renderMessages();
       await loadState();
       return payload;
     }
     await new Promise(resolve => setTimeout(resolve, 1200));
   }
-  state.messages.push({role:'assistant', content:'目标仍在后台执行，可点击“查看计划”继续跟踪。'});
+  if (messageIndex >= 0 && state.messages[messageIndex]) state.messages[messageIndex].content += '\n\n目标仍在后台执行，可点击“查看计划”继续跟踪。';
+  else state.messages.push({role:'assistant', content:'目标仍在后台执行，可点击“查看计划”继续跟踪。'});
   renderMessages();
   return null;
 }
 async function restoreCurrentSession(){
   if (state.restored || !state.sessionId) return;
   state.restored = true;
+  const sessionId = state.sessionId;
   try{
-    const result = await api(`/api/agent/copilot/session?session_id=${encodeURIComponent(state.sessionId)}&limit=100`);
+    const result = await api(`/api/agent/copilot/session?session_id=${encodeURIComponent(sessionId)}&limit=100`);
+    if (sessionId !== state.sessionId) return;
     state.messages = result.messages || [];
     state.businessFocus = result.business_focus;
+    resumeWorkflowCards();
     renderMessages();
   }catch(_){}
 }
@@ -2501,9 +2988,10 @@ async function loadSession(sessionId){
   try{
     const result = await api(`/api/agent/copilot/session?session_id=${encodeURIComponent(sessionId)}&limit=100`);
     state.sessionId = sessionId;
-    localStorage.setItem('asaFloatingSession', state.sessionId);
+    saveCurrentSession();
     state.messages = result.messages || [];
     state.businessFocus = result.business_focus;
+    resumeWorkflowCards();
     state.historyOpen = false;
     document.getElementById('chatStatus').textContent = '';
     renderHistory();
@@ -2511,6 +2999,13 @@ async function loadSession(sessionId){
   }catch(err){
     document.getElementById('chatStatus').textContent = err.message;
   }
+}
+function resumeWorkflowCards(){
+  state.messages.forEach((message, index) => {
+    const progress = message?.workflow_progress;
+    if (!progress?.workflow_id || ['completed','cancelled','failed','blocked'].includes(String(progress.status || ''))) return;
+    void monitorWorkflow(progress.workflow_id, 120000, index);
+  });
 }
 function renderHistory(){
   const panel = document.getElementById('historyPanel');
@@ -2552,26 +3047,84 @@ async function sendMessage(){
   state.loading = true;
   state.requestStartedAt = Date.now();
   state.messages.push({role:'user', content:text}); renderMessages();
+  // Phase 2: Agent 模式
+  const useAgent = text.startsWith('/agent ');
+  const effectiveText = useAgent ? text.slice(7).trim() : text;
+  if (useAgent) {
+    document.getElementById('chatStatus').textContent = '🤖 Agent 模式：正在查询...';
+    sendMessageAgent(effectiveText, readyAttachments);
+    return;
+  }
   document.getElementById('chatStatus').textContent = 'ASA 正在处理...';
   try{
-    const context = floatingMessageContext();
-    context.uploaded_attachments = readyAttachments.map(item => ({attachment_id:item.attachment_id, file_name:item.file_name, file_type:item.file_type, mime_type:item.mime_type, size_bytes:item.size_bytes, content_available:item.content_available, extracted_text:item.extracted_text || '', truncated:Boolean(item.truncated), status:item.status || '', is_image:Boolean(item.is_image), image_analysis:item.image_analysis || {}}));
-    const result = await postCopilotMessage(
-      {session_id:state.sessionId, message:text, context},
-      floatingCopilotIdempotencyKey(state.sessionId, text),
-      floatingCopilotRequestId(state.sessionId, text),
-    );
+    let result;
+    try {
+      result = await sendMessageStream(effectiveText, readyAttachments);
+    } catch (streamError) {
+      console.warn(`[ASA floating] 流式回答不可用（${streamError?.message || streamError}），回退普通回答`);
+      if (state.messages[state.messages.length - 1]?.role === 'assistant') state.messages.pop();
+      const context = floatingMessageContext();
+      context.uploaded_attachments = readyAttachments.map(item => ({attachment_id:item.attachment_id, file_name:item.file_name, file_type:item.file_type, mime_type:item.mime_type, size_bytes:item.size_bytes, content_available:item.content_available, extracted_text:item.extracted_text || '', truncated:Boolean(item.truncated), status:item.status || '', is_image:Boolean(item.is_image), image_analysis:item.image_analysis || {}}));
+      result = await postCopilotMessage(
+        {session_id:state.sessionId, message:text, context},
+        floatingCopilotIdempotencyKey(state.sessionId, text),
+        floatingCopilotRequestId(state.sessionId, text),
+      );
+    }
     state.businessFocus = result.business_focus;
     state.sessionId = result.session_id || state.sessionId;
-    localStorage.setItem('asaFloatingSession', state.sessionId);
-    const workflowText = result.workflow_id ? `\n\n已生成目标计划：${result.workflow_id}` : '';
-    state.messages.push({role:'assistant', content:(result.answer || result.message || '已处理。') + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null});
+    saveCurrentSession();
+    let answerText = result.answer || result.message || '已处理。';
+    const workflowText = result.workflow_id ? '\\n\\n已生成目标计划：' + result.workflow_id : '';
+    const assistantMessage = {role:'assistant', content: answerText + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress: result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null};
+    if (result._streamed) Object.assign(state.messages[state.messages.length - 1], assistantMessage);
+    else state.messages.push(assistantMessage);
+    if (result.workflow_id) void monitorWorkflow(result.workflow_id, 120000, state.messages.length - 1);
     state.attachments = [];
     document.getElementById('chatStatus').textContent = '';
     loadState();
   }catch(err){
     document.getElementById('chatStatus').textContent = err.message;
   }finally{
+    state.loading = false;
+    state.requestStartedAt = 0;
+    renderMessages();
+  }
+}
+
+// Phase 2: Agent 模式 sendMessage (前缀 /agent)
+async function sendMessageAgent(text, readyAttachments) {
+  const context = floatingMessageContext();
+  context.uploaded_attachments = readyAttachments.map(item => ({attachment_id:item.attachment_id, file_name:item.file_name, file_type:item.file_type, mime_type:item.mime_type, size_bytes:item.size_bytes, content_available:item.content_available, extracted_text:item.extracted_text || '', truncated:Boolean(item.truncated), status:item.status || '', is_image:Boolean(item.is_image), image_analysis:item.image_analysis || {}}));
+  const reqId = 'agent_' + floatingCopilotRequestId(state.sessionId, text);
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+    const res = await fetch('/api/v1/copilot/agent', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({request_id: reqId, session_id: state.sessionId, message: text, context}),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const result = await res.json();
+    if (!res.ok || result.ok === false) throw new Error(result.error || `HTTP ${res.status}`);
+    state.businessFocus = result.business_focus;
+    state.sessionId = result.session_id || state.sessionId;
+    saveCurrentSession();
+    let ans = result.answer || '已处理。';
+    if (result.tool_calls && result.tool_calls.length) {
+      ans += '\n\n🔧 查询了：' + result.tool_calls.map(tc => `${tc.result?.success ? '✅' : '❌'} ${tc.tool}`).join(', ');
+    }
+    const workflowProgress = result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null;
+    state.messages.push({role:'assistant', content: ans, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], tool_calls: result.tool_calls || [], proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress:workflowProgress});
+    if (workflowProgress) void monitorWorkflow(workflowProgress.workflow_id, 120000, state.messages.length - 1);
+    state.attachments = [];
+    document.getElementById('chatStatus').textContent = '';
+    loadState();
+  } catch (err) {
+    document.getElementById('chatStatus').textContent = err.message;
+  } finally {
     state.loading = false;
     state.requestStartedAt = 0;
     renderMessages();
@@ -5075,49 +5628,76 @@ def write_talent_action_batch(data: dict[str, Any]) -> Path:
     return path
 
 
+def pending_talent_action_result(
+    kind: str,
+    *,
+    write: bool,
+    reason: str,
+    lookup: dict[str, Any] | None = None,
+    error: str,
+) -> dict[str, Any]:
+    lookup = lookup if isinstance(lookup, dict) else {}
+    summary = {
+        "total": 1,
+        "would_write": 0,
+        "written": 0,
+        "already_exists": 0,
+        "pending_review": 1,
+    }
+    return {
+        "ok": not write,
+        "dry_run": not write,
+        "batch_path": "",
+        "lookup": lookup,
+        "returncode": 0 if not write else 2,
+        "stdout": "",
+        "stderr": error,
+        "sync": {
+            "ok": not write,
+            "result": {
+                "dry_run": not write,
+                "summary": summary,
+                "items": [
+                    {
+                        "index": 0,
+                        "kind": kind,
+                        "status": "pending_review",
+                        "reason": reason,
+                        "matches": lookup.get("matches") or [],
+                    }
+                ],
+                "report_paths": {},
+                "refresh_workbench": None,
+            },
+        },
+    }
+
+
 def apply_talent_action_batch(data: dict[str, Any]) -> dict[str, Any]:
     if not TALENT_SYNC_SCRIPT.exists():
         raise FileNotFoundError(f"找不到统一同步脚本：{TALENT_SYNC_SCRIPT}")
     kind = first_present(data, "kind") or first_present(data, "action_type", "")
     write = truthy(data.get("write"))
+    if kind in {"xsaas_intake", "xsaas_candidate_intake"}:
+        locator = action_locator(data)
+        if not locator.get("job_candidate_id") and (not locator.get("client") or not locator.get("job")):
+            return pending_talent_action_result(
+                kind,
+                write=write,
+                reason="missing_project",
+                error="X-SaaS intake requires a canonical client and job before write",
+            )
     if kind not in {"candidate_intake", "intake", "xsaas_intake", "xsaas_candidate_intake"}:
         data = enrich_talent_action_locator(data)
         lookup = data.get("_talent_lookup") if isinstance(data.get("_talent_lookup"), dict) else {}
         if not lookup.get("matched") or not lookup.get("job_candidate_id"):
-            summary = {
-                "total": 1,
-                "would_write": 0,
-                "written": 0,
-                "already_exists": 0,
-                "pending_review": 1,
-            }
-            return {
-                "ok": not write,
-                "dry_run": not write,
-                "batch_path": "",
-                "lookup": lookup,
-                "returncode": 0 if not write else 2,
-                "stdout": "",
-                "stderr": "talent action requires a unique A 系统 job_candidate_id before write",
-                "sync": {
-                    "ok": not write,
-                    "result": {
-                        "dry_run": not write,
-                        "summary": summary,
-                        "items": [
-                            {
-                                "index": 0,
-                                "kind": kind,
-                                "status": "pending_review",
-                                "reason": lookup.get("reason") or "no_unique_match",
-                                "matches": lookup.get("matches") or [],
-                            }
-                        ],
-                        "report_paths": {},
-                        "refresh_workbench": None,
-                    },
-                },
-            }
+            return pending_talent_action_result(
+                kind,
+                write=write,
+                reason=lookup.get("reason") or "no_unique_match",
+                lookup=lookup,
+                error="talent action requires a unique A 系统 job_candidate_id before write",
+            )
     batch_path = write_talent_action_batch(data)
     refresh_workbench = truthy(data.get("refresh_workbench"))
     cmd = [
@@ -6042,55 +6622,12 @@ def execute_agent_task_proposal(
     *,
     refresh: bool = True,
 ) -> dict[str, Any]:
-    if result["action_type"] != "create_task":
-        state.agent_service.finish_proposal(
-            proposal_id,
-            success=False,
-            note=f"不支持自动执行动作：{result['action_type']}",
-        )
-        raise ValueError(f"不支持自动执行动作：{result['action_type']}")
-    task_request = dict(result["request"])
-    conn = connect_feedback_db(state.db_path)
-    try:
-        existing_task = conn.execute(
-            """
-            SELECT id,due_at FROM followup_tasks
-            WHERE job_candidate_id=? AND task_type=? AND COALESCE(reason,'')=?
-              AND COALESCE(status,'open')='open'
-            ORDER BY id DESC LIMIT 1
-            """,
-            (
-                result["job_candidate_id"],
-                task_request.get("task_type") or "agent_verification",
-                task_request.get("reason") or "",
-            ),
-        ).fetchone()
-    finally:
-        conn.close()
-    if existing_task:
-        task_result = {
-            "task_id": existing_task["id"],
-            "job_candidate_id": result["job_candidate_id"],
-            "due_at": existing_task["due_at"],
-            "message": "已有相同的开放 Agent 任务",
-        }
-    else:
-        write_request = {**task_request, "refresh": refresh}
-        task_result = write_followup_task(state, write_request)
-    action_result = state.agent_service.record_external_action(
-        job_candidate_id=result["job_candidate_id"],
-        action_type="create_task",
-        request=task_request,
-        result=task_result,
-        idempotency_key=result["dedupe_key"],
-    )
-    action = state.agent_service.get_action(result["dedupe_key"])
-    state.agent_service.finish_proposal(
-        proposal_id,
-        success=True,
-        action_id=int(action["id"]) if action and action.get("id") else None,
-    )
-    return {"ok": True, "proposal_id": proposal_id, "status": "executed", **action_result}
+    # Proposal execution is shared with Core v1. The legacy endpoint only keeps
+    # its compatibility refresh side effect after the single canonical write.
+    execution = state.agent_service.execute_proposal({**result, "proposal_id": proposal_id})
+    if refresh and not execution.get("cached"):
+        execution["a_system_refresh"] = refresh_a_system_workbench()
+    return execution
 
 
 def write_outreach_event(state: WorkbenchState, data: dict[str, Any]) -> dict[str, Any]:
@@ -7408,7 +7945,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 suffix = clean(parsed.path.removeprefix("/api/agent/workflows/"))
                 workflow_id, _, action = suffix.partition("/")
                 if action == "start":
-                    result = self.state.agent_service.start_workflow(workflow_id)
+                    result = self.state.agent_service.start_workflow(
+                        workflow_id,
+                        expected_plan_version=parse_optional_int(data.get("expected_plan_version")),
+                        expected_plan_hash=clean(data.get("expected_plan_hash")),
+                    )
                 elif action == "revise":
                     result = self.state.agent_service.revise_workflow(workflow_id, clean(data.get("instruction")))
                 elif action == "cancel":
@@ -7583,61 +8124,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 if result["status"] == "rejected":
                     json_response(self, result)
                     return
-                if result["action_type"] != "create_task":
-                    self.state.agent_service.finish_proposal(
-                        proposal_id,
-                        success=False,
-                        note=f"V1.5 不支持执行动作：{result['action_type']}",
-                    )
-                    raise ValueError(f"V1.5 不支持执行动作：{result['action_type']}")
-                task_request = result["request"]
                 try:
-                    conn = connect_feedback_db(self.state.db_path)
-                    try:
-                        existing_task = conn.execute(
-                            """
-                            SELECT id,due_at FROM followup_tasks
-                            WHERE job_candidate_id=? AND task_type=? AND COALESCE(reason,'')=?
-                              AND COALESCE(status,'open')='open'
-                            ORDER BY id DESC LIMIT 1
-                            """,
-                            (
-                                result["job_candidate_id"],
-                                task_request.get("task_type") or "agent_verification",
-                                task_request.get("reason") or "",
-                            ),
-                        ).fetchone()
-                    finally:
-                        conn.close()
-                    if existing_task:
-                        task_result = {
-                            "task_id": existing_task["id"],
-                            "job_candidate_id": result["job_candidate_id"],
-                            "due_at": existing_task["due_at"],
-                            "message": "已有相同的开放 Agent 任务",
-                        }
-                    else:
-                        task_result = write_followup_task(self.state, task_request)
-                    action_result = self.state.agent_service.record_external_action(
-                        job_candidate_id=result["job_candidate_id"],
-                        action_type="create_task",
-                        request=task_request,
-                        result=task_result,
-                        idempotency_key=result["dedupe_key"],
-                    )
-                    action = self.state.agent_service.get_action(result["dedupe_key"])
-                    self.state.agent_service.finish_proposal(
-                        proposal_id,
-                        success=True,
-                        action_id=int(action["id"]) if action and action.get("id") else None,
-                    )
-                    json_response(self, {"ok": True, "proposal_id": proposal_id, "status": "executed", **action_result})
-                except Exception as exc:
-                    self.state.agent_service.finish_proposal(
-                        proposal_id,
-                        success=False,
-                        note=str(exc)[:500],
-                    )
+                    json_response(self, execute_agent_task_proposal(self.state, proposal_id, result))
+                except Exception:
                     raise
             elif parsed.path == "/api/agent/chat":
                 if not agent_origin_allowed(self):

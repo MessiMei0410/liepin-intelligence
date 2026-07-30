@@ -24,6 +24,7 @@ export const candidateDetail: CandidateDetail = {
 
 export const plannedWorkflow: Workflow = {
   ok: true,
+  plan_ref: { workflow_id: 'wf-1', version: 1, plan_hash: 'plan-hash-1' },
   goal: { title: '寻访前端工程师', objective: '为 ACME 寻访前端工程师', status: 'planned', progress: 0 },
   workflow: { workflow_id: 'wf-1', status: 'planned' },
   progress: { completed: 0, total: 2, ratio: 0 },

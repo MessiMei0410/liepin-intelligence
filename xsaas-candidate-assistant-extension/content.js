@@ -119,33 +119,27 @@
   }
 
   function postToWorkbench(path, payload) {
-    return fetch(`${WORKBENCH_BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      keepalive: true
-    })
-      .then(async res => {
-        const body = await res.json().catch(() => null);
-        if (res.ok) return body || { ok: true };
-        return {
-          ok: false,
-          error: body?.error || body?.stderr || `HTTP ${res.status}`,
-          status: res.status,
-          body
-        };
-      })
-      .catch(error => ({
-        ok: false,
-        error: error?.message || '本机 8765 服务未连接',
-        transport_error: 'network'
-      }));
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: 'asa-workbench-request', method: 'POST', path, payload },
+        response => {
+          if (chrome.runtime.lastError || !response) {
+            resolve({ ok: false, error: chrome.runtime.lastError?.message || '扩展后台未响应', transport_error: 'extension' });
+            return;
+          }
+          resolve(response.ok ? (response.body || { ok: true }) : response);
+        }
+      );
+    });
   }
 
   function getFromWorkbench(path) {
-    return fetch(`${WORKBENCH_BASE}${path}`, { method: 'GET', cache: 'no-store' })
-      .then(res => res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`)))
-      .catch(() => null);
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: 'asa-workbench-request', method: 'GET', path },
+        response => resolve(chrome.runtime.lastError || !response || !response.ok ? null : response.body)
+      );
+    });
   }
 
   function openAsaFloating() {

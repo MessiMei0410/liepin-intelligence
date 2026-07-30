@@ -39,7 +39,14 @@ export const workflowStepSchema = z.looseObject({
 
 export const workflowSchema = z.looseObject({
   ok: z.boolean(),
+  plan_ref: z.looseObject({
+    workflow_id: z.string(),
+    version: z.number(),
+    plan_hash: z.string(),
+  }).optional(),
   business_outcome: z.string().nullish(),
+  superseded_by_workflow_id: z.string().nullish(),
+  latest_revision_workflow_id: z.string().nullish(),
   goal: z.looseObject({
     title: z.string(),
     objective: z.string(),
@@ -85,6 +92,14 @@ export const workflowSchema = z.looseObject({
       channel: z.string().optional(),
       object_label: z.string().optional(),
       action: z.string().optional(),
+      query_plan_v1: z.looseObject({
+        cell_count: z.number().optional(),
+        dimensions: z.record(z.string(), z.array(z.string())).optional(),
+        execution_semantics: z.looseObject({
+          retrieval_axes: z.array(z.string()).optional(),
+          platform_filters: z.array(z.string()).optional(),
+        }).optional(),
+      }).optional(),
     }).optional(),
   })),
   artifacts: z.array(z.looseObject({

@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from a_system_agent.liepin_capture import EXTRACT_RESUME_JS, resume_matches_identity
+from a_system_agent.sourcing_pagination import PageResult, collect_pages, seek_to_page
 
 
 DEFAULT_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
@@ -43,10 +44,18 @@ class SearchRound:
     name: str
     query: str
     filters: dict[str, Any]
+    start_page: int = 1
+    collected_before: int = 0
+    seen_candidate_keys: set[str] | None = None
+    filter_receipt: dict[str, Any] | None = None
     result_count: int = 0
     extracted_count: int = 0
     recommended_count: int = 0
     noise_notes: str = ""
+    pages_fetched: int = 0
+    terminal_state: str = "blocked"
+    terminal_reason: str = "not_started"
+    cursor: dict[str, Any] | None = None
 
 
 @dataclass
@@ -592,6 +601,39 @@ async (limit) => {
   }
   return captured.map(url => !url ? "" : (String(url).startsWith("http") ? String(url) : "https://h.liepin.com" + String(url)));
 }
+"""
+
+
+PAGINATION_STATE_JS = r"""
+(() => {
+  const selectors = [
+    '.ant-pagination-next', '.el-pagination .btn-next', '.pagination-next',
+    'li[title="下一页"]', 'button[aria-label="下一页"]', 'a[aria-label="下一页"]'
+  ];
+  const node = selectors.map(selector => document.querySelector(selector)).find(Boolean);
+  if (!node) return {hasNext:false, reason:'next_control_missing'};
+  const disabled = node.matches(':disabled,[disabled],.disabled,.ant-pagination-disabled')
+    || node.getAttribute('aria-disabled') === 'true';
+  return {hasNext:!disabled, reason:disabled ? 'next_disabled' : ''};
+})()
+"""
+
+
+NEXT_PAGE_JS = r"""
+(() => {
+  const selectors = [
+    '.ant-pagination-next', '.el-pagination .btn-next', '.pagination-next',
+    'li[title="下一页"]', 'button[aria-label="下一页"]', 'a[aria-label="下一页"]'
+  ];
+  const node = selectors.map(selector => document.querySelector(selector)).find(Boolean);
+  if (!node) return false;
+  const disabled = node.matches(':disabled,[disabled],.disabled,.ant-pagination-disabled')
+    || node.getAttribute('aria-disabled') === 'true';
+  if (disabled) return false;
+  const target = node.querySelector('button,a') || node;
+  target.click();
+  return true;
+})()
 """
 
 
@@ -1456,12 +1498,18 @@ def record_round(conn: sqlite3.Connection, client: str, position: str, search_ro
     )
 
 
-def apply_filters(cdp: CDP, filters: dict[str, Any]) -> None:
+def apply_filters(cdp: CDP, filters: dict[str, Any]) -> dict[str, Any]:
     # Keep filters intentionally light. Current Liepin selector labels drift often;
     # keyword precision does most of the narrowing here.
-    if not filters:
-        return
-    time.sleep(0.8)
+    requested = filters.get("execution_filters") if isinstance(filters.get("execution_filters"), dict) else {}
+    if requested:
+        raise RuntimeError("LIEPIN_UNSUPPORTED_EXECUTION_FILTER: query_plan requested unavailable platform filters")
+    if filters:
+        time.sleep(0.8)
+    return {
+        "platform_filters_applied": [],
+        "evaluation_only": filters.get("evaluation_constraints") or {},
+    }
 
 
 def build_rounds(limit_rounds: int, profile: PositionProfile) -> list[SearchRound]:
@@ -1481,11 +1529,40 @@ def load_query_rounds(path: str | None) -> list[SearchRound]:
         query = clean_text(str(item.get("query") or ""))
         if not query:
             continue
+        cursor = item.get("cursor") if isinstance(item.get("cursor"), dict) else {}
+        try:
+            start_page = max(1, int(cursor.get("page") or 1))
+        except (TypeError, ValueError):
+            start_page = 1
+        try:
+            collected_before = max(0, int(item.get("collected_before") or 0))
+        except (TypeError, ValueError):
+            collected_before = 0
+        seen_candidate_keys = {
+            str(key).strip() for key in item.get("seen_candidate_keys") or [] if str(key).strip()
+        }
         rounds.append(
             SearchRound(
                 clean_text(str(item.get("round") or f"模型策略 {index + 1}")),
                 query,
-                {"source": "asa_llm_strategy", "purpose": clean_text(str(item.get("purpose") or ""))},
+                {
+                    "source": "asa_llm_strategy",
+                    "purpose": clean_text(str(item.get("purpose") or "")),
+                    "cell_id": clean_text(str(item.get("cell_id") or "")),
+                    "evaluation_constraints": (
+                        item.get("evaluation_constraints")
+                        if isinstance(item.get("evaluation_constraints"), dict)
+                        else {}
+                    ),
+                    "execution_filters": (
+                        item.get("execution_filters")
+                        if isinstance(item.get("execution_filters"), dict)
+                        else {}
+                    ),
+                },
+                start_page=start_page,
+                collected_before=collected_before,
+                seen_candidate_keys=seen_candidate_keys,
             )
         )
     return rounds
@@ -1501,6 +1578,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
     ensure_schema(conn)
     cdp = CDP(ws)
     all_candidates: list[dict[str, Any]] = []
+    raw_candidates: list[dict[str, Any]] = []
     iteration = next_iteration(conn, args.client, args.position)
     try:
         navigate(cdp, LIEPIN_SEARCH_URL, wait_seconds=3)
@@ -1523,20 +1601,91 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 current_href = str(evaluate(cdp, "location.href", timeout=8) or "")
                 if "compliancecommitment" in current_href or "合规承诺" in str(evaluate(cdp, "document.title", timeout=8) or ""):
                     raise SystemExit("猎聘命中安全合规承诺函（合规墙），请在 Chrome 里阅读并确认后再继续。")
-            apply_filters(cdp, search_round.filters)
-            cards = evaluate(cdp, f"({EXTRACT_JS})()", timeout=12) or []
-            if not isinstance(cards, list):
-                cards = []
-            if args.capture_links:
-                links = evaluate(cdp, f"({CAPTURE_LINKS_JS})({min(args.max_cards, len(cards))})", timeout=18) or []
-            else:
-                links = []
-            for index, card in enumerate(cards[: args.max_cards]):
+            search_round.filter_receipt = apply_filters(cdp, search_round.filters)
+            reported_total = search_round.result_count if re.search(r"\d", total_text) else None
+            last_signature = ""
+
+            def fetch_page(page_number: int) -> PageResult:
+                nonlocal last_signature
+                page_cards = evaluate(cdp, f"({EXTRACT_JS})()", timeout=12) or []
+                if not isinstance(page_cards, list):
+                    page_cards = []
+                page_cards = [card for card in page_cards[: args.max_cards] if isinstance(card, dict)]
+                if args.capture_links:
+                    page_links = evaluate(
+                        cdp, f"({CAPTURE_LINKS_JS})({len(page_cards)})", timeout=max(18, len(page_cards) * 2),
+                    ) or []
+                else:
+                    page_links = []
+                for position_index, card in enumerate(page_cards, 1):
+                    card["source_query"] = search_round.query
+                    card["source_round"] = search_round.name
+                    card["resume_url"] = (
+                        page_links[position_index - 1] if position_index <= len(page_links) else ""
+                    ) or card.get("resume_url", "")
+                    card["page_number"] = page_number
+                    card["position_index"] = position_index
+                last_signature = "|".join(
+                    str(card.get("res_id_encode") or card.get("name") or "") for card in page_cards[:3]
+                )
+                pagination_state = evaluate(cdp, PAGINATION_STATE_JS, timeout=8) or {}
+                page_total = reported_total
+                if page_total == 0 and page_cards:
+                    page_total = None
+                return PageResult(
+                    items=page_cards,
+                    reported_total=page_total,
+                    has_next=bool(pagination_state.get("hasNext")),
+                )
+
+            def advance_page(_next_page: int) -> bool:
+                nonlocal last_signature
+                previous_signature = last_signature
+                if evaluate(cdp, NEXT_PAGE_JS, timeout=8) is not True:
+                    return False
+                deadline = time.time() + 25
+                while time.time() < deadline:
+                    time.sleep(0.6)
+                    next_cards = evaluate(cdp, f"({EXTRACT_JS})()", timeout=12) or []
+                    signature = "|".join(
+                        str(card.get("res_id_encode") or card.get("name") or "")
+                        for card in (next_cards[:3] if isinstance(next_cards, list) else [])
+                        if isinstance(card, dict)
+                    )
+                    if signature and signature != previous_signature:
+                        last_signature = signature
+                        return True
+                return False
+
+            seek_failure = seek_to_page(
+                fetch_page=fetch_page,
+                advance_page=advance_page,
+                start_page=search_round.start_page,
+            )
+            pagination = seek_failure or collect_pages(
+                fetch_page=fetch_page,
+                advance_page=advance_page,
+                start_page=search_round.start_page,
+                max_pages=args.max_pages,
+                collected_before=search_round.collected_before,
+                seen_before_keys=search_round.seen_candidate_keys,
+                item_key=lambda card: str(
+                    card.get("res_id_encode")
+                    or card.get("resume_url")
+                    or "|".join(
+                        clean_text(str(card.get(key) or "")).casefold()
+                        for key in ("name", "current_company", "current_title")
+                    )
+                ),
+            )
+            cards = pagination.items
+            search_round.pages_fetched = pagination.pages_fetched
+            search_round.terminal_state = pagination.terminal_state
+            search_round.terminal_reason = pagination.terminal_reason
+            search_round.cursor = pagination.cursor
+            for card in cards:
                 if not isinstance(card, dict):
                     continue
-                card["source_query"] = search_round.query
-                card["source_round"] = search_round.name
-                card["resume_url"] = (links[index] if index < len(links) else "") or card.get("resume_url", "")
                 score, evidence, risks, level = score_candidate_for_profile(card, args.city, profile)
                 card["fit_score"] = score
                 card["fit_level"] = level
@@ -1544,7 +1693,10 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 card["risks"] = risks
                 card["draft"] = outreach_draft_for_profile(card, score, evidence, profile)
                 key = (normalize_name(card.get("name", "")), clean_text(card.get("current_company", "")))
-                if key in seen_keys:
+                duplicate_within_run = key in seen_keys
+                card["duplicate_within_run"] = duplicate_within_run
+                raw_candidates.append(dict(card))
+                if duplicate_within_run:
                     continue
                 seen_keys.add(key)
                 if score < args.min_score:
@@ -1599,6 +1751,7 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
         "iteration": iteration,
         "dry_run": args.dry_run,
         "candidates": all_candidates,
+        "raw_candidates": raw_candidates,
         "detail_capture": detail_capture,
         "rounds": [
             {
@@ -1607,6 +1760,13 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
                 "result_count": search_round.result_count,
                 "extracted_count": search_round.extracted_count,
                 "recommended_count": search_round.recommended_count,
+                "pages_fetched": search_round.pages_fetched,
+                "terminal_state": search_round.terminal_state,
+                "terminal_reason": search_round.terminal_reason,
+                "cursor": search_round.cursor,
+                "filter_receipt": search_round.filter_receipt or {
+                    "platform_filters_applied": [], "evaluation_only": {},
+                },
             }
             for search_round in rounds
         ],
@@ -1705,7 +1865,9 @@ def main() -> int:
     parser.add_argument("--new-tab", action="store_true")
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--max-cards", type=int, default=12)
+    parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--min-score", type=int, default=55)
+    parser.add_argument("--raw-json-output")
     parser.add_argument("--recommend-score", type=int, default=65)
     parser.add_argument("--capture-links", action="store_true")
     parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=True)
@@ -1781,6 +1943,13 @@ def main() -> int:
                 ensure_ascii=False,
                 indent=2,
             ),
+            encoding="utf-8",
+        )
+    if args.raw_json_output:
+        raw_json_output = Path(args.raw_json_output).expanduser().resolve()
+        raw_json_output.parent.mkdir(parents=True, exist_ok=True)
+        raw_json_output.write_text(
+            json.dumps(result.get("raw_candidates") or [], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     opened_links: list[str] = []

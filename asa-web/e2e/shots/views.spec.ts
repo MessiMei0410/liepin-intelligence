@@ -1,5 +1,6 @@
 import { expect, skipIfNoBackend, test } from '../support/fixtures'
 import { openJob, openWorkflow } from '../support/nav'
+import { overviewCandidates, overviewDashboard, overviewJobs } from '../support/overview-data'
 
 skipIfNoBackend()
 
@@ -8,6 +9,9 @@ skipIfNoBackend()
 // 等待条件保证异步数据全部落盘后再拍，避免基线抖动。
 
 test('总览', async ({ page }) => {
+  await page.route('**/api/v1/dashboard', route => route.fulfill({ json: overviewDashboard }))
+  await page.route('**/api/v1/jobs?**', route => route.fulfill({ json: { items: overviewJobs, total: overviewJobs.length } }))
+  await page.route('**/api/v1/candidates?**', route => route.fulfill({ json: { items: overviewCandidates, total: overviewCandidates.length } }))
   await page.goto('/asa-app')
   await expect(page.locator('header.topbar')).toContainText('ASA Agent 在线')
   await expect(page.locator('.metrics')).toBeVisible()

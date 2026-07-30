@@ -1,20 +1,17 @@
-import { useCallback, useEffect, useReducer, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ClipboardCheck, LoaderCircle, RefreshCw, UserRoundSearch } from 'lucide-react'
 import { api } from '../api'
 import type { ChannelDownweight, EvaluationReviewItem, StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { channelLabel } from './utils'
-import { DIFF_DECISIONS_EVENT, diffContentText, diffOpLabel, diffStepLabel, loadDiffDecisions, mergeReviewDecisions } from './strategyReviewDiff'
+import { diffContentText, diffOpLabel, diffStepLabel } from './strategyReviewDiff'
 import { StrategyReviewExpansion } from './StrategyReviewExpansion'
 
 // S4-3 策略复盘：终局工作流（completed/blocked/failed）展示规则版复盘结论与修订建议 diff。
 // 独立按需路由 /strategy-review，面板挂载与详情刷新（updatedAt 变化）时拉取，不进 /summary 轮询签名。
 // 无复盘（404）显示"该轮未生成策略复盘"并提供"生成复盘"（调 rebuild 幂等重算）。
 // degraded / insufficient_data 按后端语义如实呈现（证据不完整仅供参考），不夸大结论。
-// 逐项采纳/拒绝在"调整条件再搜"对话框（RevisePlanDialog）内操作，此处只回显决策标记；
-// S4-3c 起决策以后端 revision_diff[].status 为事实源（每次拉取后合并进本地缓存），
-// localStorage 仅作 API 失败时的缓存回退，变更事件到达即刷新。
-// S4-3c-3：池枯竭信号与扩池决策树扩区在 StrategyReviewExpansion（树决策本期仅 localStorage，无后端回写）。
+// 策略调整统一在 Copilot 确认卡完成；主面板只展示复盘证据与后端已记录的状态。
 // S4-5：N4 渠道降权建议（channel_downweights，仅建议不执行）与 N5 评估尺度复核（evaluation_review）
 // 如实渲染；尺度复核条目可跳候选人详情页，经"评分复核"快捷记录回写顾问结论（既有 commit 链路）。
 
@@ -40,14 +37,11 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
   const [missing, setMissing] = useState(false)
   const [error, setError] = useState('')
   const [building, setBuilding] = useState(false)
-  const [, onDecisionsChanged] = useReducer((tick: number) => tick + 1, 0)
 
   const load = useCallback(async () => {
     if (!reviewable) return
     try {
       const result = await api.strategyReview(workflowId)
-      // 后端已决状态为事实源：合并进本地缓存（未决条目的本地暂存保留），展示以合并结果为准。
-      mergeReviewDecisions(workflowId, result?.review?.revision_diff)
       setPayload(result)
       setMissing(result === null)
       setError('')
@@ -57,11 +51,6 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
   }, [workflowId, reviewable])
 
   useEffect(() => { void load() }, [load, updatedAt])
-  useEffect(() => {
-    window.addEventListener(DIFF_DECISIONS_EVENT, onDecisionsChanged)
-    return () => window.removeEventListener(DIFF_DECISIONS_EVENT, onDecisionsChanged)
-  }, [])
-
   if (!reviewable) return null
 
   const review = payload?.review
@@ -71,7 +60,6 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
   const downweights = review?.channel_downweights || []
   const evaluationReview = review?.evaluation_review || null
   const notes = review?.notes || []
-  const decisions = loadDiffDecisions(workflowId)
   const headSummary = error && !review ? '原因分析加载失败' : review ? review.verdict_label : missing ? '这轮还没分析没成的原因' : '正在分析…'
 
   const rebuild = async () => {
@@ -119,8 +107,8 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
         {findings.map(finding => <ChannelFinding key={finding.channel} finding={finding} />)}
       </div>}
       {diffs.length > 0 && <div className="review-diffs">
-        <div className="review-diffs-head"><b>修订建议</b><span>逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
-        {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} decision={decisions[diff.diff_id]} />)}
+        <div className="review-diffs-head"><b>修订建议</b><span>在 Copilot 中讨论并确认应用</span></div>
+        {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} />)}
       </div>}
       <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} jobId={jobId} mappingArtifactId={mappingArtifactId} onOpenMapping={onOpenMapping} />
       {downweights.length > 0 && <div className="review-diffs" aria-label="渠道降权建议">
@@ -154,8 +142,8 @@ function ChannelFinding({ finding }: { finding: StrategyReviewChannelFinding }) 
   </div>
 }
 
-function DiffRow({ diff, decision }: { diff: StrategyReviewDiff; decision?: string }) {
-  const status = decision || diff.status || 'pending'
+function DiffRow({ diff }: { diff: StrategyReviewDiff }) {
+  const status = diff.status || 'pending'
   const content = diffContentText(diff)
   return <div className="review-diff">
     <div className="review-diff-head">

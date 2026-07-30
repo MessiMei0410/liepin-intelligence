@@ -51,6 +51,155 @@ class CompanyVocabularyCoverageTest(unittest.TestCase):
         self.assertEqual(out, ["MPS", "矽力杰", "杰华特"])
 
 
+class QueryPlanV1ContractTest(unittest.TestCase):
+    def test_strategy_v2_carries_canonical_location_and_scenario_track_into_plan(self) -> None:
+        classification = {
+            "input_level": "L2",
+            "anchors": {
+                "scenario_track": {
+                    "present": True,
+                    "values": ["晶圆传输", "运动控制"],
+                    "source": "jd",
+                    "inferred": False,
+                    "confidence": "",
+                },
+            },
+            "missing_anchors": [],
+            "trace": [],
+        }
+        strategy = strategy_v2.build_strategy_v2(
+            {
+                "strategy_summary": "运动控制软件岗位",
+                "target_companies": ["示例科技"],
+                "channels": {
+                    "liepin": [{"query": "运动控制"}],
+                    "xsaas": [{"query": "运动控制"}],
+                },
+            },
+            classification,
+            canonical_position={"location": "杭州/上海"},
+        )
+
+        plan = query_builders.compile_query_plan_v1(strategy)
+
+        self.assertEqual(plan["dimensions"]["locations"], ["杭州", "上海"])
+        self.assertEqual(plan["dimensions"]["scenarios"], ["晶圆传输", "运动控制"])
+        self.assertEqual(plan["execution_semantics"]["retrieval_axes"], ["channel", "query"])
+        self.assertEqual(plan["execution_semantics"]["platform_filters"], [])
+        self.assertTrue(all(cell["execution_filters"] == {} for cell in plan["cells"]))
+
+    def test_compiles_complete_strategy_grid_with_stable_identity(self) -> None:
+        strategy = {
+            "schema_version": "strategy_v2",
+            "step2_target_pool": [
+                {
+                    "path": "same_layer",
+                    "tier": "T1",
+                    "companies": [
+                        {"name": "MPS", "source": "kb_profile", "confidence": "high"},
+                        {"name": "矽力杰", "source": "kb_profile", "confidence": "high"},
+                    ],
+                },
+                {
+                    "path": "adjacent",
+                    "tier": "T2",
+                    "companies": [
+                        {"name": "联宝", "source": "kb_graph", "confidence": "medium"},
+                    ],
+                },
+            ],
+            "step3_level_mapping": {"accepted_levels": ["经理", "资深工程师"]},
+            "step4_keyword_groups": [
+                {"group": "power", "targets": "电源方向", "terms": ["多相控制器", "DrMOS"]},
+                {"group": "function", "targets": "职能方向", "terms": ["技术市场", "产品定义"]},
+            ],
+            "anchors": {
+                "location": {"values": ["上海", "杭州"]},
+                "scenario": {"values": ["PC 电源"]},
+            },
+        }
+
+        first = query_builders.compile_query_plan_v1(strategy)
+        second = query_builders.compile_query_plan_v1(strategy)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["schema_version"], "query_plan_v1")
+        self.assertEqual(first["plan_hash"], query_builders.query_plan_hash(first))
+        self.assertEqual(first["cell_count"], len(first["cells"]))
+        self.assertTrue(first["cells"])
+        self.assertEqual(len({cell["cell_id"] for cell in first["cells"]}), len(first["cells"]))
+        self.assertEqual({cell["channel"] for cell in first["cells"]}, {"liepin", "xsaas"})
+        self.assertTrue(all(cell["locations"] == ["上海", "杭州"] for cell in first["cells"]))
+        self.assertTrue(all(cell["levels"] == ["经理", "资深工程师"] for cell in first["cells"]))
+        self.assertTrue(all(cell["scenarios"] == ["PC 电源"] for cell in first["cells"]))
+
+        company_refs = {
+            ref["company"]
+            for cell in first["cells"]
+            for ref in cell["provenance"]
+            if ref["kind"] in {"company_pool", "company_keyword"}
+        }
+        group_refs = {
+            ref["group"]
+            for cell in first["cells"]
+            for ref in cell["provenance"]
+            if ref["kind"] in {"keyword_group", "company_keyword"}
+        }
+        self.assertEqual(company_refs, {"MPS", "矽力杰", "联宝"})
+        self.assertEqual(group_refs, {"power", "function"})
+
+    def test_marginal_yield_scheduler_balances_conversion_overlap_and_exploration(self) -> None:
+        cells = [
+            {"cell_id": "q1", "channel": "liepin", "query": "高重叠", "priority": 10, "provenance": [{"kind": "keyword_group", "group": "a"}]},
+            {"cell_id": "q2", "channel": "liepin", "query": "高增量", "priority": 20, "provenance": [{"kind": "keyword_group", "group": "b"}]},
+            {"cell_id": "q3", "channel": "liepin", "query": "待探索", "priority": 30, "provenance": [{"kind": "keyword_group", "group": "c"}]},
+        ]
+        base = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": 3,
+            "cells": cells,
+        }
+        plan = {**base, "plan_hash": query_builders.query_plan_hash(base)}
+        metrics = [
+            {"channel": "liepin", "query": "高重叠", "runs": 4, "unique_yield_per_run": 10, "overlap_rate": 0.9, "business_score": 0},
+            {"channel": "liepin", "query": "高增量", "runs": 2, "unique_yield_per_run": 15, "overlap_rate": 0.25, "business_score": 1.5},
+        ]
+
+        scheduled = query_builders.schedule_query_plan_v1(plan, metrics)
+
+        self.assertEqual([cell["query"] for cell in scheduled["cells"]], ["高增量", "待探索", "高重叠"])
+        self.assertEqual([cell["priority"] for cell in scheduled["cells"]], [1, 2, 3])
+        self.assertEqual(scheduled["cells"][0]["base_priority"], 20)
+        self.assertEqual(scheduled["cells"][1]["scheduling"]["mode"], "exploration")
+        self.assertEqual(scheduled["scheduler"]["policy"], "marginal_unique_yield_v1")
+        self.assertEqual(scheduled["plan_hash"], query_builders.query_plan_hash(scheduled))
+        self.assertEqual(plan["cells"][0]["priority"], 10, "调度不得原地修改已生成计划")
+
+    def test_channel_execution_entries_carry_cursor_without_changing_plan_hash(self) -> None:
+        cell = {
+            "cell_id": "qpc_resume",
+            "channel": "liepin",
+            "query": "精密 机械",
+            "priority": 1,
+            "provenance": [{"kind": "keyword_group", "group": "mechanical"}],
+            "execution_cursor": {"page": 51},
+        }
+        plan = {"cells": [cell], "plan_hash": "approved-hash"}
+
+        entries = query_builders.query_plan_channel_entries(plan, "liepin")
+
+        self.assertEqual(entries, [{
+            "cell_id": "qpc_resume", "query": "精密 机械", "cursor": {"page": 51},
+            "collected_before": 0,
+            "evaluation_constraints": {"locations": [], "levels": [], "scenarios": []},
+            "execution_filters": {},
+            "seen_candidate_keys": [],
+        }])
+        self.assertEqual(plan["plan_hash"], "approved-hash")
+
+
 def _company_count(query: str, vocab: set[str]) -> int:
     return sum(1 for token in query.split() if is_company_token(token, vocab))
 
@@ -358,20 +507,54 @@ class ExecuteExternalDialectWiringTest(unittest.TestCase):
         runtime._run_json = fake_run_json  # type: ignore[method-assign]
         runtime._run = lambda command, timeout=300: subprocess.CompletedProcess(command, 0, stdout="sync ok", stderr="")  # type: ignore[method-assign]
 
+    @staticmethod
+    def _approved_plan(liepin: list[str], xsaas: list[str]) -> dict:
+        cells = [
+            {
+                "cell_id": f"qpc_test_{channel}_{index}",
+                "channel": channel,
+                "query": query,
+                "locations": [],
+                "levels": [],
+                "scenarios": [],
+                "priority": index,
+                "provenance": [{"kind": "keyword_group", "group": "test"}],
+            }
+            for channel, queries in (("liepin", liepin), ("xsaas", xsaas))
+            for index, query in enumerate(queries, 1)
+        ]
+        plan = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": len(cells),
+            "cells": cells,
+        }
+        return {**plan, "plan_hash": query_builders.query_plan_hash(plan)}
+
     def test_channel_query_files_follow_dialects(self) -> None:
         self._install_fake_runners()
         dense = "多相控制器 DrMOS POL TME FAE"
         mixed = "MPS 矽力杰 FAE"
+        expected_liepin = [
+            "MPS FAE", "矽力杰 FAE", "多相控制器 DrMOS",
+            "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE",
+        ]
+        expected_xsaas = ["MPS", "矽力杰", "多相控制器", "DrMOS"]
+        approved_plan = self._approved_plan(expected_liepin, expected_xsaas)
         request = {
             "client": "士兰微",
             "job": "技术市场经理",
             "target_count": 5,
+            "max_query_cells_per_batch": 20,
             "workflow_id": "wf-dialect",
             "opencli_shadow": False,
+            "query_plan_v1": approved_plan,
+            "query_plan_hash": approved_plan["plan_hash"],
             "strategy": {
                 "channels": {
-                    "liepin": [mixed, {"query": dense, "purpose": "兜底", "round": "core"}],
-                    "xsaas": [mixed, {"query": dense}],
+                    "liepin": ["审批后不得执行的旧查询", mixed, {"query": dense}],
+                    "xsaas": ["审批后不得执行的旧查询", mixed, {"query": dense}],
                 },
                 "strategy_v2": {
                     "step2_target_pool": [{"companies": [{"name": "MPS"}, {"name": "矽力杰"}]}],
@@ -383,23 +566,47 @@ class ExecuteExternalDialectWiringTest(unittest.TestCase):
         sourcing_dir = self.service.capability_runtime.output_dir / "sourcing"
         liepin_file = next(sourcing_dir.glob("*-liepin-queries.json"))
         xsaas_file = next(sourcing_dir.glob("*-xsaas-queries.json"))
-        liepin = json.loads(liepin_file.read_text(encoding="utf-8"))["queries"]
-        xsaas = json.loads(xsaas_file.read_text(encoding="utf-8"))["queries"]
+        liepin_entries = json.loads(liepin_file.read_text(encoding="utf-8"))["queries"]
+        xsaas_entries = json.loads(xsaas_file.read_text(encoding="utf-8"))["queries"]
+        liepin = [entry["query"] for entry in liepin_entries]
+        xsaas = [entry["query"] for entry in xsaas_entries]
         vocab = {"mps", "矽力杰"}
+
+        self.assertTrue(all(entry["execution_filters"] == {} for entry in [*liepin_entries, *xsaas_entries]))
+        self.assertTrue(all("evaluation_constraints" in entry for entry in [*liepin_entries, *xsaas_entries]))
 
         # 猎聘：组合查询维持（公司+职能词成对），≤2 词/≤6 组
         self.assertEqual(
             liepin,
-            ["MPS FAE", "矽力杰 FAE", "多相控制器 DrMOS", "多相控制器 POL", "多相控制器 TME", "多相控制器 FAE"],
+            expected_liepin,
         )
         _assert_liepin_dialect(self, liepin, vocab)
         # X-SaaS：公司词优先独立查询，过滤裸歧义缩写，技术词使用原子查询
         self.assertEqual(
             xsaas,
-            ["MPS", "矽力杰", "多相控制器", "DrMOS"],
+            expected_xsaas,
         )
         _assert_xsaas_dialect(self, xsaas, vocab)
         self.assertNotEqual(liepin, xsaas, "双渠道方言必须在接线层分叉")
+
+    def test_missing_approved_query_plan_is_blocked_without_fallback(self) -> None:
+        self._install_fake_runners()
+        request = {
+            "client": "士兰微",
+            "job": "技术市场经理",
+            "target_count": 5,
+            "workflow_id": "wf-no-approved-plan",
+            "opencli_shadow": False,
+            "strategy": {
+                "channels": {
+                    "liepin": ["不得执行的旧查询"],
+                    "xsaas": ["不得执行的旧查询"],
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "批准的 query_plan_v1"):
+            self.service.capability_runtime.execute_external("multi_channel_sourcing", request)
 
 
 if __name__ == "__main__":

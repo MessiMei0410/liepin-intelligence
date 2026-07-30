@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import liepin_workbench_server as server  # noqa: E402
+from a_system_agent.privacy import sanitize_context_snapshot  # noqa: E402
 
 
 class ASAFloatingCompletionTest(unittest.TestCase):
@@ -31,8 +32,11 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIsNotNone(build_number)
         self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 1, 21))
         self.assertGreaterEqual(int(build_number.group(1)), 22)
-        self.assertEqual(version.group(1), "0.2.18")
-        self.assertEqual(int(build_number.group(1)), 41)
+        self.assertEqual(version.group(1), "0.2.20")
+        self.assertEqual(int(build_number.group(1)), 43)
+        self.assertIn("LSMinimumSystemVersion", build)
+        self.assertIn('SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"', build)
+        self.assertNotIn("&& sign_with_timeout; then", build)
         self.assertIn("NSScreenCaptureUsageDescription", build)
         self.assertIn("NSAppleEventsUsageDescription", build)
 
@@ -127,7 +131,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         app = Path("/Users/messi/Documents/ASA/src/app/App.tsx").read_text(encoding="utf-8")
         self.assertIn("const publishCopilotContext = async", bridge)
         self.assertIn("await publishCopilotContext(context, 'copilot', true)", bridge)
-        self.assertIn("publishCopilotContext(copilotContext, 'selection', true)", app)
+        self.assertIn("copilotContext.type === 'page' ? 'navigation' : 'selection'", app)
+        self.assertIn("false,", app)
         self.assertLess(
             bridge.index("await publishCopilotContext(context, 'copilot', true)"),
             bridge.index("nativeBridge.postMessage({ type: 'showFloating' })"),
@@ -183,6 +188,34 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIn('let urlString = body["url"] as? String', source)
         self.assertIn("loadWorkbenchURL(urlString)", source)
 
+    def test_message_and_suggestion_job_links_use_native_workbench_bridge(self) -> None:
+        source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
+        message_actions = source[source.index("function runMessageAction"):source.index("function runProactiveSuggestion")]
+        suggestions = source[source.index("function runProactiveSuggestion"):source.index("function floatingMessageContext")]
+
+        self.assertIn("type === 'open_job'", message_actions)
+        self.assertIn("openWorkbenchUrl(`/asa-app#job=${encodeURIComponent(id)}`)", message_actions)
+        self.assertIn("openWorkbenchUrl(`/asa-app${suffix}`)", message_actions)
+        self.assertNotIn("window.open(`/asa-app${suffix}`", message_actions)
+        self.assertIn("openWorkbenchUrl(`/asa-app#job=${encodeURIComponent(id)}`)", suggestions)
+        self.assertIn("openWorkbenchUrl('/asa-app')", suggestions)
+
+    def test_streaming_empty_message_does_not_render_a_placeholder_reply(self) -> None:
+        source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
+        self.assertNotIn("<p>暂无回复。</p>", source)
+        self.assertIn("if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar) return '';", source)
+        self.assertIn("renderThinkingMessage()", source)
+
+    def test_floating_r3_card_requires_a_complete_snapshot_and_shows_verbatim_constraints(self) -> None:
+        source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
+        self.assertIn("typeof item === 'string' ? item : item?.rule || item?.quote", source)
+        self.assertIn("snapshot.ready === true", source)
+        self.assertIn("channels.length > 0", source)
+        self.assertIn("snapshotReady ? '' : ' disabled'", source)
+        self.assertIn("原话约束：", source)
+        for label in ["待开始", "排队中", "执行中", "待审批", "等待渠道回执", "技术失败", "已完成", "已取消", "已被新修订替代"]:
+            self.assertIn(label, source)
+
     def test_background_context_sync_never_prompts_for_permissions(self) -> None:
         source = (ROOT / "asa-floating-app" / "src" / "AppDelegate.swift").read_text(encoding="utf-8")
         self.assertIn(
@@ -192,6 +225,83 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         authorization_guard = source.index("guard screenCaptureAuthorized else")
         screenshot_call = source.index("let capture = captureWindowImageWithScreencapture", authorization_guard)
         self.assertLess(authorization_guard, screenshot_call)
+
+    def test_native_shell_scopes_shortcuts_and_bridge_capabilities(self) -> None:
+        source = (ROOT / "asa-floating-app" / "src" / "AppDelegate.swift").read_text(encoding="utf-8")
+        policy = (ROOT / "asa-floating-app" / "src" / "WebSecurityPolicy.swift").read_text(encoding="utf-8")
+        self.assertIn("event.window === self?.panel", source)
+        self.assertIn("NSEvent.removeMonitor(localKeyMonitor)", source)
+        self.assertIn("message.frameInfo.isMainFrame", source)
+        self.assertIn("message.frameInfo.securityOrigin", source)
+        self.assertIn("allowsBridgeAction", source)
+        self.assertIn('url.path == "/asa-app"', policy)
+        self.assertIn('url.path == "/asa-floating"', policy)
+
+    def test_native_context_does_not_capture_or_persist_clipboard_text(self) -> None:
+        source = (ROOT / "asa-floating-app" / "src" / "AppDelegate.swift").read_text(encoding="utf-8")
+        context_source = source[source.index("private func publishNativeContext"):source.index("private func preferredContextApplication")]
+        self.assertNotIn("clipboardPreview", context_source)
+        self.assertNotIn('"preview":', context_source)
+        self.assertNotIn("string(forType: .string)", context_source)
+        sanitized = sanitize_context_snapshot(
+            {
+                "surface": "native",
+                "clipboard": {
+                    "has_text": True,
+                    "change_count": 9,
+                    "length": 18,
+                    "preview": "password=top-secret",
+                    "content": "top-secret",
+                },
+            }
+        )
+        self.assertEqual(sanitized["clipboard"], {"has_text": True, "change_count": 9})
+
+    def test_floating_state_sanitizes_legacy_native_clipboard_fields(self) -> None:
+        legacy_context = {
+            "surface": "native",
+            "frontmost_app": {"name": "Safari", "bundle_id": "com.apple.Safari"},
+            "clipboard": {
+                "has_text": True,
+                "change_count": 9,
+                "length": 18,
+                "preview": "password=top-secret",
+            },
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        class FakeRuntimeService:
+            db_path = Path("/tmp/asa-floating-test-missing-agent.db")
+
+            def get_runtime_timeline(self, limit: int = 8) -> dict:
+                return {
+                    "context_snapshots": [{"payload": sanitize_context_snapshot(legacy_context)}],
+                    "tool_calls": [],
+                    "permission_audit": [],
+                }
+
+        with server.ASA_FLOATING_LOCK:
+            server.ASA_FLOATING_CONTEXTS.clear()
+            server.ASA_FLOATING_CONTEXTS["native"] = legacy_context
+        try:
+            payload = server.build_floating_state(type("State", (), {"agent_service": FakeRuntimeService()})())
+            self.assertEqual(
+                payload["bridge"]["context_instances"]["native"]["clipboard"],
+                {"has_text": True, "change_count": 9},
+            )
+            self.assertEqual(
+                payload["runtime"]["context_snapshots"][0]["payload"]["clipboard"],
+                {"has_text": True, "change_count": 9},
+            )
+        finally:
+            with server.ASA_FLOATING_LOCK:
+                server.ASA_FLOATING_CONTEXTS.clear()
+
+    def test_service_diagnostics_are_scoped_to_page_load_generation(self) -> None:
+        source = (ROOT / "asa-floating-app" / "src" / "AppDelegate.swift").read_text(encoding="utf-8")
+        self.assertIn("mainPageLoadGeneration += 1", source)
+        self.assertIn("floatingPageLoadGeneration += 1", source)
+        self.assertIn("generation == self.pageLoadGeneration(for: currentTarget)", source)
 
     def test_floating_page_keeps_actions_available_but_hidden_by_default(self) -> None:
         server = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
@@ -245,7 +355,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
             '"native"',
             "/api/asa/floating/action",
             "payload.workflow_id = id",
-            "runFloatingAction(type, id)",
+            "runFloatingAction(type, id, planRef)",
             "open_workflow",
             "/api/asa/floating/state",
             "/api/asa/floating/context",
@@ -259,6 +369,23 @@ class ASAFloatingCompletionTest(unittest.TestCase):
             'id="sendButton"',
         ]:
             self.assertIn(marker, server)
+
+    def test_floating_proposal_cards_use_core_v1_preflight_and_decision_routes(self) -> None:
+        source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
+        for marker in [
+            'id="proposalCards"',
+            "renderActionCards",
+            "/api/v1/agent/proposals?status=pending&limit=4",
+            "/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/preflight",
+            "/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/decision",
+            "confirmation_token",
+            "已确认，内部跟进任务已创建。",
+            "proposalReceipts",
+            "postCheck:postCheck.summary",
+            "data-proposal-open-candidate",
+            "runMessageAction('open_candidate', button.dataset.proposalOpenCandidate)",
+        ]:
+            self.assertIn(marker, source)
         for marker in [
             "parseWorkflowHash",
             "parseJobHash",
@@ -268,7 +395,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
             "asa-hash-navigation-hint",
             "activateQueueItem",
         ]:
-            self.assertIn(marker, server)
+            self.assertIn(marker, source)
         schema = (ROOT / "scripts" / "a_system_agent" / "schema.py").read_text(encoding="utf-8")
         service = (ROOT / "scripts" / "a_system_agent" / "service.py").read_text(encoding="utf-8")
         for marker in [
@@ -281,13 +408,13 @@ class ASAFloatingCompletionTest(unittest.TestCase):
             "def get_runtime_timeline",
         ]:
             self.assertTrue(marker in schema or marker in service)
-        self.assertNotIn("无待审批</span>", server)
-        self.assertNotIn("无执行目标</span>", server)
-        self.assertNotIn("const visibleCalls = calls.slice(0, 3)", server)
-        self.assertNotIn("工具与权限时间线", server)
-        self.assertNotIn("需要注意的工具动作", server)
-        self.assertIn("snapshot.show_in_floating !== true", server)
-        self.assertIn("permission !== 'read'", server)
+        self.assertNotIn("无待审批</span>", source)
+        self.assertNotIn("无执行目标</span>", source)
+        self.assertNotIn("const visibleCalls = calls.slice(0, 3)", source)
+        self.assertNotIn("工具与权限时间线", source)
+        self.assertNotIn("需要注意的工具动作", source)
+        self.assertIn("snapshot.show_in_floating !== true", source)
+        self.assertIn("permission !== 'read'", source)
         privacy = (ROOT / "scripts" / "a_system_agent" / "privacy.py").read_text(encoding="utf-8")
         self.assertIn('normalized == "wechat"', privacy)
         self.assertIn('"capture_mode" in item', privacy)
@@ -295,13 +422,15 @@ class ASAFloatingCompletionTest(unittest.TestCase):
     def test_floating_copilot_uses_compact_response_mode(self) -> None:
         llm = (ROOT / "scripts" / "a_system_agent" / "llm.py").read_text(encoding="utf-8")
         service = (ROOT / "scripts" / "a_system_agent" / "service.py").read_text(encoding="utf-8")
+        copilot_handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
+        copilot_runtime = service + copilot_handler
         self.assertIn("COPILOT_FLOATING_SYSTEM_PROMPT", llm)
         self.assertIn("payload.get(\"response_mode\") == \"floating_compact\"", llm)
         self.assertIn("浮窗空间很小", llm)
-        self.assertIn("untrusted_screen_content", service)
-        self.assertIn("attachment_content_available", service)
-        self.assertIn("visual_understanding_available", service)
-        self.assertIn("resolve_wechat_attachments", service)
+        self.assertIn("untrusted_screen_content", copilot_runtime)
+        self.assertIn("attachment_content_available", copilot_runtime)
+        self.assertIn("visual_understanding_available", copilot_runtime)
+        self.assertIn("resolve_wechat_attachments", copilot_runtime)
         self.assertIn("不可信屏幕内容", llm)
         self.assertIn("不得声称已打开、读取或理解附件内容", llm)
         self.assertIn("attachment_evidence", llm)
@@ -314,9 +443,9 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIn("按这个格式整/参考这个模板", llm)
         self.assertIn("不得默认套用招聘、人选、JD、候选人核验", llm)
         self.assertIn("忽略驾驶舱、岗位、人选、目标队列", llm)
-        self.assertIn("floating_compact", service)
-        self.assertIn("document_understanding", service)
-        self.assertIn("\"response_mode\": \"floating_compact\" if floating_compact else \"default\"", service)
+        self.assertIn("floating_compact", copilot_runtime)
+        self.assertIn("document_understanding", copilot_runtime)
+        self.assertIn("\"response_mode\": \"floating_compact\" if floating_compact else \"default\"", copilot_runtime)
 
     def test_wechat_native_context_survives_generic_native_focus(self) -> None:
         with server.ASA_FLOATING_LOCK:
@@ -613,6 +742,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertTrue(any(item["code"] == "permission_accessibility_authorized" for item in payload["diagnostics"]))
         self.assertTrue(any(item["code"] == "pending_approvals" for item in payload["diagnostics"]))
         self.assertEqual(payload["active_context"]["type"], "wechat")
+        self.assertEqual(payload["active_goals"][0]["workflow_id"], "workflow_1")
+        self.assertEqual(payload["active_goals"][0]["workflow_status"], "waiting_approval")
         self.assertEqual(payload["pending_approvals"][0]["approval_id"], "approval_1")
 
     def test_open_workflow_floating_action_opens_workflow_read_only(self) -> None:

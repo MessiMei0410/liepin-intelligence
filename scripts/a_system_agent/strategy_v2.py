@@ -47,7 +47,12 @@ _POOL_PATHS = {"same_layer", "reverse", "adjacent"}
 _POOL_TIERS = {"T1", "T2", "T3"}
 _CONFIDENCES = {"high", "medium", "low"}
 
-_DEFAULT_KB_DIR = Path("/Users/messi/Documents/ASA/knowledge_base")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_KB_CANDIDATES = (
+    _REPO_ROOT / "asa-web" / "knowledge_base",
+    _REPO_ROOT / "knowledge_base",
+    Path("/Users/messi/Documents/ASA/knowledge_base"),
+)
 
 # 场景/赛道信号词（用于从 JD/画像文本中识别 scenario_track 锚点）
 _SCENARIO_TOKENS = (
@@ -71,8 +76,29 @@ _ANSWER_HINTS = (
 
 def knowledge_base_dir() -> Path:
     """知识库目录：环境变量优先，缺省为 ASA 仓的 knowledge_base。运行时只读。"""
-    raw = os.environ.get("ASA_KNOWLEDGE_BASE_DIR", "").strip()
-    return Path(raw).expanduser() if raw else _DEFAULT_KB_DIR
+    raw = (
+        os.environ.get("ASA_KNOWLEDGE_BASE_DIR", "").strip()
+        or os.environ.get("A_SYSTEM_KNOWLEDGE_BASE_DIR", "").strip()
+    )
+    if raw:
+        return Path(raw).expanduser()
+    return next((path for path in _DEFAULT_KB_CANDIDATES if path.is_dir()), _DEFAULT_KB_CANDIDATES[0])
+
+
+def knowledge_base_health(kb_dir: str | Path | None = None) -> dict[str, Any]:
+    """Report whether strategy generation has at least one real knowledge anchor."""
+    directory = Path(kb_dir) if kb_dir else knowledge_base_dir()
+    available = {
+        "client_profiles": (directory / "kb_client_profiles_v1.json").is_file(),
+        "company_graph": (directory / "kb_company_graph_jsj_v1.json").is_file(),
+        "job_archetypes": any(directory.glob("seed_*.json")) if directory.is_dir() else False,
+    }
+    return {
+        "ok": bool(directory.is_dir() and any(available.values())),
+        "directory": str(directory),
+        "available": available,
+        "missing": [name for name, present in available.items() if not present],
+    }
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -106,11 +132,17 @@ def load_job_archetypes(kb_dir: str | Path | None = None) -> tuple[list[dict[str
         raw = doc.get("job_archetype") if isinstance(doc, dict) else None
         if not isinstance(raw, dict) or not raw.get("archetype_id"):
             continue
+        try:
+            golden_replay_min_recall = float(doc.get("golden_replay_min_recall") or 1.0)
+        except (TypeError, ValueError):
+            golden_replay_min_recall = 1.0
+            trace.append(f"{path.name} 的 golden_replay_min_recall 非法，按 1.0 处理")
         archetypes.append(
             {
                 "archetype_id": str(raw.get("archetype_id") or ""),
                 "title": str(raw.get("title") or ""),
                 "client": str(raw.get("client") or ""),
+                "client_scoped": bool(raw.get("client_scoped")),
                 "essence": str(raw.get("essence") or ""),
                 "directions": raw.get("directions") if isinstance(raw.get("directions"), list) else [],
                 "target_functions": raw.get("target_functions") if isinstance(raw.get("target_functions"), list) else [],
@@ -119,6 +151,8 @@ def load_job_archetypes(kb_dir: str | Path | None = None) -> tuple[list[dict[str
                 "keyword_groups": doc.get("keyword_groups") if isinstance(doc.get("keyword_groups"), list) else [],
                 "negative_rules": doc.get("negative_rules") if isinstance(doc.get("negative_rules"), list) else [],
                 "target_company_pool": doc.get("target_company_pool") if isinstance(doc.get("target_company_pool"), dict) else {},
+                "golden_candidates": doc.get("golden_candidates") if isinstance(doc.get("golden_candidates"), list) else [],
+                "golden_replay_min_recall": golden_replay_min_recall,
                 "source_file": path.name,
             }
         )
@@ -131,6 +165,12 @@ def load_job_archetypes(kb_dir: str | Path | None = None) -> tuple[list[dict[str
 # 原型匹配规则（S4-1 最小实现，可解释；S4-2 扩展）。标题命中任一关键词即视为命中原型。
 _ARCHETYPE_TITLE_TOKENS: dict[str, tuple[str, ...]] = {
     "tme_computing_power": ("技术市场", "tme", "technical marketing"),
+    "changyue_bonding_motion_control": (
+        "自动化软件", "运动控制软件", "控制软件", "motion control software",
+    ),
+    "changyue_precision_equipment_mechanical": (
+        "机械高级", "高级机械", "机械设计", "机械工程师", "结构设计",
+    ),
 }
 
 
@@ -156,12 +196,14 @@ def match_job_archetype(
     normalized_client = " ".join(str(client or "").split())
     for archetype in archetypes:
         archetype_id = str(archetype.get("archetype_id") or "")
+        archetype_client = str(archetype.get("client") or "")
+        if archetype.get("client_scoped") and normalized_client != archetype_client:
+            continue
         tokens = _ARCHETYPE_TITLE_TOKENS.get(archetype_id, ())
         hit_token = next((token for token in tokens if token.lower() in normalized_title), "")
         if hit_token:
             trace.append(f"岗位标题“{title}”命中原型 {archetype_id} 职能关键词“{hit_token}”")
             return {**archetype, "matched_by": "title_token", "match_reason": f"标题命中原型职能关键词：{hit_token}"}, trace
-        archetype_client = str(archetype.get("client") or "")
         if archetype_client and normalized_client == archetype_client and "市场" in str(title or ""):
             trace.append(f"客户“{client}”+市场职能命中原型 {archetype_id}")
             return {**archetype, "matched_by": "client_function", "match_reason": "客户一致且为市场岗"}, trace
@@ -410,13 +452,28 @@ def _kb_pool(archetype: dict[str, Any]) -> list[dict[str, Any]]:
     """从命中的岗位原型构建 step2 目标池（来源 kb_profile，顾问校准置信度）。"""
     pool = archetype.get("target_company_pool") or {}
     entries: list[dict[str, Any]] = []
-    mapping = (
-        ("T1_competitor_device", "same_layer", "T1", "high"),
-        ("T2_customer_OEM", "reverse", "T2", "high"),
-        ("T3_adjacent_unconfirmed", "adjacent", "T3", "medium"),
-    )
-    for key, path, tier, confidence in mapping:
-        block = pool.get(key) or {}
+    legacy_defaults = {
+        "T1_competitor_device": ("same_layer", "T1", "high"),
+        "T2_customer_OEM": ("reverse", "T2", "high"),
+        "T3_adjacent_unconfirmed": ("adjacent", "T3", "medium"),
+    }
+    for key, raw_block in pool.items():
+        if not isinstance(raw_block, dict) or raw_block.get("enabled") is False:
+            continue
+        block = raw_block
+        tier_match = re.match(r"T[123]", str(key))
+        default_path, default_tier, default_confidence = legacy_defaults.get(
+            str(key),
+            (
+                "adjacent" if "adjacent" in str(key).lower() else "reverse" if "reverse" in str(key).lower() else "same_layer",
+                tier_match.group(0) if tier_match else "T2",
+                "medium",
+            ),
+        )
+        path = str(block.get("path") or default_path)
+        tier = str(block.get("tier") or default_tier)
+        confidence = str(block.get("confidence") or default_confidence)
+        confidence = confidence if confidence in _CONFIDENCES else default_confidence
         companies = [
             {"name": str(company.get("name") or ""), "source": "kb_profile", "confidence": confidence}
             for company in block.get("companies") or []
@@ -425,6 +482,38 @@ def _kb_pool(archetype: dict[str, Any]) -> list[dict[str, Any]]:
         if companies:
             entries.append(_pool_entry(path, tier, companies, str(block.get("rationale") or "")))
     return entries
+
+
+def _graph_company_is_explicitly_excluded(company_name: str, fragment: dict[str, Any]) -> bool:
+    """Honor blanket and company-specific exclusions for graph-derived targets."""
+    rules = fragment.get("negative_rules")
+    if not isinstance(rules, list):
+        return False
+    normalized_name = _coverage_norm(company_name)
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get("type") or "").lower()
+        text = " ".join(
+            str(rule.get(key) or "")
+            for key in ("type", "rule", "source")
+        ).lower()
+        graph_signal = "kb_graph" in text or "知识图谱" in text or "图谱公司" in text
+        exclusion_signal = "exclusion" in rule_type or "排除" in rule_type or any(
+            marker in text
+            for marker in (
+                "不纳入公司池", "不并入公司池", "从公司池排除", "排除出公司池",
+                "排除", "不得搜索", "不得推荐",
+            )
+        )
+        blanket_exclusion = graph_signal and any(
+            marker in text
+            for marker in ("不纳入公司池", "不并入公司池", "从公司池排除", "排除出公司池")
+        )
+        named_exclusion = bool(normalized_name and normalized_name in _coverage_norm(text))
+        if exclusion_signal and (blanket_exclusion or named_exclusion):
+            return True
+    return False
 
 
 def build_strategy_v2(
@@ -438,6 +527,7 @@ def build_strategy_v2(
     graph_pool: list[dict[str, Any]] | None = None,
     restricted_rules: list[dict[str, Any]] | None = None,
     negative_checklist: list[dict[str, Any]] | None = None,
+    canonical_position: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """组装 strategy_v2：LLM 填充各步，运行时兜底必备键并强制版本号/定级/顾问留痕。
 
@@ -505,11 +595,22 @@ def build_strategy_v2(
 
     # S4-2：公司图谱池并入 step2（source=kb_graph + confidence，按公司名去重）。
     # governance：图谱命中只用于召回与排序，必须回候选人详情核验本人证据。
-    graph_companies = [
-        {"name": str(company.get("name") or ""), "source": "kb_graph", "confidence": str(company.get("confidence") or "low")}
-        for company in graph_pool or []
-        if isinstance(company, dict) and str(company.get("name") or "").strip()
-    ]
+    graph_companies: list[dict[str, str]] = []
+    excluded_graph_companies: list[str] = []
+    for company in graph_pool or []:
+        if not isinstance(company, dict):
+            continue
+        name = str(company.get("name") or "").strip()
+        if not name:
+            continue
+        if _graph_company_is_explicitly_excluded(name, fragment):
+            excluded_graph_companies.append(name)
+            continue
+        graph_companies.append(
+            {"name": name, "source": "kb_graph", "confidence": str(company.get("confidence") or "low")}
+        )
+    if excluded_graph_companies:
+        assembly_trace.append(f"图谱公司命中显式排除规则，未并入 step2：{len(excluded_graph_companies)} 家")
     if graph_companies:
         existing_names = {company["name"] for entry in step2 for company in entry["companies"]}
         new_companies = [company for company in graph_companies if company["name"] not in existing_names]
@@ -533,6 +634,20 @@ def build_strategy_v2(
             step3_raw.get("calibration_rule") or archetype_levels.get("note") or "按岗位职责范围而非 title 定档，待顾问确认"
         ),
     }
+    canonical_position = canonical_position or {}
+    locations = [
+        item.strip()
+        for item in re.split(r"[/、,，;；\s]+", str(canonical_position.get("location") or ""))
+        if item.strip()
+    ]
+    scenario_anchor = (
+        classification.get("anchors", {}).get("scenario_track", {})
+        if isinstance(classification.get("anchors"), dict)
+        else {}
+    )
+    scenarios = [
+        str(item).strip() for item in scenario_anchor.get("values") or [] if str(item).strip()
+    ] if isinstance(scenario_anchor, dict) else []
 
     step4_raw = fragment.get("step4_keyword_groups")
     step4: list[dict[str, Any]] = []
@@ -647,6 +762,11 @@ def build_strategy_v2(
         "step1_job_essence": step1,
         "step2_target_pool": step2,
         "step3_level_mapping": step3,
+        "evaluation_constraints": {
+            "locations": list(dict.fromkeys(locations)),
+            "levels": list(dict.fromkeys(step3["accepted_levels"])),
+            "scenarios": list(dict.fromkeys(scenarios)),
+        },
         "step4_keyword_groups": step4,
         "step5_expectation": step5,
         "negative_rules": negative_rules,
@@ -674,6 +794,19 @@ _COVERAGE_POOL_LAYERS = (
     ("T2_customer_OEM", "T2 客户整机厂"),
     ("T3_adjacent_unconfirmed", "T3 相邻池（未确认）"),
 )
+
+
+def _coverage_pool_layers(archetype: dict[str, Any]) -> list[tuple[str, str]]:
+    pool = archetype.get("target_company_pool") if isinstance(archetype.get("target_company_pool"), dict) else {}
+    layers = list(_COVERAGE_POOL_LAYERS)
+    known = {key for key, _label in layers}
+    for key, block in pool.items():
+        if key in known or not isinstance(block, dict):
+            continue
+        tier_match = re.match(r"T[123]", str(key))
+        tier = str(block.get("tier") or (tier_match.group(0) if tier_match else "T2"))
+        layers.append((str(key), str(block.get("label") or f"{tier} {key}")))
+    return layers
 
 
 def _coverage_norm(text: Any) -> str:
@@ -743,7 +876,7 @@ def build_coverage_report(archetype: dict[str, Any] | None, v2: dict[str, Any]) 
         if isinstance(company, dict) and str(company.get("name") or "").strip()
     ]
     seed_pool = archetype.get("target_company_pool") if isinstance(archetype.get("target_company_pool"), dict) else {}
-    for key, label in _COVERAGE_POOL_LAYERS:
+    for key, label in _coverage_pool_layers(archetype):
         block = seed_pool.get(key) if isinstance(seed_pool.get(key), dict) else {}
         companies = [
             str(company.get("name") or "").strip()
@@ -836,6 +969,71 @@ def build_coverage_report(archetype: dict[str, Any] | None, v2: dict[str, Any]) 
         "coverage_rate": round(len(consumed) / total, 4) if total else 1.0,
         "element_count": total,
         "consumed_count": len(consumed),
+    }
+
+
+def _replay_query_atoms(query: Any) -> list[str]:
+    text = " ".join(str(query or "").split()).lower()
+    atoms = [text, *re.split(r"[\s、；;，,/｜|+]+", text)]
+    return list(dict.fromkeys(_coverage_norm(atom) for atom in atoms if _coverage_norm(atom)))
+
+
+def build_golden_candidate_replay(
+    archetype: dict[str, Any] | None,
+    query_plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Replay a query grid against anonymized historically positive profiles."""
+    if not isinstance(archetype, dict):
+        return None
+    candidates = [item for item in archetype.get("golden_candidates") or [] if isinstance(item, dict)]
+    if not candidates:
+        return None
+    cells = [cell for cell in query_plan.get("cells") or [] if isinstance(cell, dict)]
+    atom_cells = [(cell, _replay_query_atoms(cell.get("query"))) for cell in cells]
+    covered_profiles: list[str] = []
+    uncovered_profiles: list[str] = []
+    profile_results: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates, 1):
+        profile_id = str(candidate.get("profile_id") or f"golden_{index}")
+        signals = [
+            _coverage_norm(signal)
+            for signal in candidate.get("search_signals") or []
+            if _coverage_norm(signal)
+        ]
+        matched_cells = [
+            str(cell.get("cell_id") or "")
+            for cell, atoms in atom_cells
+            if any(
+                atom == signal or atom in signal or signal in atom
+                for atom in atoms
+                for signal in signals
+            )
+        ]
+        covered = bool(signals and matched_cells)
+        (covered_profiles if covered else uncovered_profiles).append(profile_id)
+        profile_results.append(
+            {
+                "profile_id": profile_id,
+                "covered": covered,
+                "matched_cell_count": len(matched_cells),
+                "matched_cell_ids": matched_cells[:12],
+                "outcome_label": str(candidate.get("outcome_label") or "historical_positive"),
+            }
+        )
+    candidate_count = len(candidates)
+    recall_rate = round(len(covered_profiles) / candidate_count, 4) if candidate_count else 1.0
+    minimum_recall = max(0.0, min(float(archetype.get("golden_replay_min_recall") or 1.0), 1.0))
+    return {
+        "schema_version": "golden_candidate_replay_v1",
+        "archetype_id": str(archetype.get("archetype_id") or ""),
+        "evidence_scope": "anonymized_historical_positive_profiles",
+        "candidate_count": candidate_count,
+        "covered_count": len(covered_profiles),
+        "recall_rate": recall_rate,
+        "minimum_recall": minimum_recall,
+        "passed": recall_rate >= minimum_recall,
+        "uncovered_profile_ids": uncovered_profiles,
+        "profiles": profile_results,
     }
 
 

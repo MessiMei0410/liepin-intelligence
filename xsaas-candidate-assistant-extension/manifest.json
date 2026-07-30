@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "X-SaaS 人选推进助手",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "在 X-SaaS 候选人页入库、复核推进或停止，并同步到 A 系统 v3。",
   "permissions": [
     "storage",

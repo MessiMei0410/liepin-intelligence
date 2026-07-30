@@ -6,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +34,191 @@ CANDIDATE_ACTION_LABELS = {
 CANDIDATE_UPDATE_LABELS = {
     "read_no_reply": "已读未回复",
 }
+READ_ONLY_COPILOT_ACTIONS = {"open_candidate", "open_job", "open_queue"}
+NON_BUSINESS_COPILOT_ACTIONS = {*READ_ONLY_COPILOT_ACTIONS, "native_action", "floating_action", "open_workflow"}
+IDEMPOTENCY_LEASE_MINUTES = 5
+
+
+class IdempotencyConflict(ValueError):
+    """The same idempotency key cannot safely execute another action."""
+
+
+def _without_workflow_source_claim(answer: Any) -> str:
+    """Do not let an Agent-mode analysis imply sourcing ran without a workflow."""
+    text = str(answer or "")
+    if re.search(r"(?:寻访|搜索).{0,8}(?:已启动|已开始|已经开始|已执行)", text):
+        return "已完成查询和分析，尚未创建寻访工作流，因此没有启动寻访。"
+    return text
+
+
+def _candidate_action_card(intent: dict[str, Any]) -> dict[str, Any]:
+    """Expose the existing candidate preflight/commit chain as an action card.
+
+    Candidate writes deliberately do not create an agent_action_proposals row:
+    their existing one-time preflight token remains authoritative.  A nullable
+    proposal_id makes that boundary explicit to every action-card consumer.
+    """
+    candidate = dict(intent.get("candidate") or {})
+    return {
+        "proposal_id": None,
+        "capability_id": "candidate_action",
+        "action_kind": "internal_write",
+        "risk_level": "R2",
+        "context": {
+            "type": "candidate",
+            "id": candidate.get("id"),
+            "candidate": candidate.get("name"),
+            "client": candidate.get("client"),
+            "job": candidate.get("job"),
+            "stage": candidate.get("stage"),
+        },
+        "evidence": [
+            {"label": "建议原因", "value": intent.get("reason") or "顾问已发起候选人状态动作"},
+            {"label": "目标动作", "value": intent.get("action_label") or intent.get("action")},
+        ],
+        "blocked_reasons": [],
+        "next_actions": [
+            {"type": "confirm_candidate_intent", "label": "确认执行"},
+            {"type": "cancel_candidate_intent", "label": "取消"},
+        ],
+        "preflight": {"required": True, "expires_at": intent.get("expires_at")},
+        "post_check": "candidate_stage",
+    }
+
+
+def _workflow_action_card(result: dict[str, Any]) -> dict[str, Any] | None:
+    workflow_id = str(result.get("workflow_id") or "").strip()
+    if not workflow_id:
+        return None
+    approvals = [item for item in (result.get("approvals") or []) if isinstance(item, dict) and item.get("status") == "pending"]
+    approval = approvals[0] if approvals else {}
+    risk_level = str(approval.get("risk_level") or "R1")
+    step = next((item for item in (result.get("plan_summary") or []) if isinstance(item, dict) and item.get("status") not in {"completed", "skipped"}), {})
+    understanding = result.get("intent_understanding") if isinstance(result.get("intent_understanding"), dict) else {}
+    constraints = [
+        str(item.get("quote") or "").strip()
+        for item in (understanding.get("constraints") or [])
+        if isinstance(item, dict) and str(item.get("quote") or "").strip()
+    ]
+    plan_ref = dict(result.get("plan_ref") or {})
+    workflow_status = str((result.get("workflow") or {}).get("status") or "")
+    next_actions = [{"type": "open_workflow", "id": workflow_id, "label": "查看计划"}]
+    if workflow_status == "planned" and plan_ref.get("plan_hash"):
+        next_actions.append({
+            "type": "start_workflow",
+            "id": workflow_id,
+            "label": "确认计划并准备",
+            "plan_ref": plan_ref,
+        })
+    if approval.get("approval_id"):
+        next_actions.append({
+            "type": "workflow_approval",
+            "id": approval["approval_id"],
+            "label": "批准本次外部寻访" if risk_level == "R3" else "批准执行",
+        })
+    return {
+        "proposal_id": None,
+        "capability_id": str(step.get("capability_id") or "workflow"),
+        "action_kind": "external_write" if risk_level == "R3" else "internal_write",
+        "risk_level": risk_level,
+        "context": {
+            "type": "workflow",
+            "id": workflow_id,
+            "title": (result.get("goal") or {}).get("title"),
+            "plan_ref": plan_ref,
+        },
+        "evidence": [
+            {"label": "工作流", "value": workflow_id},
+            {"label": "当前步骤", "value": step.get("label") or (result.get("workflow") or {}).get("current_stage") or "准备执行"},
+            *([{"label": "理解目标", "value": understanding.get("objective")}] if understanding.get("objective") else []),
+            *([{"label": "原话约束", "value": "；".join(constraints)}] if constraints else []),
+        ],
+        "blocked_reasons": ["外部动作仍需 R3 单次审批"] if risk_level == "R3" and approval else [],
+        "next_actions": next_actions,
+        "post_check": "workflow_id",
+    }
+
+
+def _enforce_copilot_action_boundary(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep every transport honest about business execution and executable controls."""
+    workflow_id = str(result.get("workflow_id") or "").strip()
+    cards = [item for item in (result.get("action_cards") or []) if isinstance(item, dict)]
+    if not workflow_id:
+        result["answer"] = _without_workflow_source_claim(result.get("answer"))
+    allowed = set(NON_BUSINESS_COPILOT_ACTIONS)
+    result["suggested_actions"] = [
+        item
+        for item in (result.get("suggested_actions") or [])
+        if isinstance(item, dict)
+        and str(item.get("type") or "") in allowed
+    ]
+    if not cards:
+        result.pop("action_card", None)
+        result.pop("action_cards", None)
+    return result
+
+
+def _public_effective_strategy(metadata: Any, row: Any) -> dict[str, Any]:
+    """Project a search artifact to job UI without restricted strategy material."""
+    source = metadata if isinstance(metadata, dict) else {}
+    v2 = source.get("strategy_v2") if isinstance(source.get("strategy_v2"), dict) else {}
+    plan = source.get("plan") if isinstance(source.get("plan"), dict) else {}
+    company_tiers: list[dict[str, Any]] = []
+    for tier in v2.get("step2_target_pool") or []:
+        if not isinstance(tier, dict):
+            continue
+        companies = [
+            str(item.get("name") or "").strip()
+            for item in (tier.get("companies") or [])
+            if isinstance(item, dict)
+            and str(item.get("name") or "").strip()
+            and not str(item.get("source") or "").startswith("restricted")
+        ]
+        if companies:
+            company_tiers.append({
+                "path": str(tier.get("path") or ""),
+                "tier": str(tier.get("tier") or ""),
+                "companies": companies,
+                "rationale": str(tier.get("rationale") or ""),
+            })
+    keyword_groups = [
+        {
+            "group": str(group.get("group") or ""),
+            "targets": str(group.get("targets") or ""),
+            "terms": [str(term).strip() for term in (group.get("terms") or []) if str(term).strip()],
+        }
+        for group in (v2.get("step4_keyword_groups") or [])
+        if isinstance(group, dict)
+    ]
+    context = json_value(row["context_json"], {}) if row else {}
+    return {
+        "status": str(row["workflow_status"] or "") if row else "",
+        "plan_version": int(context.get("revision_number") or 0) + 1,
+        "generated_at": str(row["created_at"] or "") if row else "",
+        "summary": str(
+            (v2.get("step1_job_essence") or {}).get("statement")
+            or plan.get("strategy_summary")
+            or ""
+        ),
+        "input_level": str(v2.get("input_level") or ""),
+        "company_tiers": company_tiers,
+        "level_mapping": dict(v2.get("step3_level_mapping") or {}),
+        "keyword_groups": keyword_groups,
+        "expectation": dict(v2.get("step5_expectation") or {}),
+        "consultant_constraints": [
+            {
+                "type": str(item.get("type") or item.get("kind") or "other"),
+                "rule": str(item.get("rule") or item.get("quote") or "").strip(),
+            }
+            for item in (plan.get("consultant_constraints") or [])
+            if isinstance(item, dict) and str(item.get("rule") or item.get("quote") or "").strip()
+        ],
+        "audit": {
+            "workflow_id": str(row["workflow_id"] or "") if row else "",
+            "artifact_id": str(row["artifact_id"] or "") if row else "",
+            "schema_version": str(source.get("schema_version") or v2.get("schema_version") or ""),
+        },
+    }
 
 # 确认通道文案：新识别出的意图不直写，先由用户确认（PRD 阶段 4 R9）。
 CANDIDATE_ACTION_CONFIRM_TEXTS = {
@@ -50,6 +236,24 @@ def _row(row: Any) -> dict[str, Any]:
 def _is_stopped(stage: Any, raw_status: Any) -> bool:
     stage_text = str(stage or "")
     return any(token in stage_text for token in STOP_STAGES) or str(raw_status or "").lower() in STOP_STATUSES
+
+
+_RESUME_OVERVIEW_SECTION_RE = re.compile(
+    r"^(工作经历|工作经验|项目经历|项目经验|教育经历|教育背景|技能(?:特长)?|语言能力|自我评价|附件简历)",
+    re.MULTILINE,
+)
+
+
+def _resume_overview_summary(resume: dict[str, Any]) -> str:
+    """Return only the resume header for the overview API field, never the resume body."""
+    for key in ("profile_text", "notes"):
+        text = str(resume.get(key) or "").strip()
+        if not text:
+            continue
+        match = _RESUME_OVERVIEW_SECTION_RE.search(text)
+        header = text[:match.start()] if match else text
+        return header.strip()[:800]
+    return ""
 
 
 def _explicit_candidate_action(message: str) -> str:
@@ -95,10 +299,16 @@ class CoreService:
         self.agent_service = agent_service
         self._preflight_tokens: dict[str, tuple[int, str, datetime]] = {}
         self._preflight_lock = threading.Lock()
+        self._bootstrap_cache: dict[str, Any] | None = None
+        self._bootstrap_cache_ts: float = 0.0
+        self._bootstrap_cache_ttl: float = 5.0
 
     def bootstrap(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self._bootstrap_cache and (now - self._bootstrap_cache_ts) < self._bootstrap_cache_ttl:
+            return self._bootstrap_cache
         dashboard = self.dashboard()
-        return {
+        result = {
             "ok": True,
             "core": {"status": "connected", "db": str(self.db_path), "api_version": "v1"},
             "user": {"id": "local", "name": "本机顾问"},
@@ -110,6 +320,9 @@ class CoreService:
                 "legacy_admin": True,
             },
         }
+        self._bootstrap_cache = result
+        self._bootstrap_cache_ts = now
+        return result
 
     def copilot(self, message: str, *, session_id: str = "", context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.agent_service:
@@ -242,6 +455,10 @@ class CoreService:
             # 防止同一条消息既产生确认卡片又建立/启动工作流。
             agent_context["suppress_goal_intent"] = True
         result = self.agent_service.copilot(message, session_id=session_id, context=agent_context)
+        workflow_card = _workflow_action_card(result)
+        if workflow_card:
+            result["action_card"] = workflow_card
+            result["action_cards"] = [workflow_card]
         if action_result:
             action_label = CANDIDATE_ACTION_LABELS[action]
             result["candidate_action"] = action_result
@@ -269,6 +486,8 @@ class CoreService:
             result["write_blocked"] = True
         elif pending_intent:
             result["pending_intent"] = pending_intent
+            result["action_card"] = _candidate_action_card(pending_intent)
+            result["action_cards"] = [result["action_card"]]
             result["answer"] = f"{pending_intent['confirm_text']}\n\n未确认前不会写入 ASA。"
         elif pending_blocked:
             result["answer"] = f"这条指令未写入 ASA：{pending_blocked}"
@@ -276,15 +495,40 @@ class CoreService:
         elif pending_unresolved:
             result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
             result["write_blocked"] = True
-        if action or update_type or pending_intent:
+        result = _enforce_copilot_action_boundary(result)
+        if action or update_type or pending_intent or workflow_card:
             result_session_id = str(result.get("session_id") or session_id or "")
             if result_session_id:
-                structured = {
+                with transaction(self.db_path) as conn:
+                    existing = conn.execute(
+                        """SELECT structured_json FROM agent_copilot_messages
+                           WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1""",
+                        (result_session_id,),
+                    ).fetchone()
+                    structured = json.loads(existing["structured_json"] or "{}") if existing else {}
+                if not isinstance(structured, dict):
+                    structured = {}
+                structured.update({
                     "references": result.get("references") or [],
                     "suggested_actions": result.get("suggested_actions") or [],
                     "skill_runs": result.get("skill_runs") or [],
                     "business_focus": result.get("business_focus") or {},
-                }
+                    "action_card": result.get("action_card"),
+                    "action_cards": result.get("action_cards") or [],
+                })
+                if workflow_card:
+                    structured.update({
+                        "goal": result.get("goal"), "workflow": result.get("workflow"),
+                        "plan_summary": result.get("plan_summary") or [],
+                        "workflow_progress": {
+                            "workflow_id": workflow_card["context"]["id"],
+                            "status": (result.get("workflow") or {}).get("status") or "queued",
+                            "completed": (result.get("progress") or {}).get("completed") or 0,
+                            "total": (result.get("progress") or {}).get("total") or len(result.get("plan_summary") or []),
+                            "label": (result.get("workflow") or {}).get("current_stage") or "准备执行",
+                            "pending_approvals": result.get("approvals") or [],
+                        },
+                    })
                 if candidate_update_result:
                     structured["candidate_update"] = candidate_update_result
                 if pending_intent:
@@ -368,9 +612,202 @@ class CoreService:
             "candidate_action": action_result,
             "answer": (
                 f"已确认并同步到 ASA：{detail['name']} {action_label}，"
-                f"当前阶段为“{action_result.get('stage') or detail.get('clean_stage') or '已更新'}”。"
+                f"当前阶段为\u201c{action_result.get('stage') or detail.get('clean_stage') or '已更新'}\u201d。"
             ),
         }
+
+    def copilot_stream(self, message: str, *, session_id: str = "", context: dict[str, Any] | None = None):
+        """Phase 1.1：流式 copilot 回答生成器。复用 agent_service 的 copilot_stream_generator。"""
+        if not self.agent_service:
+            raise RuntimeError("copilot service unavailable")
+        for sse_event in self.agent_service.copilot_stream_generator(message, session_id=session_id, context=context):
+            yield sse_event
+
+    def _persist_agent_action_cards(self, result: dict[str, Any]) -> None:
+        """Persist Core-owned cards without replacing Agent-owned structured fields."""
+        result_session_id = str(result.get("session_id") or "").strip()
+        if not result_session_id:
+            return
+        with transaction(self.db_path) as conn:
+            existing = conn.execute(
+                """SELECT structured_json FROM agent_copilot_messages
+                   WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1""",
+                (result_session_id,),
+            ).fetchone()
+            if not existing:
+                return
+            try:
+                structured = json.loads(existing["structured_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                structured = {}
+            if not isinstance(structured, dict):
+                structured = {}
+            structured.update({
+                "references": result.get("references") or [],
+                "suggested_actions": result.get("suggested_actions") or [],
+                "skill_runs": result.get("skill_runs") or [],
+                "business_focus": result.get("business_focus") or {},
+                "action_card": result.get("action_card"),
+                "action_cards": result.get("action_cards") or [],
+            })
+            conn.execute(
+                """UPDATE agent_copilot_messages SET structured_json=?
+                   WHERE id=(SELECT id FROM agent_copilot_messages
+                             WHERE session_id=? AND role='assistant'
+                             ORDER BY id DESC LIMIT 1)""",
+                (json.dumps(structured, ensure_ascii=False), result_session_id),
+            )
+
+    def copilot_agent(self, message: str, *, session_id: str = "", context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run Agent-mode reads through the same action-card boundary as Copilot."""
+        if not self.agent_service:
+            raise RuntimeError("copilot service unavailable")
+        normalized = " ".join(str(message or "").split())
+        raw_context = dict(context or {})
+
+        # Candidate mutations retain their existing Core preflight/commit token
+        # chain even when the user selected the Agent-mode composer shortcut.
+        parsed_intent = parse_candidate_intent(normalized)
+        if (
+            _explicit_candidate_action(normalized)
+            or _explicit_candidate_update(normalized)
+            or parsed_intent.get("tier") == "confirm"
+        ):
+            return self.copilot(normalized, session_id=session_id, context=raw_context)
+
+        result = self.agent_service.copilot_agent(normalized, session_id=session_id, context=raw_context)
+        workflow_card = _workflow_action_card(result)
+        if workflow_card:
+            result["action_card"] = workflow_card
+            result["action_cards"] = [workflow_card]
+        else:
+            # Suggestions from a tool-using answer are informational unless
+            # Core can point to a created workflow/action-card record.
+            result.pop("action_card", None)
+            result.pop("action_cards", None)
+            result["answer"] = _without_workflow_source_claim(result.get("answer"))
+        result["suggested_actions"] = [
+            item for item in (result.get("suggested_actions") or [])
+            if isinstance(item, dict) and str(item.get("type") or "") in READ_ONLY_COPILOT_ACTIONS
+        ]
+        self._persist_agent_action_cards(result)
+        return result
+
+    def record_copilot_event(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Copilot 埋点（PRD §9），委托 agent_service 落 agent_copilot_events 表。"""
+        if not self.agent_service:
+            raise RuntimeError("copilot service unavailable")
+        return self.agent_service.record_copilot_event(session_id, event, payload)
+
+    def list_agent_proposals(self, status: str = "pending", limit: int = 20) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("agent service unavailable")
+        return self.agent_service.list_proposals(status, limit)
+
+    def generate_agent_proposals(self, job_candidate_ids: list[int], limit: int = 12) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("agent service unavailable")
+        return self.agent_service.generate_proposals(job_candidate_ids, limit=limit)
+
+    def preflight_agent_proposal(self, proposal_id: str) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("agent service unavailable")
+        return self.agent_service.proposal_preflight(proposal_id)
+
+    def decide_agent_proposal(
+        self,
+        proposal_id: str,
+        confirmation_token: str,
+        decision: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("agent service unavailable")
+        result = self.agent_service.decide_proposal(proposal_id, confirmation_token, decision, note)
+        if result["status"] == "rejected":
+            return result
+        return self.agent_service.execute_proposal(result)
+
+    def agent_action_metrics(self, days: int = 7) -> dict[str, Any]:
+        """Read-only seven-day operating metrics for the action-card loop."""
+        window_days = max(1, min(int(days or 7), 30))
+        conn = connect(self.db_path)
+        try:
+            since = f"-{window_days} days"
+            def count(sql: str, params: tuple[Any, ...] = ()) -> int:
+                return int(conn.execute(sql, params).fetchone()[0] or 0)
+
+            generated = count(
+                "SELECT count(*) FROM agent_action_proposals WHERE datetime(created_at) >= datetime('now','localtime',?)",
+                (since,),
+            )
+            confirmed = count(
+                """SELECT count(*) FROM agent_action_proposals
+                   WHERE status IN ('approved','executed','failed')
+                     AND datetime(COALESCE(reviewed_at,updated_at,created_at)) >= datetime('now','localtime',?)""",
+                (since,),
+            )
+            rejected = count(
+                """SELECT count(*) FROM agent_action_proposals
+                   WHERE status='rejected' AND datetime(COALESCE(reviewed_at,updated_at,created_at)) >= datetime('now','localtime',?)""",
+                (since,),
+            )
+            executed = count(
+                """SELECT count(*) FROM agent_action_proposals
+                   WHERE status='executed' AND datetime(COALESCE(updated_at,created_at)) >= datetime('now','localtime',?)""",
+                (since,),
+            )
+            failed = count(
+                """SELECT count(*) FROM agent_action_proposals
+                   WHERE status='failed' AND datetime(COALESCE(updated_at,created_at)) >= datetime('now','localtime',?)""",
+                (since,),
+            )
+            has_copilot_messages = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_copilot_messages'"
+            ).fetchone() is not None
+            clarification = count(
+                """SELECT count(*) FROM agent_copilot_messages
+                   WHERE role='assistant'
+                     AND (
+                       json_extract(structured_json,'$.turn_decision.effect')='clarify'
+                       OR json_extract(structured_json,'$.intent_understanding.needs_clarification')=1
+                     )
+                     AND datetime(created_at) >= datetime('now','localtime',?)""",
+                (since,),
+            ) if has_copilot_messages else 0
+            has_approvals = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_approvals'"
+            ).fetchone() is not None
+            r3_total = count(
+                """SELECT count(*) FROM agent_approvals
+                   WHERE risk_level='R3' AND datetime(created_at) >= datetime('now','localtime',?)""",
+                (since,),
+            ) if has_approvals else 0
+            r3_approved = count(
+                """SELECT count(*) FROM agent_approvals
+                   WHERE risk_level='R3' AND status='approved'
+                     AND datetime(COALESCE(decided_at,created_at)) >= datetime('now','localtime',?)""",
+                (since,),
+            ) if has_approvals else 0
+            rate = lambda numerator, denominator: round(numerator / denominator, 4) if denominator else None
+            return {
+                "ok": True,
+                "window_days": window_days,
+                "metrics": {
+                    "action_cards_generated": generated,
+                    "confirmed": confirmed,
+                    "rejected": rejected,
+                    "executed": executed,
+                    "failed": failed,
+                    "needs_clarification": clarification,
+                    "r3_approvals": {"total": r3_total, "approved": r3_approved, "approval_rate": rate(r3_approved, r3_total)},
+                    "confirmation_rate": rate(confirmed, generated),
+                    "rejection_rate": rate(rejected, generated),
+                    "execution_failure_rate": rate(failed, executed + failed),
+                },
+            }
+        finally:
+            conn.close()
 
     def dashboard(self) -> dict[str, Any]:
         conn = connect(self.db_path)
@@ -392,6 +829,15 @@ class CoreService:
                 ).fetchone()[0],
                 "pending_approvals": conn.execute(
                     "SELECT count(*) FROM agent_approvals WHERE status='pending'"
+                ).fetchone()[0],
+                "pending_proposals": conn.execute(
+                    "SELECT count(*) FROM agent_action_proposals WHERE status='pending'"
+                ).fetchone()[0],
+                "executed_proposals": conn.execute(
+                    "SELECT count(*) FROM agent_action_proposals WHERE status='executed'"
+                ).fetchone()[0],
+                "failed_proposals": conn.execute(
+                    "SELECT count(*) FROM agent_action_proposals WHERE status='failed'"
                 ).fetchone()[0],
             }
             workflows = [
@@ -568,6 +1014,26 @@ class CoreService:
                     (item["client"], item["title"]),
                 ).fetchall()
             ]
+            latest_strategy = conn.execute(
+                """
+                SELECT a.artifact_id,a.workflow_id,a.metadata_json,a.created_at,
+                       w.status AS workflow_status,g.context_json
+                FROM agent_artifacts a
+                JOIN agent_workflows w ON w.workflow_id=a.workflow_id
+                JOIN agent_goals g ON g.goal_id=a.goal_id
+                WHERE a.artifact_type='search_strategy'
+                  AND g.context_type='job' AND g.context_id=?
+                  AND w.status NOT IN ('cancelled','superseded','archived')
+                ORDER BY datetime(a.created_at) DESC,a.id DESC
+                LIMIT 1
+                """,
+                (int(job_id),),
+            ).fetchone()
+            item["latest_effective_strategy"] = (
+                _public_effective_strategy(json_value(latest_strategy["metadata_json"], {}), latest_strategy)
+                if latest_strategy
+                else None
+            )
             item["followups"] = [
                 _row(row)
                 for row in conn.execute(
@@ -762,7 +1228,7 @@ class CoreService:
                     WHERE jc.person_id=? ORDER BY COALESCE(jc.updated_at,'') DESC""", (item["person_id"],)
             )]
             item["resume"] = {
-                "summary": resume.get("profile_text") or resume.get("notes") or resume.get("full_text") or "",
+                "summary": _resume_overview_summary(resume),
                 "full_text": resume.get("full_text") or "",
                 "work_text": resume.get("work_text") or "",
                 "project_text": resume.get("project_text") or "",
@@ -996,6 +1462,19 @@ class CoreService:
                 )]
             except sqlite3.OperationalError:
                 rows = []
+            try:
+                certificate_row = conn.execute(
+                    """
+                    SELECT certificate_json FROM agent_sourcing_coverage_certificates
+                    WHERE workflow_id=? ORDER BY issued_at DESC,id DESC LIMIT 1
+                    """,
+                    (workflow_id,),
+                ).fetchone()
+                coverage_certificate = (
+                    json_value(certificate_row["certificate_json"], {}) if certificate_row else None
+                )
+            except sqlite3.OperationalError:
+                coverage_certificate = None
         finally:
             conn.close()
         sum_keys = (
@@ -1049,7 +1528,13 @@ class CoreService:
             totals = _funnel_detail(detail["complete"], detail["partial"], detail["failed"])
             channel_items.append({**agg, "detail": totals})
         channel_items.sort(key=lambda item: str(item.get("channel") or ""))
-        return {"ok": True, "workflow_id": workflow_id, "channels": channel_items, "runs": runs}
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "channels": channel_items,
+            "runs": runs,
+            "coverage_certificate": coverage_certificate,
+        }
 
     def audit_events(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         conn = connect(self.db_path)
@@ -1110,6 +1595,7 @@ class CoreService:
         if not request_id or not idempotency_key:
             raise ValueError("request_id and Idempotency-Key are required")
         request_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        conflict = ""
         with transaction(self.db_path) as conn:
             existing = conn.execute(
                 "SELECT * FROM api_idempotency WHERE idempotency_key=? AND operation=?",
@@ -1123,17 +1609,89 @@ class CoreService:
                     if isinstance(replay.get("receipt"), dict):
                         replay["receipt"]["idempotent_replay"] = True
                     return replay, True
-                raise RuntimeError("request is already processing")
-            conn.execute(
-                "INSERT INTO api_idempotency(idempotency_key,operation,request_id,request_hash) VALUES (?,?,?,?)",
-                (idempotency_key, operation, request_id, request_hash),
-            )
-        response = action()
+                if str(existing["status"] or "") == "failed":
+                    error = json_value(existing["error_json"], {})
+                    detail = str(error.get("message") or "unknown error")
+                    conflict = f"previous request failed; create a new request after reconciliation: {detail}"
+                else:
+                    expires_at = str(existing["expires_at"] or "")
+                    expired = bool(
+                        expires_at
+                        and datetime.fromisoformat(expires_at.replace(" ", "T")) <= datetime.now()
+                    )
+                    if expired:
+                        error = {
+                            "type": "abandoned_processing",
+                            "message": "processing lease expired before a result was recorded",
+                            "outcome": "unknown",
+                        }
+                        conn.execute(
+                            """
+                            UPDATE api_idempotency
+                               SET status='failed',response_status=500,error_json=?,updated_at=datetime('now','localtime'),expires_at=NULL
+                             WHERE id=?
+                            """,
+                            (json.dumps(error, ensure_ascii=False), int(existing["id"])),
+                        )
+                        conflict = "previous request failed; its final business outcome is unknown"
+                    else:
+                        conflict = "request is already processing"
+            else:
+                expires_at = (datetime.now() + timedelta(minutes=IDEMPOTENCY_LEASE_MINUTES)).isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    INSERT INTO api_idempotency
+                        (idempotency_key,operation,request_id,request_hash,status,expires_at,updated_at)
+                    VALUES (?,?,?,?, 'processing',?,datetime('now','localtime'))
+                    """,
+                    (idempotency_key, operation, request_id, request_hash, expires_at),
+                )
+        if conflict:
+            raise IdempotencyConflict(conflict)
+        try:
+            response = action()
+        except Exception as exc:
+            audit_id = f"audit_{secrets.token_hex(8)}"
+            response_status = 409 if isinstance(exc, ValueError) else 404 if isinstance(exc, LookupError) else 500
+            error = {
+                "type": type(exc).__name__,
+                "message": str(exc)[:500] or type(exc).__name__,
+            }
+            with transaction(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE api_idempotency
+                       SET status='failed',response_status=?,error_json=?,updated_at=datetime('now','localtime'),expires_at=NULL
+                     WHERE idempotency_key=? AND operation=?
+                    """,
+                    (response_status, json.dumps(error, ensure_ascii=False), idempotency_key, operation),
+                )
+                conn.execute(
+                    """INSERT INTO audit_events
+                       (event_id,actor,surface,request_id,operation,target_type,target_id,result,metadata_json)
+                       VALUES (?,?,?,?,?,?,?,'failed',?)""",
+                    (
+                        audit_id,
+                        actor,
+                        surface,
+                        request_id,
+                        operation,
+                        target_type,
+                        target_id,
+                        json.dumps({"idempotency_key": idempotency_key, "error": error}, ensure_ascii=False),
+                    ),
+                )
+            raise
         audit_id = f"audit_{secrets.token_hex(8)}"
         response = {**response, "receipt": {"audit_event_id": audit_id, "request_id": request_id, "idempotent_replay": False}}
         with transaction(self.db_path) as conn:
             conn.execute(
-                "UPDATE api_idempotency SET status='completed',response_status=200,response_json=? WHERE idempotency_key=? AND operation=?",
+                """
+                UPDATE api_idempotency
+                   SET status='completed',response_status=200,response_json=?,error_json=NULL,
+                       updated_at=datetime('now','localtime'),expires_at=NULL
+                 WHERE idempotency_key=? AND operation=?
+                """,
                 (json.dumps(response, ensure_ascii=False), idempotency_key, operation),
             )
             conn.execute(
@@ -1143,6 +1701,56 @@ class CoreService:
                  json.dumps(response, ensure_ascii=False), "success", json.dumps({"idempotency_key": idempotency_key})),
             )
         return response, False
+
+    def _record_sourcing_signal_safely(
+        self,
+        candidate_id: int,
+        signal: str,
+        *,
+        actor_type: str,
+        note: str,
+        source_type: str,
+        source_id: int,
+    ) -> dict[str, Any] | None:
+        if not signal or not self.agent_service:
+            return None
+        try:
+            return self.agent_service.record_sourcing_business_signal(
+                candidate_id,
+                signal,
+                actor_type=actor_type,
+                note=note,
+                source_type=source_type,
+                source_id=source_id,
+            )
+        except Exception as exc:
+            failure = {
+                "recorded": False,
+                "error": "learning backflow failed; the business write remains committed",
+                "error_type": type(exc).__name__,
+            }
+            try:
+                with transaction(self.db_path) as conn:
+                    conn.execute(
+                        """INSERT INTO audit_events
+                           (event_id,actor,surface,request_id,operation,target_type,target_id,result,business_event_type,business_event_id,metadata_json)
+                           VALUES (?,?,?,?,?,?,?,'failed',?,?,?)""",
+                        (
+                            f"audit_{secrets.token_hex(8)}",
+                            "system",
+                            "asa_core",
+                            f"learning_backflow_{source_id}",
+                            "candidate.learning_backflow",
+                            "job_candidate",
+                            str(candidate_id),
+                            source_type,
+                            str(source_id),
+                            json.dumps({**failure, "signal": signal}, ensure_ascii=False),
+                        ),
+                    )
+            except Exception:
+                pass
+            return failure
 
     def record_candidate_update(self, candidate_id: int, update_type: str) -> dict[str, Any]:
         if update_type not in CANDIDATE_UPDATE_LABELS:
@@ -1224,12 +1832,14 @@ class CoreService:
                     note, json.dumps({"update_type": update_type, "actor": "user"}, ensure_ascii=False),
                 ),
             )
-        learning = None
-        if stage_changed and self.agent_service:
-            learning = self.agent_service.record_sourcing_business_signal(
-                candidate_id, "contacted", actor_type="user", note=note,
-                source_type="candidate_event", source_id=cursor.lastrowid,
-            )
+        learning = self._record_sourcing_signal_safely(
+            candidate_id,
+            "contacted" if stage_changed else "",
+            actor_type="user",
+            note=note,
+            source_type="candidate_event",
+            source_id=int(cursor.lastrowid),
+        )
         return {
             "ok": True,
             "candidate_id": candidate_id,
@@ -1362,12 +1972,14 @@ class CoreService:
                 (candidate_id, row["person_id"], row["job_id"], event_type, event_status, event_reason,
                  json.dumps(event_raw, ensure_ascii=False)),
             )
-        learning = None
-        if learning_signal and self.agent_service:
-            learning = self.agent_service.record_sourcing_business_signal(
-                candidate_id, learning_signal, actor_type="user", note=note or stage,
-                source_type="candidate_event", source_id=cursor.lastrowid,
-            )
+        learning = self._record_sourcing_signal_safely(
+            candidate_id,
+            learning_signal,
+            actor_type="user",
+            note=note or stage,
+            source_type="candidate_event",
+            source_id=int(cursor.lastrowid),
+        )
         return {
             "ok": True,
             "candidate_id": candidate_id,

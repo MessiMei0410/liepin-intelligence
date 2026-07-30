@@ -185,4 +185,31 @@ describe('岗位详情接线（JobPanel 挂载画像区块）', () => {
     expect(await screen.findByText(/履历还太少，学不出画像/)).toBeInTheDocument()
     expect(screen.getByText('岗位概况')).toBeInTheDocument()
   })
+
+  it('当前策略只读取 latest_effective_strategy，历史查询单列为寻访记录', async () => {
+    stubFetch(() => insufficientPayload)
+    render(<JobPanel value={{
+      ...jobDetail,
+      search_words: '旧关键词不应冒充当前策略',
+      latest_effective_strategy: {
+        status: 'waiting_approval',
+        plan_version: 2,
+        summary: '服务器电源技术市场核心岗',
+        company_tiers: [{ tier: 'T1', companies: ['目标公司A'] }],
+        level_mapping: { accepted_levels: ['高级经理', '总监'] },
+        keyword_groups: [{ group: 'core', terms: ['服务器电源', '技术市场'] }],
+        expectation: { fallback_plan: 'T1 不足时扩展同层客户' },
+        consultant_constraints: [{ type: 'must', rule: '必须具备三次电源经验' }],
+        audit: { workflow_id: 'workflow-new' },
+      },
+      search_experiments: [{ id: 1, query: '历史查询词', channel: 'liepin', result_count: 12 }],
+    }} close={() => undefined} openCandidate={() => undefined} />)
+
+    expect(screen.getByText('当前寻访策略')).toBeInTheDocument()
+    expect(screen.getByText(/服务器电源技术市场核心岗 · 计划 v2/)).toBeInTheDocument()
+    expect(screen.getByText('必须具备三次电源经验')).toBeInTheDocument()
+    expect(screen.queryByText('旧关键词不应冒充当前策略')).not.toBeInTheDocument()
+    expect(screen.getByText('寻访记录')).toBeInTheDocument()
+    expect(screen.getByText('历史查询词')).toBeInTheDocument()
+  })
 })

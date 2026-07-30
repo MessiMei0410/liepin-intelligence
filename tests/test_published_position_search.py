@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from run_published_position_search import (
     EXTRACT_JS,
     PositionProfile,
     _split_profile_terms,
+    load_query_rounds,
     merge_resume_detail,
     score_candidate_for_profile,
     technical_market_hard_gate,
@@ -15,6 +17,24 @@ from run_published_position_search import (
 
 
 class PublishedPositionSearchReportTest(unittest.TestCase):
+    def test_query_round_loader_preserves_resume_cursor_and_cell_id(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queries.json"
+            path.write_text(json.dumps({"queries": [{
+                "cell_id": "qpc_resume",
+                "query": "精密 机械",
+                "cursor": {"page": 51},
+                "collected_before": 1000,
+            }]}), encoding="utf-8")
+
+            rounds = load_query_rounds(str(path))
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0].query, "精密 机械")
+        self.assertEqual(rounds[0].start_page, 51)
+        self.assertEqual(rounds[0].collected_before, 1000)
+        self.assertEqual(rounds[0].filters["cell_id"], "qpc_resume")
+
     def test_profile_terms_expand_channel_query_dialects(self) -> None:
         self.assertEqual(
             _split_profile_terms(["PC 电源 TME", "FAE/AE", "design-in/design-win"]),

@@ -22,6 +22,13 @@ class CapabilitySpec:
     artifact_types: tuple[str, ...] = ()
     rollback_policy: str = "none"
     label: str = ""
+    # The manifest is also consumed by action-card clients. Defaults preserve
+    # the v1 contract for existing capability registrations.
+    action_kind: str = "read"
+    preflight_mode: str = "none"
+    confirmation_surface: str = "none"
+    post_check: str = "none"
+    audit_event_type: str = ""
 
     def public(self) -> dict[str, Any]:
         return {
@@ -40,6 +47,11 @@ class CapabilitySpec:
             "artifact_types": list(self.artifact_types),
             "rollback_policy": self.rollback_policy,
             "label": self.label or self.id,
+            "action_kind": self.action_kind,
+            "preflight_mode": self.preflight_mode,
+            "confirmation_surface": self.confirmation_surface,
+            "post_check": self.post_check,
+            "audit_event_type": self.audit_event_type or f"capability.{self.id}",
         }
 
 
@@ -80,6 +92,14 @@ class CapabilityRegistry:
     def register(self, spec: CapabilitySpec) -> None:
         if spec.id in self._skills:
             raise ValueError(f"Skill 已注册：{spec.id}")
+        if spec.action_kind not in {"read", "draft", "internal_write", "external_write"}:
+            raise ValueError(f"Skill {spec.id} 使用未知 action_kind：{spec.action_kind}")
+        if spec.preflight_mode not in {"none", "preview", "required"}:
+            raise ValueError(f"Skill {spec.id} 使用未知 preflight_mode：{spec.preflight_mode}")
+        if spec.confirmation_surface not in {"none", "floating_card", "workflow_approval"}:
+            raise ValueError(f"Skill {spec.id} 使用未知 confirmation_surface：{spec.confirmation_surface}")
+        if spec.post_check not in {"none", "result", "external_evidence"}:
+            raise ValueError(f"Skill {spec.id} 使用未知 post_check：{spec.post_check}")
         self._skills[spec.id] = spec
 
     def list(self) -> list[dict[str, Any]]:

@@ -3,12 +3,11 @@ import { LoaderCircle, MapPinned } from 'lucide-react'
 import { api } from '../api'
 import type { ExpansionTreeStep, StrategyReviewSignal } from '../api'
 import { humanizeActionError } from '../shared/errors'
-import { expansionActionLabel, loadTreeDecisions, sortedTreeSteps, treeStepSummary } from './strategyExpansionTree'
+import { expansionActionLabel, sortedTreeSteps, treeStepSummary } from './strategyExpansionTree'
 import { MAPPING_TRIGGER_BY_TREE } from './mappingTask'
 
 // S4-3c-3（N3）复盘卡扩区：池枯竭信号（tag + detail 一行）与扩池决策树编号步骤列表。
-// 与 revision_diff 同法：此处只读展示并回显决策标记，逐项采纳/拒绝在“调整条件再搜”对话框内操作；
-// 树决策本期无后端回写接口，标记事实源为 localStorage（键含 workflow_id，条目按 step_id 索引）。
+// 策略调整只在 Copilot 确认卡中落地；这里仅展示复盘证据和后端回传状态。
 // 无信号且无决策树（旧复盘）时不渲染。
 // S5-2：escalate_mapping 步旁挂「发起 Mapping 直挖」入口——已有任务卡（本工作流产物含
 // mapping_task）直接打开；否则调 POST /jobs/{job_id}/mapping-tasks（trigger=decision_tree_exhausted）
@@ -24,7 +23,6 @@ export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mapp
   const signalList = signals || []
   const steps = sortedTreeSteps(tree || [])
   if (signalList.length === 0 && steps.length === 0) return null
-  const decisions = loadTreeDecisions(workflowId)
   return <>
     {signalList.length > 0 && <div className="review-signals">
       {signalList.map((signal, index) => <div className="review-signal" key={signal.signal || index}>
@@ -32,10 +30,10 @@ export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mapp
         {signal.detail && <span className="review-signal-detail">{signal.detail}</span>}
       </div>)}
     </div>}
-    {steps.length > 0 && <div className="review-tree">
-      <div className="review-diffs-head"><b>人不够时的扩圈建议</b><span>按序执行，逐项采纳/拒绝在“调整条件再搜”中操作</span></div>
+    {steps.length > 0 && <div className="review-tree" data-workflow-id={workflowId}>
+      <div className="review-diffs-head"><b>人不够时的扩圈建议</b><span>按序评估，在 Copilot 中讨论并确认应用</span></div>
       {steps.map(step => {
-        const status = decisions[step.step_id] || step.status || 'pending'
+        const status = step.status || 'pending'
         const summary = treeStepSummary(step)
         return <div className="review-tree-step" key={step.step_id}>
           <div className="review-tree-head">

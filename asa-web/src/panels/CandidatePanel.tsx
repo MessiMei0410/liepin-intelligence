@@ -6,8 +6,8 @@ import { date, sourceLabel, sourceLinkLabel, eventStatusLabel } from '../shared/
 import { copilotText } from '../shared/text'
 import { SectionHead } from '../shared/primitives'
 import { openCopilotWindow } from '../copilot/bridge'
-import { parseOverviewBasic, splitIntentKeywords, formatFeedbackScore } from './overviewFormat'
-import { parseWorkDetails } from './resumeDetail'
+import { buildResumeOverview, formatFeedbackScore } from './overviewFormat'
+import { parseEducationDetails, parseProjectDetails, parseWorkDetails } from './resumeDetail'
 
 export type CandidateAction = 'advance' | 'review' | 'contact' | 'recommend' | 'stop'
 export type CandidateActionPreflight = { action: CandidateAction; token: string; impact: string; expires_at?: string }
@@ -53,33 +53,21 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
         <section className="resume-hero"><div><span>目标岗位</span><b>{value.client} · {value.job}</b></div><div><span>当前阶段</span><b>{value.clean_stage || value.flow_bucket || '待复核'}</b></div><div><span>经验 / 学历</span><b>{value.experience || '-'} · {value.education || '-'}</b></div></section>
         <nav className="candidate-tabs" aria-label="候选人详情"><button className={view==='overview'?'active':''} onClick={()=>setView('overview')}><UserRoundSearch/>概览</button><button className={view==='resume'?'active':''} onClick={()=>setView('resume')}><BriefcaseBusiness/>履历</button><button className={view==='activity'?'active':''} onClick={()=>setView('activity')}><Clock3/>记录</button><button className={view==='assessment'?'active':''} onClick={()=>setView('assessment')}><ClipboardCheck/>评估</button></nav>
         {view==='overview'&&<>
-          <ResumeOverview text={resume.summary || resume.full_text} company={value.current_company}/>
+          <ResumeOverview text={resume.summary} candidate={value}/>
           {value.sourcing_attributions?.length>0&&<section className="sourcing-trace"><div className="sourcing-trace-head"><Search/><div><span>寻访来源</span><b>怎么找到他的</b></div></div>{value.sourcing_attributions.map(item=><div className="sourcing-trace-row" key={item.id}><div className="trace-main"><span>{sourceLabel(item.channel)} · {item.source_round||'寻访查询'}</span><b>{item.source_query}</b><small>{item.source_purpose||'根据岗位策略生成'}</small></div><div className="trace-side"><span className={`feedback-score ${formatFeedbackScore(item.learning_score).tone}`}>{formatFeedbackScore(item.learning_score).text}</span><LearningSignals item={item}/></div></div>)}</section>}
         </>}
         {view==='assessment'&&<CandidateAssessment candidateId={value.id} jobId={value.job_id}/>}
-        {view==='resume'&&<div className="resume-workspace"><ResumeWorkDetail text={resume.full_text} fallback={<ResumeTimelineSection title="工作经历" text={resume.work_text} empty="尚未采集结构化工作经历，可通过来源链接核对原始简历。"/>}/><ResumeTimelineSection title="项目经历" text={resume.project_text} empty="暂无结构化项目经历。"/><ResumeTimelineSection title="教育经历" text={resume.education_text} empty="暂无结构化教育经历。"/>{resume.full_text&&<details className="raw-resume"><summary>完整原始履历</summary><pre>{resume.full_text}</pre></details>}</div>}
+        {view==='resume'&&<div className="resume-workspace"><ResumeWorkDetail text={resume.full_text} fallback={<ResumeTimelineSection title="工作经历" text={resume.work_text} empty="尚未采集结构化工作经历，可通过来源链接核对原始简历。"/>}/><ResumeProjectSection text={resume.project_text}/><ResumeEducationSection text={resume.education_text}/>{resume.full_text&&<details className="raw-resume"><summary>完整原始履历</summary><pre>{resume.full_text}</pre></details>}</div>}
         {view==='activity'&&<div className="candidate-records"><section className="resume-section"><h3>岗位关系</h3><div className="relation-list">{value.job_relations.map(r=><div key={r.id}><div><b>{r.job}</b><span>{r.client}</span></div><small>{r.clean_stage || r.flow_bucket}</small></div>)}</div></section><section className="resume-section"><h3>业务时间线</h3><div className="timeline timeline-main">{value.events.map(e=><div key={e.id}><i/><span>{date(e.event_time)}</span><b>{e.summary || e.event_type}</b><small>{eventStatusLabel(e.event_status)}</small></div>)}</div></section></div>}
       </div></main><aside><SectionHead title="岗位关系" meta={`${value.job_relations.length} 条`} />{value.job_relations.map(r=><div className="aside-item" key={r.id}><b>{r.job}</b><span>{r.client}</span><small>{r.clean_stage || r.flow_bucket}</small></div>)}<SectionHead title="最近动态" meta={`${value.events.length} 条`} /><div className="timeline">{value.events.slice(0,8).map(e=><div key={e.id}><i/><span>{date(e.event_time)}</span><b>{e.summary || e.event_type}</b><small>{eventStatusLabel(e.event_status)}</small></div>)}</div></aside></div>
     </article>{pendingAction&&<div className="action-dialog-backdrop" role="presentation"><section className="action-dialog" role="alertdialog" aria-modal="true" aria-labelledby="candidate-action-title"><header><span className={`action-dialog-icon ${pendingAction.action==='stop'?'danger':''}`}>{pendingAction.action==='stop'?<Ban/>:<ShieldCheck/>}</span><div><small>操作确认</small><h3 id="candidate-action-title">{candidateActionLabels[pendingAction.action]}</h3></div><button className="icon-btn" disabled={busy.startsWith('commit:')} onClick={()=>{setPendingAction(undefined);setFeedback(undefined)}} title="取消" aria-label="取消"><X/></button></header><div className="action-dialog-body"><dl><div><dt>候选人</dt><dd>{value.name}</dd></div><div><dt>当前阶段</dt><dd>{value.clean_stage||value.flow_bucket||'待复核'}</dd></div></dl><p><ShieldCheck/>预检已通过：{pendingAction.impact}</p>{pendingAction.action==='stop'&&<><label><span>停止原因</span><select value={actionReason} onChange={event=>setActionReason(event.target.value)}>{stopReasonOptions.map(option=><option key={option.code} value={option.code}>{option.label}</option>)}</select></label><label><span>备注（选填）</span><textarea value={actionNote} onChange={event=>setActionNote(event.target.value)} placeholder="补充说明（选填）" rows={3}/></label></>}{pendingAction.action==='review'&&<><div className="review-conclusion-field"><span>复核结论（是尺严还是人不行）</span><div className="review-conclusion-chips"><button type="button" className="button" onClick={()=>setActionNote('【评分复核】结论：尺太严，建议放宽尺度')}>尺太严</button><button type="button" className="button" onClick={()=>setActionNote('【评分复核】结论：人不行，维持原判')}>人不行</button></div></div><label><span>结论备注</span><textarea value={actionNote} onChange={event=>setActionNote(event.target.value)} placeholder="【评分复核】尺太严还是人不行？写下判断依据…" rows={3}/></label></>}{feedback?.tone==='error'&&<div className="action-dialog-error"><TriangleAlert/>{feedback.text}</div>}</div><footer><button className="button" disabled={busy.startsWith('commit:')} onClick={()=>{setPendingAction(undefined);setFeedback(undefined)}}>取消</button><button className={`button ${pendingAction.action==='stop'?'danger-fill':'primary'}`} disabled={busy.startsWith('commit:')} onClick={commitAction} autoFocus>{busy.startsWith('commit:')?<LoaderCircle className="spin"/>:pendingAction.action==='stop'?<Ban/>:<Check/>}确认{candidateActionLabels[pendingAction.action]}</button></footer></section></div>}</div>
 }
 
-function ResumeOverview({text,company}:{text?:string;company?:string}) {
-  const normalized=String(text||'').replace(/\s+/g,' ').trim()
-  if(!normalized)return <section className="resume-section"><h3>职业概览</h3><div className="empty">暂无职业概览。</div></section>
-  const marker='求职期望：'
-  const markerIndex=normalized.indexOf(marker)
-  const companyIndex=company&&markerIndex>=0?normalized.indexOf(company,markerIndex+marker.length):-1
-  const basic=markerIndex>=0?normalized.slice(0,markerIndex).trim():normalized
-  const intentRaw=markerIndex>=0?normalized.slice(markerIndex+marker.length,companyIndex>markerIndex?companyIndex:undefined).trim():''
-  const fields=parseOverviewBasic(basic)
-  const {intent,keywords}=splitIntentKeywords(intentRaw)
-  const rows:[string,string][]=[]
-  if(fields.age)rows.push(['年龄',fields.age])
-  if(fields.experience)rows.push(['经验',fields.experience])
-  if(fields.education)rows.push(['学历',fields.education])
-  if(fields.city)rows.push(['城市',fields.city])
-  if(fields.status)rows.push(['状态',fields.status])
-  return <section className="resume-section resume-overview"><h3>职业概览</h3>{rows.length?<dl>{rows.map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>:<p className="overview-basic">{basic}</p>}{intent&&<div className="overview-intent"><span>求职意向</span><b>{intent}</b></div>}{keywords.length>0&&<div className="overview-keywords"><span>技能关键词</span><div>{keywords.map(k=><i key={k}>{k}</i>)}</div></div>}</section>
+function ResumeOverview({text,candidate}:{text?:string;candidate:CandidateDetail}) {
+  const overview=buildResumeOverview(text||'',{name:candidate.name,currentCompany:candidate.current_company,currentTitle:candidate.current_title,city:candidate.city,education:candidate.education,experience:candidate.experience})
+  const hasContent=overview.fields.length||overview.intent||overview.tags.length||overview.fallback
+  if(!hasContent)return <section className="resume-section"><h3>职业概览</h3><div className="empty">暂无职业概览。</div></section>
+  return <section className="resume-section resume-overview"><h3>职业概览</h3>{overview.fields.length>0&&<dl>{overview.fields.map(row=><div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>}{overview.fallback&&<p className="overview-basic">{overview.fallback}</p>}{overview.intent&&<div className="overview-intent"><span>求职意向</span><b>{overview.intent}</b></div>}{overview.tags.length>0&&<div className="overview-keywords"><span>意向补充</span><div>{overview.tags.map(tag=><i key={tag}>{tag}</i>)}</div></div>}</section>
 }
 
 function ResumeWorkDetail({text,fallback}:{text?:string;fallback:React.ReactNode}) {
@@ -92,6 +80,29 @@ function ResumeTimelineSection({title,text,empty}:{title:string;text?:string;emp
   const items=String(text||'').split(/\n+/).map(item=>item.trim()).filter(Boolean)
   const groups=items.reduce<Array<{label:string;entries:string[]}>>((result,item)=>{const parts=item.split(/\s*·\s*/).map(part=>part.trim()).filter(Boolean);const label=parts[0]||item;const entry=parts.slice(1).join(' · ');const existing=result.find(group=>group.label===label);if(existing)existing.entries.push(entry);else result.push({label,entries:[entry]});return result},[])
   return <section className="resume-section"><h3>{title}<span>{items.length?`${groups.length} 组 · ${items.length} 段`:''}</span></h3>{groups.length?<div className="resume-timeline">{groups.map(group=><div key={group.label}><i/><div><b>{group.label}</b><div className="resume-timeline-entries">{group.entries.filter(Boolean).map((entry,index)=><span key={`${entry}-${index}`}>{entry}</span>)}</div></div></div>)}</div>:<div className="empty">{empty}</div>}</section>
+}
+
+function ResumeProjectSection({text}:{text?:string}) {
+  const projects=parseProjectDetails(text||'')
+  if(!projects.length)return <ResumeSourceFallback title="项目经历" text={text} empty="暂无结构化项目经历。"/>
+  return <section className="resume-section"><h3>项目经历<span>{projects.length} 段</span></h3><div className="project-history">{projects.map((project,index)=><article key={`${project.title}-${project.period}`}><header><div><b>{project.title}</b><span>{project.period}</span></div></header>{(project.role||project.company)&&<dl className="history-meta">{project.role&&<div><dt>项目职务</dt><dd>{project.role}</dd></div>}{project.company&&<div><dt>所在公司</dt><dd>{project.company}</dd></div>}</dl>}{project.description[0]&&<p className="project-preview">{project.description[0]}</p>}{(project.description.length>1||project.duties.length||project.achievements.length)&&<details open={index===0}><summary>项目详情</summary><ResumeHistoryField label="项目描述" lines={project.description.slice(1)}/><ResumeHistoryField label="项目职责" lines={project.duties}/><ResumeHistoryField label="项目业绩" lines={project.achievements}/></details>}</article>)}</div></section>
+}
+
+function ResumeEducationSection({text}:{text?:string}) {
+  const education=parseEducationDetails(text||'')
+  if(!education.length)return <ResumeSourceFallback title="教育经历" text={text} empty="暂无结构化教育经历。"/>
+  return <section className="resume-section"><h3>教育经历<span>{education.length} 段</span></h3><div className="education-history">{education.map(item=><article key={`${item.school}-${item.period}`}><div><b>{item.school}</b><span>{item.period}</span></div>{(item.degree||item.major)&&<p>{[item.degree,item.major].filter(Boolean).join(' · ')}</p>}{item.details.length>0&&<small>{item.details.map(detail=><i key={detail}>{detail}</i>)}</small>}</article>)}</div></section>
+}
+
+function ResumeHistoryField({label,lines}:{label:string;lines:string[]}) {
+  if(!lines.length)return null
+  return <section className="history-detail"><span>{label}</span><div>{lines.map((line,index)=><p key={`${line}-${index}`}>{line}</p>)}</div></section>
+}
+
+// 未知来源格式保留原文，但不再复用逐行时间轴，防止单条履历被拆成数百个空节点。
+function ResumeSourceFallback({title,text,empty}:{title:string;text?:string;empty:string}) {
+  const source=String(text||'').trim()
+  return <section className="resume-section"><h3>{title}</h3>{source?<details className="resume-source-fallback"><summary>查看原始{title}</summary><pre>{source}</pre></details>:<div className="empty">{empty}</div>}</section>
 }
 
 function LearningSignals({item}:{item:CandidateDetail['sourcing_attributions'][number]}) {

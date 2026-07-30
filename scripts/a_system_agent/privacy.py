@@ -67,3 +67,17 @@ def sanitize_payload(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
     return value
+
+
+def sanitize_context_snapshot(value: Any) -> Any:
+    sanitized = sanitize_payload(value)
+    if not isinstance(sanitized, dict):
+        return sanitized
+    clipboard = sanitized.get("clipboard")
+    if isinstance(clipboard, dict):
+        sanitized["clipboard"] = {
+            key: clipboard[key]
+            for key in ("has_text", "change_count")
+            if key in clipboard
+        }
+    return sanitized

@@ -13,9 +13,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from a_system_agent import AgentService, FakeLLM  # noqa: E402
+from a_system_agent import AgentService, FakeLLM, query_builders  # noqa: E402
 from a_system_agent.capability_runtime import (  # noqa: E402
     ZERO_RESULT_ATTRIBUTIONS,
+    _command_failure_summary,
     adapt_channel_queries,
     classify_zero_result,
 )
@@ -51,6 +52,21 @@ class AdaptChannelQueriesTest(unittest.TestCase):
     def test_empty_and_malformed_robust(self) -> None:
         self.assertEqual(adapt_channel_queries([], max_terms=2, max_count=8), [])
         self.assertEqual(adapt_channel_queries(["", None, "  "], max_terms=2, max_count=8), [])
+
+    def test_nested_audit_json_reports_failed_check_instead_of_truncated_middle(self) -> None:
+        guard = {
+            "ok": False,
+            "checks": [
+                {"ok": True, "check": "visible_nav"},
+                {"ok": False, "check": "stopped_candidates_have_no_open_followups", "message": "已停止人选仍有开放任务"},
+            ],
+        }
+        wrapper = {"cmd": ["python", "guard.py"], "returncode": 1, "stdout": json.dumps(guard, ensure_ascii=False), "stderr": ""}
+
+        summary, detail = _command_failure_summary(json.dumps(wrapper, ensure_ascii=False), "", 1)
+
+        self.assertEqual(summary, "已停止人选仍有开放任务")
+        self.assertEqual(detail["failed_checks"][0]["check"], "stopped_candidates_have_no_open_followups")
 
     def test_dict_entries_use_query_field(self) -> None:
         # round6 实证：LLM 策略步骤产出 {evidence, purpose, query, round} 字典项，
@@ -312,9 +328,11 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         *,
         liepin_result: dict | Exception,
         liepin_candidates: list[dict] | None = None,
+        liepin_raw_candidates: list[dict] | None = None,
         xsaas_result: dict | Exception,
         xsaas_candidates: list[dict] | None = None,
-        intake_apply: dict | None = None,
+        xsaas_raw_candidates: list[dict] | None = None,
+        intake_apply: dict | Exception | None = None,
     ) -> None:
         runtime = self.service.capability_runtime
 
@@ -325,15 +343,29 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
                     raise liepin_result
                 out = Path(cmd[cmd.index("--json-output") + 1])
                 out.write_text(json.dumps(liepin_candidates or [], ensure_ascii=False), encoding="utf-8")
+                if "--raw-json-output" in cmd:
+                    raw_out = Path(cmd[cmd.index("--raw-json-output") + 1])
+                    raw_out.write_text(
+                        json.dumps(liepin_raw_candidates if liepin_raw_candidates is not None else (liepin_candidates or []), ensure_ascii=False),
+                        encoding="utf-8",
+                    )
                 return liepin_result
             if "--output" in cmd:
                 if isinstance(xsaas_result, Exception):
                     raise xsaas_result
                 out = Path(cmd[cmd.index("--output") + 1])
                 out.write_text(json.dumps(xsaas_candidates or [], ensure_ascii=False), encoding="utf-8")
+                if "--raw-output" in cmd:
+                    raw_out = Path(cmd[cmd.index("--raw-output") + 1])
+                    raw_out.write_text(
+                        json.dumps(xsaas_raw_candidates if xsaas_raw_candidates is not None else (xsaas_candidates or []), ensure_ascii=False),
+                        encoding="utf-8",
+                    )
                 return xsaas_result
             if "intake" in cmd:
                 if "--apply" in cmd:
+                    if isinstance(intake_apply, Exception):
+                        raise intake_apply
                     return intake_apply or {"staged": {"accepted": []}, "intake": {"inserted": 0, "receipts": []}}
                 return {"staged": {"accepted_count": 0}, "intake": {"applied": False, "inserted": 0}}
             raise AssertionError(f"unexpected command: {cmd}")
@@ -342,12 +374,40 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         runtime._run = lambda command, timeout=300: subprocess.CompletedProcess(command, 0, stdout="sync ok", stderr="")  # type: ignore[method-assign]
 
     def _request(self) -> dict:
+        cells = [
+            {
+                "cell_id": "qpc_test_liepin",
+                "channel": "liepin",
+                "query": "机械 设计",
+                "locations": [], "levels": [], "scenarios": [], "priority": 1,
+                "provenance": [{"kind": "keyword_group", "group": "mechanical"}],
+            },
+            {
+                "cell_id": "qpc_test_xsaas",
+                "channel": "xsaas",
+                "query": "机械工程师",
+                "locations": [], "levels": [], "scenarios": [], "priority": 1,
+                "provenance": [{"kind": "keyword_group", "group": "mechanical"}],
+            },
+        ]
+        plan = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": len(cells),
+            "cells": cells,
+        }
+        query_plan = {**plan, "plan_hash": query_builders.query_plan_hash(plan)}
         return {
             "client": "长越科技",
             "job": "机械高级工程师",
             "target_count": 5,
             "workflow_id": "wf-test",
+            # These cases exercise the legacy production runner as OpenCLI's explicit fallback.
+            "opencli_primary": False,
             "opencli_shadow": False,
+            "query_plan_v1": query_plan,
+            "query_plan_hash": query_plan["plan_hash"],
             "strategy": {
                 "channels": {
                     "liepin": [{"query": "机械 设计"}],
@@ -370,6 +430,12 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
                 {"channel": "liepin", "name": "张三", "query": "机械 设计", "fit_score": 80},
                 {"channel": "liepin", "name": "李四", "query": "机械 设计", "fit_score": 60},
             ],
+            liepin_raw_candidates=[
+                {"channel": "liepin", "name": "张三", "query": "机械 设计", "fit_score": 80},
+                {"channel": "liepin", "name": "李四", "query": "机械 设计", "fit_score": 60},
+                {"channel": "liepin", "name": "张三", "query": "机械 设计", "fit_score": 80},
+                {"channel": "liepin", "name": "李四", "query": "机械 设计", "fit_score": 60},
+            ],
             xsaas_result={
                 "ok": True,
                 "candidates": 1,
@@ -377,6 +443,11 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
                 "detail_capture": {"requested": 1, "complete": 0, "partial": 1, "failed": 0},
             },
             xsaas_candidates=[{"channel": "xsaas", "name": "王五", "query": "机械工程师"}],
+            xsaas_raw_candidates=[
+                {"channel": "xsaas", "name": "王五", "query": "机械工程师"},
+                {"channel": "xsaas", "name": "王五", "query": "机械工程师"},
+                {"channel": "xsaas", "name": "王五", "query": "机械工程师"},
+            ],
             intake_apply={
                 "staged": {
                     "accepted": [
@@ -409,7 +480,7 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         assert liepin["run_id"] == result["run_id"]
         assert liepin["workflow_id"] == "wf-test"
         assert liepin["job_id"] == 10
-        assert liepin["status"] == "completed"
+        assert liepin["status"] == "platform_capped"
         assert liepin["query_count"] == 1
         assert json.loads(liepin["queries_json"])[0]["query"] == "机械 设计"
         assert liepin["recall_count"] == 30
@@ -439,6 +510,661 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         AgentService.validate_external_result("multi_channel_sourcing", result)
         for run in result["channel_runs"]:
             assert "quality" not in run
+
+    def test_raw_recall_ledger_retains_low_score_and_existing_candidates(self) -> None:
+        request = self._request()
+        raw_candidates = {
+            "liepin": [
+                {
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-accepted",
+                    "name": "张三", "company": "甲公司", "title": "机械工程师", "fit_score": 82,
+                },
+                {
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-existing",
+                    "name": "李四", "company": "乙公司", "title": "结构工程师", "fit_score": 70,
+                },
+                {
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-low",
+                    "name": "王五", "company": "丙公司", "title": "工艺工程师", "fit_score": 41,
+                },
+            ],
+            "xsaas": [],
+        }
+        applied = {
+            "staged": {
+                "accepted": [{"channel": "liepin", "source_query": "机械 设计", "name": "张三", "company": "甲公司", "title": "机械工程师"}],
+                "existing": [{"channel": "liepin", "source_query": "机械 设计", "name": "李四", "company": "乙公司", "title": "结构工程师"}],
+                "batch_duplicates": [],
+                "errors": [],
+            },
+            "intake": {
+                "receipts": [{"name": "张三", "status": "inserted", "candidate_id": 201, "job_candidate_id": 101}],
+            },
+        }
+
+        result = self.service.capability_runtime._persist_candidate_recalls(
+            run_id="asa-source-ledger",
+            workflow_id="wf-ledger",
+            client="长越科技",
+            job="机械高级工程师",
+            query_plan=request["query_plan_v1"],
+            raw_candidates=raw_candidates,
+            applied=applied,
+            min_score=55,
+        )
+
+        assert result["stored"] == 3
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                "SELECT source_candidate_id,duplicate_state,exclusion_reason,candidate_id,job_candidate_id "
+                "FROM agent_candidate_recalls WHERE run_id=? ORDER BY source_candidate_id",
+                ("asa-source-ledger",),
+            ).fetchall()
+        finally:
+            conn.close()
+        by_id = {row["source_candidate_id"]: dict(row) for row in rows}
+        assert by_id["lp-accepted"]["duplicate_state"] == "accepted"
+        assert by_id["lp-accepted"]["candidate_id"] == 201
+        assert by_id["lp-accepted"]["job_candidate_id"] == 101
+        assert by_id["lp-existing"]["duplicate_state"] == "existing"
+        assert by_id["lp-low"]["duplicate_state"] == "not_intaked"
+        assert by_id["lp-low"]["exclusion_reason"] == "score_below_threshold"
+
+    def test_recall_receipts_are_bound_by_identity_not_name_only(self) -> None:
+        request = self._request()
+        raw_candidates = {
+            "liepin": [
+                {
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-a",
+                    "name": "王某", "company": "甲公司", "title": "机械工程师", "fit_score": 82,
+                },
+                {
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-b",
+                    "name": "王某", "company": "乙公司", "title": "结构工程师", "fit_score": 79,
+                },
+            ],
+            "xsaas": [],
+        }
+        accepted = [
+            {"channel": "liepin", "source_query": "机械 设计", "name": "王某", "company": "甲公司", "title": "机械工程师"},
+            {"channel": "liepin", "source_query": "机械 设计", "name": "王某", "company": "乙公司", "title": "结构工程师"},
+        ]
+        applied = {
+            "staged": {"accepted": accepted, "existing": [], "batch_duplicates": [], "errors": []},
+            "intake": {"receipts": [
+                {"name": "王某", "candidate_id": 201, "job_candidate_id": 101},
+                {"name": "王某", "candidate_id": 202, "job_candidate_id": 102},
+            ]},
+        }
+
+        self.service.capability_runtime._persist_candidate_recalls(
+            run_id="asa-source-same-name",
+            workflow_id="wf-same-name",
+            client="长越科技",
+            job="机械高级工程师",
+            query_plan=request["query_plan_v1"],
+            raw_candidates=raw_candidates,
+            applied=applied,
+            min_score=55,
+        )
+
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                "SELECT source_candidate_id,candidate_id,job_candidate_id FROM agent_candidate_recalls "
+                "WHERE run_id=? ORDER BY source_candidate_id",
+                ("asa-source-same-name",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [tuple(row) for row in rows] == [("lp-a", 201, 101), ("lp-b", 202, 102)]
+
+    def test_execute_external_persists_raw_rows_before_score_gate(self) -> None:
+        accepted = {
+            "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-good",
+            "name": "张三", "company": "甲公司", "title": "机械工程师", "fit_score": 82,
+        }
+        low_score = {
+            "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-low",
+            "name": "李四", "company": "乙公司", "title": "工艺工程师", "fit_score": 38,
+        }
+        self._install_runners(
+            liepin_result={"ok": True, "candidates": 1, "rounds": [{"query": "机械 设计", "result_count": 2, "extracted_count": 2}]},
+            liepin_candidates=[accepted],
+            liepin_raw_candidates=[accepted, low_score],
+            xsaas_result={"ok": True, "candidates": 0, "rounds": [{"query": "机械工程师", "result_count": 0, "extracted_count": 0}]},
+            xsaas_candidates=[],
+            xsaas_raw_candidates=[],
+            intake_apply={
+                "staged": {"accepted": [accepted], "existing": [], "batch_duplicates": [], "errors": []},
+                "intake": {"inserted": 1, "receipts": [{"name": "张三", "status": "inserted", "candidate_id": 201, "job_candidate_id": 101}]},
+            },
+        )
+
+        result = self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
+
+        assert result["candidate_recall_ledger"]["stored"] == 2
+        assert result["query_cell_states"]["terminal_counts"] == {"exhausted": 2}
+        certificate = result["coverage_certificate"]
+        assert certificate["schema_version"] == "coverage_certificate_v1"
+        assert certificate["coverage_status"] == "approved_query_cells_exhausted"
+        assert certificate["query_cells"] == {
+            "approved": 2, "executed": 2, "exhausted": 2,
+            "platform_capped": 0, "blocked": 0, "failed": 0, "pending": 0,
+        }
+        assert certificate["candidate_recall"]["raw_occurrences"] == 2
+        assert certificate["candidate_recall"]["unique_identities"] == 2
+        assert certificate["claims"]["all_candidates_covered"] is False
+        assert certificate["claims"]["defensible_claim"] == (
+            "已穷尽批准的渠道关键词查询单元；地点、职级、场景未作为平台筛选执行"
+        )
+        conn = self.service._connect()
+        try:
+            low = conn.execute(
+                "SELECT fit_score,duplicate_state,exclusion_reason FROM agent_candidate_recalls "
+                "WHERE run_id=? AND source_candidate_id='lp-low'",
+                (result["run_id"],),
+            ).fetchone()
+            stored_certificate = conn.execute(
+                "SELECT certificate_json FROM agent_sourcing_coverage_certificates WHERE run_id=?",
+                (result["run_id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert dict(low) == {
+            "fit_score": 38,
+            "duplicate_state": "not_intaked",
+            "exclusion_reason": "score_below_threshold",
+        }
+        assert json.loads(stored_certificate["certificate_json"])["certificate_id"] == certificate["certificate_id"]
+
+    def test_execute_external_persists_raw_evidence_before_apply_failure(self) -> None:
+        raw = {
+            "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-before-apply",
+            "name": "张三", "company": "甲公司", "title": "机械工程师", "fit_score": 82,
+        }
+        self._install_runners(
+            liepin_result={
+                "ok": True,
+                "candidates": 1,
+                "rounds": [{
+                    "query": "机械 设计", "result_count": 1, "extracted_count": 1,
+                    "terminal_state": "exhausted", "terminal_reason": "reported_total_exhausted",
+                }],
+            },
+            liepin_candidates=[raw],
+            liepin_raw_candidates=[raw],
+            xsaas_result={
+                "ok": True,
+                "candidates": 0,
+                "rounds": [{
+                    "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                    "terminal_state": "exhausted", "terminal_reason": "reported_total_exhausted",
+                }],
+            },
+            xsaas_candidates=[],
+            xsaas_raw_candidates=[],
+            intake_apply=RuntimeError("simulated intake apply failure"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "simulated intake apply failure"):
+            self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
+
+        conn = self.service._connect()
+        try:
+            recall = conn.execute(
+                "SELECT source_candidate_id,duplicate_state FROM agent_candidate_recalls "
+                "WHERE source_candidate_id='lp-before-apply'",
+            ).fetchone()
+            cells = conn.execute(
+                "SELECT status,COUNT(*) AS count FROM agent_sourcing_query_cells GROUP BY status ORDER BY status",
+            ).fetchall()
+        finally:
+            conn.close()
+        assert tuple(recall) == ("lp-before-apply", "not_intaked")
+        assert [tuple(row) for row in cells] == [("exhausted", 2)]
+
+    def test_query_cell_states_use_explicit_terminal_reasons_and_cursor(self) -> None:
+        request = self._request()
+        result = self.service.capability_runtime._persist_query_cell_states(
+            run_id="asa-source-cells",
+            workflow_id="wf-cells",
+            client="长越科技",
+            job="机械高级工程师",
+            query_plan=request["query_plan_v1"],
+            channel_runs=[
+                {
+                    "channel": "liepin", "status": "completed",
+                    "result": {"rounds": [{
+                        "query": "机械 设计", "status": "completed", "result_count": 80,
+                        "extracted_count": 24, "pages_fetched": 1, "cursor": {"page": 2},
+                    }]},
+                },
+                {
+                    "channel": "xsaas", "status": "completed",
+                    "result": {"rounds": [{
+                        "query": "机械工程师", "status": "completed", "result_count": 3,
+                        "extracted_count": 3, "pages_fetched": 2, "cursor": None,
+                    }]},
+                },
+            ],
+        )
+
+        assert result["terminal_counts"] == {"exhausted": 1, "platform_capped": 1}
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                "SELECT channel,status,reported_total,extracted_count,pages_fetched,cursor_json,terminal_reason "
+                "FROM agent_sourcing_query_cells WHERE run_id=? ORDER BY channel",
+                ("asa-source-cells",),
+            ).fetchall()
+        finally:
+            conn.close()
+        by_channel = {row["channel"]: dict(row) for row in rows}
+        assert by_channel["liepin"]["status"] == "platform_capped"
+        assert by_channel["liepin"]["terminal_reason"] == "reported_total_not_exhausted"
+        assert json.loads(by_channel["liepin"]["cursor_json"]) == {"page": 2}
+        assert by_channel["xsaas"]["status"] == "exhausted"
+        assert by_channel["xsaas"]["pages_fetched"] == 2
+
+        continuation = self.service.capability_runtime._sourcing_continuation(
+            request=request,
+            run_id="asa-source-cells",
+            query_plan=request["query_plan_v1"],
+        )
+        assert continuation["summary"]["scheduled"] is True
+        assert continuation["summary"]["remaining_cells"] == 1
+        assert continuation["request"]["resume_run_id"] == "asa-source-cells"
+        assert continuation["request"]["query_plan_hash"] == request["query_plan_hash"]
+
+    def test_execute_external_returns_cursor_continuation_request(self) -> None:
+        request = self._request()
+        request["max_pages_per_query"] = 1
+        liepin_raw = [{
+            "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-page-1",
+            "name": "张三", "current_company": "甲公司", "current_title": "机械工程师",
+            "page_number": 1, "position_index": 1, "fit_score": 70,
+        }]
+        self._install_runners(
+            liepin_result={
+                "ok": True,
+                "candidates": 1,
+                "detail_capture": {"requested": 1, "complete": 0, "partial": 1, "failed": 0},
+                "rounds": [{
+                    "query": "机械 设计", "result_count": 3, "extracted_count": 1,
+                    "unique_count": 1, "pages_fetched": 1, "terminal_state": "platform_capped",
+                    "terminal_reason": "page_safety_limit", "cursor": {"page": 2},
+                }],
+            },
+            liepin_candidates=liepin_raw,
+            liepin_raw_candidates=liepin_raw,
+            xsaas_result={
+                "ok": True,
+                "candidates": 0,
+                "detail_capture": {"requested": 0, "complete": 0, "partial": 0, "failed": 0},
+                "rounds": [{
+                    "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                    "unique_count": 0, "pages_fetched": 1, "terminal_state": "exhausted",
+                    "terminal_reason": "reported_total_exhausted", "cursor": None,
+                }],
+            },
+        )
+
+        result = self.service.capability_runtime.execute_external("multi_channel_sourcing", request)
+
+        self.assertEqual(result["coverage_certificate"]["coverage_status"], "platform_truncated")
+        self.assertTrue(result["continuation"]["scheduled"])
+        self.assertEqual(result["continuation"]["remaining_cells"], 1)
+        continuation = result["_continuation_request"]
+        self.assertEqual(continuation["resume_run_id"], result["run_id"])
+        self.assertEqual(continuation["_continuation_index"], 1)
+        self.assertEqual(continuation["query_plan_hash"], request["query_plan_hash"])
+        runnable = self.service.capability_runtime._resume_query_cells(
+            result["run_id"], request["query_plan_v1"]
+        )
+        self.assertEqual([item["cell_id"] for item in runnable], ["qpc_test_liepin"])
+        self.assertEqual(runnable[0]["execution_cursor"], {"page": 2})
+
+    def test_initial_execution_batches_eight_cells_and_leaves_rest_pending(self) -> None:
+        request = self._request()
+        cells = [
+            {
+                "cell_id": f"qpc_batch_liepin_{index}",
+                "channel": "liepin",
+                "query": f"机械 设计{index}",
+                "locations": [], "levels": [], "scenarios": [], "priority": index,
+                "provenance": [{"kind": "keyword_group", "group": f"mechanical-{index}"}],
+            }
+            for index in range(1, 10)
+        ]
+        cells.append({
+            "cell_id": "qpc_batch_xsaas_10",
+            "channel": "xsaas",
+            "query": "机械工程师10",
+            "locations": [], "levels": [], "scenarios": [], "priority": 10,
+            "provenance": [{"kind": "keyword_group", "group": "mechanical-10"}],
+        })
+        base = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": len(cells),
+            "cells": cells,
+        }
+        plan = {**base, "plan_hash": query_builders.query_plan_hash(base)}
+        request.update({"query_plan_v1": plan, "query_plan_hash": plan["plan_hash"]})
+        self._install_runners(
+            liepin_result={
+                "ok": True,
+                "candidates": 0,
+                "rounds": [
+                    {
+                        "query": cell["query"], "result_count": 0, "extracted_count": 0,
+                        "unique_count": 0, "pages_fetched": 1, "terminal_state": "exhausted",
+                        "terminal_reason": "reported_total_exhausted", "cursor": None,
+                    }
+                    for cell in cells[:8]
+                ],
+            },
+            liepin_candidates=[],
+            liepin_raw_candidates=[],
+            xsaas_result={"ok": True, "candidates": 0, "rounds": []},
+            xsaas_candidates=[],
+            xsaas_raw_candidates=[],
+        )
+
+        result = self.service.capability_runtime.execute_external("multi_channel_sourcing", request)
+
+        certificate = result["coverage_certificate"]
+        self.assertEqual(certificate["query_cells"]["exhausted"], 8)
+        self.assertEqual(certificate["query_cells"]["pending"], 2)
+        self.assertEqual(certificate["coverage_status"], "coverage_unknown")
+        self.assertEqual(result["continuation"]["remaining_cells"], 2)
+        self.assertTrue(result["continuation"]["scheduled"])
+        self.assertEqual(result["_continuation_request"]["resume_run_id"], result["run_id"])
+
+    def test_opencli_partial_recall_only_paginates_unfinished_query_cells(self) -> None:
+        runtime = self.service.capability_runtime
+        commands: list[list[str]] = []
+
+        def write_rows(command: list[str], flag: str, rows: list[dict]) -> None:
+            path = Path(command[command.index(flag) + 1])
+            path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+        def fake_run_json(command: list[str], timeout: int = 300) -> dict:
+            cmd = [str(part) for part in command]
+            commands.append(cmd)
+            if "--mode" in cmd and cmd[cmd.index("--mode") + 1] == "primary":
+                channel = cmd[cmd.index("--channel") + 1]
+                if channel == "liepin":
+                    page_one = [{
+                        "channel": "liepin", "query": "机械 设计", "candidate_id": "lp-1",
+                        "name": "甲", "company": "A", "title": "机械工程师",
+                        "page_number": 1, "position_index": 1, "fit_score": 70,
+                    }]
+                    write_rows(cmd, "--output", page_one)
+                    write_rows(cmd, "--raw-output", page_one)
+                    return {
+                        "ok": False, "coverage_complete": False, "intake_ready": True,
+                        "mode": "opencli_primary_recall", "channel": "liepin",
+                        "rounds": [{
+                            "query": "机械 设计", "result_count": 2, "extracted_count": 1,
+                            "unique_count": 1, "pages_fetched": 1, "terminal_state": "platform_capped",
+                            "terminal_reason": "opencli_limit_below_reported_total", "cursor": {"page": 2},
+                        }],
+                    }
+                write_rows(cmd, "--output", [])
+                write_rows(cmd, "--raw-output", [])
+                return {
+                    "ok": False, "coverage_complete": True, "intake_ready": False,
+                    "mode": "opencli_primary_recall", "channel": "xsaas",
+                    "rounds": [{
+                        "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                        "unique_count": 0, "pages_fetched": 1, "terminal_state": "exhausted",
+                        "terminal_reason": "reported_total_exhausted", "cursor": None,
+                    }],
+                }
+            if "--json-output" in cmd:
+                queries_path = Path(cmd[cmd.index("--queries-json") + 1])
+                fallback_entries = json.loads(queries_path.read_text(encoding="utf-8"))["queries"]
+                self.assertEqual(fallback_entries, [{
+                    "cell_id": "qpc_test_liepin", "query": "机械 设计",
+                    "evaluation_constraints": {"locations": [], "levels": [], "scenarios": []},
+                    "execution_filters": {}, "cursor": {"page": 2}, "collected_before": 1,
+                    "seen_candidate_keys": ["lp-1"],
+                }])
+                page_two = [{
+                    "channel": "liepin", "source_query": "机械 设计", "res_id_encode": "lp-2",
+                    "name": "乙", "current_company": "B", "current_title": "机械工程师",
+                    "page_number": 2, "position_index": 1, "fit_score": 72,
+                }]
+                write_rows(cmd, "--json-output", page_two)
+                write_rows(cmd, "--raw-json-output", page_two)
+                return {
+                    "ok": True, "candidates": 1,
+                    "detail_capture": {"requested": 1, "complete": 1, "partial": 0, "failed": 0},
+                    "rounds": [{
+                        "query": "机械 设计", "result_count": 2, "extracted_count": 1,
+                        "unique_count": 1, "pages_fetched": 1, "terminal_state": "exhausted",
+                        "terminal_reason": "reported_total_exhausted", "cursor": None,
+                    }],
+                }
+            if "intake" in cmd:
+                if "--apply" in cmd:
+                    return {"staged": {"accepted": []}, "intake": {"inserted": 0, "receipts": []}}
+                return {"staged": {"accepted_count": 0}, "intake": {"applied": False, "inserted": 0}}
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        runtime._run_json = fake_run_json  # type: ignore[method-assign]
+        runtime._run = lambda command, timeout=300: subprocess.CompletedProcess(  # type: ignore[method-assign]
+            command, 0, stdout="sync ok", stderr="",
+        )
+        request = self._request()
+        request.update({"opencli_primary": True, "opencli_shadow": True})
+
+        result = runtime.execute_external("multi_channel_sourcing", request)
+
+        by_channel = {item["channel"]: item for item in result["channel_runs"]}
+        self.assertEqual(by_channel["liepin"]["recall_engine"], "opencli_paginated")
+        self.assertEqual(by_channel["xsaas"]["recall_engine"], "opencli")
+        self.assertEqual(
+            by_channel["liepin"]["result"]["rounds"][0]["extracted_count"], 2,
+        )
+        self.assertTrue(result["coverage_certificate"]["evidence_integrity"]["passed"])
+        self.assertEqual(
+            result["coverage_certificate"]["coverage_status"],
+            "approved_query_cells_exhausted",
+        )
+        self.assertNotIn("_continuation_request", result)
+        production_calls = [cmd for cmd in commands if "--json-output" in cmd]
+        self.assertEqual(len(production_calls), 1)
+        self.assertFalse(any("xsaas_candidate_search.py" in " ".join(cmd) for cmd in commands))
+        self.assertTrue(all(
+            channel["reason"] == "recall_engine_opencli"
+            for channel in result["opencli_shadow"]["channels"]
+        ))
+
+    def test_liepin_pagination_failure_keeps_page_one_ledger_and_cursor(self) -> None:
+        runtime = self.service.capability_runtime
+
+        def write_rows(command: list[str], flag: str, rows: list[dict]) -> None:
+            Path(command[command.index(flag) + 1]).write_text(
+                json.dumps(rows, ensure_ascii=False), encoding="utf-8",
+            )
+
+        def fake_run_json(command: list[str], timeout: int = 300) -> dict:
+            cmd = [str(part) for part in command]
+            if "--mode" in cmd and cmd[cmd.index("--mode") + 1] == "primary":
+                channel = cmd[cmd.index("--channel") + 1]
+                if channel == "liepin":
+                    page_one = [{
+                        "channel": "liepin", "query": "机械 设计", "candidate_id": "lp-page-one",
+                        "name": "甲", "company": "A", "title": "机械工程师",
+                        "page_number": 1, "position_index": 1, "fit_score": 70,
+                    }]
+                    write_rows(cmd, "--output", page_one)
+                    write_rows(cmd, "--raw-output", page_one)
+                    return {
+                        "ok": False, "coverage_complete": False, "intake_ready": True,
+                        "mode": "opencli_primary_recall", "channel": "liepin",
+                        "rounds": [{
+                            "query": "机械 设计", "result_count": 3, "extracted_count": 1,
+                            "unique_count": 1, "pages_fetched": 1,
+                            "terminal_state": "platform_capped",
+                            "terminal_reason": "opencli_limit_below_reported_total",
+                            "cursor": {"page": 2},
+                        }],
+                    }
+                write_rows(cmd, "--output", [])
+                write_rows(cmd, "--raw-output", [])
+                return {
+                    "ok": False, "coverage_complete": True, "intake_ready": False,
+                    "mode": "opencli_primary_recall", "channel": "xsaas",
+                    "rounds": [{
+                        "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                        "unique_count": 0, "pages_fetched": 1,
+                        "terminal_state": "exhausted",
+                        "terminal_reason": "reported_total_exhausted", "cursor": None,
+                    }],
+                }
+            if "--json-output" in cmd:
+                raise RuntimeError("pagination transport failed")
+            if "intake" in cmd:
+                if "--apply" in cmd:
+                    return {"staged": {"accepted": []}, "intake": {"inserted": 0, "receipts": []}}
+                return {"staged": {"accepted_count": 0}, "intake": {"applied": False, "inserted": 0}}
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        runtime._run_json = fake_run_json  # type: ignore[method-assign]
+        runtime._run = lambda command, timeout=300: subprocess.CompletedProcess(  # type: ignore[method-assign]
+            command, 0, stdout="sync ok", stderr="",
+        )
+        request = self._request()
+        request.update({"opencli_primary": True, "opencli_shadow": True})
+
+        result = runtime.execute_external("multi_channel_sourcing", request)
+
+        self.assertEqual(result["coverage_certificate"]["coverage_status"], "platform_truncated")
+        self.assertTrue(result["continuation"]["scheduled"])
+        conn = self.service._connect()
+        try:
+            recall = conn.execute(
+                "SELECT source_candidate_id,query_cell_id FROM agent_candidate_recalls "
+                "WHERE run_id=? AND source_candidate_id='lp-page-one'",
+                (result["run_id"],),
+            ).fetchone()
+            cell = conn.execute(
+                "SELECT status,cursor_json,terminal_reason FROM agent_sourcing_query_cells "
+                "WHERE run_id=? AND cell_id='qpc_test_liepin'",
+                (result["run_id"],),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(tuple(recall), ("lp-page-one", "qpc_test_liepin"))
+        self.assertEqual(cell["status"], "platform_capped")
+        self.assertEqual(json.loads(cell["cursor_json"]), {"page": 2})
+        self.assertEqual(cell["terminal_reason"], "opencli_limit_below_reported_total")
+
+    def test_resume_selects_only_retryable_cells_from_same_plan(self) -> None:
+        query_plan = self._request()["query_plan_v1"]
+        conn = self.service._connect()
+        try:
+            for cell, status, retries in zip(
+                query_plan["cells"], ("failed", "exhausted"), (1, 0), strict=True,
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO agent_sourcing_query_cells
+                    (run_id,workflow_id,job_id,plan_hash,cell_id,channel,query,priority,status,retry_count)
+                    VALUES ('asa-source-resume','wf-resume',10,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        query_plan["plan_hash"], cell["cell_id"], cell["channel"], cell["query"],
+                        cell["priority"], status, retries,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        runnable = self.service.capability_runtime._resume_query_cells(
+            "asa-source-resume", query_plan, max_retries=3,
+        )
+
+        assert [cell["channel"] for cell in runnable] == ["liepin"]
+        assert runnable[0]["query"] == "机械 设计"
+
+    def test_resume_selects_platform_cap_only_when_cursor_is_available(self) -> None:
+        query_plan = self._request()["query_plan_v1"]
+        conn = self.service._connect()
+        try:
+            for cell, cursor in zip(
+                query_plan["cells"], ({"page": 51}, {}), strict=True,
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO agent_sourcing_query_cells
+                    (run_id,workflow_id,job_id,plan_hash,cell_id,channel,query,priority,status,cursor_json,terminal_reason)
+                    VALUES ('asa-source-cursor','wf-resume',10,?,?,?,?,?,'platform_capped',?,'page_safety_limit')
+                    """,
+                    (
+                        query_plan["plan_hash"], cell["cell_id"], cell["channel"], cell["query"],
+                        cell["priority"], json.dumps(cursor),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        runnable = self.service.capability_runtime._resume_query_cells(
+            "asa-source-cursor", query_plan, max_retries=3,
+        )
+
+        assert len(runnable) == 1
+        assert runnable[0]["channel"] == "liepin"
+        assert runnable[0]["execution_cursor"] == {"page": 51}
+
+    def test_certificate_downgrades_exhausted_grid_when_recall_ledger_is_incomplete(self) -> None:
+        request = self._request()
+        self.service.capability_runtime._persist_query_cell_states(
+            run_id="asa-source-ledger-gap",
+            workflow_id="wf-ledger-gap",
+            client="长越科技",
+            job="机械高级工程师",
+            query_plan=request["query_plan_v1"],
+            channel_runs=[
+                {
+                    "channel": "liepin", "status": "completed",
+                    "result": {"rounds": [{
+                        "query": "机械 设计", "result_count": 2, "extracted_count": 2,
+                        "terminal_state": "exhausted", "terminal_reason": "reported_total_exhausted",
+                    }]},
+                },
+                {
+                    "channel": "xsaas", "status": "completed",
+                    "result": {"rounds": [{
+                        "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                        "terminal_state": "exhausted", "terminal_reason": "reported_total_exhausted",
+                    }]},
+                },
+            ],
+        )
+
+        certificate = self.service.capability_runtime._build_coverage_certificate(
+            run_id="asa-source-ledger-gap",
+            workflow_id="wf-ledger-gap",
+            client="长越科技",
+            job="机械高级工程师",
+            query_plan=request["query_plan_v1"],
+        )
+
+        assert certificate["query_cells"]["exhausted"] == 2
+        assert certificate["evidence_integrity"]["passed"] is False
+        assert certificate["evidence_integrity"]["expected_extracted_occurrences"] == 2
+        assert certificate["evidence_integrity"]["mapped_recall_occurrences"] == 0
+        assert certificate["coverage_status"] == "coverage_unknown"
+        assert "recall_ledger_mismatch" in certificate["claims"]["coverage_unknown_reasons"]
 
     def test_zero_result_attribution_flows_to_funnel_and_quality(self) -> None:
         self._install_runners(
@@ -492,19 +1218,21 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         AgentService.validate_external_result("multi_channel_sourcing", result)
         assert channel_runs["liepin"]["quality"] == "zero_attributed"
 
-    def test_liepin_failure_records_failed_funnel_row_and_reraises(self) -> None:
+    def test_liepin_failure_is_checkpointed_without_losing_other_channel(self) -> None:
         self._install_runners(
             liepin_result=RuntimeError("猎聘登录已过期，请在 Chrome 里登录猎聘后再继续。"),
-            xsaas_result={"ok": True, "candidates": 0, "rounds": []},
+            xsaas_result={"ok": True, "candidates": 0, "rounds": [{
+                "query": "机械工程师", "result_count": 0, "extracted_count": 0,
+                "terminal_state": "exhausted", "terminal_reason": "reported_total_exhausted",
+            }]},
         )
-        with self.assertRaises(RuntimeError):
-            self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
-        rows = self._funnel_rows()
-        assert len(rows) == 1
-        assert rows[0]["channel"] == "liepin"
-        assert rows[0]["status"] == "failed"
-        assert rows[0]["zero_attribution"] == "session_expired"
-        assert "登录已过期" in rows[0]["error"]
+        result = self.service.capability_runtime.execute_external("multi_channel_sourcing", self._request())
+        rows = {row["channel"]: row for row in self._funnel_rows()}
+        assert set(rows) == {"liepin", "xsaas"}
+        assert rows["liepin"]["status"] == "blocked"
+        assert rows["liepin"]["zero_attribution"] == "session_expired"
+        assert "登录已过期" in rows["liepin"]["error"]
+        assert result["continuation"]["scheduled"] is True
 
     def test_long_traceback_keeps_tail_so_login_signal_survives(self) -> None:
         # T3 实战回归：traceback 超 1000 字符时头部截断会丢掉末尾异常行（归因信号），

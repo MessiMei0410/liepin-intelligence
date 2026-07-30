@@ -32,6 +32,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -43,6 +45,327 @@ XSAAS_QUERY_MAX_TERMS = 2
 XSAAS_QUERY_MAX_COUNT = 8
 XSAAS_AMBIGUOUS_ATOMIC_TERMS = {"ae", "fae", "pc", "pol", "tme"}
 XSAAS_GENERIC_ATOMIC_TERMS = {"产品", "工程师", "总监", "技术", "电源", "经理"}
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def query_plan_hash(plan: dict[str, Any]) -> str:
+    """Return the content identity of a query plan, excluding its self-declared hash."""
+    payload = {key: value for key, value in plan.items() if key != "plan_hash"}
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def validate_query_plan_v1(value: Any) -> tuple[bool, list[str]]:
+    """Validate the immutable executable plan before approval or channel execution."""
+    if not isinstance(value, dict):
+        return False, ["query_plan_v1 必须是对象"]
+    errors: list[str] = []
+    if value.get("schema_version") != "query_plan_v1":
+        errors.append("schema_version 必须是 query_plan_v1")
+    cells = value.get("cells")
+    if not isinstance(cells, list) or not cells:
+        errors.append("cells 必须是非空数组")
+        cells = []
+    if value.get("cell_count") != len(cells):
+        errors.append("cell_count 与 cells 数量不一致")
+    declared_hash = str(value.get("plan_hash") or "")
+    if not declared_hash or declared_hash != query_plan_hash(value):
+        errors.append("plan_hash 与查询计划内容不一致")
+    seen_ids: set[str] = set()
+    channels: set[str] = set()
+    for index, cell in enumerate(cells, 1):
+        if not isinstance(cell, dict):
+            errors.append(f"cells[{index}] 必须是对象")
+            continue
+        cell_id = str(cell.get("cell_id") or "")
+        if not cell_id or cell_id in seen_ids:
+            errors.append(f"cells[{index}].cell_id 缺失或重复")
+        seen_ids.add(cell_id)
+        channel = str(cell.get("channel") or "")
+        if channel not in {"liepin", "xsaas"}:
+            errors.append(f"cells[{index}].channel 非法")
+        else:
+            channels.add(channel)
+        if not str(cell.get("query") or "").strip():
+            errors.append(f"cells[{index}].query 为空")
+        if not isinstance(cell.get("provenance"), list) or not cell.get("provenance"):
+            errors.append(f"cells[{index}].provenance 为空")
+    for channel in ("liepin", "xsaas"):
+        if channel not in channels:
+            errors.append(f"缺少 {channel} 查询单元")
+    return not errors, errors
+
+
+def query_plan_channel_queries(plan: dict[str, Any], channel: str) -> list[str]:
+    """Extract exactly the approved query sequence for one channel."""
+    return [
+        str(cell["query"])
+        for cell in plan.get("cells") or []
+        if isinstance(cell, dict) and cell.get("channel") == channel and str(cell.get("query") or "").strip()
+    ]
+
+
+def query_plan_channel_entries(plan: dict[str, Any], channel: str) -> list[Any]:
+    """Build the execution envelope without mutating the immutable approved plan."""
+    entries: list[Any] = []
+    for cell in plan.get("cells") or []:
+        if not isinstance(cell, dict) or cell.get("channel") != channel:
+            continue
+        query = str(cell.get("query") or "").strip()
+        if not query:
+            continue
+        cursor = cell.get("execution_cursor")
+        progress = cell.get("execution_progress") if isinstance(cell.get("execution_progress"), dict) else {}
+        entry = {
+            "cell_id": str(cell.get("cell_id") or ""),
+            "query": query,
+            "evaluation_constraints": cell.get("evaluation_constraints") or {
+                "locations": cell.get("locations") or [],
+                "levels": cell.get("levels") or [],
+                "scenarios": cell.get("scenarios") or [],
+            },
+            "execution_filters": cell.get("execution_filters") or {},
+        }
+        if isinstance(cursor, dict) and int(cursor.get("page") or 0) > 1:
+            entries.append({
+                **entry,
+                "cursor": {"page": int(cursor["page"])},
+                "collected_before": max(0, int(progress.get("unique_count") or progress.get("extracted_count") or 0)),
+                "seen_candidate_keys": [
+                    str(key) for key in progress.get("seen_candidate_keys") or [] if str(key).strip()
+                ],
+            })
+        else:
+            entries.append(entry)
+    return entries
+
+
+def query_plan_company_vocabulary(plan: dict[str, Any]) -> set[str]:
+    names = {
+        str(ref.get("company") or "").strip()
+        for cell in plan.get("cells") or []
+        if isinstance(cell, dict)
+        for ref in cell.get("provenance") or []
+        if isinstance(ref, dict) and str(ref.get("company") or "").strip()
+    }
+    return {normalized for name in names if (normalized := knowledge_base.normalize_client_name(name))}
+
+
+def schedule_query_plan_v1(
+    plan: dict[str, Any],
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Rank approved-plan candidates by marginal unique yield while reserving exploration."""
+    metric_by_query = {
+        (str(item.get("channel") or ""), " ".join(str(item.get("query") or "").split()).casefold()): item
+        for item in metrics
+        if isinstance(item, dict)
+    }
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for raw_cell in plan.get("cells") or []:
+        if not isinstance(raw_cell, dict):
+            continue
+        cell = json.loads(json.dumps(raw_cell, ensure_ascii=False))
+        base_priority = int(cell.get("priority") or 0)
+        metric = metric_by_query.get((
+            str(cell.get("channel") or ""),
+            " ".join(str(cell.get("query") or "").split()).casefold(),
+        ))
+        if metric:
+            runs = max(0, int(metric.get("runs") or 0))
+            unique_yield = max(0.0, float(metric.get("unique_yield_per_run") or 0))
+            overlap_rate = max(0.0, min(float(metric.get("overlap_rate") or 0), 1.0))
+            business_score = float(metric.get("business_score") or 0)
+            marginal_score = unique_yield * (1 - overlap_rate) + business_score * 2
+            scheduling = {
+                "policy": "marginal_unique_yield_v1",
+                "mode": "learned",
+                "historical_runs": runs,
+                "unique_yield_per_run": round(unique_yield, 4),
+                "overlap_rate": round(overlap_rate, 4),
+                "business_score": round(business_score, 4),
+                "marginal_score": round(marginal_score, 4),
+            }
+        else:
+            marginal_score = 3.0
+            scheduling = {
+                "policy": "marginal_unique_yield_v1",
+                "mode": "exploration",
+                "historical_runs": 0,
+                "unique_yield_per_run": 0.0,
+                "overlap_rate": 0.0,
+                "business_score": 0.0,
+                "marginal_score": marginal_score,
+            }
+        cell["base_priority"] = base_priority
+        cell["scheduling"] = scheduling
+        ranked.append((marginal_score, base_priority, cell))
+    ranked.sort(key=lambda item: (-item[0], item[1], str(item[2].get("cell_id") or "")))
+    cells: list[dict[str, Any]] = []
+    for priority, (_, _base_priority, cell) in enumerate(ranked, 1):
+        cell["priority"] = priority
+        cells.append(cell)
+    scheduled = {
+        **{key: value for key, value in plan.items() if key not in {"plan_hash", "cells", "cell_count", "scheduler"}},
+        "scheduler": {
+            "policy": "marginal_unique_yield_v1",
+            "historical_metric_count": len(metric_by_query),
+            "exploration_cells": sum(cell["scheduling"]["mode"] == "exploration" for cell in cells),
+        },
+        "cell_count": len(cells),
+        "cells": cells,
+    }
+    return {**scheduled, "plan_hash": query_plan_hash(scheduled)}
+
+
+def _dimension_values(strategy: dict[str, Any], key: str) -> list[str]:
+    anchors = strategy.get("anchors") if isinstance(strategy.get("anchors"), dict) else {}
+    anchor = anchors.get(key) if isinstance(anchors.get(key), dict) else {}
+    return list(dict.fromkeys(str(value).strip() for value in anchor.get("values") or [] if str(value).strip()))
+
+
+def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
+    """Compile every strategy pool/group into deterministic, channel-specific query cells."""
+    declared_constraints = (
+        strategy.get("evaluation_constraints")
+        if isinstance(strategy.get("evaluation_constraints"), dict)
+        else {}
+    )
+    locations = list(dict.fromkeys(
+        str(value).strip()
+        for value in declared_constraints.get("locations") or _dimension_values(strategy, "location")
+        if str(value).strip()
+    ))
+    scenarios = list(dict.fromkeys(
+        str(value).strip()
+        for value in (
+            declared_constraints.get("scenarios")
+            or _dimension_values(strategy, "scenario_track")
+            or _dimension_values(strategy, "scenario")
+        )
+        if str(value).strip()
+    ))
+    level_mapping = strategy.get("step3_level_mapping") if isinstance(strategy.get("step3_level_mapping"), dict) else {}
+    levels = list(dict.fromkeys(
+        str(value).strip()
+        for value in declared_constraints.get("levels") or level_mapping.get("accepted_levels") or []
+        if str(value).strip()
+    ))
+    evaluation_constraints = {"locations": locations, "levels": levels, "scenarios": scenarios}
+
+    companies: list[dict[str, str]] = []
+    for pool in strategy.get("step2_target_pool") or []:
+        if not isinstance(pool, dict):
+            continue
+        for company in pool.get("companies") or []:
+            if not isinstance(company, dict) or not str(company.get("name") or "").strip():
+                continue
+            companies.append({
+                "name": str(company["name"]).strip(),
+                "tier": str(pool.get("tier") or "T3"),
+                "path": str(pool.get("path") or "adjacent"),
+                "source": str(company.get("source") or "llm_inferred"),
+                "confidence": str(company.get("confidence") or "low"),
+            })
+    groups = [
+        {
+            "group": str(group.get("group") or "").strip(),
+            "targets": str(group.get("targets") or "").strip(),
+            "terms": [str(term).strip() for term in group.get("terms") or [] if str(term).strip()],
+        }
+        for group in strategy.get("step4_keyword_groups") or []
+        if isinstance(group, dict) and str(group.get("group") or "").strip()
+    ]
+    groups = [group for group in groups if group["terms"]]
+    vocab = {knowledge_base.normalize_client_name(company["name"]) for company in companies}
+    vocab.discard("")
+
+    cells_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add(channel: str, query: str, priority: int, provenance: dict[str, Any]) -> None:
+        normalized_query = " ".join(str(query or "").split())
+        if not normalized_query:
+            return
+        key = (channel, normalized_query.casefold())
+        if key not in cells_by_key:
+            identity = {
+                "channel": channel,
+                "query": normalized_query,
+                "locations": locations,
+                "levels": levels,
+                "scenarios": scenarios,
+            }
+            cells_by_key[key] = {
+                "cell_id": "qpc_" + hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()[:20],
+                **identity,
+                "evaluation_constraints": evaluation_constraints,
+                "execution_filters": {},
+                "priority": priority,
+                "provenance": [],
+            }
+        cell = cells_by_key[key]
+        cell["priority"] = min(int(cell["priority"]), priority)
+        if provenance not in cell["provenance"]:
+            cell["provenance"].append(provenance)
+
+    builders = {"liepin": build_liepin_queries, "xsaas": build_xsaas_queries}
+    tier_priority = {"T1": 10, "T2": 20, "T3": 30}
+    for company in companies:
+        provenance = {
+            "kind": "company_pool", "company": company["name"], "tier": company["tier"],
+            "path": company["path"], "source": company["source"], "confidence": company["confidence"],
+        }
+        for channel, builder in builders.items():
+            for query in builder([company["name"]], company_terms=vocab):
+                add(channel, query, tier_priority.get(company["tier"], 30) + 10, provenance)
+
+    for group_index, group in enumerate(groups):
+        group_query = " ".join(group["terms"])
+        provenance = {
+            "kind": "keyword_group", "group": group["group"],
+            "targets": group["targets"], "terms": group["terms"],
+        }
+        for channel, builder in builders.items():
+            for query in builder([group_query], company_terms=vocab):
+                add(channel, query, 100 + group_index, provenance)
+
+        for company in companies:
+            combined = f"{company['name']} {group_query}"
+            combined_provenance = {
+                "kind": "company_keyword", "company": company["name"], "tier": company["tier"],
+                "path": company["path"], "group": group["group"], "targets": group["targets"],
+            }
+            for channel, builder in builders.items():
+                for query in builder([combined], company_terms=vocab):
+                    add(
+                        channel, query,
+                        tier_priority.get(company["tier"], 30) + group_index,
+                        combined_provenance,
+                    )
+
+    cells = sorted(
+        cells_by_key.values(),
+        key=lambda cell: (int(cell["priority"]), str(cell["channel"]), str(cell["query"]).casefold()),
+    )
+    plan: dict[str, Any] = {
+        "schema_version": "query_plan_v1",
+        "source_strategy_version": str(strategy.get("schema_version") or ""),
+        "dimensions": {"locations": locations, "levels": levels, "scenarios": scenarios},
+        "execution_semantics": {
+            "retrieval_axes": ["channel", "query"],
+            "platform_filters": [],
+            "evaluation_constraints": {
+                "locations": "post_recall_soft_score",
+                "levels": "post_recall_assessment",
+                "scenarios": "post_recall_assessment_context",
+            },
+        },
+        "cell_count": len(cells),
+        "cells": cells,
+    }
+    return {**plan, "plan_hash": query_plan_hash(plan)}
 
 
 def company_vocabulary(strategy: dict[str, Any]) -> set[str]:

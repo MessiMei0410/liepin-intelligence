@@ -1202,14 +1202,47 @@ def generate_for_workflow(
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
+    if business_outcome == "completed_target_met":
+        successful_channels = [
+            {
+                **finding,
+                "finding": "target_met",
+                "note": (
+                    f"本轮提取 {finding.get('unique_count', 0)} 人、"
+                    f"有效新增 {finding.get('intake_new_count', 0)} 人；"
+                    "已达成目标，不因原始召回计数字段缺失判负"
+                ),
+            }
+            for finding in review.get("per_channel_findings") or []
+        ]
+        review.update(
+            {
+                "verdict": "healthy",
+                "verdict_label": VERDICT_LABELS["healthy"],
+                "verdict_reason": "本轮已达到目标人数；保留渠道数据用于后续复盘，不生成扩圈或改词建议。",
+                "signals": [],
+                "per_channel_findings": successful_channels,
+                "revision_diff": [],
+                "expansion_decision_tree": [],
+                "escalation": None,
+                "channel_downweights": [],
+                "notes": ["本轮已达成目标；原始召回计数缺失时，以实际提取、入库和评估结果为准。"],
+            }
+        )
     if candidate_trace:
         review["notes"] = [*(review.get("notes") or []), *candidate_trace]
     return review
 
 
+def _review_title(review: dict[str, Any]) -> str:
+    prefix = "本轮策略复盘" if review.get("business_outcome") == "completed_target_met" else "没成的原因"
+    return f"{prefix} v{review.get('version', 1)}：{review.get('verdict_label')}"
+
+
 def _review_content(review: dict[str, Any]) -> str:
+    heading = "本轮策略复盘" if review.get("business_outcome") == "completed_target_met" else "没成的原因"
     lines = [
-        f"# 没成的原因（{review.get('generator')}）：{review.get('verdict_label')}",
+        f"# {heading}（{review.get('generator')}）：{review.get('verdict_label')}",
         "",
         f"- 工作流：{review.get('workflow_id')}（第 {review.get('round_index')} 轮，{review.get('client')}｜{review.get('job')}）",
         f"- 判定：{review.get('verdict_reason')}",
@@ -1286,7 +1319,7 @@ def upsert_strategy_review(conn: Any, review: dict[str, Any]) -> str:
             (
                 _review_content(review),
                 _dumps(review),
-                f"没成的原因 v{review['version']}：{review.get('verdict_label')}",
+                _review_title(review),
                 artifact_id,
             ),
         )
@@ -1306,7 +1339,7 @@ def upsert_strategy_review(conn: Any, review: dict[str, Any]) -> str:
             workflow_id,
             None,
             ARTIFACT_TYPE,
-            f"没成的原因 v1：{review.get('verdict_label')}",
+            _review_title(review),
             "text/markdown",
             None,
             _review_content(review),

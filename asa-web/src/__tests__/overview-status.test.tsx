@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { Overview } from '../pages/Overview'
 import type { Dashboard } from '../api'
+import { tabs } from '../shared/tabs'
 
 // T1：dashboard workflows[] 透传 business_outcome 后，总览工作流标签统一走 statusMapping
 const dashboardWith = (workflow: Record<string, unknown>): Dashboard => ({
@@ -15,6 +16,27 @@ const renderOverview = (dashboard: Dashboard) =>
   render(<Overview dashboard={dashboard} jobs={[]} candidates={[]} openWorkflow={() => {}} openCandidate={() => {}} archiveWorkflow={() => {}} />)
 
 describe('Overview 工作流状态标签（T1）', () => {
+  it('顶级导航只保留四个工作区，人才雷达作为总览二级入口', () => {
+    expect(tabs.map(([, label]) => label)).toEqual(['总览', '岗位看板', '人选进度', '人选列表'])
+    renderOverview(dashboardWith({}))
+
+    const radar = screen.getByRole('button', { name: '人才雷达' })
+    expect(radar).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(radar)
+    expect(radar).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('行动卡入口同时展示待确认、已执行和失败数量', () => {
+    renderOverview({ ...dashboardWith({}), counts: { active_jobs: 1, candidates: 1, pending_candidates: 1, pending_approvals: 0, pending_proposals: 2, executed_proposals: 5, failed_proposals: 1 } })
+    expect(screen.getByText('Agent 行动卡')).toBeInTheDocument()
+    expect(screen.getByText('待确认 2 · 已执行 5 · 失败 1')).toBeInTheDocument()
+  })
+
+  it('只有历史已执行记录时不占用总览主工作区', () => {
+    renderOverview({ ...dashboardWith({}), counts: { active_jobs: 1, candidates: 1, pending_candidates: 1, pending_approvals: 0, pending_proposals: 0, executed_proposals: 50, failed_proposals: 0 } })
+    expect(screen.queryByText('Agent 行动卡')).not.toBeInTheDocument()
+  })
+
   it('blocked + completed_needs_review → 业务文案，不显示"已阻塞"', () => {
     renderOverview(dashboardWith({ business_outcome: 'completed_needs_review' }))
     expect(screen.getByText('本轮完成，合格人数不足，有待复核人选')).toBeInTheDocument()
@@ -40,5 +62,15 @@ describe('Overview 工作流状态标签（T1）', () => {
     renderOverview(dashboardWith({ business_outcome: 'completed_future_new' }))
     expect(screen.getByText('已阻塞')).toBeInTheDocument()
     expect(screen.queryByText('completed_future_new')).not.toBeInTheDocument()
+  })
+
+  it('superseded 与未知工作流状态都不渲染英文原形', () => {
+    const { rerender } = renderOverview(dashboardWith({ status: 'superseded' }))
+    expect(screen.getByText('已被修订版替代')).toBeInTheDocument()
+    expect(screen.queryByText('superseded')).not.toBeInTheDocument()
+
+    rerender(<Overview dashboard={dashboardWith({ status: 'future_status' })} jobs={[]} candidates={[]} openWorkflow={() => {}} openCandidate={() => {}} archiveWorkflow={() => {}} />)
+    expect(screen.getByText('状态待同步')).toBeInTheDocument()
+    expect(screen.queryByText('future_status')).not.toBeInTheDocument()
   })
 })
