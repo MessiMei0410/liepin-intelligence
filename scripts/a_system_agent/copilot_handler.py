@@ -342,6 +342,30 @@ def get_copilot_focus(self, session_id: str) -> dict[str, Any] | None:
     focus["needs_clarification"] = bool(focus.get("conflicts"))
     return focus
 
+
+def _copilot_focus_from_joined_row(row: sqlite3.Row) -> dict[str, Any] | None:
+    if row["focus_revision"] is None:
+        return None
+    focus = _loads(row["focus_json"], {})
+    focus.update(
+        {
+            "session_id": str(row["session_id"]),
+            "revision": int(row["focus_revision"] or 1),
+            "context": focus.get("context") or {
+                "type": row["focus_context_type"] or "global",
+                "id": row["focus_context_id"],
+            },
+            "client": focus.get("client") or row["focus_client"] or "",
+            "action": focus.get("action") or row["focus_action"] or "",
+            "confidence": float(row["focus_confidence"] or 0),
+            "evidence": _loads(row["focus_evidence_json"], []),
+            "conflicts": _loads(row["focus_conflicts_json"], []),
+            "updated_at": row["focus_updated_at"],
+        }
+    )
+    focus["needs_clarification"] = bool(focus.get("conflicts"))
+    return focus
+
 @staticmethod
 def _new_candidate_outreach_requested(message: str) -> bool:
     """Keep a request for new people separate from an existing-batch follow-up."""
@@ -1062,6 +1086,151 @@ def _copilot_workflow_context_facts(self, context: dict[str, Any]) -> dict[str, 
     }
 
 
+def _workflow_strategy_question(message: str, context: dict[str, Any]) -> bool:
+    """Return whether the user is asking to read the selected workflow strategy."""
+    if str(context.get("type") or "") != "workflow" or not context.get("id"):
+        return False
+    normalized = "".join(str(message or "").lower().split())
+    strategy_terms = ("寻访策略", "搜索策略", "搜人策略")
+    if not any(term in normalized for term in strategy_terms):
+        return False
+    mutation_terms = (
+        "修改", "调整", "优化", "新增", "增加", "补充", "删除", "去掉", "替换", "改成", "应用",
+    )
+    return not any(term in normalized for term in mutation_terms)
+
+
+def _compact_workflow_context(workflow_payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the current workflow facts needed by Copilot without sending full artifacts."""
+    workflow = dict(workflow_payload.get("workflow") or {})
+    goal = dict(workflow_payload.get("goal") or {})
+    steps = [
+        {
+            "id": step.get("id"),
+            "capability_id": step.get("capability_id"),
+            "label": step.get("business_label"),
+            "status": step.get("status"),
+            "risk_level": step.get("risk_level"),
+        }
+        for step in (workflow_payload.get("steps") or [])
+    ]
+    approvals = [
+        {
+            "approval_id": approval.get("approval_id"),
+            "action_type": approval.get("action_type"),
+            "status": approval.get("status"),
+            "risk_level": approval.get("risk_level"),
+            "preflight": approval.get("preflight") or {},
+        }
+        for approval in (workflow_payload.get("approvals") or [])
+    ]
+    artifacts = workflow_payload.get("artifacts") or []
+    strategy_artifact = next(
+        (
+            artifact for artifact in artifacts
+            if artifact.get("artifact_type") == "search_strategy"
+            and artifact.get("validation_status") == "passed"
+        ),
+        None,
+    )
+    strategy: dict[str, Any] | None = None
+    if strategy_artifact:
+        metadata = strategy_artifact.get("metadata") if isinstance(strategy_artifact.get("metadata"), dict) else {}
+        plan = metadata.get("plan") if isinstance(metadata.get("plan"), dict) else {}
+        strategy_v2_payload = metadata.get("strategy_v2") if isinstance(metadata.get("strategy_v2"), dict) else {}
+        review_gates = plan.get("review_gates") if isinstance(plan.get("review_gates"), dict) else {}
+        channels = plan.get("channels") if isinstance(plan.get("channels"), dict) else {}
+        strategy = {
+            "artifact_id": strategy_artifact.get("artifact_id"),
+            "validation_status": strategy_artifact.get("validation_status"),
+            "model": ((plan.get("generation") or {}).get("model") if isinstance(plan.get("generation"), dict) else ""),
+            "summary": str(plan.get("strategy_summary") or ""),
+            "channels": {
+                channel: [
+                    {
+                        "query": str(item.get("query") or ""),
+                        "purpose": str(item.get("purpose") or ""),
+                    }
+                    for item in items if isinstance(item, dict) and item.get("query")
+                ]
+                for channel, items in channels.items() if isinstance(items, list)
+            },
+            "target_companies": list(plan.get("target_companies") or []),
+            "hard_requirements": list(review_gates.get("hard_requirements") or []),
+            "negative_rules": list(review_gates.get("negative_rules") or []),
+            "risk_points": list(review_gates.get("risk_points") or []),
+            "input_level": strategy_v2_payload.get("input_level"),
+            "missing_anchors": list(strategy_v2_payload.get("missing_anchors") or []),
+            "keyword_groups": list(strategy_v2_payload.get("step4_keyword_groups") or []),
+        }
+    return {
+        "goal": {
+            "goal_id": goal.get("goal_id"),
+            "title": goal.get("title"),
+            "objective": goal.get("objective"),
+        },
+        "workflow": {
+            "workflow_id": workflow.get("workflow_id"),
+            "status": workflow.get("status"),
+            "current_stage": workflow.get("current_stage"),
+        },
+        "plan_ref": dict(workflow_payload.get("plan_ref") or {}),
+        "progress": dict(workflow_payload.get("progress") or {}),
+        "steps": steps,
+        "approvals": approvals,
+        "strategy": strategy,
+    }
+
+
+def _format_workflow_strategy_answer(workflow_context: dict[str, Any]) -> str:
+    strategy = workflow_context.get("strategy") if isinstance(workflow_context.get("strategy"), dict) else None
+    workflow = workflow_context.get("workflow") if isinstance(workflow_context.get("workflow"), dict) else {}
+    if not strategy:
+        return "结论：这个任务还没有通过校验的寻访策略。\n\n下一步：先完成“生成多渠道寻访策略”步骤。"
+
+    channels = strategy.get("channels") if isinstance(strategy.get("channels"), dict) else {}
+    liepin = channels.get("liepin") if isinstance(channels.get("liepin"), list) else []
+    xsaas = channels.get("xsaas") if isinstance(channels.get("xsaas"), list) else []
+    pending_r3 = any(
+        approval.get("status") == "pending" and approval.get("risk_level") == "R3"
+        for approval in (workflow_context.get("approvals") or [])
+    )
+    approval_text = "当前待 R3 审批，尚未执行外部搜索。" if pending_r3 else f"当前工作流状态：{workflow.get('status') or '未知'}。"
+
+    def values(items: list[dict[str, Any]], key: str, limit: int) -> str:
+        result = [str(item.get(key) or "").strip() for item in items if isinstance(item, dict)]
+        result = [item for item in result if item]
+        suffix = f"；另有 {len(result) - limit} 项" if len(result) > limit else ""
+        return "；".join(result[:limit]) + suffix
+
+    companies = [str(item).strip() for item in (strategy.get("target_companies") or []) if str(item).strip()]
+    hard_requirements = [
+        {"value": item} for item in (strategy.get("hard_requirements") or []) if str(item).strip()
+    ]
+    negative_rules = [
+        {"value": item} for item in (strategy.get("negative_rules") or []) if str(item).strip()
+    ]
+    risk_points = [
+        {"value": item} for item in (strategy.get("risk_points") or []) if str(item).strip()
+    ]
+    summary = str(strategy.get("summary") or "").strip() or "按当前通过校验的 strategy_v2 执行。"
+    lines = [
+        f"结论：{summary}{approval_text}",
+        f"猎聘 {len(liepin)} 组：{values(liepin, 'query', 6) or '未配置'}",
+        f"X-SaaS {len(xsaas)} 组：{values(xsaas, 'query', 6) or '未配置'}",
+    ]
+    if companies:
+        lines.append(f"目标公司：{'、'.join(companies[:10])}" + (f"等 {len(companies)} 家" if len(companies) > 10 else ""))
+    if hard_requirements:
+        lines.append(f"硬条件：{values(hard_requirements, 'value', 5)}")
+    if negative_rules:
+        lines.append(f"排除：{values(negative_rules, 'value', 4)}")
+    if risk_points:
+        lines.append(f"风险：{values(risk_points, 'value', 4)}")
+    lines.append("下一步：批准后只搜索、排重并进入待复核，不发送消息。" if pending_r3 else "下一步：按工作流当前状态继续。")
+    return "\n\n".join(lines)
+
+
 def _copilot_context_facts(self, context: dict[str, Any]) -> dict[str, Any]:
     if str(context.get("type") or "") == "workflow":
         return self._copilot_workflow_context_facts(context)
@@ -1517,6 +1686,7 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "pending_intent": structured.get("pending_intent"),
                     "action_card": structured.get("action_card"),
                     "action_cards": structured.get("action_cards") or [],
+                    "analysis_card": structured.get("analysis_card"),
                     # 策略建议补丁：浮窗恢复会话时可重渲染「应用到策略」操作栏
                     "strategy_patch": structured.get("strategy_patch"),
                     "strategy_patch_applied": bool(structured.get("strategy_patch_applied")),
@@ -1536,43 +1706,152 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
         conn.close()
 
 
-def list_copilot_sessions(self, limit: int = 30) -> dict[str, Any]:
+def list_copilot_sessions(
+    self,
+    limit: int = 30,
+    query: str = "",
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    query = " ".join(str(query or "").split())[:120]
+    # 转义 LIKE 通配符，避免 q=% / q=_ 匹配全部会话
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    search = f"%{escaped}%"
     conn = self._connect()
     try:
         rows = conn.execute(
             """
-            SELECT messages.session_id,
-                   COUNT(*) AS message_count,
-                   MAX(messages.id) AS latest_id,
-                   MAX(messages.created_at) AS updated_at,
-                   (SELECT content FROM agent_copilot_messages first_user
-                    WHERE first_user.session_id=messages.session_id AND first_user.role='user'
-                    ORDER BY first_user.id LIMIT 1) AS title,
-                   (SELECT content FROM agent_copilot_messages latest_message
-                    WHERE latest_message.session_id=messages.session_id
-                    ORDER BY latest_message.id DESC LIMIT 1) AS preview,
-                   (SELECT context_type FROM agent_copilot_messages latest_context
-                    WHERE latest_context.session_id=messages.session_id
-                    ORDER BY latest_context.id DESC LIMIT 1) AS context_type,
-                   (SELECT context_id FROM agent_copilot_messages latest_context
-                    WHERE latest_context.session_id=messages.session_id
-                    ORDER BY latest_context.id DESC LIMIT 1) AS context_id
-            FROM agent_copilot_messages messages
-            GROUP BY messages.session_id
+            WITH rollup AS (
+                SELECT messages.session_id,
+                       COUNT(*) AS message_count,
+                       MAX(messages.id) AS latest_id,
+                       MAX(messages.created_at) AS message_updated_at,
+                       (SELECT content FROM agent_copilot_messages first_user
+                        WHERE first_user.session_id=messages.session_id AND first_user.role='user'
+                        ORDER BY first_user.id LIMIT 1) AS derived_title,
+                       (SELECT content FROM agent_copilot_messages latest_message
+                        WHERE latest_message.session_id=messages.session_id
+                        ORDER BY latest_message.id DESC LIMIT 1) AS preview,
+                       (SELECT context_type FROM agent_copilot_messages latest_context
+                        WHERE latest_context.session_id=messages.session_id
+                        ORDER BY latest_context.id DESC LIMIT 1) AS context_type,
+                       (SELECT context_id FROM agent_copilot_messages latest_context
+                        WHERE latest_context.session_id=messages.session_id
+                        ORDER BY latest_context.id DESC LIMIT 1) AS context_id
+                FROM agent_copilot_messages messages
+                GROUP BY messages.session_id
+            )
+            SELECT rollup.session_id, rollup.message_count, rollup.latest_id,
+                   COALESCE(metadata.updated_at, rollup.message_updated_at) AS updated_at,
+                   COALESCE(NULLIF(metadata.title, ''), rollup.derived_title) AS title,
+                   rollup.preview, rollup.context_type, rollup.context_id,
+                   metadata.archived_at,
+                   focus.revision AS focus_revision,
+                   focus.context_type AS focus_context_type,
+                   focus.context_id AS focus_context_id,
+                   focus.client AS focus_client,
+                   focus.action AS focus_action,
+                   focus.confidence AS focus_confidence,
+                   focus.focus_json,
+                   focus.evidence_json AS focus_evidence_json,
+                   focus.conflicts_json AS focus_conflicts_json,
+                   focus.updated_at AS focus_updated_at
+            FROM rollup
+            LEFT JOIN agent_copilot_sessions metadata ON metadata.session_id=rollup.session_id
+            LEFT JOIN agent_copilot_focus focus ON focus.session_id=rollup.session_id
+            WHERE (? OR metadata.archived_at IS NULL)
+              AND (? = '' OR COALESCE(NULLIF(metadata.title, ''), rollup.derived_title, '') LIKE ? ESCAPE '\\'
+                   OR COALESCE(rollup.preview, '') LIKE ? ESCAPE '\\')
             ORDER BY latest_id DESC
             LIMIT ?
             """,
-            (max(1, min(int(limit or 30), 100)),),
+            (int(bool(include_archived)), query, search, search, max(1, min(int(limit or 30), 100))),
         ).fetchall()
         sessions = []
         for row in rows:
             item = _row(row)
             item["title"] = str(item.get("title") or "未命名对话")[:80]
             item["preview"] = " ".join(str(item.get("preview") or "").split())[:120]
+            item["archived"] = bool(item.pop("archived_at", None))
+            item["business_focus"] = _copilot_focus_from_joined_row(row)
+            for key in [key for key in item if key.startswith("focus_") or key == "focus_json"]:
+                item.pop(key, None)
             sessions.append(item)
         return {"ok": True, "sessions": sessions}
     finally:
         conn.close()
+
+
+def update_copilot_session(
+    self,
+    session_id: str,
+    *,
+    title: str | None = None,
+    archived: bool | None = None,
+    clear_focus: bool = False,
+) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    normalized_title = " ".join(str(title or "").split()) if title is not None else None
+    if title is not None and not normalized_title:
+        raise ValueError("Agent task title cannot be empty")
+    conn = self._connect()
+    try:
+        # 存在性口径与列表查询一致：仅 focus/metadata 中有记录但没有消息的会话
+        # 在列表里永远不可见，PATCH 应按不存在处理（与 GET detail 的 404 语义一致）。
+        exists = conn.execute(
+            "SELECT 1 FROM agent_copilot_messages WHERE session_id=? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if exists is None:
+            raise LookupError("Agent task not found")
+        conn.execute(
+            """INSERT INTO agent_copilot_sessions(session_id,title,archived_at,updated_at)
+               VALUES (?, ?, CASE WHEN ? THEN datetime('now','localtime') ELSE NULL END, datetime('now','localtime'))
+               ON CONFLICT(session_id) DO UPDATE SET
+                 title=CASE WHEN ? THEN excluded.title ELSE agent_copilot_sessions.title END,
+                 archived_at=CASE WHEN ? THEN excluded.archived_at ELSE agent_copilot_sessions.archived_at END,
+                 updated_at=datetime('now','localtime')""",
+            (
+                session_id,
+                normalized_title,
+                int(archived is True),
+                int(title is not None),
+                int(archived is not None),
+            ),
+        )
+        if clear_focus:
+            conn.execute("DELETE FROM agent_copilot_focus WHERE session_id=?", (session_id,))
+        conn.commit()
+        row = conn.execute(
+            """SELECT metadata.session_id,
+                      COALESCE(NULLIF(metadata.title, ''),
+                        (SELECT content FROM agent_copilot_messages first_user
+                         WHERE first_user.session_id=metadata.session_id AND first_user.role='user'
+                         ORDER BY first_user.id LIMIT 1)) AS title,
+                      metadata.archived_at,
+                      focus.revision AS focus_revision,
+                      focus.context_type AS focus_context_type,
+                      focus.context_id AS focus_context_id,
+                      focus.client AS focus_client,
+                      focus.action AS focus_action,
+                      focus.confidence AS focus_confidence,
+                      focus.focus_json,
+                      focus.evidence_json AS focus_evidence_json,
+                      focus.conflicts_json AS focus_conflicts_json,
+                      focus.updated_at AS focus_updated_at
+               FROM agent_copilot_sessions metadata
+               LEFT JOIN agent_copilot_focus focus ON focus.session_id=metadata.session_id
+               WHERE metadata.session_id=?""",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "title": str(row["title"] or "未命名对话")[:80],
+        "archived": bool(row["archived_at"]),
+        "business_focus": _copilot_focus_from_joined_row(row),
+    }
 
 
 def _copilot_conversation_history(self, session_id: str, limit: int = 16) -> list[dict[str, str]]:
@@ -2052,6 +2331,7 @@ def _copilot_impl(
         "寻访" in message
         and re.search(r"(?:什么结果|结果如何|结果怎样|结果怎么样|进展如何|进展怎么样|情况如何|情况怎么样)", message)
     )
+    workflow_strategy_question = _workflow_strategy_question(message, selected)
     semantic_constraints = [
         str(item.get("quote") or "").strip()
         for item in (turn_decision.get("effective_constraints") or [])
@@ -2223,7 +2503,11 @@ def _copilot_impl(
     # R9：CoreService 判定该消息是待确认的候选人写入意图时置
     # suppress_goal_intent，此处不再路由工作流级目标（防止同一条
     # 消息既产生确认卡片又建立/启动工作流）。
-    suppress_goal_intent = bool(raw_context.get("suppress_goal_intent")) or workflow_outcome_question
+    suppress_goal_intent = (
+        bool(raw_context.get("suppress_goal_intent"))
+        or workflow_outcome_question
+        or workflow_strategy_question
+    )
     strategy_revision: dict[str, Any] | None = None
     strategy_revision_requested = bool(
         not suppress_goal_intent
@@ -2448,6 +2732,7 @@ def _copilot_impl(
     selected_payload: dict[str, Any] = dict(selected)
     selected_payload["intent_understanding"] = intent_understanding
     selected_payload["turn_decision"] = turn_decision
+    current_workflow_context: dict[str, Any] = {}
     if goal_workflow:
         workflow = goal_workflow.get("workflow") or {}
         goal = goal_workflow.get("goal") or {}
@@ -2481,6 +2766,14 @@ def _copilot_impl(
                 "confidence": 1.0,
             },
         })
+        try:
+            current_workflow_context = _compact_workflow_context(self.get_workflow(str(selected.get("id") or "")))
+        except (sqlite3.Error, ValueError):
+            current_workflow_context = {}
+        if current_workflow_context:
+            selected_payload["workflow_detail"] = current_workflow_context
+            if workflow_strategy_question and forced_answer is None:
+                forced_answer = _format_workflow_strategy_answer(current_workflow_context)
     elif existing_focus:
         selected_payload["business_focus"] = existing_focus
     references: list[dict[str, Any]] = []
@@ -3013,18 +3306,27 @@ def _copilot_impl(
         "suggested_actions": suggested_actions,
         "skill_runs": skill_runs,
         "goal": goal_workflow.get("goal") if goal_workflow else None,
-        "workflow": goal_workflow.get("workflow") if goal_workflow else None,
-        "plan_ref": goal_workflow.get("plan_ref") if goal_workflow else None,
+        "workflow": (
+            goal_workflow.get("workflow")
+            if goal_workflow else current_workflow_context.get("workflow") or None
+        ),
+        "plan_ref": (
+            goal_workflow.get("plan_ref")
+            if goal_workflow else current_workflow_context.get("plan_ref") or None
+        ),
         "plan_summary": [
             {
                 "id": step.get("id"),
                 "capability_id": step.get("capability_id"),
-                "label": step.get("business_label"),
+                "label": step.get("business_label") or step.get("label"),
                 "status": step.get("status"),
                 "risk_level": step.get("risk_level"),
             }
-            for step in (goal_workflow.get("steps") or [])
-        ] if goal_workflow else [],
+            for step in (
+                (goal_workflow.get("steps") or [])
+                if goal_workflow else (current_workflow_context.get("steps") or [])
+            )
+        ],
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
         "turn_decision": turn_decision,
@@ -3032,7 +3334,10 @@ def _copilot_impl(
     if strategy_revision:
         assistant_structured["workflow_revision"] = strategy_revision
     # 策略建议结构化：本轮未直接执行修订时，从回答中提取可应用的策略补丁
-    strategy_patch = _build_strategy_patch(self, message, answer, selected_payload, conversation_history) if strategy_revision is None else None
+    strategy_patch = (
+        _build_strategy_patch(self, message, answer, selected_payload, conversation_history)
+        if strategy_revision is None and not workflow_strategy_question else None
+    )
     if strategy_patch:
         assistant_structured["strategy_patch"] = strategy_patch
     if strategy_gate_pending_record:
@@ -3046,16 +3351,17 @@ def _copilot_impl(
             "input_level": str(strategy_gate_clarification.get("input_level") or ""),
             "missing_anchors": list(strategy_gate_clarification.get("missing_anchors") or []),
         }
-    if goal_workflow:
-        workflow = goal_workflow.get("workflow") or {}
-        progress = goal_workflow.get("progress") or {}
+    if goal_workflow or current_workflow_context:
+        workflow_state = goal_workflow or current_workflow_context
+        workflow = workflow_state.get("workflow") or {}
+        progress = workflow_state.get("progress") or {}
         assistant_structured["workflow_progress"] = {
             "workflow_id": workflow.get("workflow_id"),
-            "status": workflow.get("status") or (goal_workflow.get("goal") or {}).get("status") or "queued",
+            "status": workflow.get("status") or (workflow_state.get("goal") or {}).get("status") or "queued",
             "completed": progress.get("completed") or 0,
-            "total": progress.get("total") or len(goal_workflow.get("steps") or []),
+            "total": progress.get("total") or len(workflow_state.get("steps") or []),
             "label": workflow.get("current_stage") or "准备执行",
-            "pending_approvals": [item for item in (goal_workflow.get("approvals") or []) if item.get("status") == "pending"],
+            "pending_approvals": [item for item in (workflow_state.get("approvals") or []) if item.get("status") == "pending"],
         }
     conn = self._connect()
     try:
@@ -3094,24 +3400,48 @@ def _copilot_impl(
         "suggested_actions": suggested_actions,
         "skill_runs": skill_runs,
         "goal_id": goal_workflow["goal"]["goal_id"] if goal_workflow else None,
-        "workflow_id": goal_workflow["workflow"]["workflow_id"] if goal_workflow else None,
+        "workflow_id": (
+            goal_workflow["workflow"]["workflow_id"]
+            if goal_workflow else (current_workflow_context.get("workflow") or {}).get("workflow_id")
+        ),
         "goal": goal_workflow.get("goal") if goal_workflow else None,
-        "workflow": goal_workflow.get("workflow") if goal_workflow else None,
-        "plan_ref": goal_workflow.get("plan_ref") if goal_workflow else None,
+        "workflow": (
+            goal_workflow.get("workflow")
+            if goal_workflow else current_workflow_context.get("workflow") or None
+        ),
+        "plan_ref": (
+            goal_workflow.get("plan_ref")
+            if goal_workflow else current_workflow_context.get("plan_ref") or None
+        ),
         "plan_summary": [
             {
                 "id": step.get("id"),
                 "capability_id": step.get("capability_id"),
-                "label": step.get("business_label"),
+                "label": step.get("business_label") or step.get("label"),
                 "status": step.get("status"),
                 "risk_level": step.get("risk_level"),
                 "reason": step.get("reason"),
             }
-            for step in (goal_workflow.get("steps") or [])
-        ] if goal_workflow else [],
-        "approvals": goal_workflow.get("approvals") if goal_workflow else [],
-        "artifacts": goal_workflow.get("artifacts") if goal_workflow else [],
-        "progress": goal_workflow.get("progress") if goal_workflow else None,
+            for step in (
+                (goal_workflow.get("steps") or [])
+                if goal_workflow else (current_workflow_context.get("steps") or [])
+            )
+        ],
+        "approvals": (
+            goal_workflow.get("approvals")
+            if goal_workflow else current_workflow_context.get("approvals") or []
+        ),
+        "artifacts": (
+            goal_workflow.get("artifacts")
+            if goal_workflow else (
+                [current_workflow_context["strategy"]]
+                if current_workflow_context.get("strategy") else []
+            )
+        ),
+        "progress": (
+            goal_workflow.get("progress")
+            if goal_workflow else current_workflow_context.get("progress") or None
+        ),
         "workflow_revision": strategy_revision,
         "strategy_patch": strategy_patch,
         "memory": {"mode": memories.get("mode"), "hits": len(memories.get("memories") or [])},

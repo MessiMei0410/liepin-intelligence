@@ -132,6 +132,17 @@ CREATE TABLE IF NOT EXISTS agent_copilot_messages (
 CREATE INDEX IF NOT EXISTS idx_agent_copilot_session
 ON agent_copilot_messages(session_id, id);
 
+CREATE TABLE IF NOT EXISTS agent_copilot_sessions (
+    session_id TEXT PRIMARY KEY,
+    title TEXT,
+    archived_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_copilot_sessions_updated
+ON agent_copilot_sessions(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_copilot_focus (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL UNIQUE,
@@ -778,6 +789,79 @@ CREATE TABLE IF NOT EXISTS assessment_calibration_samples (
 
 CREATE INDEX IF NOT EXISTS idx_assessment_calibration_match
 ON assessment_calibration_samples(client, job_type, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_analysis_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL UNIQUE,
+    catalog_id TEXT NOT NULL,
+    catalog_version TEXT NOT NULL,
+    question TEXT NOT NULL DEFAULT '',
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    supersedes_run_id TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    export_path TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY(supersedes_run_id) REFERENCES agent_analysis_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_analysis_runs_catalog
+ON agent_analysis_runs(catalog_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_analysis_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    question TEXT NOT NULL DEFAULT '',
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    schedule_kind TEXT NOT NULL DEFAULT 'manual',
+    schedule_enabled INTEGER NOT NULL DEFAULT 0,
+    schedule_time TEXT NOT NULL DEFAULT '09:00',
+    schedule_weekday INTEGER NOT NULL DEFAULT 0,
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_status TEXT,
+    last_run_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY(last_run_id) REFERENCES agent_analysis_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_analysis_templates_enabled
+ON agent_analysis_templates(enabled, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_analysis_template_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_run_id TEXT NOT NULL UNIQUE,
+    template_id TEXT NOT NULL,
+    analysis_run_id TEXT,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    error TEXT,
+    FOREIGN KEY(template_id) REFERENCES agent_analysis_templates(template_id),
+    FOREIGN KEY(analysis_run_id) REFERENCES agent_analysis_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_analysis_template_runs_template
+ON agent_analysis_template_runs(template_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_analysis_template_runs_status
+ON agent_analysis_template_runs(status, started_at);
+
+CREATE TABLE IF NOT EXISTS agent_inbox_state (
+    item_key TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'unread',
+    source_revision TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 
@@ -804,6 +888,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "agent_learning_rules", "last_supported_at", "TEXT")
     _ensure_column(conn, "agent_learning_rules", "last_used_at", "TEXT")
     _ensure_column(conn, "agent_learning_rules", "candidate_count", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "agent_analysis_templates", "schedule_kind", "TEXT NOT NULL DEFAULT 'manual'")
+    _ensure_column(conn, "agent_analysis_templates", "schedule_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "agent_analysis_templates", "schedule_time", "TEXT NOT NULL DEFAULT '09:00'")
+    _ensure_column(conn, "agent_analysis_templates", "schedule_weekday", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "agent_analysis_templates", "timezone", "TEXT NOT NULL DEFAULT 'Asia/Shanghai'")
+    _ensure_column(conn, "agent_analysis_templates", "next_run_at", "TEXT")
+    _ensure_column(conn, "agent_analysis_templates", "last_run_at", "TEXT")
+    _ensure_column(conn, "agent_analysis_templates", "last_status", "TEXT")
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_agent_analysis_templates_due
+           ON agent_analysis_templates(enabled, schedule_enabled, next_run_at)"""
+    )
     try:
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS agent_memories_fts USING fts5(content, content='agent_memories', content_rowid='id')"

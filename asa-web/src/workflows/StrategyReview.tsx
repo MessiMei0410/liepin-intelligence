@@ -107,7 +107,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
         {findings.map(finding => <ChannelFinding key={finding.channel} finding={finding} />)}
       </div>}
       {diffs.length > 0 && <div className="review-diffs">
-        <div className="review-diffs-head"><b>修订建议</b><span>在 Copilot 中讨论并确认应用</span></div>
+        <div className="review-diffs-head"><b>修订建议</b><span>在 Agent 中讨论并确认应用</span></div>
         {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} />)}
       </div>}
       <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} jobId={jobId} mappingArtifactId={mappingArtifactId} onOpenMapping={onOpenMapping} />

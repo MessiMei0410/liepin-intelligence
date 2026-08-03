@@ -14,8 +14,8 @@ test('R3 业务终态：三按钮存在且可用，业务文案中文化', async
 
   const actions = panel.getByRole('group', { name: '下一步操作' })
   await expect(actions.getByRole('button', { name: '复核现有人选' })).toBeEnabled()
-  // 策略修订已统一进入原生 Copilot，App WebView 不再维护第二套修改计划对话框。
-  await expect(actions.getByRole('button', { name: '在 Copilot 中调整策略' })).toBeEnabled()
+  // 策略修订统一进入 Agent 对话工作区，App 不再维护第二套修改计划对话框。
+  await expect(actions.getByRole('button', { name: '在 Agent 中调整策略' })).toBeEnabled()
   await expect(actions.getByRole('button', { name: '结束本轮' })).toBeEnabled()
 
   // 负向断言：旧文案、英文 status 原形、英文枚举原形均不出现

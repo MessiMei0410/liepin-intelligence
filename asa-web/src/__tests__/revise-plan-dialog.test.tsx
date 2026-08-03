@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { RevisePlanDialog } from '../components/RevisePlanDialog'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
@@ -43,20 +43,19 @@ describe('修改计划对话框', () => {
     expect(onCancel).toHaveBeenCalledTimes(2)
   })
 
-  it('工作流面板只交接到 Copilot，不再从本地对话框调用 revise 接口', async () => {
+  it('工作流面板只交接到 Agent，不再从本地对话框调用 revise 接口', async () => {
     const user = userEvent.setup()
     const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
-    const postMessage = vi.fn()
     const close = vi.fn()
-    ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
+    const contexts: unknown[] = []
+    window.addEventListener('asa:open-agent', event => contexts.push((event as CustomEvent).detail), { once: true })
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={close} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '在 Copilot 中讨论策略' }))
-    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: 'showFloating' }))
+    await user.click(screen.getByRole('button', { name: '在 Agent 中讨论策略' }))
+    expect(contexts).toEqual([expect.objectContaining({ type: 'workflow', id: 'wf-1' })])
     expect(close).not.toHaveBeenCalled()
     expect(screen.getByRole('heading', { name: plannedWorkflow.goal.title })).toBeInTheDocument()
     const reviseCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))
     expect(reviseCall).toBeUndefined()
-    delete (window as Window & { webkit?: unknown }).webkit
   })
 })

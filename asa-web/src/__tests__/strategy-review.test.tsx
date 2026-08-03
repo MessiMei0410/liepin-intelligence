@@ -122,7 +122,7 @@ describe('策略复盘展示（StrategyReview）', () => {
     expect(within(section).getByText('「核心词」功率半导体、MOSFET')).toBeInTheDocument()
     // 主面板不再读取浏览器本地决策，复盘只展示后端事实。
     expect(within(section).getAllByText('待决策')).toHaveLength(2)
-    expect(within(section).getByText('在 Copilot 中讨论并确认应用')).toBeInTheDocument()
+    expect(within(section).getByText('在 Agent 中讨论并确认应用')).toBeInTheDocument()
     expect(within(section).queryByText('已采纳')).not.toBeInTheDocument()
     expect(within(section).queryByText('已拒绝')).not.toBeInTheDocument()
     // 备注如实呈现
@@ -274,21 +274,20 @@ describe('修改计划对话框接 revision_diff（RevisePlanDialog）', () => {
   })
 })
 
-describe('工作流面板：策略编辑统一交给 Copilot', () => {
-  it('发布工作流上下文后唤起 Copilot，保留详情且不发 revise 请求', async () => {
+describe('工作流面板：策略编辑统一交给 Agent', () => {
+  it('附着工作流上下文后进入 Agent，保留详情且不发 revise 请求', async () => {
     const user = userEvent.setup()
-    const postMessage = vi.fn()
     const close = vi.fn()
-    ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
+    const contexts: unknown[] = []
+    window.addEventListener('asa:open-agent', event => contexts.push((event as CustomEvent).detail), { once: true })
     const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={close} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    await user.click(screen.getByRole('button', { name: '在 Copilot 中讨论策略' }))
-    await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ type: 'showFloating' }))
+    await user.click(screen.getByRole('button', { name: '在 Agent 中讨论策略' }))
+    expect(contexts).toEqual([expect.objectContaining({ type: 'workflow', id: 'wf-1' })])
     expect(close).not.toHaveBeenCalled()
     expect(screen.getByRole('heading', { name: plannedWorkflow.goal.title })).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))).toBe(false)
-    delete (window as Window & { webkit?: unknown }).webkit
   })
 })
 

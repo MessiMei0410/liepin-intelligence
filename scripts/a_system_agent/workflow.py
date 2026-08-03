@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -904,6 +905,7 @@ class WorkflowEngine:
             "channels": channels,
             "query_plan_v1": query_plan,
             "query_plan_hash": query_plan_hash,
+            "channel_policy_v1": query_plan.get("channel_policy_v1") or {},
             "golden_candidate_replay_v1": golden_replay,
             "query_groups": strategy_v2.get("step4_keyword_groups") or [],
             "company_pool": pools,
@@ -927,6 +929,7 @@ class WorkflowEngine:
                 "strategy_version": snapshot["strategy_version"],
                 "target_count": snapshot["target_count"],
                 "channels": snapshot["channels"],
+                "channel_policy_v1": snapshot["channel_policy_v1"],
                 "query_plan_v1": snapshot["query_plan_v1"],
                 "query_plan_hash": snapshot["query_plan_hash"],
                 "execution_semantics": snapshot["query_plan_v1"].get("execution_semantics") or {},
@@ -935,7 +938,7 @@ class WorkflowEngine:
                 "company_pool": snapshot["company_pool"],
                 "locked_constraints": snapshot["locked_constraints"],
                 "missing_anchors": snapshot["missing_anchors"],
-                "exact_content": "批准后只能执行本卡所示策略 hash 对应的渠道关键词查询单元、公司池和目标人数；地点、职级、场景只用于召回后评估。",
+                "exact_content": "批准后只能执行本卡所示策略 hash 对应的渠道关键词查询单元、渠道编排策略、公司池和目标人数；地点、职级、场景只用于召回后评估。",
             }
         if capability_id == "outreach_execute":
             batch, _ = self._latest_artifact_payload(conn, workflow_id, "outreach_draft_batch")
@@ -1473,8 +1476,81 @@ class WorkflowEngine:
             except Exception:
                 pass
 
+    def _refresh_sourcing_coverage_assessment(self, conn, workflow_id: str) -> None:
+        """Refresh the post-assessment count without changing the sourcing coverage claim."""
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM agent_sourcing_coverage_certificates
+                WHERE workflow_id=? ORDER BY issued_at DESC,id DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            if row is None:
+                return
+            run_id = str(row["run_id"] or "")
+            completed = int(conn.execute(
+                """
+                SELECT COUNT(DISTINCT a.job_candidate_id)
+                FROM agent_candidate_recalls r
+                JOIN agent_candidate_assessments a
+                  ON a.job_candidate_id=r.job_candidate_id AND a.is_current=1
+                WHERE r.run_id=?
+                """,
+                (run_id,),
+            ).fetchone()[0])
+            certificate = _loads(row["certificate_json"], {})
+            if not isinstance(certificate, dict):
+                return
+            certificate["assessment"] = {"completed_unique_candidates": completed}
+            certificate["issued_at"] = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE agent_sourcing_coverage_certificates
+                   SET certificate_json=?,issued_at=datetime('now','localtime')
+                 WHERE id=?
+                """,
+                (_dumps(certificate), int(row["id"])),
+            )
+            step = conn.execute(
+                """
+                SELECT id,output_json FROM agent_workflow_steps
+                WHERE workflow_id=? AND capability_id='multi_channel_sourcing'
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            if step is not None:
+                output = _loads(step["output_json"], {})
+                if isinstance(output, dict):
+                    external_result = output.get("external_result")
+                    if isinstance(external_result, dict):
+                        output["external_result"] = {
+                            **external_result,
+                            "coverage_certificate": certificate,
+                        }
+                        conn.execute(
+                            "UPDATE agent_workflow_steps SET output_json=?,updated_at=datetime('now','localtime') WHERE id=?",
+                            (_dumps(output), int(step["id"])),
+                        )
+            self._event(
+                conn, workflow_id, int(step["id"]) if step is not None else None,
+                "coverage_certificate_refreshed", "completed",
+                f"覆盖证书已刷新：{completed} 位正式入库人选完成评估",
+                {"run_id": run_id, "completed_unique_candidates": completed},
+            )
+        except Exception as exc:
+            try:
+                self._event(
+                    conn, workflow_id, None, "coverage_certificate_refresh_failed", "warning",
+                    f"覆盖证书评估计数刷新失败（不影响工作流终局）：{str(exc)[:200]}",
+                )
+            except Exception:
+                pass
+
     def _finish(self, conn, workflow_id: str, goal_id: str, steps: list[Any]) -> None:
         goal = conn.execute("SELECT * FROM agent_goals WHERE goal_id=?", (goal_id,)).fetchone()
+        self._refresh_sourcing_coverage_assessment(conn, workflow_id)
         target_status = self._sourcing_target_status(conn, goal, workflow_id) if goal is not None else None
         if target_status and target_status["score_75_plus"] < target_status["target"]:
             business_outcome = "completed_needs_review" if target_status["verify_first"] > 0 else "completed_pool_insufficient"
@@ -1538,6 +1614,20 @@ class WorkflowEngine:
                 if not secrets.compare_digest(approved_hash, str(current_snapshot.get("strategy_hash") or "")):
                     raise ValueError("寻访策略已变化，原审批失效，请刷新后重新审批")
             status = {"approve": "approved", "reject": "rejected", "revise": "revision_requested"}[decision]
+            # 决策性写入必须是条件更新：并发请求只允许一个把 pending 改为终态，
+            # 落败方 rowcount=0，回滚并按"已决策"语义返回，不产生任何副作用。
+            # 先写带 approval_id 的过渡态（天然唯一）：(step_id,status) 有唯一约束，
+            # 同步骤已存在同终态的旧审批（如重试后再次批准）时直接落终态会冲突，
+            # 必须先由下方的 history 标记让位；过渡态在同事务内对外不可见。
+            decided = conn.execute(
+                "UPDATE agent_approvals SET status=?,decision_note=?,decided_at=datetime('now','localtime') WHERE id=? AND status='pending'",
+                (f"deciding_{approval['approval_id']}", note[:500], approval["id"]),
+            )
+            if decided.rowcount == 0:
+                conn.rollback()
+                if self._refresh_expired_approvals(conn, approval["workflow_id"]):
+                    conn.commit()
+                return self.get_workflow(approval["workflow_id"])
             conn.execute(
                 """
                 UPDATE agent_approvals
@@ -1546,7 +1636,10 @@ class WorkflowEngine:
                 """,
                 (approval["step_id"], status, approval["id"]),
             )
-            conn.execute("UPDATE agent_approvals SET status=?,decision_note=?,decided_at=datetime('now','localtime') WHERE id=?", (status, note[:500], approval["id"]))
+            conn.execute(
+                "UPDATE agent_approvals SET status=? WHERE id=?",
+                (status, approval["id"]),
+            )
             if decision == "approve":
                 conn.execute("UPDATE agent_workflow_steps SET status='approved',updated_at=datetime('now','localtime') WHERE id=?", (approval["step_id"],))
                 conn.execute("UPDATE agent_workflows SET status='queued',updated_at=datetime('now','localtime') WHERE workflow_id=?", (approval["workflow_id"],))
@@ -1798,6 +1891,10 @@ class WorkflowEngine:
                 "retry_mode": "sourcing_continuation",
                 "request": request,
                 "partial_result": result,
+                "recovery_claim": {
+                    "pid": os.getpid(),
+                    "claimed_at": datetime.now().isoformat(timespec="seconds"),
+                },
             }
             conn.execute(
                 """
@@ -1842,6 +1939,36 @@ class WorkflowEngine:
             request = recovery.get("request") if isinstance(recovery.get("request"), dict) else None
             if recovery.get("retry_mode") != "sourcing_continuation" or request is None:
                 continue
+            process_id = os.getpid()
+            previous_claim = (
+                recovery.get("recovery_claim")
+                if isinstance(recovery.get("recovery_claim"), dict)
+                else {}
+            )
+            if int(previous_claim.get("pid") or 0) == process_id:
+                continue
+            claimed_recovery = {
+                **recovery,
+                "recovery_claim": {
+                    "pid": process_id,
+                    "claimed_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            }
+            conn = self._connect()
+            try:
+                claimed = conn.execute(
+                    """
+                    UPDATE agent_workflow_steps
+                       SET recovery_json=?,updated_at=datetime('now','localtime')
+                     WHERE id=? AND status='waiting_external' AND recovery_json=?
+                    """,
+                    (_dumps(claimed_recovery), int(row["id"]), str(row["recovery_json"])),
+                )
+                conn.commit()
+                if claimed.rowcount != 1:
+                    continue
+            finally:
+                conn.close()
             self.service.schedule_external_workflow_step(
                 int(row["id"]), str(row["capability_id"]), request,
             )

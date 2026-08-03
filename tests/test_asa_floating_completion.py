@@ -32,8 +32,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIsNotNone(build_number)
         self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 1, 21))
         self.assertGreaterEqual(int(build_number.group(1)), 22)
-        self.assertEqual(version.group(1), "0.2.20")
-        self.assertEqual(int(build_number.group(1)), 43)
+        self.assertEqual(version.group(1), "0.2.22")
+        self.assertEqual(int(build_number.group(1)), 45)
         self.assertIn("LSMinimumSystemVersion", build)
         self.assertIn('SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"', build)
         self.assertNotIn("&& sign_with_timeout; then", build)
@@ -124,19 +124,18 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIn('mainWindow.title = "ASA Agent"', source)
         self.assertIn('panel.title = "ASA Copilot"', source)
         self.assertIn("panel.titleVisibility = .hidden", source)
+        self.assertIn('CommandLine.arguments.contains("--compat-copilot")', source)
+        self.assertIn("if compatibilityCopilotEnabled", source)
 
-    def test_agent_publishes_selected_context_before_showing_copilot(self) -> None:
-        # R4 拆分后：定义与 openCopilotWindow 在 copilot/bridge.ts，selection 上报在 app/App.tsx
+    def test_agent_routes_selected_context_to_the_react_conversation_surface(self) -> None:
+        # Agent Conversation Surface v1: compatibility callers dispatch an in-app event only.
         bridge = Path("/Users/messi/Documents/ASA/src/copilot/bridge.ts").read_text(encoding="utf-8")
         app = Path("/Users/messi/Documents/ASA/src/app/App.tsx").read_text(encoding="utf-8")
-        self.assertIn("const publishCopilotContext = async", bridge)
-        self.assertIn("await publishCopilotContext(context, 'copilot', true)", bridge)
-        self.assertIn("copilotContext.type === 'page' ? 'navigation' : 'selection'", app)
-        self.assertIn("false,", app)
-        self.assertLess(
-            bridge.index("await publishCopilotContext(context, 'copilot', true)"),
-            bridge.index("nativeBridge.postMessage({ type: 'showFloating' })"),
-        )
+        self.assertIn("openAgentWorkspace(context)", bridge)
+        self.assertIn("AGENT_NAVIGATE_EVENT", app)
+        self.assertNotIn("publishCopilotContext", bridge + app)
+        self.assertNotIn("showFloating", bridge + app)
+        self.assertNotIn("/api/asa/floating/context", bridge + app)
 
     def test_floating_header_has_stable_brand_actions_and_context_rows(self) -> None:
         server = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
@@ -203,7 +202,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
     def test_streaming_empty_message_does_not_render_a_placeholder_reply(self) -> None:
         source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
         self.assertNotIn("<p>暂无回复。</p>", source)
-        self.assertIn("if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar) return '';", source)
+        self.assertIn("if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard) return '';", source)
         self.assertIn("renderThinkingMessage()", source)
 
     def test_floating_r3_card_requires_a_complete_snapshot_and_shows_verbatim_constraints(self) -> None:

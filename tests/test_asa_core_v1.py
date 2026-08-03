@@ -29,6 +29,224 @@ def test_read_no_reply_update_requires_a_statement_or_write_intent() -> None:
     assert _explicit_candidate_update("这个人选已读不回怎么办") == ""
 
 
+def test_copilot_session_read_endpoints_expose_task_history(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    app.state.core.agent_service.copilot(
+        "继续推进这个岗位",
+        session_id="agent-task-1",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+
+    with TestClient(app) as client:
+        sessions = client.get("/api/v1/copilot/sessions", params={"limit": 30})
+        restored = client.get("/api/v1/copilot/sessions/agent-task-1", params={"limit": 100})
+        unknown = client.get("/api/v1/copilot/sessions/missing-task")
+        invalid_list_limit = client.get("/api/v1/copilot/sessions", params={"limit": 0})
+        invalid_detail_limit = client.get("/api/v1/copilot/sessions/agent-task-1", params={"limit": 201})
+        openapi = client.get("/openapi.json").json()
+
+    assert sessions.status_code == 200
+    assert sessions.json()["sessions"][0]["session_id"] == "agent-task-1"
+    assert sessions.json()["sessions"][0]["title"] == "继续推进这个岗位"
+    assert restored.status_code == 200
+    assert [item["role"] for item in restored.json()["messages"]] == ["user", "assistant"]
+    assert restored.json()["business_focus"]["context"]["type"] == "job"
+    assert sessions.json()["sessions"][0]["business_focus"]["context"]["id"] == 154
+    assert unknown.status_code == 404
+    assert invalid_list_limit.status_code == 422
+    assert invalid_detail_limit.status_code == 422
+    assert "/api/v1/copilot/sessions" in openapi["paths"]
+    assert "/api/v1/copilot/sessions/{session_id}" in openapi["paths"]
+
+
+def test_copilot_session_metadata_can_be_renamed_archived_and_clear_focus(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    app.state.core.agent_service.copilot(
+        "继续推进这个岗位",
+        session_id="agent-task-manage",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+    app.state.core.agent_service.get_copilot_focus = lambda _: (_ for _ in ()).throw(AssertionError("list must not perform N+1 focus reads"))
+
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/copilot/sessions", params={"q": "继续推进"})
+        renamed = client.patch(
+            "/api/v1/copilot/sessions/agent-task-manage",
+            headers={"Idempotency-Key": "rename-agent-task-manage"},
+            json={"request_id": "rename-task-1", "title": "士兰微电源寻访"},
+        )
+        cleared = client.patch(
+            "/api/v1/copilot/sessions/agent-task-manage",
+            headers={"Idempotency-Key": "clear-agent-task-manage"},
+            json={"request_id": "clear-task-1", "clear_focus": True},
+        )
+        archived = client.patch(
+            "/api/v1/copilot/sessions/agent-task-manage",
+            headers={"Idempotency-Key": "archive-agent-task-manage"},
+            json={"request_id": "archive-task-1", "archived": True},
+        )
+        hidden = client.get("/api/v1/copilot/sessions")
+        included = client.get("/api/v1/copilot/sessions", params={"include_archived": "true", "q": "士兰微电源"})
+        openapi = client.get("/openapi.json").json()
+
+    assert listed.status_code == 200
+    assert listed.json()["sessions"][0]["business_focus"]["context"]["type"] == "job"
+    assert renamed.json()["title"] == "士兰微电源寻访"
+    assert cleared.json()["business_focus"] is None
+    assert archived.json()["archived"] is True
+    assert "agent-task-manage" not in {item["session_id"] for item in hidden.json()["sessions"]}
+    assert included.json()["sessions"][0]["session_id"] == "agent-task-manage"
+    assert openapi["paths"]["/api/v1/copilot/sessions"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("CopilotSessionListResponse")
+
+
+def test_copilot_session_patch_requires_visible_messages(db_path: Path) -> None:
+    # 仅存在于 metadata 或 focus、没有任何消息的会话在列表里永远不可见，
+    # PATCH 必须按不存在处理（与 GET detail 的 404 语义一致）。
+    app = create_app(db_path=db_path, start_legacy=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("INSERT INTO agent_copilot_sessions(session_id,title) VALUES ('ghost-metadata-task','幽灵会话')")
+        conn.execute("INSERT INTO agent_copilot_focus(session_id) VALUES ('ghost-focus-task')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(app) as client:
+        metadata_ghost = client.patch(
+            "/api/v1/copilot/sessions/ghost-metadata-task",
+            headers={"Idempotency-Key": "ghost-metadata-patch"},
+            json={"request_id": "ghost-metadata-1", "title": "改名"},
+        )
+        focus_ghost = client.patch(
+            "/api/v1/copilot/sessions/ghost-focus-task",
+            headers={"Idempotency-Key": "ghost-focus-patch"},
+            json={"request_id": "ghost-focus-1", "clear_focus": True},
+        )
+        listed = client.get("/api/v1/copilot/sessions")
+
+    assert metadata_ghost.status_code == 404
+    assert focus_ghost.status_code == 404
+    visible = {item["session_id"] for item in listed.json()["sessions"]}
+    assert "ghost-metadata-task" not in visible
+    assert "ghost-focus-task" not in visible
+
+
+def test_copilot_session_patch_idempotency_key_is_scoped_to_target(db_path: Path) -> None:
+    # 幂等查找键不含 target 时，同 key+body 打不同 session 会静默重放第一个 target 的响应；
+    # target 纳入 request_hash 后必须判 409，同 target 的重放仍然正常。
+    app = create_app(db_path=db_path, start_legacy=False)
+    app.state.core.agent_service.copilot(
+        "继续推进这个岗位",
+        session_id="idem-task-a",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+    app.state.core.agent_service.copilot(
+        "继续推进这个岗位",
+        session_id="idem-task-b",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+
+    body = {"request_id": "idem-target-rename", "title": "统一标题"}
+    headers = {"Idempotency-Key": "idem-target-rename-key"}
+    with TestClient(app) as client:
+        first = client.patch("/api/v1/copilot/sessions/idem-task-a", headers=headers, json=body)
+        cross_target = client.patch("/api/v1/copilot/sessions/idem-task-b", headers=headers, json=body)
+        replay = client.patch("/api/v1/copilot/sessions/idem-task-a", headers=headers, json=body)
+
+    assert first.status_code == 200
+    assert first.json()["title"] == "统一标题"
+    assert cross_target.status_code == 409
+    assert replay.status_code == 200
+    assert replay.json()["title"] == "统一标题"
+    conn = sqlite3.connect(db_path)
+    try:
+        other_title = conn.execute(
+            "SELECT title FROM agent_copilot_sessions WHERE session_id='idem-task-b'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert other_title is None or other_title[0] is None
+
+
+def test_copilot_session_search_escapes_like_wildcards(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            """INSERT INTO agent_copilot_messages(session_id,context_type,context_id,role,content,structured_json)
+               VALUES (?,?,?,?,?,?)""",
+            [
+                ("wild-task-power", "global", None, "user", "电源专家寻访进展", "{}"),
+                ("wild-task-power", "global", None, "assistant", "好的", "{}"),
+                ("wild-task-plain", "global", None, "user", "整理本周进展", "{}"),
+                ("wild-task-plain", "global", None, "assistant", "收到", "{}"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(app) as client:
+        percent = client.get("/api/v1/copilot/sessions", params={"q": "%"})
+        underscore = client.get("/api/v1/copilot/sessions", params={"q": "_"})
+        backslash = client.get("/api/v1/copilot/sessions", params={"q": "\\"})
+        exact = client.get("/api/v1/copilot/sessions", params={"q": "电源"})
+
+    assert percent.status_code == 200
+    for wildcard in (percent, underscore, backslash):
+        wildcard_ids = {item["session_id"] for item in wildcard.json()["sessions"]}
+        assert "wild-task-power" not in wildcard_ids
+        assert "wild-task-plain" not in wildcard_ids
+    exact_ids = {item["session_id"] for item in exact.json()["sessions"]}
+    assert "wild-task-power" in exact_ids
+    assert "wild-task-plain" not in exact_ids
+
+
+def test_copilot_analysis_shortcut_tolerates_non_numeric_context_id(db_path: Path) -> None:
+    # 非数字 context.id 不能抛 ValueError 变 500：降级为不带 scope，消息仍正常落库。
+    app = create_app(db_path=db_path, start_legacy=False)
+    core = app.state.core
+
+    class StubAnalytics:
+        def create_run(self, catalog_id: str, question: str, scope: dict) -> dict:
+            return {
+                "ok": True,
+                "result": {
+                    "run_id": "run-stub",
+                    "catalog_id": catalog_id,
+                    "status": "ok",
+                    "headline": "渠道转化正常",
+                    "metrics": [],
+                    "data_as_of": "2026-08-01",
+                    "scope": scope,
+                    "references": [],
+                },
+            }
+
+    core.analytics_service = StubAnalytics()
+    intent, params = core._copilot_analysis_request("哪个渠道效果好", {"type": "job", "id": "JD-非数字"})
+    assert intent == "channel_performance"
+    assert "job_id" not in params
+
+    result = core._run_copilot_analysis(
+        "岗位健康度怎么样",
+        session_id="analysis-non-numeric",
+        context={"type": "job", "id": "JD-非数字"},
+        catalog_id="job_health",
+        scope={},
+    )
+    assert result["ok"] is True
+    assert result["context"]["id"] == "JD-非数字"
+    conn = sqlite3.connect(db_path)
+    try:
+        stored = conn.execute(
+            "SELECT DISTINCT context_id FROM agent_copilot_messages WHERE session_id='analysis-non-numeric'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert stored == [(None,)]
+
+
 def test_resume_summary_excludes_work_and_project_body() -> None:
     summary = _resume_overview_summary(
         {
@@ -506,7 +724,14 @@ def test_recruiting_pages_cannot_call_local_api_directly(origin: str, db_path: P
 def test_dashboard_and_jobs_exclude_stopped_and_empty_left_join_rows(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         dashboard = client.get("/api/v1/dashboard").json()
-        candidates = client.get("/api/v1/candidates?limit=200").json()["items"]
+        first_page = client.get("/api/v1/candidates?limit=200").json()
+        candidates = list(first_page["items"])
+        while len(candidates) < first_page["total"]:
+            page = client.get(
+                "/api/v1/candidates",
+                params={"limit": 200, "offset": len(candidates)},
+            ).json()
+            candidates.extend(page["items"])
         expected = sum(
             "初筛不通过" not in (item.get("clean_stage") or "")
             and "停止" not in (item.get("clean_stage") or "")
@@ -932,6 +1157,19 @@ def test_floating_compat_copilot_review_failure_uses_core_write_path(db_path: Pa
         assert body["candidate_action"]["action"] == "stop"
         assert "已同步到 ASA" in body["answer"]
         assert client.get("/api/v1/candidates/558").json()["candidate"]["is_stopped"] is True
+
+
+def test_legacy_runtime_reuses_core_agent_service(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "a_system_agent.workflow.WorkflowEngine.recover_external_continuations",
+        lambda self: 0,
+    )
+    app = create_app(db_path=db_path, start_legacy=True)
+    try:
+        assert app.state.legacy.state.agent_service is app.state.core.agent_service
+    finally:
+        app.state.legacy.close()
+        app.state.core.agent_service.close()
 
 
 def test_candidate_detail_resolves_source_url_written_after_startup(db_path: Path) -> None:

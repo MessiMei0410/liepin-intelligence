@@ -226,7 +226,7 @@ describe('复盘卡扩区：池枯竭信号 + 扩池决策树（StrategyExpansio
     expect(within(tree).queryByText('已采纳')).not.toBeInTheDocument()
     expect(within(tree).queryByText('已拒绝')).not.toBeInTheDocument()
     expect(within(tree).getAllByText('待决策')).toHaveLength(5)
-    expect(within(tree).getByText(/在 Copilot 中讨论并确认应用/)).toBeInTheDocument()
+    expect(within(tree).getByText(/在 Agent 中讨论并确认应用/)).toBeInTheDocument()
   })
 
   it('无信号无树的旧复盘不渲染新区块', async () => {
@@ -330,9 +330,9 @@ describe('修改计划对话框接扩池决策树（RevisePlanDialog）', () => 
 })
 
 describe('工作流面板：不再提供本地树决策入口', () => {
-  it('仅展示 Copilot 交接入口', () => {
+  it('仅展示 Agent 交接入口', () => {
     render(<WorkflowPanel value={plannedWorkflow} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
-    expect(screen.getByRole('button', { name: '在 Copilot 中讨论策略' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '在 Agent 中讨论策略' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改计划' })).not.toBeInTheDocument()
   })
 })

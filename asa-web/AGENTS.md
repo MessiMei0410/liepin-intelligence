@@ -18,7 +18,7 @@ ASA App 前端（React 19 + Vite 8 + TS strict），由 ASA Core（127.0.0.1:876
 ## 硬性约定
 
 - **禁止 JS 原生对话框**：`prompt()`/`confirm()`/`alert()` 全仓清零，用 React 内对话框（参照 `src/components/RevisePlanDialog.tsx`）。WKWebView 不实现 JS 对话框代理，曾有静默失败事故。
-- **Copilot 架构（R12-b 收敛）**：原生浮窗是唯一 Copilot 交互界面（UI/会话/发送/R9 确认卡都在后端仓库 `asa_floating_html` 内联 JS）；React 侧只保留两个角色——上下文生产者（`publishCopilotContext` 发进服务端仲裁层）与唤起浮窗（`openCopilotWindow` → native `showFloating`）。`?surface=copilot` 是纯转发器/只读提示页（`src/copilot/CopilotSurface.tsx`），不得再加回对话 UI 或 URL 上下文通道。
+- **Agent Conversation Surface v1**：React `src/agent/` 是 Agent 的主交互面，负责会话、发送、对象卡和确认 UI；Core 仍是上下文仲裁、会话、工作流与审批的唯一事实来源。所有业务入口必须显式附着上下文后进入 Agent，不得调用 native `showFloating` 或浮窗上下文通道。旧 `asa_floating_html` 仅保留一个版本作为兼容回滚实现，本期不删除且不提供可见入口；`?surface=copilot` 直接进入主 Agent 界面。
 - **PRD R4 拆分已完成**：`src/main.tsx` 只剩入口装配（surface 判定 + createRoot）；组件分布在 `src/app/`（App/Diagnostics）、`src/pages/`、`src/panels/`、`src/workflows/`（面板 + utils）、`src/copilot/`、`src/shared/`。搬运来的存量压缩 JSX 逐字节保留，其路径列入 `.prettierignore`，不重排、不格式化、不"修"存量 lint warn；新逻辑放新文件。
 - 候选人确认层（`role="alertdialog"`、preflight/commit token 链路）的字面量被 `tests/test_candidate_action_dialog.py` 正则断言——正向锚定 `src/panels/CandidatePanel.tsx`，负向 `confirm(` 扫描 `src/**/*.tsx` 拼接文本，改动会打破契约测试。
 - 新增代码禁止显式 `any`（eslint 对 main.tsx 以外已设为 error）。

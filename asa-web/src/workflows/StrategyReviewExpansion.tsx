@@ -31,7 +31,7 @@ export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mapp
       </div>)}
     </div>}
     {steps.length > 0 && <div className="review-tree" data-workflow-id={workflowId}>
-      <div className="review-diffs-head"><b>人不够时的扩圈建议</b><span>按序评估，在 Copilot 中讨论并确认应用</span></div>
+      <div className="review-diffs-head"><b>人不够时的扩圈建议</b><span>按序评估，在 Agent 中讨论并确认应用</span></div>
       {steps.map(step => {
         const status = step.status || 'pending'
         const summary = treeStepSummary(step)

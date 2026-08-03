@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let serviceBaseURL = URL(string: "http://127.0.0.1:8765")!
     private lazy var webSecurityPolicy = ASAWebSecurityPolicy(serviceBaseURL: serviceBaseURL)
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.20"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.22"
     }
     private lazy var floatingURL = serviceBaseURL.appendingPathComponent("asa-floating").appending(queryItems: [URLQueryItem(name: "ui", value: appVersion)])
     private lazy var stateURL = serviceBaseURL.appendingPathComponent("api/asa/floating/state")
@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private lazy var healthURL = serviceBaseURL.appendingPathComponent("api/v1/health")
     private let launchAgentLabel = "ai.hermes.liepin-workbench"
     private let coreHealthRetryDelays: [TimeInterval] = [0.4, 0.8, 1.5, 2.5, 4.0]
+    private let compatibilityCopilotEnabled = CommandLine.arguments.contains("--compat-copilot")
 
     private func webSurfaceName(for target: WKWebView) -> String {
         target === mainWebView ? "agent" : "copilot"
@@ -84,53 +85,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         buildMainMenu()
         buildStatusItem()
         buildMainWindow()
-        buildPanel()
-        buildCollapsedPanel()
-        registerGlobalHotKey()
-        publishNativeContext(trigger: "launch", force: true)
+        if compatibilityCopilotEnabled {
+            buildPanel()
+            buildCollapsedPanel()
+            registerGlobalHotKey()
+            publishNativeContext(trigger: "launch", force: true)
+        }
         restoreCoreAndLoad()
         showMainWindow()
-        showPanel()
-        refreshCollapsedStatus()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
-            self?.refreshCollapsedStatus()
-        }
-        nativeContextTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.publishNativeContext(trigger: "timer", force: false)
-        }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(frontmostApplicationDidChange(_:)),
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: nil
-        )
-
-        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift],
-               event.charactersIgnoringModifiers?.lowercased() == "a" {
-                self?.togglePanel()
-                return nil
+        if compatibilityCopilotEnabled {
+            showPanel()
+            refreshCollapsedStatus()
+            statusTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self] _ in
+                self?.refreshCollapsedStatus()
             }
-            if flags == [.command, .shift], key == "s" {
-                self?.startScreenshotCapture()
-                return nil
+            nativeContextTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+                self?.publishNativeContext(trigger: "timer", force: false)
             }
-            if flags == [.command], key == "v" {
-                guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
-                self?.panel.makeKey()
-                self?.pasteClipboardIntoWebView()
-                return nil
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(frontmostApplicationDidChange(_:)),
+                name: NSWorkspace.didActivateApplicationNotification,
+                object: nil
+            )
+            localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+                if flags == [.command, .shift], key == "a" {
+                    self?.togglePanel()
+                    return nil
+                }
+                if flags == [.command, .shift], key == "s" {
+                    self?.startScreenshotCapture()
+                    return nil
+                }
+                if flags == [.command], key == "v" {
+                    guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
+                    self?.panel.makeKey()
+                    self?.pasteClipboardIntoWebView()
+                    return nil
+                }
+                if flags == [.command], let selector = self?.standardEditSelector(for: key) {
+                    guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
+                    self?.panel.makeKey()
+                    self?.webView.window?.makeFirstResponder(self?.webView)
+                    NSApp.sendAction(selector, to: nil, from: self)
+                    return nil
+                }
+                return event
             }
-            if flags == [.command], let selector = self?.standardEditSelector(for: key) {
-                guard event.window === self?.panel, self?.panel.isKeyWindow == true else { return event }
-                self?.panel.makeKey()
-                self?.webView.window?.makeFirstResponder(self?.webView)
-                NSApp.sendAction(selector, to: nil, from: self)
-                return nil
-            }
-            return event
         }
     }
 
@@ -266,7 +269,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(NSMenuItem(title: "显示 ASA Copilot", action: #selector(showPanel), keyEquivalent: ""))
+        if compatibilityCopilotEnabled {
+            appMenu.addItem(NSMenuItem(title: "显示 ASA Copilot", action: #selector(showPanel), keyEquivalent: ""))
+        }
         appMenu.addItem(NSMenuItem(title: "显示 ASA Agent", action: #selector(showMainWindow), keyEquivalent: "1"))
         appMenu.addItem(NSMenuItem(title: "启动/检查本机服务", action: #selector(startWorkbenchService), keyEquivalent: ""))
         appMenu.addItem(.separator())
@@ -439,13 +444,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "ASA"
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "显示 ASA Copilot", action: #selector(showPanel), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "收起为圆点", action: #selector(collapsePanel), keyEquivalent: ""))
+        if compatibilityCopilotEnabled {
+            menu.addItem(NSMenuItem(title: "显示 ASA Copilot", action: #selector(showPanel), keyEquivalent: ""))
+            menu.addItem(NSMenuItem(title: "收起为圆点", action: #selector(collapsePanel), keyEquivalent: ""))
+        }
         menu.addItem(NSMenuItem(title: "显示 ASA Agent", action: #selector(showMainWindow), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "启动/检查本机服务", action: #selector(startWorkbenchService), keyEquivalent: ""))
-        let screenshotItem = NSMenuItem(title: "截图", action: #selector(startScreenshotCapture), keyEquivalent: "s")
-        screenshotItem.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(screenshotItem)
+        if compatibilityCopilotEnabled {
+            let screenshotItem = NSMenuItem(title: "截图", action: #selector(startScreenshotCapture), keyEquivalent: "s")
+            screenshotItem.keyEquivalentModifierMask = [.command, .shift]
+            menu.addItem(screenshotItem)
+        }
         menu.addItem(NSMenuItem(title: "刷新 ASA 页面", action: #selector(reloadASA), keyEquivalent: "r"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 ASA", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -563,6 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func togglePanel() {
+        guard compatibilityCopilotEnabled else { return }
         publishNativeContext(trigger: "toggle", force: true)
         if panel.isVisible {
             collapsePanel()
@@ -572,6 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func showPanel() {
+        guard compatibilityCopilotEnabled else { return }
         publishNativeContext(trigger: "show", force: true)
         presentPanel()
     }
@@ -669,8 +680,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func completeCoreLoad() {
         loadMainWindow()
-        loadFloatingPage()
-        refreshCollapsedStatus()
+        if compatibilityCopilotEnabled {
+            loadFloatingPage()
+            refreshCollapsedStatus()
+        }
     }
 
     private func kickstartCore() {
@@ -1480,6 +1493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func collapsePanel() {
+        guard compatibilityCopilotEnabled else { return }
         if let screen = panel.screen ?? NSScreen.main {
             let visible = screen.visibleFrame
             collapsedPanel.setFrameOrigin(NSPoint(x: visible.maxX - 72, y: visible.midY))
@@ -1490,8 +1504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     @objc private func reloadASA() {
         loadMainWindow()
-        loadFloatingPage()
-        refreshCollapsedStatus()
+        if compatibilityCopilotEnabled {
+            loadFloatingPage()
+            refreshCollapsedStatus()
+        }
     }
 
     @objc private func reloadFloatingPage() {
@@ -1580,7 +1596,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let script = """
         window.dispatchEvent(new CustomEvent('asa-native-status', { detail: { message: \(literal), action: \(actionLiteral) } }));
         """
-        webView.evaluateJavaScript(script, completionHandler: nil)
+        let target = compatibilityCopilotEnabled ? webView : mainWebView
+        target?.evaluateJavaScript(script, completionHandler: nil)
     }
 
     private func notifyWebAttachmentAnalysis(attachmentID: String, analysis: [String: Any]? = nil, error: String = "") {
@@ -1671,7 +1688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             if mainGeneration == self.mainPageLoadGeneration {
                 self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.mainWebView)
             }
-            if floatingGeneration == self.floatingPageLoadGeneration {
+            if self.compatibilityCopilotEnabled && floatingGeneration == self.floatingPageLoadGeneration {
                 self.renderServiceUnavailablePage(detail, diagnostics: diagnostics, in: self.webView)
             }
         }
@@ -1698,6 +1715,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         let diagnosticsLiteral = (try? JSONSerialization.data(withJSONObject: diagnosticPayload))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        // Only the --compat-copilot mode exposes the legacy floating panel,
+        // so the Copilot recovery button is rendered conditionally.
+        let copilotButtonMarkup = compatibilityCopilotEnabled
+            ? #"<button onclick="native('showFloating')">显示 Copilot</button>"#
+            : ""
         let html = """
         <!doctype html>
         <html lang="zh-CN">
@@ -1740,7 +1762,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
               <button class="primary" onclick="native('startWorkbenchService')">启动本机服务</button>
               <button onclick="native('retryServiceConnection')">重试连接</button>
               <button onclick="native('openWorkbench')">打开 ASA Agent</button>
-              <button onclick="native('showFloating')">显示 Copilot</button>
+              \(copilotButtonMarkup)
             </div>
             <div class="hint">ASA 会在本机服务恢复后自动重新加载，不需要打开浏览器。</div>
           </main>
@@ -1908,6 +1930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 analysis: localImageAnalysis(image, source: "pasted_clipboard_image")
             )
         } else if type == "reload" {
+            guard compatibilityCopilotEnabled else { return }
             reloadFloatingPage()
         } else if type == "openWorkbench" {
             if let urlString = body["url"] as? String, !urlString.isEmpty {
@@ -1916,6 +1939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 openWorkbench()
             }
         } else if type == "showFloating" {
+            guard compatibilityCopilotEnabled else { return }
             presentPanel()
         } else if type == "hideFloating" {
             collapsePanel()

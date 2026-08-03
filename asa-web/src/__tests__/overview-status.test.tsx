@@ -16,8 +16,8 @@ const renderOverview = (dashboard: Dashboard) =>
   render(<Overview dashboard={dashboard} jobs={[]} candidates={[]} openWorkflow={() => {}} openCandidate={() => {}} archiveWorkflow={() => {}} />)
 
 describe('Overview 工作流状态标签（T1）', () => {
-  it('顶级导航只保留四个工作区，人才雷达作为总览二级入口', () => {
-    expect(tabs.map(([, label]) => label)).toEqual(['总览', '岗位看板', '人选进度', '人选列表'])
+  it('顶级导航只保留四个工作区，Agent 替代总览', () => {
+    expect(tabs.map(([, label]) => label)).toEqual(['Agent', '岗位看板', '人选进度', '人选列表'])
     renderOverview(dashboardWith({}))
 
     const radar = screen.getByRole('button', { name: '人才雷达' })

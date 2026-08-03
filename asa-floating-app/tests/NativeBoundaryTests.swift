@@ -13,7 +13,7 @@ struct NativeBoundaryTests {
         precondition(!policy.isTrustedServiceURL(URL(string: "http://127.0.0.1:9999/asa-app")!))
         precondition(!policy.isTrustedServiceURL(URL(string: "https://127.0.0.1:8765/asa-app")!))
         precondition(!policy.allowsNavigation(to: floatingURL, on: .agent))
-        precondition(policy.allowsBridgeAction("showFloating", on: .agent))
+        precondition(!policy.allowsBridgeAction("showFloating", on: .agent))
         precondition(!policy.allowsBridgeAction("screenshot", on: .agent))
         precondition(policy.allowsBridgeAction("screenshot", on: .copilot))
         precondition(policy.allowsExternalURL(URL(string: "https://openai.com")!))

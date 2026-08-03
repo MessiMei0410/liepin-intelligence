@@ -5,10 +5,12 @@ import { parseWorkflowCandidatesPage, parseWorkflowStepDetail, parseWorkflowSumm
 import type { WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 import { parseSourcingFunnel } from './workflow/sourcingFunnel'
 import type { SourcingFunnel } from './workflow/sourcingFunnel'
+import { parseAgentSession, parseAgentSessionList, parseAgentSessionUpdate } from './agent/sessionModel'
 
 export type { Workflow } from './workflow/workflowModel'
 export type { WorkflowCandidateItem, WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 export type { SourcingFunnel, SourcingFunnelChannel, SourcingFunnelRun } from './workflow/sourcingFunnel'
+export type { AgentMessage, AgentSession, AgentSessionSummary } from './agent/sessionModel'
 
 export type Job = {
   id: number; title: string; client: string; location?: string; status?: string;
@@ -77,6 +79,14 @@ export type ContractAnchor = [
   paths['/api/v1/candidate-actions/preflight']['post'],
   paths['/api/v1/candidate-actions/commit']['post'],
   paths['/api/v1/agent/metrics']['get'],
+  paths['/api/v1/copilot/sessions']['get'],
+  paths['/api/v1/copilot/sessions/{session_id}']['get'],
+  paths['/api/v1/copilot/stream']['post'],
+  paths['/api/v1/workbench']['get'],
+  paths['/api/v1/analytics/runs']['post'],
+  paths['/api/v1/analytics/runs/{run_id}']['get'],
+  paths['/api/v1/analytics/runs/{run_id}/refresh']['post'],
+  paths['/api/v1/analytics/templates']['get'],
   // R10 增补：停止原因摘要路由入锚。
   paths['/api/v1/candidates/stop-reasons/summary']['get'],
   // S4-3 增补：策略复盘读取与按需重算路由入锚。
@@ -119,6 +129,68 @@ export type Bootstrap = {
   core?: { status?: string; db?: string; api_version?: string };
   user?: { id?: string; name?: string };
   counts?: DashboardCounts; features?: Record<string, boolean>;
+}
+
+export type AnalysisMetric = {
+  id: string; label: string; value: number | null; unit: string;
+  definition_id: string; definition_version: string;
+}
+export type AnalysisReference = {
+  type: 'job' | 'candidate' | 'workflow' | string; id: string | number; label: string; href?: string;
+}
+export type AnalysisSection = {
+  type: 'table' | 'funnel' | 'bar' | 'trend' | 'candidate_list'; title: string;
+  columns: string[]; rows: Array<Record<string, unknown>>;
+}
+export type AnalysisResult = {
+  schema_version: 'analysis_result_v1'; run_id: string; catalog_id: string; catalog_version: string;
+  status: 'completed' | 'partial' | 'failed' | 'expired'; question: string; scope: Record<string, unknown>;
+  data_as_of: string; headline: string; metrics: AnalysisMetric[]; sections: AnalysisSection[];
+  references: AnalysisReference[]; caveats: string[]; truncated: boolean;
+  suggested_actions: Array<Record<string, unknown>>; supersedes_run_id?: string | null;
+}
+export type AnalysisTemplate = {
+  template_id: string; name: string; catalog_id: string; question: string; scope: Record<string, unknown>;
+  enabled: boolean; schedule_kind: 'manual' | 'daily' | 'weekly'; schedule_enabled: boolean;
+  schedule_time: string; schedule_weekday: number; timezone: string;
+  next_run_at?: string | null; last_run_at?: string | null; last_status?: 'running' | 'completed' | 'failed' | 'skipped' | null;
+  last_run_id?: string | null; last_result?: AnalysisResult | null; created_at?: string; updated_at?: string;
+}
+export type AnalysisCatalogItem = {
+  catalog_id: string; label: string; allowed_scope_fields: string[];
+}
+export type AnalysisTemplateInput = {
+  name: string; catalog_id: string; question: string; scope: Record<string, unknown>;
+  schedule_kind: AnalysisTemplate['schedule_kind']; schedule_enabled: boolean;
+  schedule_time: string; schedule_weekday: number; timezone: string;
+}
+export type AnalysisTemplateRun = {
+  template_run_id: string; template_id: string; analysis_run_id?: string | null;
+  trigger: 'manual' | 'schedule'; status: 'running' | 'completed' | 'failed' | 'skipped';
+  started_at: string; completed_at?: string | null; error?: string | null; headline?: string | null; data_as_of?: string | null;
+}
+export type AnalysisTrendPoint = { run_id: string; at: string; value: number | null }
+export type AnalysisTrendSeries = {
+  metric_id: string; label: string; unit: string; latest: number | null; previous: number | null;
+  delta: number | null; delta_ratio: number | null; points: AnalysisTrendPoint[];
+}
+export type AnalysisTrend = {
+  ok: boolean; template_id: string; name: string; catalog_id: string; run_count: number;
+  runs: Array<{ run_id: string; at: string; headline?: string; values: Record<string, number | null> }>;
+  series: AnalysisTrendSeries[];
+}
+export type WorkbenchAction = {
+  type: 'open_candidate' | 'open_workflow' | 'open_analysis'; id: string; label: string;
+}
+export type WorkbenchItem = {
+  item_key: string; source_revision: string; kind: 'candidate_action' | 'approval' | 'analysis';
+  lane: 'pending' | 'running' | 'delivered'; priority_score: number; title: string; subtitle: string;
+  status_label: string; reason: string; source_label: string; updated_at?: string;
+  inbox_state: 'unread' | 'read' | 'later' | 'hidden'; primary_action: WorkbenchAction;
+}
+export type Workbench = {
+  ok: boolean; version: string; summary: { pending: number; running: number; delivered: number; total: number };
+  items: WorkbenchItem[];
 }
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
@@ -425,6 +497,34 @@ const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
 export const api = {
   bootstrap: () => json<Bootstrap>('/api/v1/bootstrap'),
   dashboard: () => json<Dashboard>('/api/v1/dashboard'),
+  workbench: () => json<Workbench>('/api/v1/workbench?limit=300'),
+  agentSessions: (limit = 30) => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}`).then(parseAgentSessionList),
+  agentSession: (sessionId: string, limit = 100) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}`).then(parseAgentSession),
+  updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
+    write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),
+  analysisRun: (runId: string) => json<{ ok: boolean; result: AnalysisResult; duration_ms: number; template_id?: string | null }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}`),
+  createAnalysis: (catalogId: string, question = '', scope: Record<string, unknown> = {}) =>
+    write<{ ok: boolean; result: AnalysisResult; duration_ms: number }>('/api/v1/analytics/runs', { catalog_id: catalogId, question, scope }),
+  refreshAnalysis: (runId: string) =>
+    write<{ ok: boolean; result: AnalysisResult; duration_ms: number }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}/refresh`, {}),
+  exportAnalysis: (runId: string) =>
+    write<{ ok: boolean; artifact: { artifact_id: string; file_path: string; title: string } }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}/export`, {}),
+  analyticsCatalog: () => json<{ ok: boolean; version: string; items: AnalysisCatalogItem[] }>('/api/v1/analytics/catalog'),
+  analyticsTemplates: () => json<{ ok: boolean; items: AnalysisTemplate[] }>('/api/v1/analytics/templates'),
+  createAnalyticsTemplate: (input: AnalysisTemplateInput) =>
+    write<{ ok: boolean; template_id: string }>('/api/v1/analytics/templates', input),
+  updateAnalyticsTemplate: (templateId: string, input: AnalysisTemplateInput) =>
+    write<{ ok: boolean; template_id: string }>(`/api/v1/analytics/templates/${encodeURIComponent(templateId)}`, input, 'PATCH'),
+  runAnalyticsTemplate: (templateId: string) =>
+    write<{ ok: boolean; result: AnalysisResult; duration_ms: number }>(`/api/v1/analytics/templates/${encodeURIComponent(templateId)}/run`, {}),
+  analyticsTemplateRuns: (templateId: string) =>
+    json<{ ok: boolean; items: AnalysisTemplateRun[] }>(`/api/v1/analytics/templates/${encodeURIComponent(templateId)}/runs`),
+  analyticsTemplateTrend: (templateId: string) =>
+    json<AnalysisTrend>(`/api/v1/analytics/templates/${encodeURIComponent(templateId)}/trend`),
+  deleteAnalyticsTemplate: (templateId: string) =>
+    json<{ ok: boolean; template_id: string; status: string }>(`/api/v1/analytics/templates/${encodeURIComponent(templateId)}`, { method: 'DELETE' }),
+  setInboxState: (itemKey: string, state: WorkbenchItem['inbox_state'], sourceRevision: string) =>
+    write<{ ok: boolean; item_key: string; state: string }>(`/api/v1/inbox/${encodeURIComponent(itemKey)}/state`, { state, source_revision: sourceRevision }, 'PATCH'),
   agentProposals: (status = 'pending', limit = 20) =>
     json<{ ok: boolean; status: string; proposals: AgentProposal[] }>(`/api/v1/agent/proposals?status=${encodeURIComponent(status)}&limit=${limit}`),
   agentActionMetrics: (days = 7) => json<{ ok: boolean; window_days: number; metrics: AgentActionMetrics }>(`/api/v1/agent/metrics?days=${days}`),

@@ -171,6 +171,7 @@ describe('R7 候选人增量刷新', () => {
     vi.stubGlobal('fetch', fetchMock)
     render(<App />)
     await act(async () => undefined)
+    fireEvent.click(screen.getByRole('button', { name: '人选列表' }))
     fireEvent.click(screen.getByLabelText('打开候选人 张三'))
     await act(async () => undefined)
 

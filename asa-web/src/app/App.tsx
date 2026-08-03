@@ -1,10 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { MessageSquareText, Search, ShieldAlert, X } from 'lucide-react'
-import { api, Bootstrap, Candidate, CandidateDetail, Dashboard, Job, JobDetail, Workflow } from '../api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Activity, Database, MessageSquareText, Pin, Search, ShieldAlert, Wifi, X } from 'lucide-react'
+import { api, AnalysisCatalogItem, AnalysisResult, AnalysisTemplate, AnalysisTemplateInput, AnalysisTrend, Bootstrap, Candidate, CandidateDetail, Dashboard, Job, JobDetail, Workbench, WorkbenchItem, Workflow } from '../api'
 import { Tab, tabs } from '../shared/tabs'
-import { humanizeActionError } from '../shared/errors'
-import { publishCopilotContext, openCopilotWindow } from '../copilot/bridge'
-import { Overview } from '../pages/Overview'
 import { Jobs } from '../pages/Jobs'
 import { Candidates } from '../pages/Candidates'
 import { Progress } from '../pages/Progress'
@@ -13,9 +10,16 @@ import { CandidatePanel } from '../panels/CandidatePanel'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import { resolveWorkflowRevision } from '../workflow/workflowRevision'
 import { Diagnostics } from './Diagnostics'
+import { AnalysisWorkspace } from '../pages/AnalysisWorkspace'
+import { AnalysisTemplateDialog } from '../components/AnalysisTemplateDialog'
+import { AgentWorkspace } from '../agent/AgentWorkspace'
+import { AGENT_NAVIGATE_EVENT } from '../agent/navigation'
+import type { AgentContext, AgentReference } from '../agent/transport'
+
+const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
 export function App() {
-  const [tab, setTab] = useState<Tab>('overview')
+  const [tab, setTab] = useState<Tab>('agent')
   const [boot, setBoot] = useState<Bootstrap>()
   const [dashboard, setDashboard] = useState<Dashboard>()
   const [jobs, setJobs] = useState<Job[]>([])
@@ -24,15 +28,58 @@ export function App() {
   const [job, setJob] = useState<JobDetail>()
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
+  const [workbench, setWorkbench] = useState<Workbench>()
+  const [templates, setTemplates] = useState<AnalysisTemplate[]>([])
+  const [analysisCatalog, setAnalysisCatalog] = useState<AnalysisCatalogItem[]>([])
+  const [analysis, setAnalysis] = useState<AnalysisResult>()
+  const [analysisTrend, setAnalysisTrend] = useState<AnalysisTrend>()
+  const [analysisTemplateId, setAnalysisTemplateId] = useState('')
+  const [templateDialog, setTemplateDialog] = useState<AnalysisTemplate | 'new'>()
+  const [analysisBusy, setAnalysisBusy] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
+  const [agentContext, setAgentContext] = useState<AgentContext>({ type: 'page', page: 'agent', mode: 'page_review' })
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
+
+  const refreshWorkbench = async () => {
+    const [nextWorkbench, nextTemplates] = await Promise.allSettled([api.workbench(), api.analyticsTemplates()])
+    if (nextWorkbench.status === 'fulfilled' && Array.isArray(nextWorkbench.value.items) && nextWorkbench.value.summary) setWorkbench(nextWorkbench.value)
+    if (nextTemplates.status === 'fulfilled' && Array.isArray(nextTemplates.value.items)) setTemplates(nextTemplates.value.items)
+  }
 
   useEffect(() => {
     Promise.all([api.bootstrap(), api.dashboard(), api.jobs(), api.candidates()])
       .then(([b, d, j, c]) => { setBoot(b); setDashboard(d); setJobs(j.items); setCandidates(c.items); setError('') })
       .catch(e => setError(String(e.message || e)))
+    queueMicrotask(() => void refreshWorkbench())
+    queueMicrotask(() => {
+      void api.analyticsCatalog().then(result => setAnalysisCatalog(result.items)).catch(() => undefined)
+    })
   }, [refreshKey])
+
+  useEffect(() => {
+    let active = true
+    let refreshing = false
+    const refresh = async () => {
+      if (!active || refreshing || document.hidden) return
+      refreshing = true
+      try { await refreshWorkbench() } finally { refreshing = false }
+    }
+    const timer = window.setInterval(() => void refresh(), 15_000)
+    const onVisible = () => { if (!document.hidden) void refresh() }
+    window.addEventListener('focus', onVisible)
+    document.addEventListener('visibilitychange', onVisible)
+    const source = typeof EventSource === 'undefined' ? undefined : new EventSource('/api/v1/events')
+    source?.addEventListener('workflow', () => void refresh())
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onVisible)
+      source?.close()
+    }
+  }, [])
 
   // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
   // dashboard 计数由统一轮询自然收敛。
@@ -98,22 +145,8 @@ export function App() {
 
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
 
-  useEffect(() => {
-    const openHash = () => {
-      const hash = new URLSearchParams(location.hash.slice(1))
-      const id = Number(hash.get('candidate'))
-      const workflowId = hash.get('workflow')
-      const jobId = Number(hash.get('job'))
-      if (id) { openCandidate(id); return }
-      if (workflowId) { openWorkflow(workflowId); return }
-      if (jobId) { openJob(jobId); return }
-      setJob(undefined); setCandidate(undefined); setWorkflow(undefined)
-    }
-    openHash(); addEventListener('hashchange', openHash); return () => removeEventListener('hashchange', openHash)
-  }, [])
-
   const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
@@ -122,15 +155,11 @@ export function App() {
     await refreshCandidateList()
   }
   const openJob = async (id: number) => {
-    try { setCandidate(undefined); setWorkflow(undefined); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-  }
-  const archiveWorkflow = async (id: string) => {
-    try { await api.workflowAction(id, 'archive'); setRefreshKey(value => value + 1) }
-    catch (e) { setError(humanizeActionError(e, '归档失败，请重试。')) }
+    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const openWorkflow = async (id: string) => {
     try {
-      setJob(undefined); setCandidate(undefined)
+      setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
       const resolved = await resolveWorkflowRevision(id, api.workflow)
       setWorkflow(resolved.value)
       const nextHash = `workflow=${encodeURIComponent(resolved.id)}`
@@ -138,13 +167,99 @@ export function App() {
       else location.hash = nextHash
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
-  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); history.replaceState(null, '', location.pathname) }
+  const openAnalysis = async (id: string, templateId = '') => {
+    try {
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined)
+      const run = await api.analysisRun(id)
+      const resolvedTemplateId = templateId || run.template_id || ''
+      const trend = resolvedTemplateId ? await api.analyticsTemplateTrend(resolvedTemplateId).catch(() => undefined) : undefined
+      setAnalysis(run.result); setAnalysisTemplateId(resolvedTemplateId); setAnalysisTrend(trend)
+      const nextHash = `analysis=${encodeURIComponent(id)}`
+      if (location.hash.slice(1) !== nextHash) history.pushState(null, '', `${location.pathname}${location.search}#${nextHash}`)
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+  useEffect(() => {
+    const openHash = () => {
+      const hash = new URLSearchParams(location.hash.slice(1))
+      const analysisId = hash.get('analysis')
+      const candidateId = Number(hash.get('candidate'))
+      const workflowId = hash.get('workflow')
+      const jobId = Number(hash.get('job'))
+      if (analysisId) { void openAnalysis(analysisId); return }
+      if (candidateId) { void openCandidate(candidateId); return }
+      if (workflowId) { void openWorkflow(workflowId); return }
+      if (jobId) { void openJob(jobId); return }
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    }
+    queueMicrotask(openHash)
+    addEventListener('hashchange', openHash)
+    return () => removeEventListener('hashchange', openHash)
+  }, [])
+  const runTemplate = async (id: string) => {
+    setAnalysisBusy(id)
+    try {
+      const result = (await api.runAnalyticsTemplate(id)).result
+      const trend = await api.analyticsTemplateTrend(id).catch(() => undefined)
+      setAnalysis(result); setAnalysisTemplateId(id); setAnalysisTrend(trend)
+      history.pushState(null, '', `${location.pathname}${location.search}#analysis=${encodeURIComponent(result.run_id)}`)
+      await refreshWorkbench()
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setAnalysisBusy('') }
+  }
+  const refreshAnalysis = async () => {
+    if (!analysis) return
+    setAnalysisBusy('refresh')
+    try {
+      const result = analysisTemplateId
+        ? (await api.runAnalyticsTemplate(analysisTemplateId)).result
+        : (await api.refreshAnalysis(analysis.run_id)).result
+      const trend = analysisTemplateId ? await api.analyticsTemplateTrend(analysisTemplateId).catch(() => undefined) : undefined
+      setAnalysis(result); setAnalysisTrend(trend)
+      history.replaceState(null, '', `${location.pathname}${location.search}#analysis=${encodeURIComponent(result.run_id)}`)
+      await refreshWorkbench()
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setAnalysisBusy('') }
+  }
+  const exportAnalysis = async () => {
+    if (!analysis) return
+    setAnalysisBusy('export')
+    try {
+      const result = await api.exportAnalysis(analysis.run_id)
+      setNotice(`已导出：${result.artifact.file_path}`)
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setAnalysisBusy('') }
+  }
+  const saveTemplate = async (input: AnalysisTemplateInput) => {
+    setAnalysisBusy('template-save')
+    try {
+      if (templateDialog && templateDialog !== 'new') await api.updateAnalyticsTemplate(templateDialog.template_id, input)
+      else await api.createAnalyticsTemplate(input)
+      setTemplateDialog(undefined)
+      await refreshWorkbench()
+      setNotice(templateDialog === 'new' ? '固定分析已创建' : '固定分析已更新')
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setAnalysisBusy('') }
+  }
+  const deleteTemplate = async () => {
+    if (!templateDialog || templateDialog === 'new') return
+    setAnalysisBusy('template-save')
+    try {
+      await api.deleteAnalyticsTemplate(templateDialog.template_id)
+      setTemplateDialog(undefined)
+      await refreshWorkbench()
+      setNotice('固定分析已删除')
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setAnalysisBusy('') }
+  }
+  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); history.replaceState(null, '', `${location.pathname}${location.search}`) }
   const visibleJobs = jobs.filter(j => !query || `${j.id} ${j.client} ${j.title} ${j.status}`.toLowerCase().includes(query.toLowerCase()))
   const visibleCandidates = candidates.filter(c => !query || `${c.name} ${c.current_company} ${c.current_title} ${c.job} ${c.client}`.toLowerCase().includes(query.toLowerCase()))
   const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
   const workflowJobId = Number(workflowContext?.id || 0)
   const workflowJob = jobs.find(item => item.id === workflowJobId)
-  const copilotContext = candidate
+  const activeContext = analysis
+    ? { type: 'page', page: tab, mode: 'analysis_review', analysis_id: analysis.run_id }
+    : candidate
     ? { type: 'candidate', id: candidate.id, candidate: candidate.name, client: candidate.client, job: candidate.job, mode: 'candidate_review', page: tab }
     : job
       ? { type: 'job', id: job.id, client: job.client, job: job.title, mode: 'job_review', page: tab }
@@ -157,39 +272,76 @@ export function App() {
             page: tab,
           }
         : { type: 'page', page: tab, mode: 'page_review' }
-  const copilotContextSignature = JSON.stringify(copilotContext)
+  const showAgent = useCallback((context: AgentContext) => {
+    setAgentContext(context); setTab('agent'); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+  }, [])
+  const openAgent = (context: AgentContext = activeContext) => showAgent(context)
   useEffect(() => {
-    void publishCopilotContext(
-      copilotContext,
-      copilotContext.type === 'page' ? 'navigation' : 'selection',
-      false,
-    )
-  }, [copilotContextSignature])
+    const navigate = (event: Event) => showAgent((event as CustomEvent<AgentContext>).detail)
+    window.addEventListener(AGENT_NAVIGATE_EVENT, navigate)
+    return () => window.removeEventListener(AGENT_NAVIGATE_EVENT, navigate)
+  }, [showAgent])
 
   if (error && !boot) return <Diagnostics error={error} retry={() => setRefreshKey(x => x + 1)} />
 
-  return <div className="shell">
+  const pageTitle = analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
+  const navigateTab = (id: Tab) => {
+    setTab(id); setQuery(''); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    history.replaceState(null, '', `${location.pathname}${location.search}`)
+  }
+
+  const handleWorkbenchAction = (item: WorkbenchItem) => {
+    const action = item.primary_action
+    if (action.type === 'open_candidate') void openCandidate(Number(action.id))
+    else if (action.type === 'open_workflow') void openWorkflow(action.id)
+    else if (action.type === 'open_analysis') void openAnalysis(action.id)
+  }
+  const openAgentObject = (reference: AgentReference) => {
+    if (reference.type === 'candidate' || reference.type === 'job_candidate') void openCandidate(Number(reference.id))
+    else if (reference.type === 'job') {
+      void api.job(Number(reference.id)).then(result => setJob(result.job)).catch(error => setError(error instanceof Error ? error.message : String(error)))
+    } else if (reference.type === 'workflow') void openWorkflow(String(reference.id))
+  }
+
+  return <div className={`shell ${tab === 'agent' && !analysis ? 'agent-mode' : ''}`}>
     <aside className="nav">
-      <div className="brand"><span>ASA</span><strong>Agent</strong><small>Recruiting OS</small></div>
-      <nav>{tabs.map(([id, label, icon]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setQuery('') }}>{icon}<span>{label}</span></button>)}</nav>
+      <div className="brand"><span>ASA</span><strong>Agent</strong><small>Recruiting Workbench</small></div>
+      <nav>{tabs.map(([id, label, icon]) => <button key={id} className={!analysis && tab === id ? 'active' : ''} onClick={() => navigateTab(id)}>{icon}<span>{label}</span></button>)}</nav>
+      <div className="nav-status"><Wifi/><span>Core 在线</span></div>
       <a className="legacy" href="/admin/legacy" target="_blank">审计与旧版</a>
     </aside>
     <main className="main">
       <header className="topbar">
-        <div><h1>{tabs.find(x => x[0] === tab)?.[1]}</h1><p>{boot?.core?.status === 'connected' ? 'ASA Agent 在线 · Core 已连接 · v3 实时数据' : 'ASA Agent 正在连接 Core'}</p></div>
-        {(tab === 'jobs' || tab === 'candidates' || tab === 'progress') && <label className="search"><Search/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索姓名、公司或岗位" aria-label="搜索姓名、公司或岗位" /></label>}
-        <button className="button copilot-launch" title="打开 ASA Copilot 浮窗" aria-label="打开 ASA Copilot 浮窗" onClick={()=>openCopilotWindow(copilotContext)}><MessageSquareText/><span>Copilot</span></button>
+        <div><h1>{pageTitle}</h1><p>{boot?.core?.status === 'connected' ? 'ASA Agent 在线 · Core 已连接 · v3 实时数据' : 'ASA Agent 正在连接 Core'}</p></div>
+        {!analysis && (tab === 'jobs' || tab === 'candidates' || tab === 'progress') && <label className="search"><Search/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索姓名、公司或岗位" aria-label="搜索姓名、公司或岗位" /></label>}
+        {!analysis && tab !== 'agent' && <button className="button copilot-launch" title="交给 Agent" aria-label="交给 Agent" onClick={()=>openAgent(activeContext)}><MessageSquareText/><span>Agent</span></button>}
       </header>
       <div className="content">
-        {tab === 'overview' && <Overview dashboard={dashboard} jobs={jobs} candidates={candidates} openWorkflow={openWorkflow} openCandidate={openCandidate} archiveWorkflow={archiveWorkflow} openCopilot={() => openCopilotWindow(copilotContext)} />}
-        {tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
-        {tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
-        {tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
+        {analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
+        {!analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
+        {!analysis && tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
+        {!analysis && tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
+        {!analysis && tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
       </div>
     </main>
+    {(tab !== 'agent' || analysis) && <aside className="context-rail">
+      {analysis ? <>
+        <section><header><Activity/><h2>分析范围</h2></header><dl>{Object.entries(analysis.scope).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}{!Object.keys(analysis.scope).length && <div><dt>scope</dt><dd>全部业务数据</dd></div>}</dl></section>
+        <section><header><Database/><h2>数据口径</h2></header><p>{analysis.data_as_of}</p><p>{analysis.catalog_version}</p>{analysis.truncated && <span className="rail-warning">结果已截断</span>}</section>
+        <section><header><Pin/><h2>证据引用</h2></header><div className="rail-links">{analysis.references.map(reference => <a key={`${reference.type}:${reference.id}`} href={reference.href}>{reference.label}</a>)}{!analysis.references.length && <p>当前分析无对象引用</p>}</div></section>
+        {!!analysis.caveats.length && <section><header><ShieldAlert/><h2>数据提示</h2></header>{analysis.caveats.map(item => <p key={item}>{item}</p>)}</section>}
+      </> : <>
+        <section><header><Activity/><h2>今日节奏</h2></header><dl><div><dt>待处理</dt><dd>{workbench?.summary?.pending ?? dashboard?.counts?.pending_candidates ?? '-'}</dd></div><div><dt>运行中</dt><dd>{workbench?.summary?.running ?? '-'}</dd></div><div><dt>已交付</dt><dd>{workbench?.summary?.delivered ?? '-'}</dd></div></dl></section>
+        <section><header><Pin/><h2>固定分析</h2></header><div className="rail-links">{templates.slice(0, 6).map(item => <button key={item.template_id} onClick={() => void runTemplate(item.template_id)}>{item.name}</button>)}{!templates.length && <p>暂无固定分析</p>}</div></section>
+        <section><header><Database/><h2>数据连接</h2></header><p>v3 统一库</p><span className="rail-online"><i/>实时连接</span></section>
+      </>}
+    </aside>}
     {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
     {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
     {workflow && <WorkflowPanel value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
+    {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
+    {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}
   </div>
 }

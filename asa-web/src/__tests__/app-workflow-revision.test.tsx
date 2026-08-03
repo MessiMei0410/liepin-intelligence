@@ -48,7 +48,7 @@ describe('App 工作流修订导航', () => {
     ])
   })
 
-  it('工作流上下文向原生 Copilot 发布稳定的岗位、模式和页面信息', async () => {
+  it('浏览工作流不会自动发布浮窗上下文', async () => {
     history.replaceState(null, '', `${location.pathname}#workflow=workflow_context`)
     const postMessage = vi.fn()
     ;(window as Window & { webkit?: unknown }).webkit = { messageHandlers: { asaNative: { postMessage } } }
@@ -60,34 +60,21 @@ describe('App 工作流修订导航', () => {
       },
       workflow: { ...plannedWorkflow.workflow, workflow_id: 'workflow_context' },
     }
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url === '/api/v1/bootstrap') return Promise.resolve(mockResponse({ ok: true, core: { status: 'connected' } }))
       if (url === '/api/v1/dashboard') return Promise.resolve(mockResponse({ ok: true, workflows: [] }))
-      if (url === '/api/v1/jobs') return Promise.resolve(mockResponse({ items: [{ id: 42, client: '士兰微', title: '电源专家', candidate_count: 0, active_candidate_count: 0 }], total: 1 }))
+      if (url.startsWith('/api/v1/jobs')) return Promise.resolve(mockResponse({ items: [{ id: 42, client: '士兰微', title: '电源专家', candidate_count: 0, active_candidate_count: 0 }], total: 1 }))
       if (url.startsWith('/api/v1/candidates')) return Promise.resolve(mockResponse({ items: [], total: 0 }))
       if (url === '/api/v1/workflows/workflow_context') return Promise.resolve(mockResponse(contextWorkflow))
-      if (url === '/api/asa/floating/context') {
-        expect(init?.method).toBe('POST')
-        return Promise.resolve(mockResponse({ ok: true }))
-      }
       return Promise.resolve(mockResponse({ ok: false }, false, 404))
     })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<App />)
 
-    const isWorkflowContextCall = ([input, init]: [RequestInfo | URL, RequestInit?]) => {
-      if (String(input) !== '/api/asa/floating/context') return false
-      return JSON.parse(String(init?.body)).context?.type === 'workflow'
-    }
-    await waitFor(() => expect(fetchMock.mock.calls.some(isWorkflowContextCall)).toBe(true))
-    const call = fetchMock.mock.calls.find(isWorkflowContextCall)
-    const payload = JSON.parse(String(call?.[1]?.body))
-    expect(payload.context).toMatchObject({
-      type: 'workflow', id: 'workflow_context', client: '士兰微', job: '电源专家', mode: 'strategy_revision', page: 'overview',
-    })
-    expect(payload.context.subtitle).toContain('策略')
-    expect(payload).toMatchObject({ trigger: 'selection', explicit: false, user_selected: false })
+    expect(await screen.findByText(plannedWorkflow.goal.title)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/asa/floating/context')).toBe(false)
+    expect(postMessage).not.toHaveBeenCalled()
   })
 })

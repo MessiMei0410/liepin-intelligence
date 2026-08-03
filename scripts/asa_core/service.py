@@ -34,7 +34,7 @@ CANDIDATE_ACTION_LABELS = {
 CANDIDATE_UPDATE_LABELS = {
     "read_no_reply": "已读未回复",
 }
-READ_ONLY_COPILOT_ACTIONS = {"open_candidate", "open_job", "open_queue"}
+READ_ONLY_COPILOT_ACTIONS = {"open_candidate", "open_job", "open_queue", "open_analysis"}
 NON_BUSINESS_COPILOT_ACTIONS = {*READ_ONLY_COPILOT_ACTIONS, "native_action", "floating_action", "open_workflow"}
 IDEMPOTENCY_LEASE_MINUTES = 5
 
@@ -294,9 +294,10 @@ def _funnel_detail(complete: int, partial: int, failed: int) -> dict[str, Any]:
 
 
 class CoreService:
-    def __init__(self, db_path: Path = DEFAULT_DB, agent_service: Any | None = None) -> None:
+    def __init__(self, db_path: Path = DEFAULT_DB, agent_service: Any | None = None, analytics_service: Any | None = None) -> None:
         self.db_path = db_path
         self.agent_service = agent_service
+        self.analytics_service = analytics_service
         self._preflight_tokens: dict[str, tuple[int, str, datetime]] = {}
         self._preflight_lock = threading.Lock()
         self._bootstrap_cache: dict[str, Any] | None = None
@@ -328,6 +329,12 @@ class CoreService:
         if not self.agent_service:
             raise RuntimeError("copilot service unavailable")
         raw_context = dict(context or {})
+        analysis_request = self._copilot_analysis_request(message, raw_context)
+        if analysis_request:
+            return self._run_copilot_analysis(
+                message, session_id=session_id, context=raw_context,
+                catalog_id=analysis_request[0], scope=analysis_request[1],
+            )
         action = _explicit_candidate_action(message)
         candidate_id = 0
         if str(raw_context.get("type") or "").strip() == "candidate":
@@ -546,6 +553,90 @@ class CoreService:
                         (result["answer"], json.dumps(structured, ensure_ascii=False), result_session_id),
                     )
         return result
+
+    def _copilot_analysis_request(
+        self, message: str, context: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]] | None:
+        if not self.analytics_service:
+            return None
+        text = " ".join(str(message or "").lower().split())
+        context_type = str(context.get("type") or "")
+        context_id = context.get("id")
+        try:
+            numeric_context_id = int(context_id) if context_id else None
+        except (TypeError, ValueError):
+            numeric_context_id = None
+        if any(token in text for token in ("数据质量", "重复数据", "缺失数据", "异常状态")):
+            return "data_quality", {}
+        if any(token in text for token in ("渠道效果", "渠道表现", "哪个渠道", "渠道转化")):
+            return "channel_performance", {"days": 30, **({"job_id": numeric_context_id} if context_type == "job" and numeric_context_id else {})}
+        if any(token in text for token in ("工作流漏斗", "流程漏斗", "步骤完成率")):
+            return "workflow_funnel", {"workflow_id": str(context_id)} if context_type == "workflow" and context_id else {}
+        if context_type == "job" and numeric_context_id and any(token in text for token in ("岗位健康", "岗位漏斗", "岗位卡在哪", "卡在哪里", "覆盖怎么样")):
+            return "job_health", {"job_id": numeric_context_id, "days": 30}
+        overview_intent = any(token in text for token in ("经营概览", "今日概览", "今天先做什么", "今天最需要", "今天优先", "今日待办分析"))
+        if overview_intent:
+            return "operations_overview", {"days": 7}
+        return None
+
+    def _run_copilot_analysis(
+        self,
+        message: str,
+        *,
+        session_id: str,
+        context: dict[str, Any],
+        catalog_id: str,
+        scope: dict[str, Any],
+    ) -> dict[str, Any]:
+        stable_session_id = str(session_id or "").strip() or f"copilot_{secrets.token_hex(6)}"
+        run = self.analytics_service.create_run(catalog_id, message, scope)
+        analysis = run["result"]
+        metrics = list(analysis.get("metrics") or [])[:5]
+        card = {
+            "schema_version": "analysis_card_v1",
+            "run_id": analysis["run_id"],
+            "catalog_id": analysis["catalog_id"],
+            "status": analysis["status"],
+            "headline": analysis["headline"],
+            "metrics": metrics,
+            "data_as_of": analysis["data_as_of"],
+            "scope": analysis["scope"],
+            "references": list(analysis.get("references") or [])[:5],
+            "open_analysis": {"type": "open_analysis", "id": analysis["run_id"], "label": "查看完整分析"},
+        }
+        metric_lines = [
+            f"{item.get('label')}：{'数据不足' if item.get('value') is None else item.get('value')}"
+            for item in metrics[:4]
+        ]
+        answer = f"结论：{analysis['headline']}\n\n依据：" + "；".join(metric_lines) + "。\n\n下一步：可打开完整分析查看口径和引用。"
+        structured = {
+            "analysis_card": card,
+            "references": card["references"],
+            "suggested_actions": [card["open_analysis"]],
+            "business_focus": {},
+        }
+        context_type = str(context.get("type") or "global")
+        raw_context_id = context.get("id")
+        try:
+            context_id = int(raw_context_id) if context_type in {"job", "candidate"} and raw_context_id else None
+        except (TypeError, ValueError):
+            context_id = None
+        with transaction(self.db_path) as conn:
+            conn.executemany(
+                """INSERT INTO agent_copilot_messages
+                   (session_id,context_type,context_id,role,content,structured_json)
+                   VALUES (?,?,?,?,?,?)""",
+                [
+                    (stable_session_id, context_type, context_id, "user", message, json.dumps(context, ensure_ascii=False)),
+                    (stable_session_id, context_type, context_id, "assistant", answer, json.dumps(structured, ensure_ascii=False)),
+                ],
+            )
+        return {
+            "ok": bool(run.get("ok")), "session_id": stable_session_id, "answer": answer,
+            "context": {"type": context_type, "id": raw_context_id},
+            "analysis_card": card, "references": card["references"],
+            "suggested_actions": [card["open_analysis"]], "action_cards": [],
+        }
 
     def confirm_copilot_intent(
         self,
@@ -1594,7 +1685,15 @@ class CoreService:
     ) -> tuple[dict[str, Any], bool]:
         if not request_id or not idempotency_key:
             raise ValueError("request_id and Idempotency-Key are required")
-        request_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        # target 也纳入 hash：同一 key+body 打到不同 target 必须判 409 冲突，
+        # 否则路径参数里的目标（如 sessions/{id}）会被静默重放成第一个 target 的响应。
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {"payload": payload, "target_type": target_type, "target_id": target_id},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
         conflict = ""
         with transaction(self.db_path) as conn:
             existing = conn.execute(

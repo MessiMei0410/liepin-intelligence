@@ -9,16 +9,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = SCRIPT_DIR.parent
@@ -27,6 +27,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import liepin_workbench_server as legacy
 from a_system_agent.service import AgentService
 
+from .analytics import AnalyticsService
 from .database import DEFAULT_DB, migrate
 from .service import CoreService
 
@@ -78,6 +79,69 @@ class CopilotMessage(WriteEnvelope):
     message: str = Field(min_length=1)
     session_id: str = ""
     context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CopilotSessionPatch(WriteEnvelope):
+    title: str | None = Field(default=None, min_length=1, max_length=80)
+    archived: bool | None = None
+    clear_focus: bool = False
+
+
+class CopilotReferenceResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    type: str
+    id: str | int
+    label: str
+    subtitle: str | None = None
+    href: str | None = None
+
+
+class CopilotMessageResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    role: Literal["user", "assistant"]
+    content: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    references: list[CopilotReferenceResponse] = Field(default_factory=list)
+    suggested_actions: list[dict[str, Any]] = Field(default_factory=list)
+    business_focus: dict[str, Any] | None = None
+    workflow_id: str | None = None
+    workflow_progress: dict[str, Any] | None = None
+    pending_intent: dict[str, Any] | None = None
+    action_card: dict[str, Any] | None = None
+    created_at: str | None = None
+
+
+class CopilotSessionSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    session_id: str
+    title: str
+    preview: str
+    message_count: int = Field(ge=0)
+    updated_at: str | None = None
+    context_type: str | None = None
+    context_id: str | int | None = None
+    business_focus: dict[str, Any] | None = None
+    archived: bool = False
+
+
+class CopilotSessionListResponse(BaseModel):
+    ok: bool = True
+    sessions: list[CopilotSessionSummaryResponse] = Field(default_factory=list)
+
+
+class CopilotSessionDetailResponse(BaseModel):
+    ok: bool = True
+    session_id: str
+    messages: list[CopilotMessageResponse] = Field(default_factory=list)
+    business_focus: dict[str, Any] | None = None
+
+
+class CopilotSessionUpdateResponse(BaseModel):
+    ok: bool = True
+    session_id: str
+    title: str
+    archived: bool
+    business_focus: dict[str, Any] | None = None
 
 
 class CopilotEvent(WriteEnvelope):
@@ -173,6 +237,38 @@ class ProposalDecision(WriteEnvelope):
     note: str = ""
 
 
+class AnalyticsRunCreate(WriteEnvelope):
+    catalog_id: str = Field(min_length=1)
+    question: str = ""
+    scope: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyticsTemplateCreate(AnalyticsRunCreate):
+    name: str = Field(min_length=1)
+    schedule_kind: str = "manual"
+    schedule_enabled: bool = False
+    schedule_time: str = "09:00"
+    schedule_weekday: int = Field(default=0, ge=0, le=6)
+    timezone: str = "Asia/Shanghai"
+
+
+class AnalyticsTemplatePatch(WriteEnvelope):
+    name: str | None = None
+    catalog_id: str | None = None
+    question: str | None = None
+    scope: dict[str, Any] | None = None
+    schedule_kind: str | None = None
+    schedule_enabled: bool | None = None
+    schedule_time: str | None = None
+    schedule_weekday: int | None = Field(default=None, ge=0, le=6)
+    timezone: str | None = None
+
+
+class InboxStatePatch(WriteEnvelope):
+    state: str = Field(min_length=1)
+    source_revision: str = ""
+
+
 class LegacyRuntime:
     def __init__(self, external_host: str, external_port: int) -> None:
         self.server = None
@@ -198,9 +294,11 @@ class LegacyRuntime:
 def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int = 8765, start_legacy: bool = True) -> FastAPI:
     runtime = LegacyRuntime(host, port) if start_legacy else None
     agent = AgentService(db_path)
-    core = CoreService(db_path, agent)
+    analytics = AnalyticsService(db_path)
+    core = CoreService(db_path, agent, analytics)
     if runtime:
         runtime.state.core_service = core
+        runtime.state.bind_agent_service(agent)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -208,19 +306,36 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         app.state.migration = migration
         if runtime:
             runtime.start()
-        yield
-        if runtime:
-            runtime.close()
-        agent.close()
+
+        async def analytics_scheduler() -> None:
+            while True:
+                try:
+                    outcome = await asyncio.to_thread(analytics.run_due_templates)
+                    app.state.analytics_scheduler = {"status": "running", "last_result": outcome, "error": ""}
+                except Exception as exc:
+                    app.state.analytics_scheduler = {"status": "degraded", "last_result": None, "error": str(exc)[:500]}
+                await asyncio.sleep(30)
+
+        scheduler_task = asyncio.create_task(analytics_scheduler(), name="asa-analysis-scheduler")
+        try:
+            yield
+        finally:
+            scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
+            if runtime:
+                runtime.close()
+            agent.close()
 
     app = FastAPI(title="ASA Core", version="1.0.0", lifespan=lifespan)
     app.state.core = core
+    app.state.analytics = analytics
     app.state.legacy = runtime
     browser_origins = trusted_browser_origins(host, port)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=sorted(browser_origins),
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Idempotency-Key", "X-Requested-With"],
         max_age=600,
     )
@@ -514,6 +629,44 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("copilot.message", body, idempotency_key, "copilot_session", body.session_id or "new",
                     lambda: core.copilot(body.message, session_id=body.session_id, context=body.context))
 
+    @app.get("/api/v1/copilot/sessions", response_model=CopilotSessionListResponse)
+    def copilot_sessions(
+        limit: int = Query(30, ge=1, le=100),
+        q: str = Query("", max_length=120),
+        include_archived: bool = Query(False),
+    ) -> dict[str, Any]:
+        return agent.list_copilot_sessions(limit, q, include_archived)
+
+    @app.get("/api/v1/copilot/sessions/{session_id}", response_model=CopilotSessionDetailResponse)
+    def copilot_session(session_id: str, limit: int = Query(100, ge=1, le=200)) -> dict[str, Any]:
+        result = agent.get_copilot_session(session_id, limit)
+        if not result.get("messages") and not result.get("business_focus"):
+            raise HTTPException(status_code=404, detail="Agent task not found")
+        return result
+
+    @app.patch("/api/v1/copilot/sessions/{session_id}", response_model=CopilotSessionUpdateResponse)
+    def copilot_session_update(
+        session_id: str,
+        body: CopilotSessionPatch,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        try:
+            return idem(
+                "copilot.session_update",
+                body,
+                idempotency_key,
+                "copilot_session",
+                session_id,
+                lambda: agent.update_copilot_session(
+                    session_id,
+                    title=body.title,
+                    archived=body.archived,
+                    clear_focus=body.clear_focus,
+                ),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/api/v1/copilot/stream")
     async def copilot_stream(
         body: CopilotMessage,
@@ -523,7 +676,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         """Canonical Copilot decision exposed as SSE transport."""
         key = idempotency_key or f"copilot-stream-{body.request_id}"
         try:
-            result, _ = core.execute_idempotent(
+            result, _ = await asyncio.to_thread(
+                core.execute_idempotent,
                 operation="copilot.message",
                 request_id=body.request_id,
                 idempotency_key=key,
@@ -603,6 +757,98 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             return response
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/v1/analytics/catalog")
+    def analytics_catalog() -> dict[str, Any]:
+        return analytics.catalog()
+
+    @app.post("/api/v1/analytics/runs", status_code=201)
+    def analytics_run_create(body: AnalyticsRunCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "analytics.run_create", body, idempotency_key, "analysis_catalog", body.catalog_id,
+            lambda: analytics.create_run(body.catalog_id, body.question, body.scope),
+        )
+
+    @app.get("/api/v1/analytics/runs/{run_id}")
+    def analytics_run_get(run_id: str) -> dict[str, Any]:
+        payload = analytics.get_run(run_id)
+        if payload.get("result", {}).get("status") == "expired":
+            raise HTTPException(410, detail={"error": "分析结果已过期", "run_id": run_id, "can_refresh": True})
+        return payload
+
+    @app.post("/api/v1/analytics/runs/{run_id}/refresh", status_code=201)
+    def analytics_run_refresh(run_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "analytics.run_refresh", body, idempotency_key, "analysis_run", run_id,
+            lambda: analytics.refresh_run(run_id),
+        )
+
+    @app.post("/api/v1/analytics/runs/{run_id}/export")
+    def analytics_run_export(run_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "analytics.run_export", body, idempotency_key, "analysis_run", run_id,
+            lambda: analytics.export_run(run_id),
+        )
+
+    @app.get("/api/v1/analytics/templates")
+    def analytics_templates() -> dict[str, Any]:
+        return analytics.list_templates()
+
+    @app.post("/api/v1/analytics/templates", status_code=201)
+    def analytics_template_create(body: AnalyticsTemplateCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "analytics.template_create", body, idempotency_key, "analysis_template", body.name,
+            lambda: analytics.create_template(
+                body.name, body.catalog_id, body.question, body.scope,
+                schedule_kind=body.schedule_kind, schedule_enabled=body.schedule_enabled,
+                schedule_time=body.schedule_time, schedule_weekday=body.schedule_weekday,
+                timezone_name=body.timezone,
+            ),
+        )
+
+    @app.patch("/api/v1/analytics/templates/{template_id}")
+    def analytics_template_patch(template_id: str, body: AnalyticsTemplatePatch, idempotency_key: str = Header(alias="Idempotency-Key")):
+        patch = body.model_dump(exclude={"request_id"}, exclude_unset=True)
+        return idem(
+            "analytics.template_patch", body, idempotency_key, "analysis_template", template_id,
+            lambda: analytics.update_template(template_id, patch),
+        )
+
+    @app.post("/api/v1/analytics/templates/{template_id}/run", status_code=201)
+    def analytics_template_run(template_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "analytics.template_run", body, idempotency_key, "analysis_template", template_id,
+            lambda: analytics.run_template(template_id),
+        )
+
+    @app.get("/api/v1/analytics/templates/{template_id}/runs")
+    def analytics_template_runs(template_id: str, limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
+        return analytics.list_template_runs(template_id, limit)
+
+    @app.get("/api/v1/analytics/templates/{template_id}/trend")
+    def analytics_template_trend(template_id: str, limit: int = Query(30, ge=2, le=100)) -> dict[str, Any]:
+        return analytics.template_trend(template_id, limit)
+
+    @app.delete("/api/v1/analytics/templates/{template_id}")
+    def analytics_template_delete(template_id: str) -> dict[str, Any]:
+        return analytics.delete_template(template_id)
+
+    @app.get("/api/v1/workbench")
+    def workbench(limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
+        flow = agent.get_flow_inbox(queue="今日待办", limit=300)
+        return analytics.workbench(flow, limit)
+
+    @app.get("/api/v1/inbox")
+    def inbox(limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
+        flow = agent.get_flow_inbox(queue="今日待办", limit=300)
+        return analytics.workbench(flow, limit)
+
+    @app.patch("/api/v1/inbox/{item_key:path}/state")
+    def inbox_state(item_key: str, body: InboxStatePatch, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem(
+            "inbox.state", body, idempotency_key, "inbox_item", item_key,
+            lambda: analytics.set_inbox_state(item_key, body.state, body.source_revision),
+        )
 
     @app.post("/api/v1/workflows", status_code=201)
     def create_workflow(body: WorkflowCreate, idempotency_key: str = Header(alias="Idempotency-Key")):

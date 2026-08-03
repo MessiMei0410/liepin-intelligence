@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment, workbench_server
 from a_system_agent import AgentService, FakeLLM
 from a_system_agent.context import build_candidate_context
@@ -651,6 +653,119 @@ class WorkflowEngineTest(AgentDbCase):
         assert row["source_round"] == "core"
         assert row["strategy_model"] == "fake-search-model"
 
+    def test_sourcing_attribution_pairs_same_name_receipts_by_intake_order(self) -> None:
+        strategy = {
+            "channels": {
+                "xsaas": [
+                    {"round": "core", "query": "查询一", "purpose": "核心公司"},
+                    {"round": "expand", "query": "查询二", "purpose": "扩展公司"},
+                ],
+            },
+        }
+        applied = {
+            "staged": {
+                "accepted": [
+                    {"name": "同名人选", "channel": "xsaas", "source_query": "查询一", "xsaas_id": "source-a"},
+                    {"name": "同名人选", "channel": "xsaas", "source_query": "查询二", "xsaas_id": "source-b"},
+                ],
+            },
+            "intake": {
+                "receipts": [
+                    {"name": "同名人选", "status": "inserted", "candidate_id": 40, "job_candidate_id": 30},
+                    {"name": "同名人选", "status": "inserted", "candidate_id": 41, "job_candidate_id": 31},
+                ],
+            },
+        }
+
+        result = self.service.capability_runtime._persist_sourcing_attributions(
+            applied, strategy, "workflow_same_name_attribution", "长越科技", "机械高级工程师"
+        )
+
+        assert result["stored"] == 2
+        conn = self.service._connect()
+        try:
+            rows = conn.execute(
+                "SELECT job_candidate_id,candidate_id,source_query FROM agent_sourcing_attributions "
+                "WHERE workflow_id=? ORDER BY source_query",
+                ("workflow_same_name_attribution",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [tuple(row) for row in rows] == [
+            (30, 40, "查询一"),
+            (31, 41, "查询二"),
+        ]
+
+    def test_workflow_finish_refreshes_coverage_assessment_count_and_step_snapshot(self) -> None:
+        created = self.service.create_goal(
+            "给长越科技机械高级工程师补充1位合适人选",
+            {"type": "job", "id": 10, "page": "positions"},
+        )
+        workflow_id = created["workflow"]["workflow_id"]
+        sourcing_step = next(
+            step for step in created["steps"] if step["capability_id"] == "multi_channel_sourcing"
+        )
+        assessment = self.service.submit_assessment(30, wait=True, timeout=3)
+        assert assessment["status"] == "completed"
+        run_id = "asa-source-refresh-certificate"
+        certificate = {
+            "schema_version": "coverage_certificate_v1",
+            "run_id": run_id,
+            "workflow_id": workflow_id,
+            "coverage_status": "platform_truncated",
+            "assessment": {"completed_unique_candidates": 0},
+        }
+        conn = self.service._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO agent_candidate_recalls
+                (recall_id,run_id,workflow_id,job_id,channel,source_candidate_id,job_candidate_id,raw_json)
+                VALUES ('recall-refresh-certificate',?,?,10,'liepin','source-refresh',30,'{}')
+                """,
+                (run_id, workflow_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO agent_sourcing_coverage_certificates
+                (certificate_id,run_id,workflow_id,job_id,plan_hash,coverage_status,certificate_json)
+                VALUES ('coverage-refresh-certificate',?,?,10,'plan-refresh','platform_truncated',?)
+                """,
+                (run_id, workflow_id, json.dumps(certificate, ensure_ascii=False)),
+            )
+            conn.execute(
+                "UPDATE agent_workflow_steps SET output_json=? WHERE id=?",
+                (
+                    json.dumps({"external_result": {"coverage_certificate": certificate}}, ensure_ascii=False),
+                    sourcing_step["id"],
+                ),
+            )
+
+            self.service.workflow_engine._refresh_sourcing_coverage_assessment(conn, workflow_id)
+            conn.commit()
+
+            stored = json.loads(conn.execute(
+                "SELECT certificate_json FROM agent_sourcing_coverage_certificates WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0])
+            step_output = json.loads(conn.execute(
+                "SELECT output_json FROM agent_workflow_steps WHERE id=?",
+                (sourcing_step["id"],),
+            ).fetchone()[0])
+            event = conn.execute(
+                "SELECT detail_json FROM agent_step_events WHERE workflow_id=? "
+                "AND event_type='coverage_certificate_refreshed' ORDER BY id DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stored["coverage_status"] == "platform_truncated"
+        assert stored["assessment"] == {"completed_unique_candidates": 1}
+        assert step_output["external_result"]["coverage_certificate"]["assessment"] == {
+            "completed_unique_candidates": 1,
+        }
+        assert json.loads(event["detail_json"])["completed_unique_candidates"] == 1
+
     def test_job_publish_prepare_runs_before_publish_approval_and_blocks_missing_fields(self) -> None:
         result = self.service.create_goal(
             "发布长越科技机械高级工程师岗位",
@@ -710,6 +825,42 @@ class WorkflowEngineTest(AgentDbCase):
         stale_click = self.service.decide_workflow_approval(old["approval_id"], "approve")
         assert stale_click["workflow"]["status"] == "waiting_approval"
         assert len([item for item in stale_click["approvals"] if item["status"] == "pending"]) == 1
+
+    def test_concurrent_decision_loser_produces_no_side_effects(self) -> None:
+        # 模拟并发窗口落败方：审批已被另一请求决策（status 非 pending）后再点击，
+        # 必须按"已决策"早退——不重复写事件、不翻转步骤状态、不补提交执行。
+        result = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        workflow_id = result["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        submissions = 0
+        original_submit = self.service.executor.submit
+
+        def counting_submit(*args, **kwargs):
+            nonlocal submissions
+            submissions += 1
+            return original_submit(*args, **kwargs)
+
+        self.service.executor.submit = counting_submit  # type: ignore[method-assign]
+        try:
+            first = self.service.decide_workflow_approval(approval["approval_id"], "reject", "第一个请求已拒绝")
+            loser = self.service.decide_workflow_approval(approval["approval_id"], "approve")
+        finally:
+            self.service.executor.submit = original_submit  # type: ignore[method-assign]
+
+        assert submissions == 0  # reject 不触发执行；落败的 approve 也不能补提交 run_workflow
+        assert loser["workflow"]["status"] == first["workflow"]["status"]
+        loser_approval = next(item for item in loser["approvals"] if item["approval_id"] == approval["approval_id"])
+        assert loser_approval["status"] == "rejected"
+        assert next(step for step in loser["steps"] if step["id"] == approval["step_id"])["status"] == "skipped"
+        decided_events = [
+            event for event in loser["events"] if event["event_type"] == "approval_decided"
+        ]
+        assert len(decided_events) == 1
 
     def test_workflow_revision_supersedes_old_approval_and_preserves_round(self) -> None:
         original = self.service.create_goal(
@@ -897,6 +1048,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert statuses[second["approval_id"]] == "approved"
         assert statuses[first["approval_id"]].startswith("approved_history_")
 
+    @pytest.mark.allow_external_recovery
     def test_external_cursor_continuation_is_checkpointed_before_reschedule(self) -> None:
         scheduled: list[tuple[int, str, dict]] = []
         self.service.schedule_external_workflow_step = (  # type: ignore[method-assign]
@@ -935,18 +1087,35 @@ class WorkflowEngineTest(AgentDbCase):
         assert current_step["status"] == "waiting_external"
         assert current_step["recovery"]["retry_mode"] == "sourcing_continuation"
         assert current_step["recovery"]["request"]["resume_run_id"] == "asa-source-continuation"
+        claim_pid = current_step["recovery"]["recovery_claim"]["pid"]
+        assert claim_pid > 0
         assert current_step["output"]["continuation_history"][-1]["remaining_cells"] == 2
         assert any(
             event["event_type"] == "external_continuation_checkpointed"
             for event in checkpointed["events"]
         )
 
-        recovered: list[tuple[int, str, dict]] = []
-        self.service.close()
+        duplicate_recoveries: list[tuple[int, str, dict]] = []
         with patch.object(
             AgentService,
             "schedule_external_workflow_step",
-            lambda service, step_id, capability_id, request: recovered.append((step_id, capability_id, request)),
+            lambda service, step_id, capability_id, request: duplicate_recoveries.append(
+                (step_id, capability_id, request)
+            ),
+        ):
+            duplicate_service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="测试回答"))
+            duplicate_service.close()
+        assert duplicate_recoveries == []
+
+        recovered: list[tuple[int, str, dict]] = []
+        self.service.close()
+        with (
+            patch("a_system_agent.workflow.os.getpid", return_value=claim_pid + 1),
+            patch.object(
+                AgentService,
+                "schedule_external_workflow_step",
+                lambda service, step_id, capability_id, request: recovered.append((step_id, capability_id, request)),
+            ),
         ):
             self.service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="测试回答"))
         assert recovered == [(step["id"], "multi_channel_sourcing", continuation_request)]
