@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let serviceBaseURL = URL(string: "http://127.0.0.1:8765")!
     private lazy var webSecurityPolicy = ASAWebSecurityPolicy(serviceBaseURL: serviceBaseURL)
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.22"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.23"
     }
     private lazy var floatingURL = serviceBaseURL.appendingPathComponent("asa-floating").appending(queryItems: [URLQueryItem(name: "ui", value: appVersion)])
     private lazy var stateURL = serviceBaseURL.appendingPathComponent("api/asa/floating/state")
@@ -1786,7 +1786,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         </body>
         </html>
         """
-        target.loadHTMLString(html, baseURL: serviceBaseURL)
+        // loadHTMLString 的 baseURL 会成为这次替代加载的导航 URL，必须通过
+        // WebSecurityPolicy 的导航白名单：主窗口用 /asa-app，浮窗 panel 用 /asa-floating。
+        // 直接用服务根地址会被白名单拒绝，诊断页将渲染为白屏。
+        target.loadHTMLString(html, baseURL: target === mainWebView ? workbenchURL : floatingURL)
     }
 
     private func refreshCollapsedStatus() {
