@@ -17,6 +17,29 @@ describe('Agent transport', () => {
     ])
   })
 
+  it('解析 progress 事件，未知事件仍静默丢弃', () => {
+    const events = parseAgentSse([
+      'event: progress\ndata: {"message":"正在梳理岗位需求"}\n\n',
+      'event: heartbeat\ndata: {"ts":1}\n\n',
+      'event: context\ndata: {"session_id":"task-1"}\n\n',
+      'event: progress\ndata: {"message":"正在调用模型"}\n\n',
+      'event: text\ndata: {"content":"部分答案"}\n\n',
+    ].join(''))
+
+    expect(events).toEqual([
+      { type: 'progress', data: { message: '正在梳理岗位需求' } },
+      { type: 'context', data: { session_id: 'task-1' } },
+      { type: 'progress', data: { message: '正在调用模型' } },
+      { type: 'text', data: { content: '部分答案' } },
+    ])
+  })
+
+  it('progress 事件契约漂移转成明确错误', () => {
+    expect(parseAgentSse('event: progress\ndata: {"message":42}\n\n')).toEqual([
+      { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } },
+    ])
+  })
+
   it('同一发送任务的重试复用 request id 和幂等键', () => {
     const turn = createAgentTurn('task-1', '继续寻找 10 人', { type: 'job', id: 154 }, 'request-fixed')
     expect(turn.requestId).toBe('request-fixed')

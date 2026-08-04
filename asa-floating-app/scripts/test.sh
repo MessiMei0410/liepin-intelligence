@@ -12,7 +12,13 @@ swiftc \
   -o "$TEST_DIR/native-boundary-tests" \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
+  src/DiagnosticsPage.swift \
   tests/NativeBoundaryTests.swift
 
 "$TEST_DIR/native-boundary-tests"
+
+# Full typecheck so AppDelegate/main.swift stay under compile-time guard
+# even though they are not linked into the test binary.
+swiftc -typecheck -target "${ARCH}-apple-macos${DEPLOYMENT_TARGET}" src/*.swift
+
 echo "ASA native boundary tests passed"

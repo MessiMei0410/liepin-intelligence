@@ -1683,6 +1683,43 @@ class CoreService:
         actor: str = "local",
         surface: str = "asa_web",
     ) -> tuple[dict[str, Any], bool]:
+        replay, is_replay = self.begin_idempotent(
+            operation=operation,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            target_type=target_type,
+            target_id=target_id,
+        )
+        if is_replay:
+            return replay, True
+        response = self.complete_idempotent(
+            operation=operation,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            target_type=target_type,
+            target_id=target_id,
+            action=action,
+            actor=actor,
+            surface=surface,
+        )
+        return response, False
+
+    def begin_idempotent(
+        self,
+        *,
+        operation: str,
+        request_id: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        target_type: str,
+        target_id: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """幂等"开始"段：登记处理租约，重放/冲突语义与 execute_idempotent 完全一致。
+
+        命中重放返回 (已登记响应, True)；否则租约已写入、返回 (None, False)，
+        调用方随后必须走 complete_idempotent 登记最终结果（成功或 failed 落账）。
+        """
         if not request_id or not idempotency_key:
             raise ValueError("request_id and Idempotency-Key are required")
         # target 也纳入 hash：同一 key+body 打到不同 target 必须判 409 冲突，
@@ -1747,6 +1784,21 @@ class CoreService:
                 )
         if conflict:
             raise IdempotencyConflict(conflict)
+        return None, False
+
+    def complete_idempotent(
+        self,
+        *,
+        operation: str,
+        request_id: str,
+        idempotency_key: str,
+        target_type: str,
+        target_id: str,
+        action: Callable[[], dict[str, Any]],
+        actor: str = "local",
+        surface: str = "asa_web",
+    ) -> dict[str, Any]:
+        """幂等"完成"段：执行 action 并登记结果（completed + 审计；异常时 failed 落账后原样抛出）。"""
         try:
             response = action()
         except Exception as exc:
@@ -1799,7 +1851,7 @@ class CoreService:
                 (audit_id, actor, surface, request_id, operation, target_type, target_id,
                  json.dumps(response, ensure_ascii=False), "success", json.dumps({"idempotency_key": idempotency_key})),
             )
-        return response, False
+        return response
 
     def _record_sourcing_signal_safely(
         self,

@@ -131,6 +131,35 @@ def test_copilot_session_patch_requires_visible_messages(db_path: Path) -> None:
     assert "ghost-focus-task" not in visible
 
 
+def test_orphan_copilot_session_metadata_is_collected_at_init(db_path: Path) -> None:
+    # 消息被删后残留的 metadata 是孤儿：初始化（ensure_schema）时清理；
+    # 有消息的会话 metadata 不受影响，且清理幂等可重复。
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("INSERT INTO agent_copilot_sessions(session_id,title) VALUES ('orphan-task','孤儿会话')")
+        conn.execute(
+            """INSERT INTO agent_copilot_messages
+               (session_id,context_type,context_id,role,content,structured_json)
+               VALUES ('alive-task','job',154,'user','继续推进这个岗位','{}')"""
+        )
+        conn.execute("INSERT INTO agent_copilot_sessions(session_id,title) VALUES ('alive-task','活跃会话')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    create_app(db_path=db_path, start_legacy=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        remaining = {
+            row[0] for row in conn.execute(
+                "SELECT session_id FROM agent_copilot_sessions WHERE session_id IN ('orphan-task','alive-task')"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert remaining == {"alive-task"}
+
+
 def test_copilot_session_patch_idempotency_key_is_scoped_to_target(db_path: Path) -> None:
     # 幂等查找键不含 target 时，同 key+body 打不同 session 会静默重放第一个 target 的响应；
     # target 纳入 request_hash 后必须判 409，同 target 的重放仍然正常。
@@ -397,6 +426,66 @@ def test_stream_replays_the_canonical_copilot_result_idempotently(db_path: Path)
         assert "event: done" in first.text
         assert "turn_decision_v2" in replay.text
         assert '"idempotent_replay": true' in replay.text
+
+
+def test_stream_emits_progress_first_and_skips_it_on_replay(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        client.app.state.core.copilot = lambda *_args, **_kwargs: {
+            "ok": True,
+            "session_id": "stream-progress",
+            "answer": "处理完成",
+            "context": {},
+            "references": [],
+            "suggested_actions": [],
+        }
+        payload = {
+            "request_id": "stream-progress-request",
+            "session_id": "stream-progress",
+            "message": "今天先处理什么？",
+            "context": {"type": "page", "page": "overview"},
+        }
+        headers = {"Idempotency-Key": "stream-progress-key"}
+        first = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+        replay = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+
+        assert first.status_code == 200
+        first_frame = first.text.split("\n\n", 1)[0]
+        assert first_frame.startswith("event: progress")
+        assert '"message"' in first_frame
+        assert "event: done" in first.text
+        # 重放路径直接放已登记结果，不重复 progress。
+        assert replay.status_code == 200
+        assert "event: progress" not in replay.text
+        assert "event: done" in replay.text
+        assert '"idempotent_replay": true' in replay.text
+
+
+def test_stream_failure_ends_with_error_event_and_keeps_failed_bookkeeping(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        def failing(*_args, **_kwargs):
+            raise RuntimeError("decision pipeline exploded")
+
+        client.app.state.core.copilot = failing
+        payload = {
+            "request_id": "stream-error-request",
+            "session_id": "stream-error",
+            "message": "触发一次失败",
+            "context": {"type": "page", "page": "overview"},
+        }
+        headers = {"Idempotency-Key": "stream-error-key"}
+        response = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+
+        # 流已开始 → 以 error 事件收尾，不裸断连、不补 done。
+        assert response.status_code == 200
+        assert "event: progress" in response.text
+        assert "event: error" in response.text
+        assert "decision pipeline exploded" in response.text
+        assert "event: done" not in response.text
+
+        # failed 落账语义不变：同 key 重试在流开始前判 409 冲突（HTTP 通道）。
+        retry = client.post("/api/v1/copilot/stream", json=payload, headers=headers)
+        assert retry.status_code == 409
+        assert "previous request failed" in retry.json()["detail"]
 
 
 def test_legacy_agent_endpoint_is_a_canonical_idempotent_alias(db_path: Path) -> None:

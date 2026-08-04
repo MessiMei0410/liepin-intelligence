@@ -6,6 +6,8 @@ import { agentConversationReducer, initialAgentConversationState } from './conve
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 
 const ACTIVE_SESSION_KEY = 'asaAgentSessionId'
+// 与 api.agentSession 默认 limit 对齐：拉满即视为历史被截断。
+const SESSION_MESSAGE_LIMIT = 100
 
 const focusLabel = (focus?: Record<string, unknown> | null) => {
   if (!focus) return ''
@@ -74,9 +76,14 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
   const [taskError, setTaskError] = useState('')
   const [focusError, setFocusError] = useState('')
   const [focusBusy, setFocusBusy] = useState(false)
+  const [turnProgress, setTurnProgress] = useState('')
+  const [historyTruncated, setHistoryTruncated] = useState(false)
+  const [searchUnavailable, setSearchUnavailable] = useState(false)
   const [contextConflict, setContextConflict] = useState<{ incoming: AgentContext; restored?: AgentContext; label: string }>()
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const generationRef = useRef(0)
+  const searchedRef = useRef(false)
+  const searchSeqRef = useRef(0)
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)
   const { messages, phase, error } = conversation
@@ -89,16 +96,30 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
       setSessions(Array.isArray(result.sessions) ? result.sessions : [])
     } catch { /* Core upgrade compatibility: chat still works. */ }
   }
+  // 任务搜索走服务端 q 参数；请求失败时回落本地过滤，不打断输入。
+  const searchSessions = async (query: string, seq: number) => {
+    try {
+      const result = await api.agentSessions(30, query)
+      if (seq !== searchSeqRef.current) return
+      setSessions(Array.isArray(result.sessions) ? result.sessions : [])
+      setSearchUnavailable(false)
+    } catch {
+      if (seq === searchSeqRef.current) setSearchUnavailable(true)
+    }
+  }
   const restoreSession = async (id: string) => {
     controllerRef.current?.abort()
     const generation = ++generationRef.current
     setContextConflict(undefined)
+    setTurnProgress('')
+    setHistoryTruncated(false)
     dispatch({ type: 'restore_started' })
     try {
       const result = await api.agentSession(id)
       if (generation !== generationRef.current) return
       const restoredFocus = result.business_focus || null
       setSessionId(result.session_id); dispatch({ type: 'restore_succeeded', messages: result.messages }); setFocus(restoredFocus)
+      setHistoryTruncated(result.messages.length >= SESSION_MESSAGE_LIMIT)
       const restoredContext = focusContext(restoredFocus)
       const incoming = attachedContextRef.current
       const incomingIsBusiness = Boolean(incoming.type && incoming.type !== 'page')
@@ -129,6 +150,22 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
   useEffect(() => {
     attachedContextRef.current = attachedContext
   }, [attachedContext])
+  // 搜索输入 300ms 防抖后请求服务端；清空时恢复默认列表。
+  useEffect(() => {
+    const query = taskQuery.trim()
+    if (!query) {
+      if (searchedRef.current) {
+        searchedRef.current = false
+        setSearchUnavailable(false)
+        void refreshSessions()
+      }
+      return
+    }
+    searchedRef.current = true
+    const seq = ++searchSeqRef.current
+    const timer = window.setTimeout(() => void searchSessions(query, seq), 300)
+    return () => window.clearTimeout(timer)
+  }, [taskQuery])
   useEffect(() => {
     if (typeof endRef.current?.scrollIntoView === 'function') endRef.current.scrollIntoView({ block: 'end' })
   }, [messages, loading])
@@ -136,7 +173,7 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
 
   const startTaskWithContext = (next: AgentContext) => {
     controllerRef.current?.abort(); generationRef.current += 1; setSessionId(''); dispatch({ type: 'task_reset' }); setFocus(null); setDraft(''); setLastTurn(undefined)
-    setAttachedContext(next); setContextConflict(undefined); setFocusError('')
+    setAttachedContext(next); setContextConflict(undefined); setFocusError(''); setTurnProgress(''); setHistoryTruncated(false)
     localStorage.removeItem(ACTIVE_SESSION_KEY); setHistoryOpen(false)
   }
   const newTask = () => startTaskWithContext(context.type && context.type !== 'page' ? context : { type: 'page', page: 'agent' })
@@ -151,7 +188,7 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
   const runTurn = async (turn: AgentTurn, retrying = false) => {
     const controller = new AbortController()
     const generation = generationRef.current
-    controllerRef.current = controller; setLastTurn(turn)
+    controllerRef.current = controller; setLastTurn(turn); setTurnProgress('')
     dispatch({ type: 'turn_started', requestId: turn.requestId, message: turn.message, context: turn.context, retry: retrying })
     let completed = false
     let streamFailed = false
@@ -162,9 +199,14 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
         if (event.type === 'context') {
           if (!contextSessionId) contextSessionId = event.data.session_id
           setSessionId(event.data.session_id); localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
+        } else if (event.type === 'progress') {
+          // 受理/阶段进度提示：临时状态行，首个 text/done/error 到达后清除。
+          setTurnProgress(event.data.message)
         } else if (event.type === 'text') {
+          setTurnProgress('')
           dispatch({ type: 'turn_text', requestId: turn.requestId, content: event.data.content })
         } else if (event.type === 'done') {
+          setTurnProgress('')
           if (event.data.ok === false) {
             streamFailed = true
             dispatch({ type: 'turn_failed', requestId: turn.requestId, error: event.data.error || 'Agent 处理失败，请重试' })
@@ -180,6 +222,7 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
           dispatch({ type: 'turn_done', requestId: turn.requestId, result: event.data })
           localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
         } else {
+          setTurnProgress('')
           streamFailed = true
           dispatch({ type: 'turn_failed', requestId: turn.requestId, error: event.data.error })
         }
@@ -190,7 +233,10 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
       if (generation !== generationRef.current) return
       if (controller.signal.aborted) dispatch({ type: 'turn_stopped', requestId: turn.requestId })
       else dispatch({ type: 'turn_failed', requestId: turn.requestId, error: value instanceof Error ? value.message : String(value) })
-    } finally { if (controllerRef.current === controller) controllerRef.current = undefined }
+    } finally {
+      if (controllerRef.current === controller) controllerRef.current = undefined
+      if (generation === generationRef.current) setTurnProgress('')
+    }
   }
   const submit = (event?: FormEvent) => {
     event?.preventDefault()
@@ -246,11 +292,16 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
     } catch (value) { setTaskError(value instanceof Error ? value.message : String(value)) }
     finally { setTaskBusy('') }
   }
-  const currentFocus = attachedContext.type && attachedContext.type !== 'page'
-    ? contextLabel(attachedContext) || focusLabel(focus)
-    : focusLabel(focus)
+  // 焦点以服务端 business_focus 为准；仅服务端无焦点时才回落到本地附着上下文文案。
+  const serverFocusLabel = focusLabel(focus)
+  const currentFocus = serverFocusLabel
+    || (attachedContext.type && attachedContext.type !== 'page' ? contextLabel(attachedContext) : '')
   const focusNeedsClarification = Boolean(focus?.needs_clarification || (Array.isArray(focus?.conflicts) && focus.conflicts.length))
-  const visibleSessions = sessions.filter(item => `${item.title} ${item.preview}`.toLowerCase().includes(taskQuery.trim().toLowerCase()))
+  const trimmedQuery = taskQuery.trim()
+  // 服务端搜索请求失败时回落到本地过滤；其余情况列表即服务端结果。
+  const visibleSessions = trimmedQuery && searchUnavailable
+    ? sessions.filter(item => `${item.title} ${item.preview}`.toLowerCase().includes(trimmedQuery.toLowerCase()))
+    : sessions
 
   return <div className="agent-workspace">
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
@@ -259,12 +310,14 @@ export function AgentWorkspace({ dashboard, workbench, templates, context, onOpe
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
       <div className="agent-messages">
+        {historyTruncated && <p className="agent-truncated">仅显示最近 100 条消息</p>}
         {!messages.length && !restoring && <AgentHome dashboard={dashboard} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} />}
         {restoring && <div className="agent-loading"><LoaderCircle className="spin"/>恢复任务</div>}
         {messages.map((message, index) => <div className={`agent-message ${message.role}`} key={`${index}:${message.created_at || ''}`}>
           <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span><div className="agent-message-content">{message.content || (loading && index === messages.length - 1 ? <LoaderCircle className="spin"/> : null)}</div>
           {message.role === 'assistant' && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} onOpenFull={onOpenFullObject} />)}
         </div>)}
+        {turnProgress && <div className="agent-progress" role="status"><LoaderCircle className="spin"/><span>正在处理：{turnProgress}</span></div>}
         {(error || (phase === 'stopped' && lastTurn)) && <div className="agent-error"><span>{error || '已停止生成'}</span>{lastTurn && <button className="button" onClick={retry}>重试</button>}</div>}
         <div ref={endRef}/>
       </div>

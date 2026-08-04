@@ -675,35 +675,56 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     ) -> StreamingResponse:
         """Canonical Copilot decision exposed as SSE transport."""
         key = idempotency_key or f"copilot-stream-{body.request_id}"
+        # 先登记幂等租约：冲突/参数错误仍在流开始前走 HTTP 非 2xx（409 JSON），语义不变。
         try:
-            result, _ = await asyncio.to_thread(
-                core.execute_idempotent,
+            replay, is_replay = await asyncio.to_thread(
+                core.begin_idempotent,
                 operation="copilot.message",
                 request_id=body.request_id,
                 idempotency_key=key,
                 payload=body.model_dump(),
                 target_type="copilot_session",
                 target_id=body.session_id or "new",
-                action=lambda: core.copilot(body.message, session_id=body.session_id, context=body.context),
-                surface="asa_copilot_stream",
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
         async def stream():
-            context_payload = {
-                "session_id": result.get("session_id"),
-                "context": result.get("context") or {},
-                "references": result.get("references") or [],
-                "suggested_actions": result.get("suggested_actions") or [],
-            }
-            yield f"event: context\ndata: {json.dumps(context_payload, ensure_ascii=False)}\n\n"
-            answer = str(result.get("answer") or "")
-            for offset in range(0, len(answer), 80):
-                if await request.is_disconnected():
-                    return
-                yield f"event: text\ndata: {json.dumps({'content': answer[offset:offset + 80]}, ensure_ascii=False)}\n\n"
-            yield f"event: done\ndata: {json.dumps(result, ensure_ascii=False)}\n\n"
+            # 流开始后的任何失败（计算或分片发送）都以 error 事件收尾，不裸断连；
+            # 前端两种通道（HTTP 非 2xx / 流内 error）都兼容。
+            try:
+                if is_replay:
+                    # 重放只放已登记结果，不重复 progress。
+                    result = replay
+                else:
+                    progress = {"message": "请求已受理，正在处理"}
+                    yield f"event: progress\ndata: {json.dumps(progress, ensure_ascii=False)}\n\n"
+                    result = await asyncio.to_thread(
+                        core.complete_idempotent,
+                        operation="copilot.message",
+                        request_id=body.request_id,
+                        idempotency_key=key,
+                        target_type="copilot_session",
+                        target_id=body.session_id or "new",
+                        action=lambda: core.copilot(body.message, session_id=body.session_id, context=body.context),
+                        surface="asa_copilot_stream",
+                    )
+                context_payload = {
+                    "session_id": result.get("session_id"),
+                    "context": result.get("context") or {},
+                    "references": result.get("references") or [],
+                    "suggested_actions": result.get("suggested_actions") or [],
+                }
+                yield f"event: context\ndata: {json.dumps(context_payload, ensure_ascii=False)}\n\n"
+                answer = str(result.get("answer") or "")
+                for offset in range(0, len(answer), 80):
+                    if await request.is_disconnected():
+                        return
+                    yield f"event: text\ndata: {json.dumps({'content': answer[offset:offset + 80]}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps(result, ensure_ascii=False)}\n\n"
+            except Exception as exc:
+                error = {"error": str(exc)[:500] or type(exc).__name__}
+                yield f"event: error\ndata: {json.dumps(error, ensure_ascii=False)}\n\n"
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/api/v1/copilot/agent")

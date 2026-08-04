@@ -25,5 +25,42 @@ struct NativeBoundaryTests {
         precondition(clipboard["change_count"] as? Int == 7)
         precondition(clipboard["preview"] == nil)
         precondition(clipboard["length"] == nil)
+
+        // Diagnostics page: Copilot recovery button only exists in --compat-copilot mode.
+        precondition(DiagnosticsPage.copilotButtonMarkup(compatibilityCopilotEnabled: false).isEmpty)
+        precondition(DiagnosticsPage.copilotButtonMarkup(compatibilityCopilotEnabled: true).contains("showFloating"))
+
+        // Diagnostics page baseURL: main window uses /asa-app, floating panel uses /asa-floating.
+        let mainWindowURL = URL(string: "http://127.0.0.1:8765/asa-app")!
+        let floatingPanelURL = URL(string: "http://127.0.0.1:8765/asa-floating?ui=0.2.23")!
+        precondition(DiagnosticsPage.baseURL(target: .mainWindow, mainWindowURL: mainWindowURL, floatingURL: floatingPanelURL).path == "/asa-app")
+        precondition(DiagnosticsPage.baseURL(target: .floatingPanel, mainWindowURL: mainWindowURL, floatingURL: floatingPanelURL).path == "/asa-floating")
+
+        // Diagnostics page auto-reload: poll /api/v1/health and jump back per target.
+        let sampleDiagnostics = [
+            ServiceDiagnostic(order: 0, title: "ASA Core", path: "/api/v1/health", ok: false, status: "未连接")
+        ]
+        let mainPageHTML = DiagnosticsPage.html(
+            detail: "",
+            diagnostics: sampleDiagnostics,
+            compatibilityCopilotEnabled: false,
+            target: .mainWindow
+        )
+        precondition(!mainPageHTML.contains("showFloating"))
+        precondition(mainPageHTML.contains("fetch('/api/v1/health'"))
+        precondition(mainPageHTML.contains("}, 5000)"))
+        precondition(mainPageHTML.contains("location.href = '/asa-app'"))
+        precondition(!mainPageHTML.contains("location.href = '/asa-floating'"))
+
+        let panelPageHTML = DiagnosticsPage.html(
+            detail: "本机 ASA 服务未连接",
+            diagnostics: sampleDiagnostics,
+            compatibilityCopilotEnabled: true,
+            target: .floatingPanel
+        )
+        precondition(panelPageHTML.contains("showFloating"))
+        precondition(panelPageHTML.contains("fetch('/api/v1/health'"))
+        precondition(panelPageHTML.contains("location.href = '/asa-floating'"))
+        precondition(!panelPageHTML.contains("location.href = '/asa-app'"))
     }
 }

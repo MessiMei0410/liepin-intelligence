@@ -878,6 +878,15 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # 孤儿会话元数据清理：metadata 只在消息存在时才会写入（见 update_copilot_session），
+    # 因此没有任何消息的 metadata 行必是消息被删后的残留，可安全删除；语句幂等可重复执行。
+    conn.execute(
+        """DELETE FROM agent_copilot_sessions
+           WHERE NOT EXISTS (
+               SELECT 1 FROM agent_copilot_messages c
+               WHERE c.session_id = agent_copilot_sessions.session_id
+           )"""
+    )
     _ensure_column(conn, "agent_workflows", "archived_at", "TEXT")
     _ensure_column(conn, "agent_workflows", "business_outcome", "TEXT")
     _ensure_column(conn, "agent_goals", "business_outcome", "TEXT")

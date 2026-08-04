@@ -77,10 +77,14 @@ test('Agent 任务可搜索、改名、归档并解除业务焦点', async ({ pa
     if (url.pathname.endsWith('/agent-manage-task')) {
       return route.fulfill({ json: { ok: true, session_id: 'agent-manage-task', messages: [], business_focus: focus } })
     }
-    return route.fulfill({ json: { ok: true, sessions: archived ? [] : [
+    // 搜索已改为服务端语义：前端会带 q 参数，mock 按 title/preview 过滤以模拟 Core 行为。
+    const query = (url.searchParams.get('q') || '').trim()
+    const all = [
       { session_id: 'agent-manage-task', title, preview: '继续补充候选人', message_count: 2, business_focus: focus },
       { session_id: 'agent-other-task', title: '长越岗位分析', preview: '分析完成', message_count: 4 },
-    ] } })
+    ]
+    const sessions = archived ? [] : query ? all.filter(item => item.title.includes(query) || item.preview.includes(query)) : all
+    return route.fulfill({ json: { ok: true, sessions } })
   })
 
   await page.goto('/asa-app')

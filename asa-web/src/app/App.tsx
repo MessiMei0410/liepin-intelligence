@@ -38,9 +38,23 @@ export function App() {
   const [analysisBusy, setAnalysisBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [coreOffline, setCoreOffline] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [agentContext, setAgentContext] = useState<AgentContext>({ type: 'page', page: 'agent', mode: 'page_review' })
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
+  const coreFailuresRef = useRef(0)
+
+  // Core 健康探测：连续 2 次失败才判定离线；成功一次即复位，不重复打搅。
+  const probeCore = async () => {
+    try {
+      await api.health()
+      coreFailuresRef.current = 0
+      setCoreOffline(false)
+    } catch {
+      coreFailuresRef.current += 1
+      if (coreFailuresRef.current >= 2) setCoreOffline(true)
+    }
+  }
 
   const refreshWorkbench = async () => {
     const [nextWorkbench, nextTemplates] = await Promise.allSettled([api.workbench(), api.analyticsTemplates()])
@@ -64,8 +78,9 @@ export function App() {
     const refresh = async () => {
       if (!active || refreshing || document.hidden) return
       refreshing = true
-      try { await refreshWorkbench() } finally { refreshing = false }
+      try { await Promise.all([refreshWorkbench(), probeCore()]) } finally { refreshing = false }
     }
+    queueMicrotask(() => void probeCore())
     const timer = window.setInterval(() => void refresh(), 15_000)
     const onVisible = () => { if (!document.hidden) void refresh() }
     window.addEventListener('focus', onVisible)
@@ -317,6 +332,7 @@ export function App() {
         {!analysis && (tab === 'jobs' || tab === 'candidates' || tab === 'progress') && <label className="search"><Search/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索姓名、公司或岗位" aria-label="搜索姓名、公司或岗位" /></label>}
         {!analysis && tab !== 'agent' && <button className="button copilot-launch" title="交给 Agent" aria-label="交给 Agent" onClick={()=>openAgent(activeContext)}><MessageSquareText/><span>Agent</span></button>}
       </header>
+      {coreOffline && <div className="core-offline-banner" role="alert"><span>ASA Core 连接中断，检查本机服务后可点击重连</span><button className="button" onClick={() => void probeCore()}>重连</button></div>}
       <div className="content">
         {analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
         {!analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}

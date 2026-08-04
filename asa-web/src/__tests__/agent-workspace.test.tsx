@@ -68,13 +68,17 @@ describe('Agent workspace', () => {
     expect(screen.getByRole('status', { name: '当前任务焦点' })).toHaveTextContent('士兰微 / 电源专家')
   })
 
-  it('支持搜索、内联重命名和二次确认归档任务', async () => {
+  it('支持服务端搜索、内联重命名和二次确认归档任务', async () => {
+    const allSessions = [
+      { session_id: 'task-1', title: '士兰微寻访', preview: '继续找人', message_count: 2 },
+      { session_id: 'task-2', title: '长越岗位分析', preview: '分析完成', message_count: 4 },
+    ]
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input)
-      if (url.includes('/api/v1/copilot/sessions?')) return mockResponse({ ok: true, sessions: [
-        { session_id: 'task-1', title: '士兰微寻访', preview: '继续找人', message_count: 2 },
-        { session_id: 'task-2', title: '长越岗位分析', preview: '分析完成', message_count: 4 },
-      ] })
+      if (url.includes('/api/v1/copilot/sessions?')) {
+        const q = new URLSearchParams(url.split('?')[1] || '').get('q') || ''
+        return mockResponse({ ok: true, sessions: q ? allSessions.filter(item => item.title.includes(q)) : allSessions })
+      }
       if (url.includes('/api/v1/copilot/sessions/task-1') && init?.method === 'PATCH') return mockResponse({ ok: true, session_id: 'task-1', title: '士兰微电源寻访', archived: false, business_focus: null })
       return mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })
     })
@@ -84,8 +88,10 @@ describe('Agent workspace', () => {
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
     fireEvent.change(await screen.findByLabelText('搜索任务'), { target: { value: '士兰微' } })
+    // 300ms 防抖后走服务端 q 参数
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes(`q=${encodeURIComponent('士兰微')}`))).toBe(true))
+    await waitFor(() => expect(screen.queryByText('长越岗位分析')).not.toBeInTheDocument())
     expect(screen.getAllByText('士兰微寻访').length).toBeGreaterThan(0)
-    expect(screen.queryByText('长越岗位分析')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '重命名任务：士兰微寻访' }))
     const rename = screen.getByRole('form', { name: '重命名任务' })
@@ -297,6 +303,138 @@ describe('Agent workspace', () => {
 
     resolvePatch(mockResponse({ ok: true, session_id: 'task-1', title: '士兰微电源寻访', archived: false, business_focus: null }))
     await waitFor(() => expect(screen.queryByRole('form', { name: '重命名任务' })).not.toBeInTheDocument())
+  })
+
+  it('服务端搜索请求失败时回落本地过滤', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/copilot/sessions?')) {
+        if (url.includes('q=')) return mockResponse({ detail: 'Core 暂不可用' }, false, 500)
+        return mockResponse({ ok: true, sessions: [
+          { session_id: 'task-1', title: '士兰微寻访', preview: '继续找人', message_count: 2 },
+          { session_id: 'task-2', title: '长越岗位分析', preview: '分析完成', message_count: 4 },
+        ] })
+      }
+      return mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByText('长越岗位分析')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('搜索任务'), { target: { value: '士兰微' } })
+    await waitFor(() => expect(screen.queryByText('长越岗位分析')).not.toBeInTheDocument())
+    expect(screen.getAllByText('士兰微寻访').length).toBeGreaterThan(0)
+  })
+
+  it('清空搜索后恢复默认任务列表', async () => {
+    const allSessions = [
+      { session_id: 'task-1', title: '士兰微寻访', preview: '继续找人', message_count: 2 },
+      { session_id: 'task-2', title: '长越岗位分析', preview: '分析完成', message_count: 4 },
+    ]
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/copilot/sessions?')) {
+        const q = new URLSearchParams(url.split('?')[1] || '').get('q') || ''
+        return mockResponse({ ok: true, sessions: q ? allSessions.filter(item => item.title.includes(q)) : allSessions })
+      }
+      return mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(await screen.findByLabelText('搜索任务'), { target: { value: '士兰微' } })
+    await waitFor(() => expect(screen.queryByText('长越岗位分析')).not.toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('搜索任务'), { target: { value: '' } })
+    expect(await screen.findByText('长越岗位分析')).toBeInTheDocument()
+    // 恢复默认列表的请求不带 q 参数
+    const listCalls = fetchMock.mock.calls.map(([input]) => String(input)).filter(url => url.includes('/api/v1/copilot/sessions?'))
+    expect(listCalls[listCalls.length - 1]).not.toContain('q=')
+  })
+
+  it('progress 事件显示为临时状态行，正文到达后清除且不写入消息列表', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const chunks = [
+      'event: context\ndata: {"session_id":"task-1"}\n\nevent: progress\ndata: {"message":"梳理岗位需求"}\n\n',
+      'event: text\ndata: {"content":"部分答案"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-1","answer":"部分答案"}\n\n',
+    ]
+    let index = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/copilot/stream')
+      ? ({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (index > 0) await gate
+              return index < chunks.length
+                ? { value: new TextEncoder().encode(chunks[index++]), done: false }
+                : { value: undefined, done: true }
+            },
+          }),
+        },
+      }) as unknown as Response
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(await screen.findByText('正在处理：梳理岗位需求')).toBeInTheDocument()
+    expect(screen.queryByText('部分答案')).not.toBeInTheDocument()
+
+    release()
+    expect(await screen.findByText('部分答案')).toBeInTheDocument()
+    expect(screen.queryByText('正在处理：梳理岗位需求')).not.toBeInTheDocument()
+  })
+
+  it('服务端焦点有值时优先于本地附着上下文文案，冲突提示不受影响', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-1', business_focus: { context: { type: 'job', id: 154 }, client: '士兰微', job: { title: '电源专家' } },
+        messages: [{ role: 'user', content: '继续找人' }, { role: 'assistant', content: '甲岗位进展' }],
+      })
+      return mockResponse({ ok: true, sessions: [] })
+    }))
+    renderWorkspace({ type: 'job', id: 155, client: '长越', job: '算法专家' })
+
+    // 冲突提示照常出现，且焦点栏以服务端 business_focus 为准而非本地「长越 / 算法专家」
+    expect(await screen.findByRole('alert')).toHaveTextContent('你正带着新的业务上下文进入，当前任务焦点为 士兰微 / 电源专家')
+    const focusBar = screen.getByRole('status', { name: '当前任务焦点' })
+    expect(focusBar).toHaveTextContent('士兰微 / 电源专家')
+    expect(focusBar).not.toHaveTextContent('长越')
+  })
+
+  it('服务端无焦点时回落到本地附着上下文文案', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
+      ? mockResponse({ ok: true, sessions: [] })
+      : mockResponse({ ok: true, session_id: 'task-1', title: '任务', archived: false, business_focus: null })))
+    renderWorkspace({ type: 'job', id: 154, client: '士兰微', job: '电源专家' })
+
+    expect(await screen.findByRole('status', { name: '当前任务焦点' })).toHaveTextContent('士兰微 / 电源专家')
+  })
+
+  it('恢复拉满 100 条消息时提示仅显示最近 100 条', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    const messages = Array.from({ length: 100 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `历史消息 ${index + 1}` }))
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-1?limit=100')
+      ? mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages })
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByText('仅显示最近 100 条消息')).toBeInTheDocument()
+    expect(screen.getByText('历史消息 100')).toBeInTheDocument()
+  })
+
+  it('恢复消息不足 100 条时不显示截断提示', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-1?limit=100')
+      ? mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '已恢复任务' }] })
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
+    expect(screen.queryByText('仅显示最近 100 条消息')).not.toBeInTheDocument()
   })
 })
 

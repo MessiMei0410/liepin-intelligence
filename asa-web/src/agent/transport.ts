@@ -27,6 +27,7 @@ export type AgentTurnResult = {
 
 export type AgentSseEvent =
   | { type: 'context'; data: { session_id: string; context?: AgentContext; references?: AgentReference[]; suggested_actions?: Array<Record<string, unknown>> } }
+  | { type: 'progress'; data: { message: string } }
   | { type: 'text'; data: { content: string } }
   | { type: 'done'; data: AgentTurnResult }
   | { type: 'error'; data: { error: string } }
@@ -44,6 +45,7 @@ const contextEventSchema = z.object({
   suggested_actions: z.array(structuredRecord).optional(),
 })
 const textEventSchema = z.object({ content: z.string() })
+const progressEventSchema = z.object({ message: z.string() })
 const doneEventSchema = z.object({
   ok: z.boolean().optional(), session_id: z.string().min(1), answer: z.string(), error: z.string().optional(), context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(), suggested_actions: z.array(structuredRecord).optional(),
@@ -62,13 +64,15 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   try { value = JSON.parse(rawData) } catch { return { type: 'error', data: { error: 'Agent 返回了无法解析的数据' } } }
   const parsed = event === 'context' ? contextEventSchema.safeParse(value)
     : event === 'text' ? textEventSchema.safeParse(value)
-      : event === 'done' ? doneEventSchema.safeParse(value)
-        : event === 'error' ? errorEventSchema.safeParse(value)
-          : undefined
+      : event === 'progress' ? progressEventSchema.safeParse(value)
+        : event === 'done' ? doneEventSchema.safeParse(value)
+          : event === 'error' ? errorEventSchema.safeParse(value)
+            : undefined
   if (!parsed) return undefined
   if (!parsed.success) return { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } }
   if (event === 'context') return { type: 'context', data: parsed.data as Extract<AgentSseEvent, { type: 'context' }>['data'] }
   if (event === 'text') return { type: 'text', data: parsed.data as Extract<AgentSseEvent, { type: 'text' }>['data'] }
+  if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
   if (event === 'done') return { type: 'done', data: parsed.data as AgentTurnResult }
   if (event === 'error') return { type: 'error', data: parsed.data as { error: string } }
   return undefined

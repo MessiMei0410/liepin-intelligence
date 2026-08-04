@@ -498,8 +498,9 @@ export const api = {
   bootstrap: () => json<Bootstrap>('/api/v1/bootstrap'),
   dashboard: () => json<Dashboard>('/api/v1/dashboard'),
   workbench: () => json<Workbench>('/api/v1/workbench?limit=300'),
-  agentSessions: (limit = 30) => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}`).then(parseAgentSessionList),
+  agentSessions: (limit = 30, q = '') => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`).then(parseAgentSessionList),
   agentSession: (sessionId: string, limit = 100) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}`).then(parseAgentSession),
+  health: () => json<{ ok?: boolean; status?: string }>('/api/v1/health'),
   updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
     write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),
   analysisRun: (runId: string) => json<{ ok: boolean; result: AnalysisResult; duration_ms: number; template_id?: string | null }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}`),

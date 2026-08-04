@@ -21,6 +21,7 @@ swiftc \
   src/main.swift \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
+  src/DiagnosticsPage.swift \
   src/AppDelegate.swift \
   -framework Cocoa \
   -framework Vision \
@@ -61,9 +62,9 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.23</string>
+  <string>0.2.24</string>
   <key>CFBundleVersion</key>
-  <string>46</string>
+  <string>47</string>
   <key>LSMinimumSystemVersion</key>
   <string>__DEPLOYMENT_TARGET__</string>
   <key>LSUIElement</key>

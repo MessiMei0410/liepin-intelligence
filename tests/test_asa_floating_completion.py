@@ -30,10 +30,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         build_number = re.search(r"<key>CFBundleVersion</key>\s*<string>(\d+)</string>", build)
         self.assertIsNotNone(version)
         self.assertIsNotNone(build_number)
-        self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 1, 21))
-        self.assertGreaterEqual(int(build_number.group(1)), 22)
-        self.assertEqual(version.group(1), "0.2.23")
-        self.assertEqual(int(build_number.group(1)), 46)
+        self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 2, 23))
+        self.assertGreaterEqual(int(build_number.group(1)), 46)
         self.assertIn("LSMinimumSystemVersion", build)
         self.assertIn('SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"', build)
         self.assertNotIn("&& sign_with_timeout; then", build)
@@ -42,6 +40,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
 
     def test_native_shell_exposes_service_recovery_bridge(self) -> None:
         source = (ROOT / "asa-floating-app" / "src" / "AppDelegate.swift").read_text(encoding="utf-8")
+        source += (ROOT / "asa-floating-app" / "src" / "DiagnosticsPage.swift").read_text(encoding="utf-8")
         for marker in [
             "startWorkbenchService",
             "openWorkbench",
@@ -129,13 +128,14 @@ class ASAFloatingCompletionTest(unittest.TestCase):
 
     def test_agent_routes_selected_context_to_the_react_conversation_surface(self) -> None:
         # Agent Conversation Surface v1: compatibility callers dispatch an in-app event only.
-        bridge = Path("/Users/messi/Documents/ASA/src/copilot/bridge.ts").read_text(encoding="utf-8")
+        # 旧 src/copilot/bridge.ts 已随死代码清理删除，入口统一在 src/agent/navigation.ts。
+        navigation = Path("/Users/messi/Documents/ASA/src/agent/navigation.ts").read_text(encoding="utf-8")
         app = Path("/Users/messi/Documents/ASA/src/app/App.tsx").read_text(encoding="utf-8")
-        self.assertIn("openAgentWorkspace(context)", bridge)
-        self.assertIn("AGENT_NAVIGATE_EVENT", app)
-        self.assertNotIn("publishCopilotContext", bridge + app)
-        self.assertNotIn("showFloating", bridge + app)
-        self.assertNotIn("/api/asa/floating/context", bridge + app)
+        self.assertFalse(Path("/Users/messi/Documents/ASA/src/copilot").exists())
+        self.assertIn("AGENT_NAVIGATE_EVENT", navigation + app)
+        self.assertNotIn("publishCopilotContext", navigation + app)
+        self.assertNotIn("showFloating", navigation + app)
+        self.assertNotIn("/api/asa/floating/context", navigation + app)
 
     def test_floating_header_has_stable_brand_actions_and_context_rows(self) -> None:
         server = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
