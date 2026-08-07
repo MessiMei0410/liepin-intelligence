@@ -34,5 +34,11 @@ __pycache__/
 *.crt
 *.p12
 
+# Hermes 本地计划缓存
+.hermes/
+
+# 浏览器书签/下载临时 JSON
+text_claude.com_download_*.json
+
 # 系统文件
 .DS_Store
