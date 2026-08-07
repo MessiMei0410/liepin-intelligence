@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Activity, Ban, BriefcaseBusiness, Check, ChevronDown, ChevronUp, ExternalLink, LoaderCircle, Pause, Play, UserRound, Workflow } from 'lucide-react'
+import { Activity, Ban, BriefcaseBusiness, Building2, Check, ChevronDown, ChevronUp, CircleCheck, CircleDashed, ExternalLink, LoaderCircle, MapPin, Pause, Play, Target, UserRound, Workflow } from 'lucide-react'
 import { api, CandidateDetail, JobDetail } from '../api'
 import type { Workflow as WorkflowValue } from '../api'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
-import { WorkflowStrategy } from '../workflows/WorkflowStrategy'
 import type { AgentReference } from './transport'
 import { useDialogFocus } from '../shared/useDialogFocus'
 
@@ -22,8 +21,16 @@ const workflowProgressStatus: Record<string, string> = {
   waiting_external: '等待渠道回执', blocked: '已阻塞', failed: '技术失败',
   completed: '已完成', paused: '已暂停', cancelled: '已取消', superseded: '已被新修订替代',
 }
+const workflowStepStatus: Record<string, string> = {
+  pending: '待执行', queued: '排队中', running: '执行中', waiting_approval: '待审批', waiting_external: '等渠道',
+  completed: '已完成', skipped: '已跳过', failed: '失败', blocked: '阻塞', cancelled: '已取消',
+}
 
 const compactText = (value: unknown) => String(value || '').replace(/\s+/g, ' ').trim()
+const businessText = (value: unknown) => {
+  const text = compactText(value)
+  return /[\u3400-\u9fff]/.test(text) ? text : ''
+}
 const recordValue = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const recordList = (value: unknown) => Array.isArray(value) ? value.filter(item => item && typeof item === 'object') as Array<Record<string, unknown>> : []
 const textList = (value: unknown) => Array.isArray(value) ? value.map(item => compactText(item)).filter(Boolean) : []
@@ -39,12 +46,15 @@ function WorkflowPlanSummary({ progress, actionCard }: { progress?: Record<strin
   const approvals = recordList(progress?.pending_approvals).filter(item => compactText(item.status || 'pending') === 'pending')
   const evidence = recordList(actionCard?.evidence).filter(item => compactText(item.value)).slice(0, 4)
   const blocked = textList(actionCard?.blocked_reasons)
+  const business = recordValue(actionCard?.business_summary)
+  const task = compactText(business.task) || compactText(evidence.find(item => item.label === '理解目标')?.value) || compactText(progress?.label) || '准备执行'
+  const current = compactText(business.current) || compactText(progress?.label) || compactText(evidence.find(item => item.label === '当前步骤')?.value) || '准备执行'
   if (!workflowId && !evidence.length && !boundedTotal) return null
   return <section className="agent-workflow-summary" aria-label="执行方案摘要">
-    <div className="agent-workflow-summary-head"><b>推进方案</b><span>{workflowProgressStatus[status] || status || '状态待同步'}</span></div>
-    <p>{compactText(progress?.label) || compactText(evidence.find(item => item.label === '当前步骤')?.value) || '准备执行'}</p>
-    {boundedTotal > 0 && <><div className="agent-workflow-meter"><i style={{ width: `${percent}%` }}/></div><small>{boundedCompleted} / {boundedTotal} 步{approvals.length ? ` · ${approvals.length} 个审批待确认` : ''}</small></>}
-    {evidence.length > 0 && <dl>{evidence.map(item => <div key={`${compactText(item.label)}:${compactText(item.value)}`}><dt>{compactText(item.label) || '依据'}</dt><dd>{compactText(item.value)}</dd></div>)}</dl>}
+    <div className="agent-workflow-summary-head"><b>本次要做什么</b><span>{workflowProgressStatus[status] || status || '状态待同步'}</span></div>
+    <p className="agent-workflow-task">{task}</p>
+    {boundedTotal > 0 && <div className="agent-workflow-progress"><div className="agent-workflow-meter"><i style={{ width: `${percent}%` }}/></div><small>{boundedCompleted} / {boundedTotal} 步{approvals.length ? ` · ${approvals.length} 个审批待确认` : ''}</small></div>}
+    <p className="agent-workflow-current"><b>{status === 'planned' ? '下一步' : '当前'}</b><span>{current}</span></p>
     {blocked.length > 0 && <p className="agent-workflow-risk">{blocked.join('；')}</p>}
   </section>
 }
@@ -60,7 +70,6 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
   const [job, setJob] = useState<JobDetail>()
   const [workflow, setWorkflow] = useState<WorkflowValue>()
   const [workflowSummary, setWorkflowSummary] = useState<Record<string, unknown> | null>(null)
-  const [strategyOpen, setStrategyOpen] = useState(false)
   const [pending, setPending] = useState<{ action: CandidateAction; token: string; impact: string }>()
   const actionDialogRef = useDialogFocus<HTMLElement>(Boolean(pending))
   const [note, setNote] = useState('')
@@ -186,38 +195,46 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
     business_outcome: workflow.workflow.business_outcome,
     steps: workflow.steps,
   }) : null
-  const strategyStep = workflow?.steps.find(step => step.capability_id === 'search_strategy')
-  const strategyOutput = recordValue(strategyStep?.output)
-  const strategy = recordValue(strategyOutput.strategy)
-  const strategyChannels = recordValue(strategy.channels)
-  const reviewGates = recordValue(strategy.review_gates)
-  const strategyV2 = recordValue(strategyOutput.strategy_v2)
-  const workflowInlineActions = objectType === 'workflow'
-    ? recordList(actionCard?.next_actions).filter(action => compactText(action.type))
-    : []
   const summaryProgress = workflowSummary ? recordValue(workflowSummary.progress) : {}
   const summaryNextStep = workflowSummary ? recordValue(workflowSummary.next_step) : {}
+  const summaryStatus = compactText(workflowSummary?.status || workflowProgress?.status || 'planned')
   const displayedWorkflowProgress = workflowSummary ? {
     ...recordValue(workflowProgress),
     workflow_id: compactText(workflowSummary.workflow_id) || compactText(reference.id),
-    status: compactText(workflowSummary.status) || compactText(workflowProgress?.status || 'planned'),
+    status: summaryStatus,
     completed: Number(summaryProgress.completed ?? workflowProgress?.completed ?? 0),
     total: Number(summaryProgress.total ?? workflowProgress?.total ?? 0),
-    label: compactText(workflowSummary.current_stage) || compactText(summaryNextStep.business_label) || compactText(workflowProgress?.label) || '准备执行',
+    label: businessText(summaryNextStep.business_label) || businessText(workflowSummary.current_stage) || businessText(workflowProgress?.label) || (summaryStatus === 'completed' ? '任务已完成' : '准备执行'),
     pending_approvals: recordList(workflowSummary.pending_approvals),
   } : workflowProgress
+  const displayedWorkflowStatus = compactText(displayedWorkflowProgress?.status || 'planned')
+  const workflowInlineActions = objectType === 'workflow'
+    ? recordList(actionCard?.next_actions).filter(action => {
+      const type = compactText(action.type)
+      if (!type) return false
+      if (type === 'start_workflow') return displayedWorkflowStatus === 'planned'
+      if (type === 'workflow_approval') return ['planned', 'waiting_approval'].includes(displayedWorkflowStatus)
+      return true
+    })
+    : []
   const workflowIsActive = !!workflow && ['queued', 'running', 'waiting_approval', 'waiting_external'].includes(workflow.workflow.status)
   const workflowIsPaused = workflow?.workflow.status === 'paused'
-  return <article className={`agent-object ${expanded ? 'expanded' : ''}`}>
+  const rawWorkflowStage = compactText(workflow?.workflow.current_stage)
+  const activeWorkflowStep = workflow?.steps.find(step => !['completed', 'skipped'].includes(step.status))
+  const completedWorkflowStep = workflow ? [...workflow.steps].reverse().find(step => step.status === 'completed') : undefined
+  const workflowStage = businessText(rawWorkflowStage)
+    ? rawWorkflowStage
+    : activeWorkflowStep?.business_label || completedWorkflowStep?.business_label || '准备执行'
+  return <article className={`agent-object agent-object-${objectType} ${expanded ? 'expanded' : ''}`}>
     <button className="agent-object-toggle" onClick={toggle} aria-label={`${expanded ? '收起' : '展开'}${reference.label}`}>
       <Icon/><span><b>{reference.label}</b>{reference.subtitle && <small>{reference.subtitle}</small>}</span>{loading ? <LoaderCircle className="spin"/> : expanded ? <ChevronUp/> : <ChevronDown/>}
     </button>
-    {objectType === 'workflow' && <WorkflowPlanSummary progress={displayedWorkflowProgress} actionCard={actionCard}/>}
-    {workflowInlineActions.length > 0 && <div className="agent-object-actions agent-object-card-actions">{workflowInlineActions.map(action => {
+    {objectType === 'workflow' && !expanded && <WorkflowPlanSummary progress={displayedWorkflowProgress} actionCard={actionCard}/>}
+    {!expanded && workflowInlineActions.length > 0 && <div className="agent-object-actions agent-object-card-actions">{workflowInlineActions.map(action => {
       const type = compactText(action.type)
       const label = compactText(action.label) || (
         type === 'start_workflow'
-          ? '确认计划并准备'
+          ? '开始执行本次任务'
           : type === 'workflow_approval'
             ? '查看审批'
             : '查看计划'
@@ -227,31 +244,29 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
     {expanded && <div className="agent-object-body">
       {error && <p className="agent-inline-error">{error}</p>}
       {actionFeedback && <p className="agent-inline-feedback" role="status">{actionFeedback}</p>}
-      {candidate && <>
-        <dl><div><dt>当前经历</dt><dd><span>{candidate.current_company || '待补充'}</span> · {candidate.current_title || '待补充'}</dd></div><div><dt>推进阶段</dt><dd>{candidate.clean_stage || '待确认'}</dd></div><div><dt>关联岗位</dt><dd>{candidate.client || '-'} / {candidate.job || '-'}</dd></div></dl>
-        <div className="agent-object-actions">
+      {candidate && <section className="agent-candidate-console" aria-label="候选人决策台">
+        <header><span className="agent-console-icon"><UserRound/></span><div><small>当前经历</small><b>{candidate.current_company || '待补充'} · {candidate.current_title || '待补充'}</b></div><em className={candidate.is_stopped ? 'stopped' : ''}>{candidate.is_stopped ? '已停止' : candidate.clean_stage || '待确认'}</em></header>
+        <div className="agent-candidate-facts"><span><MapPin/>{candidate.city || '地点待补充'}</span><span>{candidate.experience || '经验待补充'}</span><span>{candidate.education || '学历待补充'}</span></div>
+        <div className="agent-candidate-target"><Target/><span><small>目标岗位</small><b>{candidate.client || '待确认客户'} · {candidate.job || '待确认岗位'}</b></span></div>
+        {candidate.is_stopped && <p className="agent-console-notice danger">已确认停止，无需重复复核{candidate.stop_reason_label ? ` · ${candidate.stop_reason_label}` : ''}</p>}
+        <div className="agent-object-actions agent-candidate-actions">
           {!candidate.is_stopped && (Object.keys(actionLabels) as CandidateAction[]).map(action => <button key={action} className={`button ${action === 'stop' ? 'danger' : ''}`} disabled={!!busy} onClick={() => void preflight(action)}>{busy === action ? <LoaderCircle className="spin"/> : action === 'stop' ? <Ban/> : <Check/>}{actionLabels[action]}</button>)}
-          <button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>完整详情</button>
+          <button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>查看完整履历</button>
         </div>
-      </>}
-      {job && <>
-        <dl><div><dt>客户</dt><dd>{job.client}</dd></div><div><dt>优先级</dt><dd>{job.priority || '常规'}</dd></div><div><dt>人选漏斗</dt><dd>{job.funnel.active} 有效 / {job.funnel.total} 总计</dd></div><div><dt>当前策略</dt><dd>{job.latest_effective_strategy?.summary || job.summary || '待完善'}</dd></div></dl>
-        <div className="agent-object-actions"><button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>完整详情</button></div>
-      </>}
-      {workflow && <>
-        <dl><div><dt>状态</dt><dd>{workflowStatus?.label}</dd></div>{workflow.workflow.current_stage && <div><dt>当前阶段</dt><dd>{workflow.workflow.current_stage}</dd></div>}<div><dt>执行进度</dt><dd>{workflow.progress ? `${workflow.progress.completed} / ${workflow.progress.total}` : '准备中'}</dd></div></dl>
-        {strategyStep && <WorkflowStrategy
-          strategy={strategy}
-          channels={strategyChannels}
-          gates={reviewGates}
-          coverage={strategyV2.coverage_report}
-          open={strategyOpen}
-          toggle={() => setStrategyOpen(value => !value)}
-          strategyV2={strategyV2}
-        />}
+      </section>}
+      {job && <section className="agent-job-console" aria-label="岗位经营台">
+        <header><span className="agent-console-icon"><Building2/></span><div><small>{job.client}</small><b>{job.title}</b></div><div className="agent-job-badges"><em>{job.priority || '常规'}</em><em>{job.status || '状态待确认'}</em></div></header>
+        <div className="agent-job-funnel" aria-label="岗位人选漏斗"><div><b>{job.funnel.total}</b><span>全部</span></div><div><b>{job.funnel.active}</b><span>推进中</span></div><div><b>{job.funnel.contacted}</b><span>已触达</span></div><div><b>{job.funnel.recommended}</b><span>已推荐</span></div></div>
+        <div className="agent-job-focus"><Target/><span><small>当前关注</small><b>{job.hard_requirements || job.latest_effective_strategy?.summary || job.summary || '岗位画像待完善'}</b></span></div>
+        <div className="agent-object-actions"><button className="button primary" onClick={() => onOpenFull(reference)}><ExternalLink/>打开岗位工作台</button></div>
+      </section>}
+      {workflow && <section className="agent-workflow-console" aria-label="执行控制台">
+        <header><div><small>当前状态</small><b>{workflowStatus?.label || '状态待同步'}</b></div><div><small>当前阶段</small><b>{workflowStage}</b></div></header>
+        <ol aria-label="执行步骤">{workflow.steps.slice(0, 4).map(step => <li key={step.id} className={step.status}><span>{step.status === 'completed' ? <CircleCheck/> : <CircleDashed/>}</span><b>{step.business_label}</b><em>{workflowStepStatus[step.status] || step.status}</em></li>)}</ol>
+        {workflow.steps.length > 4 && <small className="agent-workflow-more">另有 {workflow.steps.length - 4} 个步骤，请在完整详情中查看</small>}
         {workflow.approvals.filter(item => item.status === 'pending').map(item => <section className="agent-approval" key={item.approval_id}><b>{item.title}</b><span>{item.risk_level} · 单次授权</span><div><button className="button primary" disabled={!!busy} onClick={() => void decideApproval(item.approval_id, 'approve')}>{busy === item.approval_id && <LoaderCircle className="spin"/>}批准本次执行</button><button className="button" disabled={!!busy} onClick={() => void decideApproval(item.approval_id, 'reject')}>不执行</button></div></section>)}
-        <div className="agent-object-actions">{workflowIsActive && <><button className="button" disabled={!!busy} onClick={() => void updateWorkflowStatus('pause')}>{busy === 'workflow:pause' ? <LoaderCircle className="spin"/> : <Pause/>}暂停寻访</button><button className="button danger" disabled={!!busy} onClick={() => void updateWorkflowStatus('cancel')}>{busy === 'workflow:cancel' ? <LoaderCircle className="spin"/> : <Ban/>}立即停止寻访</button></>}{workflowIsPaused && <><button className="button primary" disabled={!!busy} onClick={() => void updateWorkflowStatus('resume')}>{busy === 'workflow:resume' ? <LoaderCircle className="spin"/> : <Play/>}继续寻访</button><button className="button danger" disabled={!!busy} onClick={() => void updateWorkflowStatus('cancel')}>{busy === 'workflow:cancel' ? <LoaderCircle className="spin"/> : <Ban/>}立即停止寻访</button></>}<button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>完整详情</button></div>
-      </>}
+        <div className="agent-object-actions">{workflowIsActive && <><button className="button" disabled={!!busy} onClick={() => void updateWorkflowStatus('pause')}>{busy === 'workflow:pause' ? <LoaderCircle className="spin"/> : <Pause/>}暂停</button><button className="button danger" disabled={!!busy} onClick={() => void updateWorkflowStatus('cancel')}>{busy === 'workflow:cancel' ? <LoaderCircle className="spin"/> : <Ban/>}结束本轮</button></>}{workflowIsPaused && <button className="button primary" disabled={!!busy} onClick={() => void updateWorkflowStatus('resume')}>{busy === 'workflow:resume' ? <LoaderCircle className="spin"/> : <Play/>}继续执行</button>}<button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>查看完整工作流</button></div>
+      </section>}
     </div>}
     {pending && <div className="action-dialog-backdrop" role="presentation"><section ref={actionDialogRef} className="action-dialog agent-action-dialog" role="alertdialog" aria-modal="true" aria-labelledby="agent-action-title">
       <header><span className={`action-dialog-icon ${pending.action === 'stop' ? 'danger' : ''}`}>{pending.action === 'stop' ? <Ban/> : <Check/>}</span><div><small>写入预检通过</small><h3 id="agent-action-title">{actionLabels[pending.action]}</h3></div><button className="icon-btn" aria-label="关闭" onClick={() => setPending(undefined)}>×</button></header>

@@ -87,7 +87,9 @@ test('Agent 发送任务、渲染对象卡并在重载后恢复', async ({ page 
   await expect(page.locator('.agent-message-content').getByText('已定位到关联人选。')).toBeVisible()
   await expect(page.locator('.agent-conversation-head')).toContainText('衣**')
   await page.getByRole('button', { name: '展开衣**' }).click()
-  await expect(page.locator('.agent-object-body')).toContainText('推进阶段')
+  const candidateConsole = page.getByRole('region', { name: '候选人决策台' })
+  await expect(candidateConsole).toContainText('当前经历')
+  await expect(candidateConsole).toContainText('目标岗位')
 })
 
 test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {

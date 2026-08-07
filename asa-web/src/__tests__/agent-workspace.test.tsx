@@ -363,8 +363,10 @@ describe('Agent workspace', () => {
   it('工作流回复去重对象卡，并直接展示推进方案摘要', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-workflow')
     const openFull = vi.fn()
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-workflow?limit=100')
-      ? mockResponse({
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      if (String(input).endsWith('/api/v1/workflows/wf-1')) return mockResponse(plannedWorkflow)
+      return String(input).endsWith('/api/v1/copilot/sessions/task-workflow?limit=100')
+        ? mockResponse({
         ok: true, session_id: 'task-workflow', business_focus: null,
         messages: [{
           role: 'assistant',
@@ -383,6 +385,13 @@ describe('Agent workspace', () => {
           workflow_progress: { workflow_id: 'wf-1', status: 'planned', completed: 0, total: 5, label: '确认推进方案', pending_approvals: [{ approval_id: 'a1', status: 'pending' }] },
           action_card: {
             context: { type: 'workflow', id: 'wf-1', title: '长越科技｜自动化软件高级工程师｜第4轮寻访' },
+            business_summary: {
+              task: '从现有人选中整理自动化软件高级工程师的优先名单',
+              completed: ['读取岗位范围'],
+              current: '整理候选人核验队列',
+              deliverable: '优先评估名单，以及每位候选人的命中依据',
+              scope_note: '本次不触发外部寻访',
+            },
             evidence: [{ label: '当前步骤', value: '内部诊断现有人选与渠道缺口' }, { label: '理解目标', value: '推进长越软件岗位' }],
             blocked_reasons: ['外部动作仍需 R3 单次审批'],
             next_actions: [
@@ -392,12 +401,15 @@ describe('Agent workspace', () => {
             ],
           },
         }],
-      })
-      : mockResponse({ ok: true, sessions: [] })))
+        })
+        : mockResponse({ ok: true, sessions: [] })
+    }))
     renderWorkspace({ type: 'page', page: 'agent' }, { onOpenFullObject: openFull })
 
-    expect(await screen.findByText('推进方案')).toBeInTheDocument()
-    expect(screen.getByText('内部诊断现有人选与渠道缺口')).toBeInTheDocument()
+    expect(await screen.findByText('本次要做什么')).toBeInTheDocument()
+    expect(screen.getByText('从现有人选中整理自动化软件高级工程师的优先名单')).toBeInTheDocument()
+    expect(screen.queryByText('优先评估名单，以及每位候选人的命中依据')).not.toBeInTheDocument()
+    expect(screen.getByText('整理候选人核验队列')).toBeInTheDocument()
     expect(screen.getByText('0 / 5 步 · 1 个审批待确认')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '展开长越科技｜自动化软件高级工程师｜第4轮寻访' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '展开自动化软件高级工程师' })).not.toBeInTheDocument()
@@ -407,6 +419,10 @@ describe('Agent workspace', () => {
     expect(screen.queryByRole('button', { name: '展开胡** · 待首次评估' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '查看审批' }))
     expect(openFull).toHaveBeenCalledWith(expect.objectContaining({ type: 'workflow', id: 'wf-1' }))
+    fireEvent.click(screen.getByRole('button', { name: '展开长越科技｜自动化软件高级工程师｜第4轮寻访' }))
+    expect(screen.queryByRole('region', { name: '执行方案摘要' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '查看审批' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '收起长越科技｜自动化软件高级工程师｜第4轮寻访' }))
     fireEvent.click(screen.getByRole('button', { name: '确认计划并准备' }))
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
       '/api/v1/workflows/wf-1/start',
@@ -907,7 +923,7 @@ describe('Agent object embed', () => {
     render(<AgentObjectEmbed reference={{ type: 'candidate', id: 1, label: '张三' }} onOpenFull={() => {}} />)
 
     fireEvent.click(screen.getByRole('button', { name: '展开张三' }))
-    expect(await screen.findByText('示例科技')).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: '候选人决策台' })).toHaveTextContent('示例科技 · 前端工程师')
     fireEvent.click(screen.getByRole('button', { name: '复核通过' }))
     expect(await screen.findByRole('alertdialog')).toHaveTextContent('候选人将进入复核通过阶段')
     fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
@@ -938,7 +954,7 @@ describe('Agent object embed', () => {
     render(<AgentObjectEmbed reference={{ type: 'workflow', id: 'wf-1', label: '士兰微｜电源专家｜第3轮寻访' }} onOpenFull={() => {}} />)
 
     fireEvent.click(screen.getByRole('button', { name: '展开士兰微｜电源专家｜第3轮寻访' }))
-    const stop = await screen.findByRole('button', { name: '立即停止寻访' })
+    const stop = await screen.findByRole('button', { name: '结束本轮' })
     fireEvent.click(stop)
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/workflows/wf-1/cancel'))).toBe(true))
   })
@@ -983,7 +999,7 @@ describe('Agent object embed', () => {
     vi.useRealTimers()
   })
 
-  it('工作流对象卡展开后展示具体寻访策略', async () => {
+  it('工作流对象卡保持轻量，完整策略下沉到工作流详情', async () => {
     const workflow = {
       ...plannedWorkflow,
       steps: [
@@ -1012,17 +1028,32 @@ describe('Agent object embed', () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/workflows/wf-1/summary')
       ? mockResponse({ ok: true, workflow_id: 'wf-1', status: 'waiting_approval', progress: { completed: 1, total: 2 }, current_stage: '执行多渠道寻访', pending_approvals: [] })
       : mockResponse(workflow)))
-    render(<AgentObjectEmbed reference={{ type: 'workflow', id: 'wf-1', label: '士兰微｜电源专家｜第3轮寻访' }} onOpenFull={() => {}} />)
+    const openFull = vi.fn()
+    render(<AgentObjectEmbed reference={{ type: 'workflow', id: 'wf-1', label: '士兰微｜电源专家｜第3轮寻访' }} onOpenFull={openFull} />)
 
     fireEvent.click(screen.getByRole('button', { name: '展开士兰微｜电源专家｜第3轮寻访' }))
-    expect(await screen.findByText('VPD 垂直供电 TLVR')).toBeInTheDocument()
-    expect(screen.getByText('VPD VRM 多相 Buck')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '查看完整策略' }))
-    expect(screen.getByText('具备 VPD/VRM 实际项目证据')).toBeInTheDocument()
-    expect(screen.getByText('仅有 AC/DC 经验且无板级电源项目')).toBeInTheDocument()
-    expect(screen.getByText('按项目深度判断资深程度')).toBeInTheDocument()
-    expect(screen.getByText('MPS')).toBeInTheDocument()
-    expect(screen.getByText('Vicor')).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: '执行控制台' })).toHaveTextContent('生成寻访策略')
+    expect(screen.queryByText('VPD 垂直供电 TLVR')).not.toBeInTheDocument()
+    expect(screen.queryByText('VPD VRM 多相 Buck')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看完整工作流' }))
+    expect(openFull).toHaveBeenCalledWith(expect.objectContaining({ type: 'workflow', id: 'wf-1' }))
+  })
+
+  it('岗位对象卡使用岗位经营台而不是候选人或工作流界面', async () => {
+    const job = {
+      id: 9, title: '机械高级工程师', client: '长越科技', status: '已发布', priority: 'P0-最急',
+      candidate_count: 18, active_candidate_count: 7, position: {}, profile: {}, candidates: [], stages: [], search_experiments: [], events: [], followups: [],
+      funnel: { total: 18, active: 7, stopped: 4, contacted: 6, recommended: 2 }, hard_requirements: '固晶机、共晶机或键合机整机机械经验',
+    }
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/jobs/9') ? mockResponse({ job }) : mockResponse({})))
+    render(<AgentObjectEmbed reference={{ type: 'job', id: 9, label: '机械高级工程师', subtitle: '长越科技' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开机械高级工程师' }))
+    const console = await screen.findByRole('region', { name: '岗位经营台' })
+    expect(console).toHaveTextContent('18全部7推进中6已触达2已推荐')
+    expect(console).toHaveTextContent('固晶机、共晶机或键合机整机机械经验')
+    expect(screen.queryByRole('region', { name: '候选人决策台' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '执行控制台' })).not.toBeInTheDocument()
   })
 
   it('对象 id 非法时展示错误而不是发起请求', async () => {
