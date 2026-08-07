@@ -15,7 +15,7 @@ from ._shared import (
     OPENCLI_BIN, OPENCLI_BROWSER_READ_COMMANDS, OPENCLI_BROWSER_TAB_READ_COMMANDS,
     DECISION_LABELS,
 )
-from .capability_runtime import ExternalPhaseError, RecruitingCapabilityRuntime, ZERO_RESULT_ATTRIBUTION_LABELS
+from .capability_runtime import ExternalExecutionCancelled, ExternalPhaseError, RecruitingCapabilityRuntime, ZERO_RESULT_ATTRIBUTION_LABELS
 from .context import build_candidate_context
 from .native_attachments import resolve_wechat_attachments
 from .policy import action_decision, is_stopped
@@ -160,6 +160,7 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
                 f"本轮完成评估 {len(completed)} 位；岗位当前已有 {stats['completed']} 位评估结果。"
                 if completed else f"本轮没有新增待评估人选；岗位当前已有 {stats['completed']} 位评估结果。"
             )
+        all_failed = len(completed) == 0 and len(failed) > 0
         return {
             "summary": summary,
             "assessment_queue": {
@@ -171,8 +172,8 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
                 "total": len(ids),
             },
             "references": references,
-            "blocked": bool(failed),
-            "missing_inputs": ["检查模型连接后重试失败评估"] if failed else [],
+            "blocked": all_failed,
+            "missing_inputs": ["检查模型连接后重试失败评估"] if all_failed else [],
         }
     if capability_id == "reply_triage":
         inbox = self.get_flow_inbox(queue="已回复", limit=50)
@@ -370,6 +371,14 @@ def cancel_workflow(self, workflow_id: str, note: str = "") -> dict[str, Any]:
     return self.workflow_engine.cancel_workflow(workflow_id, note)
 
 
+def pause_workflow(self, workflow_id: str, note: str = "") -> dict[str, Any]:
+    return self.workflow_engine.pause_workflow(workflow_id, note)
+
+
+def resume_workflow(self, workflow_id: str, note: str = "") -> dict[str, Any]:
+    return self.workflow_engine.resume_workflow(workflow_id, note)
+
+
 def archive_workflow(self, workflow_id: str) -> dict[str, Any]:
     return self.workflow_engine.archive_workflow(workflow_id)
 
@@ -383,23 +392,47 @@ def complete_external_workflow_step(self, step_id: int, result: dict[str, Any]) 
 
 
 def schedule_external_workflow_step(self, step_id: int, capability_id: str, request: dict[str, Any]) -> None:
-    self.executor.submit(self._execute_external_workflow_step, int(step_id), capability_id, dict(request))
+    execution_token = self.workflow_engine.claim_external_execution(int(step_id), request)
+    if not execution_token:
+        return
+    self.executor.submit(
+        self._execute_external_workflow_step,
+        int(step_id),
+        capability_id,
+        {**request, "_workflow_execution_token": execution_token},
+    )
 
 
 def _execute_external_workflow_step(self, step_id: int, capability_id: str, request: dict[str, Any]) -> None:
     try:
-        result = self.capability_runtime.execute_external(capability_id, request)
+        execution_token = str(request.get("_workflow_execution_token") or "")
+        if not self.workflow_engine.external_step_is_active(int(step_id), execution_token):
+            return
+        result = self.capability_runtime.execute_external(
+            capability_id,
+            {**request, "_workflow_step_id": int(step_id)},
+        )
         continuation_request = result.pop("_continuation_request", None)
         if isinstance(continuation_request, dict):
-            self.workflow_engine.checkpoint_external_continuation(
-                step_id, result, continuation_request,
-            )
-            self.schedule_external_workflow_step(
-                step_id, capability_id, continuation_request,
-            )
+            try:
+                self.workflow_engine.checkpoint_external_continuation(
+                    step_id, result, continuation_request, execution_token,
+                )
+            except ValueError:
+                if not self.workflow_engine.external_step_is_active(int(step_id), execution_token):
+                    return
+                raise
+            if self.workflow_engine.external_step_is_active(int(step_id)):
+                self.schedule_external_workflow_step(step_id, capability_id, continuation_request)
             return
-        self.workflow_engine.complete_external_step(step_id, result)
+        if not self.workflow_engine.external_step_is_active(int(step_id), execution_token):
+            return
+        self.workflow_engine.complete_external_step(step_id, result, execution_token)
+    except ExternalExecutionCancelled:
+        return
     except ExternalPhaseError as exc:
+        if not self.workflow_engine.external_step_is_active(int(step_id), execution_token):
+            return
         self.workflow_engine.fail_external_step(
             step_id,
             str(exc),
@@ -413,6 +446,8 @@ def _execute_external_workflow_step(self, step_id: int, capability_id: str, requ
             },
         )
     except Exception as exc:
+        if not self.workflow_engine.external_step_is_active(int(step_id), execution_token):
+            return
         self.workflow_engine.fail_external_step(step_id, str(exc))
 
 @staticmethod

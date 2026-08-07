@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import query_builders
+from . import sourcing_result_card
 
 
 def _dumps(value: Any) -> str:
@@ -165,6 +166,24 @@ def classify_business_outcome(conn: Any, workflow_id: str) -> str | None:
 class WorkflowEngine:
     MAX_STEPS = 12
 
+    SEMANTIC_ACTION_LABELS = {
+        "candidate_sourcing": ("sourcing", "寻访"),
+        "new_candidate_outreach": ("sourcing", "寻访"),
+        "candidate_outreach": ("outreach", "候选人触达"),
+        "candidate_review": ("candidate_review", "候选人核验"),
+        "job_publish": ("job_publish", "岗位发布"),
+        "job_split": ("job_library", "岗位拆分"),
+        "job_archive": ("job_library", "岗位归档"),
+        "recommendation": ("recommendation_report", "推荐报告"),
+        "salary": ("salary", "谈薪处理"),
+    }
+
+    STANDARD_PLAYBOOK_MARKERS = {
+        "job_library_update", "job_publish_prepare", "multi_channel_sourcing",
+        "recommendation_report", "outreach_prepare", "salary_verification",
+        "interview_followup", "offer_confirmation",
+    }
+
     ACTION_LABELS = (
         ("multi_channel_sourcing", "sourcing", "寻访"),
         ("job_publish_execute", "job_publish", "岗位发布"),
@@ -242,6 +261,12 @@ class WorkflowEngine:
         round_number: int | None = None,
     ) -> str:
         action_key, action_label = self._action_label(steps)
+        understanding = selected.get("intent_understanding") if isinstance(selected.get("intent_understanding"), dict) else {}
+        semantic_action = str(understanding.get("action") or "")
+        if semantic_action in self.SEMANTIC_ACTION_LABELS:
+            action_key, action_label = self.SEMANTIC_ACTION_LABELS[semantic_action]
+            if semantic_action == "recommendation" and self._recommendation_requires_send(objective):
+                action_key, action_label = "recommendation", "客户推荐"
         if action_key == "sourcing":
             action_label = f"第{round_number}轮寻访" if round_number else "寻访记录"
             target_count = self._target_candidate_count(objective)
@@ -416,24 +441,59 @@ class WorkflowEngine:
 
     def _template_plan(self, objective: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         text = objective.lower()
+        understanding = context.get("intent_understanding") if isinstance(context.get("intent_understanding"), dict) else {}
+        semantic_action = str(understanding.get("action") or "")
+        use_keyword_fallback = semantic_action in {"", "none"}
         steps: list[dict[str, Any]] = []
         add = lambda *args: steps.append(self._step(*args))
 
-        if (
-            any(token in text for token in ("更新", "拆分", "拆成", "分成", "新建", "建立"))
-            and any(token in text for token in ("岗位", "职位", "岗位库"))
+        if semantic_action == "candidate_review":
+            if context.get("type") == "job":
+                add("job_diagnosis", "锁定岗位核验范围", "jd_calibration", "读取岗位漏斗、风险提示和当前待核验人选，不触发外部渠道")
+                add("talent_pool_search", "整理候选人核验队列", "verification", "优先继承上一轮指出的判断过期、待确认和已触达未回复人选", ["job_diagnosis"])
+                add("candidate_batch_assessment", "生成逐人核验点", "assessment", "基于现有 v3 简历和评估结果形成可推进、待核验和停止建议", ["talent_pool_search"])
+            elif context.get("type") == "candidate":
+                add("candidate_assessment", "复核当前人岗判断", "assessment", "基于当前岗位、简历和已有评估重新检查匹配判断")
+                add("verification_plan", "生成候选人核验清单", "verification", "列出证据缺口和需要顾问确认的关键问题", ["candidate_assessment"])
+            else:
+                add("candidate_batch_assessment", "生成批量核验点", "assessment", "基于当前队列形成逐人核验清单")
+        elif (
+            semantic_action in {"job_split", "job_archive"}
+            or (
+                use_keyword_fallback
+                and any(token in text for token in ("更新", "拆分", "新建", "建立"))
+                and any(token in text for token in ("岗位", "职位", "岗位库"))
+            )
         ):
             add("job_diagnosis", "诊断当前岗位库状态", "jd_calibration", "先读取当前 jobs、positions 与岗位画像")
             add("job_library_update", "更新岗位库", "job_library", "写入岗位库属于内部高影响动作，必须单次确认", ["job_diagnosis"])
-        elif (any(token in text for token in ("发布", "上架", "发")) and any(token in text for token in ("岗位", "职位"))):
+        elif semantic_action == "job_publish" or (
+            use_keyword_fallback
+            and any(token in text for token in ("发布", "上架", "发"))
+            and any(token in text for token in ("岗位", "职位"))
+        ):
             add("jd_calibration", "校准岗位要求", "jd_calibration", "发布前核对岗位名称、地点、薪资和硬门槛")
             add("job_publish_prepare", "准备岗位发布", "job_intake", "生成发布草稿、预检并读回关键字段", ["jd_calibration"])
             add("job_publish_execute", "发布猎聘岗位", "job_intake", "正式发布属于对外动作，必须批量确认后逐项审计", ["job_publish_prepare"])
         elif (
-            any(token in text for token in ("补充", "补池", "寻访", "找人", "搜索", "搜人"))
-            or (
-                any(target in text for target in ("人选", "候选人"))
-                and any(action in text for action in ("找", "搜", "补", "寻访"))
+            context.get("type") == "job"
+            and use_keyword_fallback
+            and "推进" in text
+            and not any(token in text for token in ("推进人选", "推进候选人", "已推进", "推进到"))
+        ):
+            add("job_diagnosis", "诊断岗位当前进展", "jd_calibration", "核对岗位要求、优先级、漏斗和当前阻塞")
+            add("talent_pool_search", "盘点并排重现有人才池", "sourcing", "先复用历史人才库并识别未复核、停滞和判断过期人选", ["job_diagnosis"])
+            add("candidate_batch_assessment", "复核现有人选与证据缺口", "assessment", "优先处理当前候选池，形成可推进、待核验和停止建议", ["talent_pool_search"])
+            add("search_strategy", "补齐岗位寻访策略", "search_strategy", "根据现有人才池缺口更新目标公司、关键词和渠道配比", ["candidate_batch_assessment"])
+            add("multi_channel_sourcing", "准备新一轮多渠道寻访", "sourcing", "仅在现有人才池不足时进入猎聘和 X-SaaS，外部执行前单独确认", ["search_strategy"])
+        elif semantic_action in {"candidate_sourcing", "new_candidate_outreach"} or (
+            use_keyword_fallback
+            and (
+                any(token in text for token in ("补充", "补池", "寻访", "找人", "搜索", "搜人"))
+                or (
+                    any(target in text for target in ("人选", "候选人"))
+                    and any(action in text for action in ("找", "搜", "补", "寻访"))
+                )
             )
         ):
             add("job_diagnosis", "诊断岗位人才缺口", "jd_calibration", "先确认岗位要求、优先级和当前漏斗")
@@ -441,21 +501,34 @@ class WorkflowEngine:
             add("search_strategy", "生成多渠道寻访策略", "search_strategy", "根据缺口制定目标公司和关键词", ["talent_pool_search"])
             add("multi_channel_sourcing", "执行多渠道寻访", "sourcing", "猎聘和 X-SaaS 浏览器执行需要人工确认", ["search_strategy"])
             add("candidate_batch_assessment", "评估新增候选人", "assessment", "对新增关系自动评估并分流", ["multi_channel_sourcing"])
-        elif any(token in text for token in ("推荐报告", "可推荐", "推荐材料", "推荐给客户")):
+        elif semantic_action == "recommendation" or (
+            use_keyword_fallback
+            and any(token in text for token in ("推荐报告", "可推荐", "推荐材料", "推荐给客户"))
+        ):
             add("candidate_assessment", "复核人岗判断", "assessment", "报告必须基于当前证据和岗位硬门槛")
             add("verification_plan", "检查待核验信息", "verification", "先暴露报告中的证据缺口", ["candidate_assessment"])
             add("matching_report", "生成匹配分析", "recommendation", "形成内部可审计的人岗分析", ["verification_plan"])
             add("recommendation_report", "生成嘉驰推荐报告", "recommendation", "生成客户可预览的推荐报告草稿", ["matching_report"])
+            if self._recommendation_requires_send(objective):
+                add("client_recommendation", "提交客户推荐", "recommendation", "对外提交前锁定推荐报告并单独确认客户渠道", ["recommendation_report"])
             if any(token in text for token in ("谈薪", "薪资", "竞争offer", "竞争 offer")):
                 add("salary_verification", "核验薪资证据", "salary", "整理谈薪材料前先检查流水、期望和竞争机会证据", ["recommendation_report"])
                 add("salary_negotiation", "整理谈薪材料", "salary", "输出薪资差距、风险和候选人决策下一步", ["salary_verification"])
-        elif any(token in text for token in ("正向回复", "回复", "跟进", "触达", "联系")):
+        elif semantic_action == "candidate_outreach" or (
+            use_keyword_fallback
+            and any(token in text for token in ("正向回复", "回复", "跟进", "触达", "联系"))
+        ):
             add("reply_triage", "识别回复与待办", "reply", "先区分正向回复、薪资、地点和拒绝信号")
             add("communication_draft_batch", "生成沟通草稿", "outreach", "根据当前阶段和证据生成未发送草稿", ["reply_triage"])
             add("outreach_prepare", "锁定触达草稿", "outreach", "锁定本批候选人的待发送文案和预检对象", ["communication_draft_batch"])
-            if context.get("type") in {"candidate", "queue"} and any(token in text for token in ("发送", "触达", "联系")):
+            if semantic_action == "candidate_outreach" or (
+                context.get("type") in {"candidate", "queue"} and any(token in text for token in ("发送", "触达", "联系"))
+            ):
                 add("outreach_execute", "执行候选人触达", "outreach", "发送消息属于对外动作，必须批量确认后逐人审计", ["outreach_prepare"])
-        elif any(token in text for token in ("谈薪", "薪资", "竞争offer", "竞争 offer")):
+        elif semantic_action == "salary" or (
+            use_keyword_fallback
+            and any(token in text for token in ("谈薪", "薪资", "竞争offer", "竞争 offer"))
+        ):
             add("salary_verification", "核验薪资证据", "salary", "区分税务、工资和一次性收入证据")
             add("salary_negotiation", "整理谈薪风险", "salary", "分析差距、竞争机会和决策时间线", ["salary_verification"])
             add("decision_coaching", "生成决策辅导方案", "decision", "针对非薪资顾虑形成沟通方案", ["salary_negotiation"])
@@ -482,9 +555,19 @@ class WorkflowEngine:
             keys.append(step["step_key"])
         return steps
 
+    @staticmethod
+    def _recommendation_requires_send(objective: str) -> bool:
+        return any(
+            token in str(objective or "")
+            for token in ("推荐给客户", "提交客户", "推给客户", "客户推荐")
+        )
+
     def _plan(self, objective: str, context: dict[str, Any]) -> list[dict[str, Any]]:
         fallback = self._template_plan(objective, context)
-        if any(step["capability_id"] in {"job_library_update", "multi_channel_sourcing"} for step in fallback):
+        understanding = context.get("intent_understanding") if isinstance(context.get("intent_understanding"), dict) else {}
+        if str(understanding.get("action") or "") in self.SEMANTIC_ACTION_LABELS:
+            return self._apply_routing_rules(fallback, context)
+        if any(step["capability_id"] in self.STANDARD_PLAYBOOK_MARKERS for step in fallback):
             return self._apply_routing_rules(fallback, context)
         capabilities = [
             {
@@ -563,6 +646,48 @@ class WorkflowEngine:
     def _validate_plan(self, steps: list[dict[str, Any]], context: dict[str, Any]) -> None:
         if not steps or len(steps) > self.MAX_STEPS:
             raise ValueError("目标计划为空或超过步数限制")
+        understanding = context.get("intent_understanding") if isinstance(context.get("intent_understanding"), dict) else {}
+        semantic_action = str(understanding.get("action") or "")
+        context_type = str(context.get("type") or "global")
+        allowed_contexts = {
+            "candidate_sourcing": {"job"},
+            "new_candidate_outreach": {"job"},
+            "candidate_outreach": {"candidate", "queue"},
+            "candidate_review": {"job", "candidate", "queue"},
+            "job_publish": {"job"},
+            "recommendation": {"candidate"},
+            "salary": {"candidate"},
+        }
+        if semantic_action in allowed_contexts and context_type not in allowed_contexts[semantic_action]:
+            expected = "或".join(sorted(allowed_contexts[semantic_action]))
+            raise ValueError(f"动作 {semantic_action} 执行前必须唯一定位 {expected} 对象")
+
+        capability_ids = {str(step.get("capability_id") or "") for step in steps}
+        required_capabilities = {
+            "candidate_sourcing": {"multi_channel_sourcing", "candidate_batch_assessment"},
+            "new_candidate_outreach": {"multi_channel_sourcing", "candidate_batch_assessment"},
+            "candidate_outreach": {"outreach_prepare", "outreach_execute"},
+            "job_publish": {"job_publish_prepare", "job_publish_execute"},
+            "job_split": {"job_library_update"},
+            "job_archive": {"job_library_update"},
+            "recommendation": {"recommendation_report"},
+            "salary": {"salary_verification", "salary_negotiation"},
+        }.get(semantic_action, set())
+        if semantic_action == "recommendation" and self._recommendation_requires_send(
+            str(understanding.get("objective") or "")
+        ):
+            required_capabilities = required_capabilities | {"client_recommendation"}
+        if semantic_action == "candidate_review":
+            required_capabilities = (
+                {"candidate_assessment", "verification_plan"}
+                if context_type == "candidate"
+                else {"candidate_batch_assessment"}
+            )
+        missing_capabilities = required_capabilities - capability_ids
+        if missing_capabilities:
+            raise ValueError(
+                f"动作 {semantic_action} 的计划缺少必要能力：{'、'.join(sorted(missing_capabilities))}"
+            )
         seen: set[str] = set()
         for step in steps:
             capability = self.service.skills.get(step["capability_id"])
@@ -1240,7 +1365,7 @@ class WorkflowEngine:
         conn = self._connect()
         try:
             workflow = conn.execute("SELECT * FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
-            if workflow is None or workflow["status"] in {"cancelled", "completed", "superseded"}:
+            if workflow is None or workflow["status"] in {"cancelled", "completed", "superseded", "paused"}:
                 return
             goal_id = workflow["goal_id"]
             conn.execute("UPDATE agent_workflows SET status='running',updated_at=datetime('now','localtime') WHERE workflow_id=?", (workflow_id,))
@@ -1253,7 +1378,7 @@ class WorkflowEngine:
             conn = self._connect()
             try:
                 workflow = conn.execute("SELECT * FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
-                if workflow is None or workflow["status"] in {"cancelled", "superseded", "blocked"}:
+                if workflow is None or workflow["status"] in {"cancelled", "superseded", "blocked", "paused"}:
                     return
                 steps = conn.execute("SELECT * FROM agent_workflow_steps WHERE workflow_id=? ORDER BY sequence", (workflow_id,)).fetchall()
                 completed_keys = {step["step_key"] for step in steps if step["status"] in {"completed", "skipped"}}
@@ -1288,8 +1413,29 @@ class WorkflowEngine:
                     conn.execute("UPDATE agent_goals SET status='waiting_approval',updated_at=datetime('now','localtime') WHERE goal_id=?", (workflow["goal_id"],))
                     conn.commit()
                     return
-                conn.execute("UPDATE agent_workflow_steps SET status='running',started_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE id=?", (pending["id"],))
-                conn.execute("UPDATE agent_workflows SET active_step_id=?,current_stage=?,updated_at=datetime('now','localtime') WHERE workflow_id=?", (pending["id"], pending["business_stage"], workflow_id))
+                claimed = conn.execute(
+                    """
+                    UPDATE agent_workflow_steps
+                       SET status='running',started_at=datetime('now','localtime'),updated_at=datetime('now','localtime')
+                     WHERE id=?
+                       AND EXISTS (
+                           SELECT 1 FROM agent_workflows
+                            WHERE workflow_id=? AND status NOT IN ('cancelled','completed','superseded','paused')
+                       )
+                    """,
+                    (pending["id"], workflow_id),
+                )
+                if claimed.rowcount != 1:
+                    conn.commit()
+                    return
+                conn.execute(
+                    """
+                    UPDATE agent_workflows
+                       SET active_step_id=?,current_stage=?,updated_at=datetime('now','localtime')
+                     WHERE workflow_id=? AND status NOT IN ('cancelled','completed','superseded','paused')
+                    """,
+                    (pending["id"], pending["business_stage"], workflow_id),
+                )
                 self._event(conn, workflow_id, pending["id"], "step_started", "running", f"正在执行：{pending['business_label']}")
                 conn.commit()
                 context = self._workflow_context(conn, workflow_id)
@@ -1307,6 +1453,11 @@ class WorkflowEngine:
                 verification = self._verify_step_result(step_data, context, result)
                 conn = self._connect()
                 try:
+                    current_status = conn.execute(
+                        "SELECT status FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+                    ).fetchone()
+                    if current_status is None or current_status["status"] in {"cancelled", "completed", "superseded", "paused"}:
+                        return
                     if not verification["ok"]:
                         recovery = self._recovery_plan(step_data, verification)
                         output = {**result, "verification": verification}
@@ -1408,6 +1559,11 @@ class WorkflowEngine:
             except Exception as exc:
                 conn = self._connect()
                 try:
+                    current_status = conn.execute(
+                        "SELECT status FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+                    ).fetchone()
+                    if current_status is None or current_status["status"] in {"cancelled", "completed", "superseded", "paused"}:
+                        return
                     conn.execute(
                         "UPDATE agent_workflow_steps SET status='failed',error=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE id=?",
                         (str(exc)[:1000], step_data["id"]),
@@ -1552,6 +1708,26 @@ class WorkflowEngine:
         goal = conn.execute("SELECT * FROM agent_goals WHERE goal_id=?", (goal_id,)).fetchone()
         self._refresh_sourcing_coverage_assessment(conn, workflow_id)
         target_status = self._sourcing_target_status(conn, goal, workflow_id) if goal is not None else None
+
+        # Sourcing 结果卡：无论达标与否，寻访类工作流终局时生成结果摘要产物。
+        # 结果卡生成失败不得阻塞终局流转。
+        try:
+            result_card = sourcing_result_card.build_sourcing_result_card(conn, workflow_id)
+            assessment_step = next((s for s in steps if s["capability_id"] == "candidate_batch_assessment"), None)
+            result_step_id = int(assessment_step["id"]) if assessment_step else 0
+            if result_card:
+                self._store_artifacts(conn, goal_id, workflow_id, result_step_id, [{
+                    "type": "sourcing_result",
+                    "title": result_card["title"],
+                    "mime_type": "application/json",
+                    "content": json.dumps(result_card["summary"], ensure_ascii=False),
+                    "metadata": {"action_card": result_card},
+                    "validation_status": "passed",
+                }])
+                self._event(conn, workflow_id, result_step_id or None, "sourcing_result_card_generated", "completed", result_card["title"], result_card)
+        except Exception as exc:
+            self._event(conn, workflow_id, None, "sourcing_result_card_failed", "failed", f"结果卡生成失败：{str(exc)[:200]}")
+
         if target_status and target_status["score_75_plus"] < target_status["target"]:
             business_outcome = "completed_needs_review" if target_status["verify_first"] > 0 else "completed_pool_insufficient"
             summary = (
@@ -1663,12 +1839,131 @@ class WorkflowEngine:
                 raise ValueError("工作流不存在")
             conn.execute("UPDATE agent_workflows SET status='cancelled',finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE workflow_id=?", (workflow_id,))
             conn.execute("UPDATE agent_goals SET status='cancelled',result_summary=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE goal_id=?", (note or "用户取消", workflow["goal_id"]))
-            conn.execute("UPDATE agent_workflow_steps SET status='cancelled',updated_at=datetime('now','localtime') WHERE workflow_id=? AND status IN ('pending','waiting_approval','approved')", (workflow_id,))
+            conn.execute(
+                """
+                UPDATE agent_workflow_steps
+                   SET status='cancelled',recovery_json='{}',finished_at=COALESCE(finished_at,datetime('now','localtime')),updated_at=datetime('now','localtime')
+                 WHERE workflow_id=?
+                   AND status IN ('pending','queued','running','waiting_approval','waiting_external','approved','paused')
+                """,
+                (workflow_id,),
+            )
             conn.execute("UPDATE agent_approvals SET status='cancelled',decided_at=datetime('now','localtime') WHERE workflow_id=? AND status='pending'", (workflow_id,))
             self._event(conn, workflow_id, None, "workflow_cancelled", "cancelled", note or "用户取消目标")
             conn.commit()
         finally:
             conn.close()
+        return self.get_workflow(workflow_id)
+
+    def pause_workflow(self, workflow_id: str, note: str = "") -> dict[str, Any]:
+        """Freeze a resumable workflow and invalidate any in-flight channel runner."""
+        conn = self._connect()
+        try:
+            workflow = conn.execute(
+                "SELECT goal_id,status,active_step_id FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+            if workflow is None:
+                raise ValueError("工作流不存在")
+            previous_status = str(workflow["status"] or "")
+            if previous_status == "paused":
+                return self.get_workflow(workflow_id)
+            if previous_status not in {"queued", "running", "waiting_approval", "waiting_external"}:
+                raise ValueError(f"当前工作流不能暂停：{previous_status or '状态待同步'}")
+            if previous_status == "running":
+                conn.execute(
+                    "UPDATE agent_workflow_steps SET status='paused',updated_at=datetime('now','localtime') WHERE workflow_id=? AND status='running'",
+                    (workflow_id,),
+                )
+            for step in conn.execute(
+                "SELECT id,recovery_json FROM agent_workflow_steps WHERE workflow_id=? AND status='waiting_external'",
+                (workflow_id,),
+            ).fetchall():
+                recovery = _loads(step["recovery_json"], {})
+                if not isinstance(recovery, dict):
+                    recovery = {}
+                recovery["execution_token"] = f"paused-{secrets.token_hex(8)}"
+                recovery["paused_at"] = datetime.now().isoformat(timespec="seconds")
+                conn.execute(
+                    "UPDATE agent_workflow_steps SET recovery_json=?,updated_at=datetime('now','localtime') WHERE id=?",
+                    (_dumps(recovery), int(step["id"])),
+                )
+            conn.execute(
+                "UPDATE agent_workflows SET status='paused',updated_at=datetime('now','localtime') WHERE workflow_id=?",
+                (workflow_id,),
+            )
+            conn.execute(
+                "UPDATE agent_goals SET status='paused',updated_at=datetime('now','localtime') WHERE goal_id=?",
+                (workflow["goal_id"],),
+            )
+            self._event(
+                conn, workflow_id, workflow["active_step_id"], "workflow_paused", "paused",
+                note or "用户暂停工作流，当前渠道将在本查询单元结束后停止。",
+                {"resume_status": previous_status},
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.get_workflow(workflow_id)
+
+    def resume_workflow(self, workflow_id: str, note: str = "") -> dict[str, Any]:
+        """Resume a paused workflow from its last durable state."""
+        continuation_requests: list[tuple[int, str, dict[str, Any]]] = []
+        run_locally = False
+        conn = self._connect()
+        try:
+            workflow = conn.execute(
+                "SELECT goal_id,status FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+            if workflow is None:
+                raise ValueError("工作流不存在")
+            if workflow["status"] != "paused":
+                raise ValueError("当前工作流未处于暂停状态")
+            paused_event = conn.execute(
+                "SELECT detail_json FROM agent_step_events WHERE workflow_id=? AND event_type='workflow_paused' ORDER BY id DESC LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+            pause_detail = _loads(paused_event["detail_json"], {}) if paused_event else {}
+            resume_status = str(pause_detail.get("resume_status") or "queued")
+            if resume_status == "waiting_external":
+                rows = conn.execute(
+                    "SELECT id,capability_id,recovery_json FROM agent_workflow_steps WHERE workflow_id=? AND status='waiting_external'",
+                    (workflow_id,),
+                ).fetchall()
+                for step in rows:
+                    recovery = _loads(step["recovery_json"], {})
+                    request = recovery.get("request") if isinstance(recovery, dict) else None
+                    if isinstance(request, dict) and request:
+                        continuation_requests.append((int(step["id"]), str(step["capability_id"]), dict(request)))
+                if not continuation_requests:
+                    raise ValueError("暂停前的渠道请求不可恢复，请重试该步骤")
+            elif resume_status == "waiting_approval":
+                resume_status = "waiting_approval"
+            else:
+                resume_status = "queued"
+                conn.execute(
+                    "UPDATE agent_workflow_steps SET status='pending',updated_at=datetime('now','localtime') WHERE workflow_id=? AND status='paused'",
+                    (workflow_id,),
+                )
+                run_locally = True
+            conn.execute(
+                "UPDATE agent_workflows SET status=?,updated_at=datetime('now','localtime') WHERE workflow_id=?",
+                (resume_status, workflow_id),
+            )
+            conn.execute(
+                "UPDATE agent_goals SET status=?,updated_at=datetime('now','localtime') WHERE goal_id=?",
+                (resume_status, workflow["goal_id"]),
+            )
+            self._event(
+                conn, workflow_id, None, "workflow_resumed", resume_status,
+                note or "工作流已恢复执行。", {"resumed_to": resume_status},
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        for step_id, capability_id, request in continuation_requests:
+            self.service.schedule_external_workflow_step(step_id, capability_id, request)
+        if run_locally:
+            self.service.executor.submit(self.run_workflow, workflow_id)
         return self.get_workflow(workflow_id)
 
     def archive_workflow(self, workflow_id: str) -> dict[str, Any]:
@@ -1680,7 +1975,7 @@ class WorkflowEngine:
             ).fetchone()
             if workflow is None:
                 raise ValueError("工作流不存在")
-            if workflow["status"] in {"queued", "running", "waiting_approval", "waiting_external"}:
+            if workflow["status"] in {"queued", "running", "waiting_approval", "waiting_external", "paused"}:
                 raise ValueError("执行中的工作流不能归档，请先取消")
             conn.execute(
                 "UPDATE agent_workflows SET archived_at=COALESCE(archived_at,datetime('now','localtime')),updated_at=datetime('now','localtime') WHERE workflow_id=?",
@@ -1740,7 +2035,7 @@ class WorkflowEngine:
             self.service.executor.submit(self.run_workflow, workflow_id)
         return self.get_workflow(workflow_id)
 
-    def complete_external_step(self, step_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    def complete_external_step(self, step_id: int, result: dict[str, Any], execution_token: str = "") -> dict[str, Any]:
         if not isinstance(result, dict):
             raise ValueError("渠道结果必须是对象")
         conn = self._connect()
@@ -1748,6 +2043,16 @@ class WorkflowEngine:
             step = conn.execute("SELECT * FROM agent_workflow_steps WHERE id=?", (int(step_id),)).fetchone()
             if step is None or step["status"] != "waiting_external":
                 raise ValueError("当前步骤不在等待渠道结果状态")
+            workflow_status = conn.execute(
+                "SELECT status FROM agent_workflows WHERE workflow_id=?", (step["workflow_id"],)
+            ).fetchone()
+            recovery = _loads(step["recovery_json"], {})
+            if (
+                workflow_status is None
+                or workflow_status["status"] != "waiting_external"
+                or (execution_token and str(recovery.get("execution_token") or "") != execution_token)
+            ):
+                return self.get_workflow(str(step["workflow_id"]))
             self.service.validate_external_result(step["capability_id"], result)
             workflow = conn.execute("SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (step["workflow_id"],)).fetchone()
             context = self._workflow_context(conn, step["workflow_id"])
@@ -1845,11 +2150,75 @@ class WorkflowEngine:
         self.service.executor.submit(self.run_workflow, step["workflow_id"])
         return self.get_workflow(step["workflow_id"])
 
+    def claim_external_execution(self, step_id: int, request: dict[str, Any]) -> str:
+        """Persist a one-shot token so stale workers cannot write after a pause/resume."""
+        conn = self._connect()
+        try:
+            step = conn.execute(
+                """
+                SELECT s.recovery_json,s.status,w.status AS workflow_status
+                  FROM agent_workflow_steps s
+                  JOIN agent_workflows w ON w.workflow_id=s.workflow_id
+                 WHERE s.id=?
+                """,
+                (int(step_id),),
+            ).fetchone()
+            if step is None or step["status"] != "waiting_external" or step["workflow_status"] != "waiting_external":
+                return ""
+            recovery = _loads(step["recovery_json"], {})
+            if not isinstance(recovery, dict):
+                recovery = {}
+            token = secrets.token_hex(12)
+            recovery.update({
+                "retry_mode": str(recovery.get("retry_mode") or "sourcing_continuation"),
+                "request": {key: value for key, value in request.items() if key != "_workflow_execution_token"},
+                "execution_token": token,
+                "execution_claimed_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            claimed = conn.execute(
+                """
+                UPDATE agent_workflow_steps SET recovery_json=?,updated_at=datetime('now','localtime')
+                 WHERE id=? AND status='waiting_external'
+                   AND EXISTS (
+                       SELECT 1 FROM agent_workflows
+                        WHERE workflow_id=(SELECT workflow_id FROM agent_workflow_steps WHERE id=?)
+                          AND status='waiting_external'
+                   )
+                """,
+                (_dumps(recovery), int(step_id), int(step_id)),
+            )
+            conn.commit()
+            return token if claimed.rowcount == 1 else ""
+        finally:
+            conn.close()
+
+    def external_step_is_active(self, step_id: int, execution_token: str = "") -> bool:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT s.status,s.recovery_json,w.status AS workflow_status
+                  FROM agent_workflow_steps s
+                  JOIN agent_workflows w ON w.workflow_id=s.workflow_id
+                 WHERE s.id=?
+                """,
+                (int(step_id),),
+            ).fetchone()
+            return bool(
+                row
+                and row["status"] == "waiting_external"
+                and row["workflow_status"] == "waiting_external"
+                and (not execution_token or str(_loads(row["recovery_json"], {}).get("execution_token") or "") == execution_token)
+            )
+        finally:
+            conn.close()
+
     def checkpoint_external_continuation(
         self,
         step_id: int,
         result: dict[str, Any],
         request: dict[str, Any],
+        execution_token: str = "",
     ) -> dict[str, Any]:
         """Durably checkpoint a sourcing batch before scheduling its cursor continuation."""
         if not isinstance(result, dict) or not isinstance(request, dict):
@@ -1862,11 +2231,22 @@ class WorkflowEngine:
         conn = self._connect()
         try:
             step = conn.execute(
-                "SELECT * FROM agent_workflow_steps WHERE id=?",
+                """
+                SELECT s.*,w.status AS workflow_status
+                  FROM agent_workflow_steps s
+                  JOIN agent_workflows w ON w.workflow_id=s.workflow_id
+                 WHERE s.id=?
+                """,
                 (int(step_id),),
             ).fetchone()
-            if step is None or step["status"] != "waiting_external":
-                raise ValueError("当前步骤不在等待渠道结果状态")
+            recovery_before = _loads(step["recovery_json"], {}) if step is not None else {}
+            if (
+                step is None
+                or step["status"] != "waiting_external"
+                or step["workflow_status"] != "waiting_external"
+                or (execution_token and str(recovery_before.get("execution_token") or "") != execution_token)
+            ):
+                raise ValueError("当前步骤不在可继续的渠道结果状态")
             previous = _loads(step["output_json"], {})
             history = previous.get("continuation_history") if isinstance(previous.get("continuation_history"), list) else []
             summary = result.get("continuation") if isinstance(result.get("continuation"), dict) else {}
@@ -1901,9 +2281,16 @@ class WorkflowEngine:
                 UPDATE agent_workflow_steps
                    SET output_json=?,recovery_json=?,error=NULL,updated_at=datetime('now','localtime')
                  WHERE id=?
+                   AND status='waiting_external'
+                   AND EXISTS (
+                       SELECT 1 FROM agent_workflows
+                           WHERE workflow_id=? AND status='waiting_external'
+                   )
                 """,
-                (_dumps(output), _dumps(recovery), int(step_id)),
+                (_dumps(output), _dumps(recovery), int(step_id), str(step["workflow_id"])),
             )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("工作流已停止，忽略渠道续跑结果")
             self._event(
                 conn,
                 str(step["workflow_id"]),
@@ -1925,10 +2312,13 @@ class WorkflowEngine:
         try:
             rows = conn.execute(
                 """
-                SELECT id,capability_id,recovery_json
-                FROM agent_workflow_steps
-                WHERE status='waiting_external' AND recovery_json<>'{}'
-                ORDER BY id
+                SELECT s.id,s.workflow_id,s.capability_id,s.recovery_json
+                 FROM agent_workflow_steps s
+                  JOIN agent_workflows w ON w.workflow_id=s.workflow_id
+                 WHERE s.status='waiting_external'
+                   AND w.status NOT IN ('cancelled','completed','superseded','paused')
+                   AND s.recovery_json<>'{}'
+                ORDER BY s.id
                 """
             ).fetchall()
         finally:
@@ -1961,8 +2351,12 @@ class WorkflowEngine:
                     UPDATE agent_workflow_steps
                        SET recovery_json=?,updated_at=datetime('now','localtime')
                      WHERE id=? AND status='waiting_external' AND recovery_json=?
+                       AND EXISTS (
+                           SELECT 1 FROM agent_workflows
+                            WHERE workflow_id=? AND status='waiting_external'
+                       )
                     """,
-                    (_dumps(claimed_recovery), int(row["id"]), str(row["recovery_json"])),
+                    (_dumps(claimed_recovery), int(row["id"]), str(row["recovery_json"]), str(row["workflow_id"])),
                 )
                 conn.commit()
                 if claimed.rowcount != 1:
@@ -2370,7 +2764,146 @@ class WorkflowEngine:
         item["context"] = _loads(item.pop("context_json", "{}"), {})
         return item
 
-    def _step_item(self, row: Any, goal_context: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _compact_step_output(output: dict[str, Any]) -> dict[str, Any]:
+        """Keep workflow first paint useful while full output stays on the step endpoint."""
+        def size(value: Any) -> int:
+            try:
+                return len(_dumps(value).encode("utf-8"))
+            except (TypeError, ValueError):
+                return 0
+
+        def artifact_index(value: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    key: item.get(key)
+                    for key in ("type", "title", "mime_type", "validation_status")
+                    if item.get(key) not in (None, "")
+                }
+                for item in (value if isinstance(value, list) else [])[:12]
+                if isinstance(item, dict)
+            ]
+
+        def request_index(value: Any) -> dict[str, Any]:
+            request = value if isinstance(value, dict) else {}
+            preflight = request.get("preflight") if isinstance(request.get("preflight"), dict) else {}
+            inner = preflight.get("preflight") if isinstance(preflight.get("preflight"), dict) else preflight
+            channels = inner.get("channels") if isinstance(inner, dict) else {}
+            return {
+                key: request.get(key)
+                for key in ("workflow_id", "client", "job", "target_count", "query_plan_hash")
+                if request.get(key) not in (None, "")
+            } | ({"preflight": {"preflight": {"channels": channels}}} if isinstance(channels, dict) and channels else {})
+
+        def channel_run_index(value: Any) -> list[dict[str, Any]]:
+            runs = value if isinstance(value, list) else []
+            compact: list[dict[str, Any]] = []
+            for item in runs[:20]:
+                if not isinstance(item, dict):
+                    continue
+                result = item.get("result") if isinstance(item.get("result"), dict) else {}
+                candidates = result.get("candidates")
+                compact.append({
+                    "channel": item.get("channel"),
+                    "status": item.get("status"),
+                    "quality": item.get("quality"),
+                    "zero_attribution": item.get("zero_attribution"),
+                    "result": {
+                        "candidates": len(candidates) if isinstance(candidates, list) else int(candidates or 0),
+                        "status": result.get("status"),
+                        "error": result.get("error"),
+                    },
+                })
+            return compact
+
+        def external_result_index(value: Any) -> dict[str, Any]:
+            external = value if isinstance(value, dict) else {}
+            result: dict[str, Any] = {
+                key: external.get(key)
+                for key in ("run_id", "verified", "channel_risk_stop")
+                if external.get(key) not in (None, "")
+            }
+            result["channel_runs"] = channel_run_index(external.get("channel_runs"))
+            intake = external.get("intake") if isinstance(external.get("intake"), dict) else {}
+            applied = intake.get("applied") if isinstance(intake.get("applied"), dict) else {}
+            intake_counts = applied.get("intake") if isinstance(applied.get("intake"), dict) else {}
+            if applied:
+                result["intake"] = {"applied": {
+                    "client": applied.get("client"),
+                    "job": applied.get("job"),
+                    "ok": applied.get("ok"),
+                    "intake": {
+                        key: intake_counts.get(key)
+                        for key in ("applied", "inserted", "planned", "skipped_existing")
+                        if intake_counts.get(key) is not None
+                    },
+                }}
+            shadow = external.get("opencli_shadow") if isinstance(external.get("opencli_shadow"), dict) else {}
+            if shadow:
+                result["opencli_shadow"] = {
+                    "enabled": shadow.get("enabled"),
+                    "channels": [
+                        {
+                            key: item.get(key)
+                            for key in ("channel", "status", "comparison")
+                            if item.get(key) not in (None, "")
+                        }
+                        for item in (shadow.get("channels") if isinstance(shadow.get("channels"), list) else [])[:10]
+                        if isinstance(item, dict)
+                    ],
+                }
+            for key in ("sourcing_funnel", "coverage_certificate", "continuation"):
+                value_for_key = external.get(key)
+                if value_for_key is not None and size(value_for_key) <= 24_000:
+                    result[key] = value_for_key
+            return result
+
+        compact: dict[str, Any] = {"_summary_only": True, "full_detail_available": True}
+        for key, value in output.items():
+            if key == "artifacts":
+                compact[key] = artifact_index(value)
+            elif key in {"auto_execute_request", "external_request"}:
+                compact[key] = request_index(value)
+            elif key == "external_result":
+                compact[key] = external_result_index(value)
+            elif key == "query_plan_v1" and isinstance(value, dict):
+                cells = value.get("cells") if isinstance(value.get("cells"), list) else []
+                compact[key] = {
+                    "schema_version": value.get("schema_version"),
+                    "plan_hash": value.get("plan_hash"),
+                    "cell_count": len(cells),
+                }
+            elif key == "strategy_v2" and isinstance(value, dict):
+                compact[key] = {
+                    name: value.get(name)
+                    for name in (
+                        "schema_version", "archetype_id", "input_level", "coverage_report",
+                        # 顾问判断是工作流策略首屏的解释层，保留在摘要中；关键词/公司池仍按原规则裁剪。
+                        "consultant_judgement",
+                    )
+                    if value.get(name) is not None
+                }
+            elif key == "assessment_queue" and isinstance(value, dict):
+                compact[key] = {
+                    name: item
+                    for name, item in value.items()
+                    if not isinstance(item, (dict, list))
+                }
+            elif key == "audit" and isinstance(value, dict):
+                compact[key] = {
+                    name: item
+                    for name, item in value.items()
+                    if name not in {"stdout", "stderr"} and not isinstance(item, (dict, list))
+                }
+            elif size(value) <= 48_000:
+                compact[key] = value
+            elif isinstance(value, list):
+                compact[key] = {"item_count": len(value), "summary_only": True}
+            elif isinstance(value, dict):
+                compact[key] = {"field_count": len(value), "summary_only": True}
+        return compact
+
+    def _step_item(self, row: Any, goal_context: dict[str, Any], *, summary_only: bool = False) -> dict[str, Any]:
         """单步骤的对外结构：解析 JSON 列，并为岗位批量评估步骤实时注入评估队列。"""
         item = _row(row)
         for source, target, default in (
@@ -2396,6 +2929,8 @@ class WorkflowEngine:
             queue["low_score"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) < 55])
             if int(queue.get("started") or 0) == 0:
                 item["output"]["summary"] = f"本轮没有新增待评估人选；岗位当前已有 {len(assessed_items)} 位评估结果。"
+        if summary_only and len(_dumps(item["output"]).encode("utf-8")) > 160_000:
+            item["output"] = self._compact_step_output(item["output"])
         return item
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
@@ -2441,6 +2976,12 @@ class WorkflowEngine:
             for row in artifacts:
                 item = _row(row)
                 item["metadata"] = _loads(item.pop("metadata_json"), {})
+                item["has_content"] = bool(str(item.get("content") or "").strip())
+                item["has_file"] = bool(str(item.get("file_path") or "").strip())
+                # 工作流详情只返回产物索引。正文与本地路径必须通过受限产物接口按需读取，
+                # 避免 sourcing_ticket 等大正文拖慢详情轮询，也不向浏览器暴露绝对路径。
+                item.pop("content", None)
+                item.pop("file_path", None)
                 artifact_items.append(item)
             workflow_item = _row(workflow)
             workflow_item["plan"] = _loads(workflow_item.pop("plan_json"), {})
@@ -2456,18 +2997,57 @@ class WorkflowEngine:
             goal_item = self._goal_public(goal)
             goal_item.setdefault("business_outcome", None)
             revision_links = self._workflow_revision_links(conn, workflow_id)
+            artifact_summary = self._artifact_summary(workflow_item.get("status"), step_items, artifact_items)
             return {
                 "ok": True, "goal": goal_item, "workflow": workflow_item,
                 "plan_ref": plan_ref,
                 "business_outcome": workflow_item.get("business_outcome") or goal_item.get("business_outcome"),
                 **revision_links,
                 "steps": step_items, "approvals": approval_items, "artifacts": artifact_items,
+                "artifact_summary": artifact_summary,
                 "events": [_row(row) for row in events],
                 "progress": {"completed": len([s for s in step_items if s["status"] in {"completed", "skipped"}]), "total": len(step_items), "ratio": float(goal["progress"] or 0)},
                 "quality": self.quality_metrics()["metrics"],
             }
         finally:
             conn.close()
+
+    @staticmethod
+    def _artifact_summary(status: Any, steps: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+        if artifacts:
+            return {
+                "kind": "artifacts",
+                "count": len(artifacts),
+                "message": f"已生成 {len(artifacts)} 项可查看产物。",
+            }
+
+        status_text = str(status or "")
+        assessment_step = next(
+            (
+                step for step in steps
+                if step.get("capability_id") == "candidate_batch_assessment" and step.get("status") == "completed"
+            ),
+            None,
+        )
+        if assessment_step is not None:
+            return {
+                "kind": "business_records",
+                "count": 0,
+                "message": "本轮结果已写入候选人评估记录，不另生成文件产物。",
+            }
+        if status_text == "planned":
+            message = "计划尚未执行，开始后这里会显示业务产物或结果去向。"
+        elif status_text in {"queued", "running", "waiting_approval", "waiting_external"}:
+            message = "工作流仍在执行，产物会在对应步骤完成并校验后出现。"
+        elif status_text == "cancelled":
+            message = "工作流已取消；取消前没有生成可查看产物。"
+        elif status_text in {"failed", "blocked"}:
+            message = "工作流未形成可查看产物，请先处理失败或阻塞步骤。"
+        elif status_text == "completed":
+            message = "本工作流完成的是核验或状态更新，结果已回写业务记录，不另生成文件产物。"
+        else:
+            message = "当前没有可查看产物。"
+        return {"kind": "none", "count": 0, "message": message}
 
     def _workflow_revision_links(self, conn: Any, workflow_id: str) -> dict[str, Any]:
         current_id = workflow_id
