@@ -13,6 +13,18 @@ enum DiagnosticsPageTarget {
     case floatingPanel
 }
 
+// Deterministic backoff policy for Core-restart recovery so the retry cadence
+// is auditable and covered by NativeBoundaryTests. AppDelegate consumes the
+// schedule instead of hardcoding delays in the trigger handler.
+struct CoreRecoverySchedule: Equatable {
+    let retryDelays: [TimeInterval]
+
+    var maxRetryAttempts: Int { retryDelays.count }
+    var totalBackoff: TimeInterval { retryDelays.reduce(0, +) }
+
+    static let standard = CoreRecoverySchedule(retryDelays: [0.4, 0.8, 1.5, 2.5, 4.0])
+}
+
 // Pure helpers for the service-unavailable diagnostics page so the markup,
 // baseURL selection, and recovery script stay covered by NativeBoundaryTests.
 enum DiagnosticsPage {
@@ -53,7 +65,8 @@ enum DiagnosticsPage {
             ["title": $0.title, "path": $0.path, "ok": $0.ok, "status": $0.status] as [String: Any]
         }
         let diagnosticsLiteral = (try? JSONSerialization.data(withJSONObject: diagnosticPayload))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            .flatMap { String(data: $0, encoding: .utf8) }
+            .map(escapeJavaScriptHTML) ?? "[]"
         let copilotButtonMarkup = copilotButtonMarkup(compatibilityCopilotEnabled: compatibilityCopilotEnabled)
         let homePath = homePath(target: target)
         return """
@@ -132,11 +145,36 @@ enum DiagnosticsPage {
         """
     }
 
-    private static func javaScriptStringLiteral(_ value: String) -> String {
+    static func javaScriptStringLiteral(_ value: String) -> String {
         guard let data = try? JSONEncoder().encode(value),
               let literal = String(data: data, encoding: .utf8) else {
             return "''"
         }
-        return literal
+        return escapeJavaScriptHTML(literal)
+    }
+
+    // The literal is embedded inside a <script> block, so JSON escaping alone
+    // is not enough: "</script>" and U+2028/U+2029 would survive JSONEncoder
+    // and either close the element or terminate the JS string early.
+    static func escapeJavaScriptHTML(_ literal: String) -> String {
+        var result = ""
+        result.reserveCapacity(literal.count)
+        for scalar in literal.unicodeScalars {
+            switch scalar.value {
+            case 0x26: // &
+                result += "\\u0026"
+            case 0x3C: // <
+                result += "\\u003C"
+            case 0x3E: // >
+                result += "\\u003E"
+            case 0x2028:
+                result += "\\u2028"
+            case 0x2029:
+                result += "\\u2029"
+            default:
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
     }
 }

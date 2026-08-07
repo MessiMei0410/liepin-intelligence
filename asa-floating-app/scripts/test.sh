@@ -12,6 +12,7 @@ swiftc \
   -o "$TEST_DIR/native-boundary-tests" \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
+  src/HotKeyRouting.swift \
   src/DiagnosticsPage.swift \
   tests/NativeBoundaryTests.swift
 

@@ -13,7 +13,6 @@ final class DraggableDotButton: NSButton {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    private static let globalHotKeySignature: OSType = 0x41534131 // "ASA1"
     private var panel: NSPanel!
     private var mainWindow: NSWindow!
     private var mainWebView: WKWebView!
@@ -39,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let serviceBaseURL = URL(string: "http://127.0.0.1:8765")!
     private lazy var webSecurityPolicy = ASAWebSecurityPolicy(serviceBaseURL: serviceBaseURL)
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.24"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.27"
     }
     private lazy var floatingURL = serviceBaseURL.appendingPathComponent("asa-floating").appending(queryItems: [URLQueryItem(name: "ui", value: appVersion)])
     private lazy var stateURL = serviceBaseURL.appendingPathComponent("api/asa/floating/state")
@@ -48,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private lazy var workbenchURL = serviceBaseURL.appendingPathComponent("asa-app")
     private lazy var healthURL = serviceBaseURL.appendingPathComponent("api/v1/health")
     private let launchAgentLabel = "ai.hermes.liepin-workbench"
-    private let coreHealthRetryDelays: [TimeInterval] = [0.4, 0.8, 1.5, 2.5, 4.0]
+    private let coreHealthRetryDelays: [TimeInterval] = CoreRecoverySchedule.standard.retryDelays
     private let compatibilityCopilotEnabled = CommandLine.arguments.contains("--compat-copilot")
 
     private func webSurfaceName(for target: WKWebView) -> String {
@@ -73,14 +72,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
+    // Liepin is authenticated in the long-lived CDP Chrome profile, not the
+    // browser selected by NSWorkspace. Open those links through CDP so a
+    // candidate resume does not unexpectedly land on the login page.
+    private func openExternalURL(_ url: URL) {
+        let host = (url.host ?? "").lowercased()
+        let isLiepin = host == "liepin.com" || host.hasSuffix(".liepin.com")
+        guard isLiepin else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        // /json/new treats everything after the first '?' as the target URL;
+        // escape target query separators so res_id_encode is not truncated.
+        let cdpTarget = url.absoluteString.replacingOccurrences(of: "&", with: "%26")
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:9223/json/new?\(cdpTarget)")!)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 2
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                self?.webLogger.error("Liepin CDP open failed; falling back to default browser")
+                NSWorkspace.shared.open(url)
+                return
+            }
+            self?.webLogger.info("Liepin URL opened in CDP Chrome on port 9223")
+        }.resume()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
         buildStatusItem()
         buildMainWindow()
+        registerGlobalHotKey()
         if compatibilityCopilotEnabled {
             buildPanel()
             buildCollapsedPanel()
-            registerGlobalHotKey()
             publishNativeContext(trigger: "launch", force: true)
         }
         restoreCoreAndLoad()
@@ -103,10 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-                if flags == [.command, .shift], key == "a" {
-                    self?.togglePanel()
-                    return nil
-                }
                 if flags == [.command, .shift], key == "s" {
                     self?.startScreenshotCapture()
                     return nil
@@ -163,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                     nil,
                     &hotKeyID
                 )
-                guard status == noErr, hotKeyID.signature == AppDelegate.globalHotKeySignature else {
+                guard status == noErr, hotKeyID.signature == ASAHotKeyRouting.globalHotKeySignature else {
                     return OSStatus(eventNotHandledErr)
                 }
                 let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
@@ -183,15 +205,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             return
         }
 
-        let registered = [
-            registerHotKey(id: 1, keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey), label: "Option+Space"),
-            registerHotKey(id: 2, keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | shiftKey), label: "Command+Shift+A"),
-            registerHotKey(id: 3, keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(controlKey | optionKey), label: "Control+Option+A"),
-        ].filter { $0 }
+        let registered = ASAHotKeyRouting.defaultHotKeys
+            .map { registerHotKey(id: $0.id.rawValue, keyCode: $0.keyCode, modifiers: $0.modifiers, label: $0.label) }
+            .filter { $0 }
         if registered.isEmpty {
-            notifyWebStatus("ASA 全局快捷键注册失败：请从菜单栏 ASA 显示浮窗。")
+            notifyWebStatus("ASA 全局快捷键注册失败：请从菜单栏 ASA 显示 Agent。")
         } else {
-            notifyWebStatus("ASA 快捷键已启用：Option+Space；备用 Command+Shift+A / Control+Option+A。")
+            notifyWebStatus("ASA Agent 快捷键已启用：Option+Space；备用 Command+Shift+A / Control+Option+A。")
         }
     }
 
@@ -210,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func registerHotKey(id: UInt32, keyCode: UInt32, modifiers: UInt32, label: String) -> Bool {
         var hotKeyRef: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: AppDelegate.globalHotKeySignature, id: id)
+        let hotKeyID = EventHotKeyID(signature: ASAHotKeyRouting.globalHotKeySignature, id: id)
         let status = RegisterEventHotKey(
             keyCode,
             modifiers,
@@ -231,13 +251,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func handleGlobalHotKey() {
-        appendHotKeyLog("triggered hotkey")
         let appBeforeActivation = NSWorkspace.shared.frontmostApplication
         publishNativeContext(trigger: "hotkey", force: true, preferredApplication: appBeforeActivation)
-        if panel.isVisible {
-            collapsePanel()
-        } else {
-            presentPanel()
+        switch ASAHotKeyRouting.destination(compatibilityCopilotEnabled: compatibilityCopilotEnabled) {
+        case .agentMainWindow:
+            appendHotKeyLog("triggered hotkey destination=agent")
+            showMainWindow()
+        case .compatibilityCopilot:
+            appendHotKeyLog("triggered hotkey destination=compatibility-copilot")
+            if panel.isVisible {
+                collapsePanel()
+            } else {
+                presentPanel()
+            }
         }
     }
 
@@ -266,6 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
         appMenu.addItem(NSMenuItem(title: "显示 ASA Agent", action: #selector(showMainWindow), keyEquivalent: "1"))
         appMenu.addItem(NSMenuItem(title: "启动/检查本机服务", action: #selector(startWorkbenchService), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem(title: "刷新 ASA 页面", action: #selector(reloadASA), keyEquivalent: "r"))
         appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(title: "退出 ASA", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appMenu.items.forEach { $0.target = self }
@@ -295,11 +322,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func javaScriptStringLiteral(_ value: String) -> String {
-        guard let data = try? JSONEncoder().encode(value),
-              let literal = String(data: data, encoding: .utf8) else {
-            return "''"
-        }
-        return literal
+        // Shared with DiagnosticsPage so any string embedded into JS (including
+        // inside <script> markup) is safe against </script> breakout and
+        // U+2028/U+2029 line terminators.
+        DiagnosticsPage.javaScriptStringLiteral(value)
     }
 
     private func mimeType(for pathExtension: String) -> String {
@@ -435,6 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "ASA"
+        statusItem.button?.toolTip = "ASA Agent"
         let menu = NSMenu()
         if compatibilityCopilotEnabled {
             menu.addItem(NSMenuItem(title: "显示 ASA Copilot", action: #selector(showPanel), keyEquivalent: ""))
@@ -543,6 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         collapsedPanel.hasShadow = true
 
         collapsedButton = DraggableDotButton(title: "ASA", target: self, action: #selector(showPanel))
+        collapsedButton.toolTip = "ASA Copilot"
         collapsedButton.bezelStyle = .shadowlessSquare
         collapsedButton.isBordered = false
         collapsedButton.wantsLayer = true
@@ -561,16 +589,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         button.bezelStyle = .rounded
         button.font = NSFont.systemFont(ofSize: 12)
         return button
-    }
-
-    @objc private func togglePanel() {
-        guard compatibilityCopilotEnabled else { return }
-        publishNativeContext(trigger: "toggle", force: true)
-        if panel.isVisible {
-            collapsePanel()
-        } else {
-            showPanel()
-        }
     }
 
     @objc private func showPanel() {
@@ -650,8 +668,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func retryCoreHealth(attempt: Int, generation: Int, lastDetail: String) {
-        guard attempt < coreHealthRetryDelays.count else {
-            showServiceUnavailablePages("自动恢复未成功：\(lastDetail)", generation: generation)
+        guard attempt < CoreRecoverySchedule.standard.maxRetryAttempts else {
+            showServiceUnavailablePages("自动恢复未成功（已重试 \(attempt) 次）：\(lastDetail)", generation: generation)
             refreshCollapsedStatus()
             return
         }
@@ -679,12 +697,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func kickstartCore() {
+        let label = launchAgentLabel
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(launchAgentLabel)"]
+        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        process.terminationHandler = { [weak self] process in
+            let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderr = String(data: stderrData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let status = process.terminationStatus
+            self?.appendHotKeyLog("core kickstart status=\(status) stderr=\(stderr)")
+            if status != 0 {
+                let detail = stderr.isEmpty
+                    ? "launchd 服务 \(label) 可能未加载，请检查服务状态。"
+                    : stderr
+                self?.notifyWebStatus("Core 启动命令失败（launchctl 退出码 \(status)）：\(detail)")
+            }
+        }
         do {
             try process.run()
         } catch {
+            appendHotKeyLog("core kickstart run_error=\(error.localizedDescription)")
             notifyWebStatus("Core 恢复失败：\(error.localizedDescription)")
         }
     }
@@ -1534,6 +1569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     @objc private func retryServiceConnection() {
+        notifyWebStatus("正在重试 ASA Core 连接...")
         restoreCoreAndLoad()
     }
 
@@ -1775,7 +1811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             return
         }
         if webSecurityPolicy.allowsExternalURL(url), navigationAction.navigationType == .linkActivated {
-            NSWorkspace.shared.open(url)
+            openExternalURL(url)
         }
         webLogger.error("navigation deny surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(url), privacy: .public)")
         decisionHandler(.cancel)
@@ -1799,8 +1835,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             return nil
         }
         guard webSecurityPolicy.allowsExternalURL(url) else { return nil }
-        NSWorkspace.shared.open(url)
+        openExternalURL(url)
         return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = parameters.allowsDirectories
+        openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        openPanel.resolvesAliases = true
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            completionHandler(response == .OK ? openPanel.urls : nil)
+        }
+        if let window = webView.window {
+            openPanel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(openPanel.runModal())
+        }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -1870,7 +1928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             collapsePanel()
         } else if type == "openExternal", let urlString = body["url"] as? String,
                   let url = URL(string: urlString), webSecurityPolicy.allowsExternalURL(url) {
-            NSWorkspace.shared.open(url)
+            openExternalURL(url)
         } else if type == "startWorkbenchService" {
             startWorkbenchService()
         } else if type == "retryServiceConnection" {
