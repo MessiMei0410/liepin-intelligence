@@ -132,7 +132,6 @@ class QueryPlanV1ContractTest(unittest.TestCase):
         self.assertTrue(all(cell["locations"] == ["上海", "杭州"] for cell in first["cells"]))
         self.assertTrue(all(cell["levels"] == ["经理", "资深工程师"] for cell in first["cells"]))
         self.assertTrue(all(cell["scenarios"] == ["PC 电源"] for cell in first["cells"]))
-
         company_refs = {
             ref["company"]
             for cell in first["cells"]
@@ -147,6 +146,107 @@ class QueryPlanV1ContractTest(unittest.TestCase):
         }
         self.assertEqual(company_refs, {"MPS", "矽力杰", "联宝"})
         self.assertEqual(group_refs, {"power", "function"})
+
+    def test_power_role_does_not_expand_unverified_graph_companies_into_queries(self) -> None:
+        strategy = {
+            "schema_version": "strategy_v2",
+            "step2_target_pool": [{
+                "path": "same_layer", "tier": "T2",
+                "companies": [
+                    {"name": "MPS", "source": "client_doc", "confidence": "high"},
+                    {"name": "芯钛科半导体设备（上海）有限公司", "source": "kb_graph", "confidence": "high"},
+                ],
+            }],
+            "step3_level_mapping": {"accepted_levels": ["专家"]},
+            "step4_keyword_groups": [{"group": "power", "targets": "VPD/VRM模块电源研发", "terms": ["VPD", "VRM", "TLVR"]}],
+            "anchors": {"scenario": {"values": ["服务器电源"]}},
+        }
+
+        plan = query_builders.compile_query_plan_v1(strategy)
+
+        self.assertNotIn("芯钛科半导体设备", " ".join(cell["query"] for cell in plan["cells"]))
+        self.assertEqual(plan["company_pool_guard"]["rejected"][0]["source"], "kb_graph")
+
+    def test_power_role_never_executes_bare_company_queries(self) -> None:
+        strategy = {
+            "schema_version": "strategy_v2",
+            "step2_target_pool": [{
+                "path": "same_layer", "tier": "T1",
+                "companies": [
+                    {"name": "TI", "source": "client_doc", "confidence": "high"},
+                    {"name": "瑞萨电子", "source": "llm_inferred", "confidence": "medium"},
+                ],
+            }],
+            "step4_keyword_groups": [
+                {"group": "core", "targets": "VPD/VRM模块电源研发", "terms": ["VPD", "VRM", "TLVR"]},
+                {"group": "design", "targets": "多相Buck电源设计", "terms": ["多相Buck", "DrMOS", "模块电源"]},
+            ],
+        }
+
+        plan = query_builders.compile_query_plan_v1(strategy)
+
+        company_cells = [
+            cell for cell in plan["cells"]
+            if any(ref.get("company") for ref in cell.get("provenance") or [])
+        ]
+        self.assertTrue(company_cells)
+        self.assertTrue(all(
+            any(ref.get("kind") == "company_keyword" for ref in cell["provenance"])
+            for cell in company_cells
+        ))
+        self.assertFalse(any(
+            cell["query"].casefold() in {"ti", "瑞萨电子"}
+            for cell in plan["cells"]
+        ))
+        self.assertEqual(
+            plan["company_pool_guard"]["company_only_queries"],
+            "forbidden_for_specialized_power_role",
+        )
+        self.assertEqual(
+            plan["company_pool_guard"]["company_keyword_expansion"],
+            "first_core_group_only",
+        )
+        self.assertTrue(all(
+            all(ref.get("group") == "core" for ref in cell["provenance"] if ref.get("kind") == "company_keyword")
+            for cell in company_cells
+        ))
+        self.assertTrue(all(cell["channel"] == "liepin" for cell in company_cells))
+
+    def test_power_role_query_budget_preserves_groups_and_limits_company_sweep(self) -> None:
+        strategy = {
+            "schema_version": "strategy_v2",
+            "step2_target_pool": [{
+                "path": "same_layer", "tier": "T1",
+                "companies": [
+                    {"name": f"目标公司{index:02d}", "source": "client_doc", "confidence": "high"}
+                    for index in range(20)
+                ],
+            }],
+            "step4_keyword_groups": [
+                {"group": f"group-{index}", "targets": "模块电源研发", "terms": ["VPD", "VRM", f"能力词{index}"]}
+                for index in range(6)
+            ],
+        }
+
+        plan = query_builders.compile_query_plan_v1(strategy)
+
+        self.assertLessEqual(plan["cell_count"], query_builders.POWER_ROLE_MAX_QUERY_CELLS)
+        self.assertEqual(plan["query_budget"]["policy"], "specialized_power_balanced_budget_v1")
+        self.assertEqual(plan["query_budget"]["max_company_queries"], 12)
+        covered_groups = {
+            (cell["channel"], ref["group"])
+            for cell in plan["cells"]
+            for ref in cell["provenance"]
+            if ref.get("kind") == "keyword_group"
+        }
+        self.assertEqual(len(covered_groups), 12)
+        covered_companies = {
+            ref["company"]
+            for cell in plan["cells"]
+            for ref in cell["provenance"]
+            if ref.get("kind") == "company_keyword"
+        }
+        self.assertLessEqual(len(covered_companies), 12)
 
     def test_marginal_yield_scheduler_balances_conversion_overlap_and_exploration(self) -> None:
         cells = [
@@ -177,6 +277,103 @@ class QueryPlanV1ContractTest(unittest.TestCase):
         self.assertEqual(scheduled["plan_hash"], query_builders.query_plan_hash(scheduled))
         self.assertEqual(plan["cells"][0]["priority"], 10, "调度不得原地修改已生成计划")
 
+    def test_channel_policy_documents_how_liepin_and_xsaas_combine(self) -> None:
+        cells = [
+            {
+                "cell_id": "q_liepin_power",
+                "channel": "liepin",
+                "query": "MPS 技术市场",
+                "priority": 1,
+                "query_family_ids": ["company_keyword:power"],
+                "provenance": [{"kind": "company_keyword", "company": "MPS", "group": "power"}],
+            },
+            {
+                "cell_id": "q_xsaas_power",
+                "channel": "xsaas",
+                "query": "MPS",
+                "priority": 2,
+                "query_family_ids": ["company_keyword:power"],
+                "provenance": [{"kind": "company_keyword", "company": "MPS", "group": "power"}],
+            },
+        ]
+        base = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": len(cells),
+            "cells": cells,
+        }
+        plan = {**base, "plan_hash": query_builders.query_plan_hash(base)}
+
+        scheduled = query_builders.schedule_query_plan_v1(plan, [])
+
+        policy = scheduled["channel_policy_v1"]
+        self.assertEqual(policy["execution_mode"], "balanced_pilot")
+        self.assertEqual(policy["target_share"], {"liepin": 0.5, "xsaas": 0.5})
+        self.assertEqual(policy["channel_playbook"]["xsaas"]["execution_stage"], "broad_recall")
+        self.assertEqual(policy["channel_playbook"]["liepin"]["execution_stage"], "verify_and_contact")
+        self.assertIn("job_chat_verified", policy["channel_playbook"]["xsaas"]["never_claim"])
+        self.assertTrue(policy["handoff_constraints"]["requires_existing_approved_cell"])
+        self.assertTrue(policy["handoff_constraints"]["forbid_new_unapproved_query"])
+        self.assertTrue(any(item["phase"] == "breadth_to_precision" for item in policy["combination_playbook"]))
+
+        by_channel = {cell["channel"]: cell for cell in scheduled["cells"]}
+        self.assertEqual(by_channel["xsaas"]["scheduling"]["channel_policy"]["intake_stage"], "X1 X-SaaS新增/待复核")
+        self.assertEqual(
+            by_channel["xsaas"]["scheduling"]["channel_policy"]["review_pass_stage"],
+            "X2 X-SaaS复核通过/待人工联系",
+        )
+        self.assertEqual(by_channel["liepin"]["scheduling"]["channel_policy"]["fallback_channel"], "xsaas")
+        self.assertTrue(by_channel["liepin"]["scheduling"]["channel_policy"]["handoff_requires_approved_query_family"])
+
+    def test_channel_policy_uses_history_but_keeps_share_guardrails(self) -> None:
+        cells = [
+            {"cell_id": f"q_liepin_{index}", "channel": "liepin", "query": f"猎聘 {index}", "priority": index, "provenance": [{"kind": "keyword_group", "group": "lp"}]}
+            for index in range(1, 5)
+        ] + [
+            {"cell_id": f"q_xsaas_{index}", "channel": "xsaas", "query": f"X {index}", "priority": index + 4, "provenance": [{"kind": "keyword_group", "group": "xs"}]}
+            for index in range(1, 5)
+        ]
+        base = {
+            "schema_version": "query_plan_v1",
+            "source_strategy_version": "strategy_v2",
+            "dimensions": {"locations": [], "levels": [], "scenarios": []},
+            "cell_count": len(cells),
+            "cells": cells,
+        }
+        plan = {**base, "plan_hash": query_builders.query_plan_hash(base)}
+        metrics = [
+            {
+                "channel": "liepin",
+                "query": "猎聘 1",
+                "runs": 3,
+                "raw_occurrences": 60,
+                "unique_identities": 6,
+                "detail_complete": 4,
+                "intake_count": 2,
+                "unique_yield_per_run": 2,
+                "overlap_rate": 0.9,
+            },
+            {
+                "channel": "xsaas",
+                "query": "X 1",
+                "runs": 3,
+                "raw_occurrences": 120,
+                "unique_identities": 45,
+                "detail_complete": 36,
+                "intake_count": 30,
+                "unique_yield_per_run": 15,
+                "overlap_rate": 0.2,
+            },
+        ]
+
+        scheduled = query_builders.schedule_query_plan_v1(plan, metrics)
+
+        self.assertEqual(scheduled["channel_policy_v1"]["execution_mode"], "quality_weighted")
+        self.assertEqual(scheduled["channel_policy_v1"]["primary_channel"], "xsaas")
+        self.assertEqual(scheduled["channel_policy_v1"]["target_share"]["xsaas"], 0.7)
+        self.assertEqual(scheduled["channel_policy_v1"]["target_share"]["liepin"], 0.3)
+
     def test_channel_execution_entries_carry_cursor_without_changing_plan_hash(self) -> None:
         cell = {
             "cell_id": "qpc_resume",
@@ -193,6 +390,8 @@ class QueryPlanV1ContractTest(unittest.TestCase):
         self.assertEqual(entries, [{
             "cell_id": "qpc_resume", "query": "精密 机械", "cursor": {"page": 51},
             "collected_before": 0,
+            "query_family_ids": [],
+            "channel_variant": "liepin",
             "evaluation_constraints": {"locations": [], "levels": [], "scenarios": []},
             "execution_filters": {},
             "seen_candidate_keys": [],

@@ -4,7 +4,7 @@ All functions receive 'self' (AgentService instance) as first parameter.
 """
 
 from __future__ import annotations
-import json, re, textwrap, secrets, threading, sqlite3
+import hashlib, json, re, textwrap, secrets, threading, sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,148 @@ from . import strategy_v2
 from .native_attachments import attachment_read_requested, image_analysis_requested
 from .capability_runtime import ZERO_RESULT_ATTRIBUTION_LABELS
 from .turn_decision import build_turn_decision
+
+
+_EXPANDED_EXPLANATION_MARKERS = (
+    "详细", "展开", "完整依据", "逐条", "具体解释", "解释下", "为什么", "为何", "怎么判断", "从哪些点",
+    "深入", "全面", "说清楚", "好好分析", "具体说",
+)
+
+_ASSESSMENT_CONTEXT_FIELDS = (
+    "fit_score", "fit_level", "recommendation", "recommendation_label",
+    "confidence", "evidence_coverage", "criteria", "strengths", "gaps",
+    "risks", "verification_questions", "next_action", "outreach_angle", "citations",
+)
+
+_CRITERION_STATUS_LABELS = {
+    "met": "已满足", "partial": "部分匹配", "not_met": "未满足", "unknown": "证据不足",
+}
+
+
+def _copilot_response_detail(message: str) -> str:
+    return "expanded" if any(marker in str(message or "") for marker in _EXPANDED_EXPLANATION_MARKERS) else "standard"
+
+
+def _copilot_assessment_context(assessment: dict[str, Any]) -> dict[str, Any]:
+    return {key: assessment.get(key) for key in _ASSESSMENT_CONTEXT_FIELDS}
+
+
+def _candidate_evidence_question(message: str) -> bool:
+    text = " ".join(str(message or "").split())
+    return any(
+        token in text
+        for token in (
+            "哪些方面", "匹配", "适合", "符合", "为什么", "为何", "怎么判断",
+            "从哪些点", "三次电源", "证据链", "详细解释", "具体解释",
+        )
+    )
+
+
+def _copilot_list_value(*values: Any) -> list[str]:
+    for value in values:
+        parsed = value if isinstance(value, list) else _loads(value, None)
+        if isinstance(parsed, list):
+            result = [" ".join(str(item or "").split()) for item in parsed]
+            result = [item for item in result if item]
+            if result:
+                return list(dict.fromkeys(result))
+        text = " ".join(str(value or "").split())
+        if text:
+            result = [item.strip() for item in re.split(r"[\n；;]+", text) if item.strip()]
+            if result:
+                return list(dict.fromkeys(result))
+    return []
+
+
+def _copilot_job_evidence(self, job_id: int) -> dict[str, Any]:
+    try:
+        job = self.capability_runtime._job({"type": "job", "id": int(job_id)})
+    except (sqlite3.Error, ValueError):
+        return {}
+    profile = job.get("profile") if isinstance(job.get("profile"), dict) else {}
+    return {
+        "client": job.get("client"),
+        "job": job.get("title"),
+        "location": job.get("position_location") or job.get("location"),
+        "status": job.get("status"),
+        "summary": profile.get("jd_analysis_summary") or job.get("summary"),
+        "responsibilities": _copilot_list_value(job.get("responsibilities")),
+        "requirements": _copilot_list_value(job.get("requirements")),
+        "education_requirement": profile.get("education_requirement") or job.get("education"),
+        "experience_requirement": profile.get("experience_requirement") or job.get("experience"),
+        "hard_requirements": _copilot_list_value(profile.get("hard_requirements_json"), job.get("hard_requirements")),
+        "ability_keywords": _copilot_list_value(profile.get("ability_keywords_json"), job.get("ability_keywords")),
+        "soft_preferences": _copilot_list_value(profile.get("soft_preferences_json")),
+        "target_companies": _copilot_list_value(profile.get("target_companies_json"), job.get("target_companies")),
+        "exclusions": _copilot_list_value(profile.get("exclusion_tags_json"), job.get("exclusions")),
+        "risk_points": _copilot_list_value(profile.get("risk_points_json")),
+        "pitch_points": _copilot_list_value(profile.get("pitch_points_json")),
+    }
+
+
+def _format_candidate_evidence_answer(assessment: dict[str, Any], *, gaps_only: bool = False) -> str:
+    gaps = [str(item).strip() for item in (assessment.get("gaps") or []) if str(item).strip()]
+    questions = [str(item).strip() for item in (assessment.get("verification_questions") or []) if str(item).strip()]
+    if gaps_only:
+        lines = ["**结论**", assessment.get("next_action") or "当前判断仍有证据缺口。"]
+        lines.extend(["", "**证据缺口**", *[f"- {item}" for item in gaps or ["当前没有额外证据缺口。"]]])
+        lines.extend(["", "**需要核验**", *[f"{index}. {item}" for index, item in enumerate(questions or ["当前没有额外核验项。"], 1)]])
+        return "\n".join(lines)
+
+    criteria = assessment.get("criteria") if isinstance(assessment.get("criteria"), dict) else {}
+    items: list[tuple[str, dict[str, Any]]] = []
+    for group in ("hard_requirements", "core_abilities", "soft_preferences"):
+        for item in (criteria.get(group) or []):
+            if not isinstance(item, dict):
+                continue
+            criterion = str(item.get("criterion") or "").strip()
+            # 评估器可能同时返回一个把整段 JD 拼在一起的总门槛和拆分门槛；
+            # 总门槛通常只有学历证据，直接展示会造成“整条硬门槛已满足”的误读。
+            if len(criterion) > 80 and group == "hard_requirements":
+                continue
+            items.append((group, item))
+    status_rank = {"met": 0, "partial": 1, "unknown": 2, "not_met": 3}
+    items.sort(key=lambda pair: (
+        status_rank.get(str(pair[1].get("status") or "unknown"), 2),
+        0 if pair[0] == "hard_requirements" else 1 if pair[0] == "core_abilities" else 2,
+    ))
+    matched = [item for _, item in items if str(item.get("status") or "unknown") == "met"]
+    uncertain = [item for _, item in items if str(item.get("status") or "unknown") != "met"]
+    lines = [
+        "**结论**",
+        f"当前评估为 {assessment.get('fit_level') or '待判断'}"
+        + (f"（{assessment.get('fit_score')} 分）" if assessment.get("fit_score") is not None else "")
+        + "。以下判断只基于现有证据，不代表未写明的能力已经满足。",
+        "",
+        "**逐条证据链**",
+        "",
+        "**直接匹配**",
+    ]
+    if not matched:
+        lines.append("- 当前评估没有足够的直接匹配证据。")
+    for index, item in enumerate(matched[:8], 1):
+        criterion = str(item.get("criterion") or "判断项").strip()
+        status = _CRITERION_STATUS_LABELS.get(str(item.get("status") or "unknown"), "证据不足")
+        evidence = [str(value).strip() for value in (item.get("evidence") or []) if str(value).strip()]
+        reason = str(item.get("reason") or "").strip()
+        lines.append(f"{index}. **{criterion}｜{status}**")
+        lines.append(f"   - 直接证据：{'；'.join(evidence) if evidence else '现有资料未提供直接证据'}")
+        lines.append(f"   - 判断说明：{reason or '需要结合补充材料再判断'}")
+    lines.extend(["", "**部分匹配或证据不足**"])
+    if not uncertain:
+        lines.append("- 当前没有额外的部分匹配或证据不足项。")
+    for index, item in enumerate(uncertain[:10], 1):
+        criterion = str(item.get("criterion") or "判断项").strip()
+        status = _CRITERION_STATUS_LABELS.get(str(item.get("status") or "unknown"), "证据不足")
+        evidence = [str(value).strip() for value in (item.get("evidence") or []) if str(value).strip()]
+        reason = str(item.get("reason") or "").strip()
+        lines.append(f"{index}. **{criterion}｜{status}**")
+        lines.append(f"   - 已知材料：{'；'.join(evidence) if evidence else '简历未提供直接证据'}")
+        lines.append(f"   - 不能直接下结论的原因：{reason or '需要补充项目细节'}")
+    lines.extend(["", "**判断边界**", *[f"- {item}" for item in gaps or ["当前评估未记录额外缺口。"]]])
+    lines.extend(["", "**需要核验**", *[f"{index}. {item}" for index, item in enumerate(questions or ["当前没有额外核验项。"], 1)]])
+    lines.extend(["", "**下一步**", str(assessment.get("next_action") or "先补齐关键证据，再由顾问决定是否推进。")])
+    return "\n".join(lines)
 
 
 def _normalize_copilot_context(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -137,75 +279,102 @@ def _floating_bridge_evidence(self, context: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in evidence.items() if value not in (None, "", [])}
 
     candidate = bridge.get("candidate") if isinstance(bridge.get("candidate"), dict) else {}
-    profile = (
+    bridge_profile = (
         candidate.get("profile_summary")
         or bridge.get("candidate_profile_text")
         or bridge.get("profile_summary")
         or bridge.get("page_text")
         or ""
     )
+    job_candidate_id = bridge.get("job_candidate_id")
+    if not bridge_profile and isinstance(job_candidate_id, int) and job_candidate_id > 0:
+        try:
+            candidate_context = build_candidate_context(self.db_path, job_candidate_id)
+            bridge_profile = str((candidate_context.get("resume") or {}).get("full_text") or "")
+        except Exception:
+            bridge_profile = ""
     evidence = {
         "source": surface,
         "page_type": compact(bridge.get("page_type"), 40),
         "candidate_name": compact(candidate.get("name") or bridge.get("candidate_name"), 40),
         "company": compact(candidate.get("company") or bridge.get("company"), 80),
         "title": compact(candidate.get("title") or bridge.get("candidate_title"), 120),
-        "profile_summary": compact(profile, 4200),
+        "profile_summary": compact(bridge_profile, 4200),
         "bridge_status": compact(bridge.get("status"), 160),
         "source_url": compact(bridge.get("source_url") or bridge.get("url"), 260),
     }
     return {key: value for key, value in evidence.items() if value}
 
 
-def _uploaded_attachment_evidence(self, context: dict[str, Any]) -> dict[str, Any]:
+def _uploaded_attachment_evidence(self, context: dict[str, Any], session_id: str) -> dict[str, Any]:
     raw_items = context.get("uploaded_attachments") if isinstance(context.get("uploaded_attachments"), list) else []
     items: list[dict[str, Any]] = []
+    requested: list[tuple[str, str]] = []
     for raw in raw_items[:3]:
         if not isinstance(raw, dict):
             continue
-        file_name = Path(str(raw.get("file_name") or "").strip()).name[:180]
-        if not file_name:
+        attachment_id = " ".join(str(raw.get("attachment_id") or "").split())[:80]
+        access_token = str(raw.get("access_token") or "")[:200]
+        if not attachment_id or not access_token:
             continue
-        extracted_text = str(raw.get("extracted_text") or "")[:18000]
-        raw_analysis = raw.get("image_analysis") if isinstance(raw.get("image_analysis"), dict) else {}
-        classifications: list[dict[str, Any]] = []
-        for classification in (raw_analysis.get("classifications") or [])[:12]:
-            if not isinstance(classification, dict):
-                continue
-            label = " ".join(str(classification.get("label") or "").split())[:100]
-            if not label:
-                continue
-            try:
-                confidence = round(float(classification.get("confidence") or 0), 4)
-            except (TypeError, ValueError):
-                confidence = 0.0
-            classifications.append({"label": label, "confidence": confidence})
-        image_analysis = {
-            "source": " ".join(str(raw_analysis.get("source") or "pasted_clipboard_image").split())[:80],
-            "ocr_text": str(raw_analysis.get("ocr_text") or extracted_text)[:12000],
-            "classifications": classifications,
-        }
-        image_analysis = {key: value for key, value in image_analysis.items() if value not in (None, "", [])}
-        try:
-            size_bytes = max(0, int(raw.get("size_bytes") or 0))
-        except (TypeError, ValueError):
-            size_bytes = 0
-        items.append(
-            {
-                "attachment_id": " ".join(str(raw.get("attachment_id") or "").split())[:80],
-                "file_name": file_name,
-                "file_type": " ".join(str(raw.get("file_type") or Path(file_name).suffix.lstrip(".")).split())[:20],
-                "mime_type": " ".join(str(raw.get("mime_type") or "").split())[:120],
-                "size_bytes": size_bytes,
-                "content_available": bool(raw.get("content_available") and (extracted_text or image_analysis)),
-                "extracted_text": extracted_text,
-                "truncated": bool(raw.get("truncated")),
-                "is_image": bool(raw.get("is_image")),
-                "image_analysis": image_analysis,
-                "status": " ".join(str(raw.get("status") or "").split())[:160],
-                "untrusted_document_content": True,
-            }
-        )
+        requested.append((attachment_id, hashlib.sha256(access_token.encode("utf-8")).hexdigest()))
+
+    conn = self._connect()
+    try:
+        rows = []
+        if requested:
+            for attachment_id, token_hash in requested:
+                row = conn.execute(
+                    """
+                    SELECT * FROM agent_copilot_attachments
+                    WHERE attachment_id=? AND access_token_hash=?
+                      AND expires_at>datetime('now','localtime')
+                      AND (session_id='' OR session_id=?)
+                    """,
+                    (attachment_id, token_hash, session_id),
+                ).fetchone()
+                if row:
+                    rows.append(row)
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_copilot_attachments
+                WHERE session_id=? AND expires_at>datetime('now','localtime')
+                ORDER BY created_at DESC LIMIT 2
+                """,
+                (session_id,),
+            ).fetchall()
+        for row in rows:
+            extracted_text = str(row["extracted_text"] or "")[:18000]
+            file_name = Path(str(row["file_name"] or "")).name[:180]
+            content_available = bool(extracted_text)
+            items.append(
+                {
+                    "attachment_id": row["attachment_id"],
+                    "file_name": file_name,
+                    "file_type": row["file_type"],
+                    "mime_type": row["mime_type"],
+                    "size_bytes": int(row["size_bytes"] or 0),
+                    "content_available": content_available,
+                    "extracted_text": extracted_text,
+                    "truncated": bool(row["truncated"]),
+                    "is_image": False,
+                    "status": row["status"],
+                    "untrusted_document_content": True,
+                }
+            )
+            conn.execute(
+                """
+                UPDATE agent_copilot_attachments
+                SET session_id=CASE WHEN session_id='' THEN ? ELSE session_id END,
+                    last_accessed_at=datetime('now','localtime')
+                WHERE attachment_id=?
+                """,
+                (session_id, row["attachment_id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
     if not items:
         return {}
     return {
@@ -213,6 +382,32 @@ def _uploaded_attachment_evidence(self, context: dict[str, Any]) -> dict[str, An
         "items": items,
         "content_available": any(item["content_available"] for item in items),
         "local_paths_exposed": False,
+    }
+
+
+def _persistable_attachment_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    evidence = payload.get("uploaded_attachment_evidence") if isinstance(payload.get("uploaded_attachment_evidence"), dict) else {}
+    if not evidence:
+        return payload
+    stored_items = []
+    for item in (evidence.get("items") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        stored_items.append({
+            key: item.get(key)
+            for key in (
+                "attachment_id", "file_name", "file_type", "mime_type", "size_bytes",
+                "content_available", "truncated", "is_image", "status",
+            )
+        })
+    return {
+        **payload,
+        "uploaded_attachment_evidence": {
+            "scope": evidence.get("scope"),
+            "items": stored_items,
+            "content_available": bool(evidence.get("content_available")),
+            "local_paths_exposed": False,
+        },
     }
 
 
@@ -267,10 +462,17 @@ def _mentioned_jobs_for_copilot(self, message: str, limit: int = 5) -> list[dict
         job = str(item.get("job") or "")
         score = 0
         job_id = int(item.get("id") or 0)
-        if job_id and re.search(rf"(?:#\s*|岗位\s*#?\s*){job_id}(?!\d)", cleaned, re.I):
+        client_matched = any(alias in cleaned for alias in _client_aliases(client))
+        id_matched = bool(job_id and re.search(rf"(?:#\s*|岗位\s*#?\s*){job_id}(?!\d)", cleaned, re.I))
+        title_matched = bool(job and job in cleaned)
+        if id_matched:
             score += 100
-        if any(alias in cleaned for alias in _client_aliases(client)):
+        if client_matched:
             score += 12
+        # 没有客户名、也不是精确岗位名/ID 时，不拿岗位标题里的零散词去碰全文，
+        # 否则 JD/附件长文本里很容易误命中“分析”“数据”等通用词，导致无关岗位卡片。
+        if not (client_matched or id_matched or title_matched):
+            continue
         for token in re.split(r"[\s/（）()、,，｜|]+", job):
             token = token.strip()
             if len(token) >= 2 and token in cleaned:
@@ -725,7 +927,7 @@ def _copilot_action_kind(message: str) -> str:
         return "candidate_sourcing"
     rules = (
         ("job_archive", ("归档岗位", "岗位归档", "关闭岗位", "岗位关闭", "没拆分的岗位", "未拆分的岗位")),
-        ("job_split", ("拆分岗位", "岗位拆分", "拆成", "分成")),
+        ("job_split", ("拆分岗位", "岗位拆分", "分成")),
         ("job_publish", ("发布岗位", "岗位发布", "上架岗位")),
         ("candidate_sourcing", ("补池", "寻访", "找人", "找些人选", "找候选人", "搜索人选")),
         ("candidate_outreach", ("触达", "开聊", "发送消息", "联系候选人", "二次跟进", "再跟一次", "催回复")),
@@ -737,6 +939,20 @@ def _copilot_action_kind(message: str) -> str:
         if any(token in message for token in tokens):
             return action
     return ""
+
+
+_JOB_REQUIREMENT_MARKERS = (
+    "岗位需求", "JD", "jd", "职位描述", "岗位描述", "岗位职责", "岗位职则",
+    "任职要求", "任职资格", "职位要求", "岗位要求", "招聘需求", "新增岗位",
+    "新岗位", "录入岗位", "接入岗位", "岗位接入",
+)
+
+
+@staticmethod
+def _is_job_requirement_message(message: str) -> bool:
+    """检测用户是否正在输入/粘贴一份岗位需求（JD）。"""
+    text = str(message or "")
+    return any(marker in text for marker in _JOB_REQUIREMENT_MARKERS)
 
 
 _COPILOT_SPEECH_ACTS = {
@@ -1182,7 +1398,7 @@ def _compact_workflow_context(workflow_payload: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _format_workflow_strategy_answer(workflow_context: dict[str, Any]) -> str:
+def _format_workflow_strategy_answer(workflow_context: dict[str, Any], *, expanded: bool = False) -> str:
     strategy = workflow_context.get("strategy") if isinstance(workflow_context.get("strategy"), dict) else None
     workflow = workflow_context.get("workflow") if isinstance(workflow_context.get("workflow"), dict) else {}
     if not strategy:
@@ -1200,6 +1416,8 @@ def _format_workflow_strategy_answer(workflow_context: dict[str, Any]) -> str:
     def values(items: list[dict[str, Any]], key: str, limit: int) -> str:
         result = [str(item.get(key) or "").strip() for item in items if isinstance(item, dict)]
         result = [item for item in result if item]
+        if expanded:
+            limit = len(result)
         suffix = f"；另有 {len(result) - limit} 项" if len(result) > limit else ""
         return "；".join(result[:limit]) + suffix
 
@@ -1220,7 +1438,8 @@ def _format_workflow_strategy_answer(workflow_context: dict[str, Any]) -> str:
         f"X-SaaS {len(xsaas)} 组：{values(xsaas, 'query', 6) or '未配置'}",
     ]
     if companies:
-        lines.append(f"目标公司：{'、'.join(companies[:10])}" + (f"等 {len(companies)} 家" if len(companies) > 10 else ""))
+        company_limit = len(companies) if expanded else 10
+        lines.append(f"目标公司：{'、'.join(companies[:company_limit])}" + (f"等 {len(companies)} 家" if len(companies) > company_limit else ""))
     if hard_requirements:
         lines.append(f"硬条件：{values(hard_requirements, 'value', 5)}")
     if negative_rules:
@@ -1262,6 +1481,27 @@ def _copilot_context_from_focus(
     selected_facts = self._copilot_context_facts(selected)
     if selected_facts and current_clients and selected_facts.get("client") not in current_clients:
         return {"type": "global", "id": None, "page": selected.get("page") or "overview", "filters": {}}, []
+    # 模糊结果追问（"寻访结果呢"类，未提及岗位/客户名）优先会话焦点岗位，
+    # 避免前端残留页面 context 把主线串到其他岗位（2026-08-07 长越→电源专家串台）。
+    if (
+        selected_facts
+        and selected.get("type") == "job"
+        and not current_jobs
+        and not current_clients
+        and re.search(r"(?:结果|进展|情况|怎么样|如何)", message)
+        and focus
+    ):
+        focus_context = focus.get("context") if isinstance(focus.get("context"), dict) else {}
+        if (
+            focus_context.get("type") == "job"
+            and focus_context.get("id")
+            and str(selected.get("id")) != str(focus_context.get("id"))
+            and float(focus.get("confidence") or 0) >= 0.7
+        ):
+            return {
+                "type": "job", "id": int(focus_context["id"]),
+                "page": "positions", "filters": {},
+            }, []
     if selected_facts:
         return dict(selected), []
     if len(current_jobs) == 1:
@@ -1667,10 +1907,25 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
         messages = []
         for row in reversed(rows):
             structured = _loads(row["structured_json"], {})
+            uploaded = structured.get("uploaded_attachment_evidence") if isinstance(structured.get("uploaded_attachment_evidence"), dict) else {}
+            uploaded_items = []
+            for item in (uploaded.get("items") or [])[:3]:
+                if not isinstance(item, dict):
+                    continue
+                uploaded_items.append({
+                    key: item.get(key)
+                    for key in (
+                        "attachment_id", "file_name", "file_type", "mime_type", "size_bytes",
+                        "content_available", "truncated", "is_image", "status",
+                    )
+                })
+            message_context = {"type": row["context_type"], "id": row["context_id"]}
+            if uploaded_items:
+                message_context["uploaded_attachments"] = uploaded_items
             messages.append(
                 {
                     "role": row["role"], "content": row["content"],
-                    "context": {"type": row["context_type"], "id": row["context_id"]},
+                    "context": message_context,
                     "references": structured.get("references") or [],
                     "suggested_actions": structured.get("suggested_actions") or [],
                     "skill_runs": structured.get("skill_runs") or [],
@@ -1686,6 +1941,7 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "pending_intent": structured.get("pending_intent"),
                     "action_card": structured.get("action_card"),
                     "action_cards": structured.get("action_cards") or [],
+                    "model_participation": structured.get("model_participation"),
                     "analysis_card": structured.get("analysis_card"),
                     # 策略建议补丁：浮窗恢复会话时可重渲染「应用到策略」操作栏
                     "strategy_patch": structured.get("strategy_patch"),
@@ -1851,6 +2107,36 @@ def update_copilot_session(
         "title": str(row["title"] or "未命名对话")[:80],
         "archived": bool(row["archived_at"]),
         "business_focus": _copilot_focus_from_joined_row(row),
+    }
+
+
+def archive_all_copilot_sessions(self) -> dict[str, Any]:
+    """Archive every visible Copilot task while preserving messages and focus evidence."""
+    conn = self._connect()
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT messages.session_id
+                 FROM agent_copilot_messages messages
+                 LEFT JOIN agent_copilot_sessions metadata ON metadata.session_id=messages.session_id
+                WHERE metadata.archived_at IS NULL
+                ORDER BY messages.session_id"""
+        ).fetchall()
+        session_ids = [str(row["session_id"]) for row in rows]
+        conn.executemany(
+            """INSERT INTO agent_copilot_sessions(session_id,title,archived_at,updated_at)
+               VALUES (?, NULL, datetime('now','localtime'), datetime('now','localtime'))
+               ON CONFLICT(session_id) DO UPDATE SET
+                 archived_at=datetime('now','localtime'),
+                 updated_at=datetime('now','localtime')""",
+            [(session_id,) for session_id in session_ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "ok": True,
+        "archived_count": len(session_ids),
+        "session_ids": session_ids,
     }
 
 
@@ -2205,10 +2491,10 @@ def _route_copilot_skills(self, message: str, context: dict[str, Any]) -> list[s
         return ["liepin_resume_capture"]
 
     direct_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("job_intake", ("岗位接入", "录入岗位", "新岗位", "岗位需求", "需求接入")),
-        ("jd_calibration", ("jd校准", "JD校准", "岗位校准", "校准岗位", "硬门槛")),
+        ("job_intake", ("岗位接入", "录入岗位", "接入岗位", "需求接入")),
+        ("jd_calibration", ("jd校准", "JD校准", "岗位校准", "校准岗位", "硬门槛", "岗位需求", "分析岗位", "分析JD", "JD分析", "看看这个JD", "岗位要求", "JD")),
         ("job_library_update", ("更新岗位", "拆分岗位", "新建岗位", "建立岗位", "岗位库更新")),
-        ("job_diagnosis", ("岗位", "风险", "漏斗", "诊断", "驾驶舱", "看板")),
+        ("job_diagnosis", ("岗位诊断", "岗位风险", "岗位漏斗", "风险", "漏斗", "诊断", "驾驶舱", "看板")),
         ("talent_pool_search", ("人才库", "历史人才", "存量人选", "库里", "搜库", "检索人才")),
         ("search_strategy", ("寻访策略", "搜索策略", "怎么找", "搜人策略", "目标公司", "关键词")),
         ("job_publish_prepare", ("发布准备", "岗位发布准备", "准备发布", "发布草稿", "上架准备")),
@@ -2263,7 +2549,7 @@ def _copilot_impl(
     if not message:
         raise ValueError("请输入问题")
     raw_context = dict(context or {})
-    floating_compact = str(raw_context.get("display_mode") or "").strip() == "floating_compact" or str(raw_context.get("source") or "").strip() == "asa_floating"
+    floating_compact = str(raw_context.get("display_mode") or "").strip() == "floating_compact"
     selected = self._normalize_copilot_context(raw_context)
     selected, focus_conflicts = self._copilot_context_from_focus(session_id, message, selected)
     existing_focus = self.get_copilot_focus(session_id)
@@ -2614,11 +2900,55 @@ def _copilot_impl(
     semantic_goal_intent = bool(
         semantic_action in {
             "candidate_sourcing", "candidate_outreach", "job_publish", "job_split",
-            "job_archive", "recommendation", "salary",
+            "job_archive", "candidate_review", "recommendation", "salary",
         }
         and semantic_speech_act in {"propose", "execute", "confirm"}
         and intent_understanding.get("safe_for_action")
     )
+    action_context_prompts = {
+        "candidate_outreach": ({"candidate", "queue"}, "请先选择具体候选人，或明确要处理的待联系队列。"),
+        "candidate_review": ({"job", "candidate", "queue"}, "请先选择要核验的岗位、候选人或候选队列。"),
+        "recommendation": ({"candidate"}, "请先选择要生成报告或推荐给客户的具体候选人。"),
+        "salary": ({"candidate"}, "请先选择要处理谈薪的具体候选人。"),
+    }
+    action_context_rule = action_context_prompts.get(semantic_action)
+    if (
+        forced_answer is None
+        and semantic_goal_intent
+        and turn_decision.get("effect") == "create_plan"
+        and action_context_rule
+        and selected.get("type") not in action_context_rule[0]
+    ):
+        # 语义动作需要岗位/候选人上下文但 selected 缺失时，先从会话焦点/历史证据
+        # 补全目标岗位，避免有明确主线的会话被"请先选择"卡死（2026-08-07 郭杨评估指令被吞）。
+        inferred_target: dict[str, Any] | None = None
+        focus_snapshot = focus_context if isinstance(focus_context, dict) else {}
+        focus_context_candidate = focus_snapshot if focus_snapshot.get("type") in {"job", "candidate"} and focus_snapshot.get("id") else {}
+        if focus_context_candidate and float((existing_focus or {}).get("confidence") or 0) >= 0.7:
+            inferred_target = {"type": str(focus_context_candidate["type"]), "id": int(focus_context_candidate["id"])}
+        else:
+            evidence = self._copilot_session_business_evidence(session_id)
+            evidence_jobs = list(evidence.get("jobs") or [])
+            if len(evidence_jobs) == 1:
+                inferred_target = {"type": "job", "id": int(evidence_jobs[0]["id"])}
+            elif len(evidence_jobs) > 1:
+                # 多岗位时取最近一条 assistant 引用/用户 context 的岗位（按消息倒序优先）。
+                recent = conversation_history[-6:]
+                for item in reversed(recent):
+                    mentioned = self._mentioned_jobs_for_copilot(str(item.get("content") or ""))
+                    if len(mentioned) == 1:
+                        inferred_target = {"type": "job", "id": int(mentioned[0]["id"])}
+                        break
+        if inferred_target:
+            target_type = str(inferred_target["type"])
+            selected = {
+                "type": target_type, "id": int(inferred_target["id"]),
+                "page": "positions" if target_type == "job" else "candidates", "filters": {},
+            }
+            selected_facts = self._copilot_context_facts(selected)
+            focus_conflicts = []
+        else:
+            forced_answer = action_context_rule[1]
     if (
         forced_answer is None
         and semantic_action != "none"
@@ -2773,7 +3103,10 @@ def _copilot_impl(
         if current_workflow_context:
             selected_payload["workflow_detail"] = current_workflow_context
             if workflow_strategy_question and forced_answer is None:
-                forced_answer = _format_workflow_strategy_answer(current_workflow_context)
+                forced_answer = _format_workflow_strategy_answer(
+                    current_workflow_context,
+                    expanded=_copilot_response_detail(message) == "expanded",
+                )
     elif existing_focus:
         selected_payload["business_focus"] = existing_focus
     references: list[dict[str, Any]] = []
@@ -2795,12 +3128,18 @@ def _copilot_impl(
                     "review": stop_review,
                     "stage": stop_stage_event,
                 },
-                "assessment": {
-                    key: assessment.get(key)
-                    for key in ["fit_score", "fit_level", "recommendation", "confidence", "evidence_coverage", "strengths", "gaps", "risks", "next_action"]
-                },
+                "assessment": _copilot_assessment_context(assessment),
             }
         )
+        if (
+            assessment
+            and not is_stopped(candidate_context)
+            and forced_answer is None
+            and _candidate_evidence_question(message)
+        ):
+            # 主 Agent 对话也必须使用可核验的结构化证据，不能让模型把详细追问
+            # 压缩成一句泛化结论；模型仍可在非证据型问题中自由回答。
+            forced_answer = _format_candidate_evidence_answer(assessment)
         identity = candidate_context.get("identity", {})
         position = candidate_context.get("position", {})
         references.append(
@@ -2845,9 +3184,10 @@ def _copilot_impl(
                         f"依据：{project_label} 的最新停止记录是：{stop_summary}。\n\n"
                         "下一步：保持历史归档；如需重新考虑，先打开人选详情查看记录，再人工纠正状态或重新复核。"
                     )
+            persisted_payload = _persistable_attachment_payload(selected_payload)
             business_focus = self._persist_copilot_focus(
-                session_id, message, selected_payload,
-                structured=selected_payload, conflicts=focus_conflicts,
+                session_id, message, persisted_payload,
+                structured=persisted_payload, conflicts=focus_conflicts,
             )
             conn = self._connect()
             try:
@@ -2858,12 +3198,13 @@ def _copilot_impl(
                     VALUES (?,?,?,?,?,?)
                     """,
                     [
-                        (session_id, context_type, context_id, "user", message, _dumps(selected_payload)),
+                        (session_id, context_type, context_id, "user", message, _dumps(persisted_payload)),
                         (
                             session_id, context_type, context_id, "assistant", answer,
                             _dumps({
                                 "references": references, "suggested_actions": suggested_actions,
                                 "skill_runs": [], "business_focus": business_focus,
+                                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
                             }),
                         ),
                     ],
@@ -2880,6 +3221,7 @@ def _copilot_impl(
                 "suggested_actions": suggested_actions,
                 "skill_runs": [],
                 "business_focus": business_focus,
+                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
             }
     elif context_type == "job" and context_id:
         conn = self._connect()
@@ -2898,6 +3240,7 @@ def _copilot_impl(
             conn.close()
         if job:
             selected_payload.update(_row(job))
+            selected_payload["position"] = _copilot_job_evidence(self, int(context_id))
             references.append({"type": "job", "id": context_id, "label": job["job"], "subtitle": job["client"]})
             suggested_actions.append({"type": "open_job", "id": context_id, "label": "打开岗位"})
     elif context_type == "queue":
@@ -2947,7 +3290,7 @@ def _copilot_impl(
                 bool(item.get("content_available"))
                 for item in attachment_evidence.get("items") or []
             )
-    uploaded_attachment_evidence = self._uploaded_attachment_evidence(raw_context)
+    uploaded_attachment_evidence = self._uploaded_attachment_evidence(raw_context, session_id)
     if uploaded_attachment_evidence:
         selected_payload["uploaded_attachment_evidence"] = uploaded_attachment_evidence
         for item in uploaded_attachment_evidence.get("items") or []:
@@ -3072,6 +3415,7 @@ def _copilot_impl(
                             _dumps({
                                 "references": references, "suggested_actions": suggested_actions,
                                 "skill_runs": [], "business_focus": business_focus,
+                                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
                             }),
                         ),
                     ],
@@ -3088,6 +3432,7 @@ def _copilot_impl(
                 "suggested_actions": suggested_actions,
                 "skill_runs": [],
                 "business_focus": business_focus,
+                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
             }
     mentioned_jobs = self._mentioned_jobs_for_copilot(message)
     if mentioned_jobs:
@@ -3099,11 +3444,6 @@ def _copilot_impl(
     workflow_outcome_context = self._copilot_workflow_outcome_context(
         message, selected, mentioned_jobs, existing_focus
     )
-    if not references:
-        references = [
-            {"type": item["type"], "id": item["id"], "label": item["label"], "subtitle": item["project"]}
-            for item in dashboard.get("top_actions", [])[:5]
-        ]
     routed_skills = (
         []
         if goal_workflow or forced_answer is not None or workflow_outcome_question
@@ -3133,6 +3473,23 @@ def _copilot_impl(
             suggested_actions.extend(result.get("suggested_actions") or [])
         except Exception as exc:
             skill_runs.append({"skill": {"id": skill_id}, "ok": False, "error": str(exc)[:500]})
+    # 仅在没有任何任务信号时才用 dashboard top_actions 兜底；
+    # 否则用户会收到与当前对话无关的候选/岗位卡片（功能卡）。
+    has_task_signal = bool(
+        goal_workflow
+        or forced_answer is not None
+        or workflow_outcome_context
+        or routed_skills
+        or mentioned_jobs
+        or attachment_skill_run
+        or _is_job_requirement_message(message)
+        or str(intent_understanding.get("action") or "none") != "none"
+    )
+    if not references and not has_task_signal:
+        references = [
+            {"type": item["type"], "id": item["id"], "label": item["label"], "subtitle": item["project"]}
+            for item in dashboard.get("top_actions", [])[:5]
+        ]
     memories = self.search_memories(
         message, context_type=context_type, context_id=context_id,
         client=str(selected_payload.get("client") or selected_payload.get("position", {}).get("client") or ""),
@@ -3142,6 +3499,7 @@ def _copilot_impl(
         "question": message,
         "intent_understanding": intent_understanding,
         "response_mode": "floating_compact" if floating_compact else "default",
+        "response_detail": _copilot_response_detail(message),
         "conversation": self._copilot_conversation_context(session_id, conversation_history),
         "conversation_history": conversation_history,
         "selected_context": selected_payload,
@@ -3172,6 +3530,7 @@ def _copilot_impl(
         ),
         None,
     )
+    answer_source = "rules"
     if goal_workflow:
         plan_steps = goal_workflow.get("steps") or []
         risk_steps = [step for step in plan_steps if step.get("risk_level") in {"R2", "R3"}]
@@ -3293,13 +3652,15 @@ def _copilot_impl(
         answer = forced_answer
     else:
         answer = self.llm.copilot(sanitize_payload(payload))
+        answer_source = "model"
+    persisted_payload = _persistable_attachment_payload(selected_payload)
     focus_context = (
         (goal_workflow.get("goal") or {}).get("context")
-        if goal_workflow else selected_payload
-    ) or selected_payload
+        if goal_workflow else persisted_payload
+    ) or persisted_payload
     business_focus = self._persist_copilot_focus(
         session_id, message, focus_context,
-        structured=selected_payload, conflicts=focus_conflicts,
+        structured=persisted_payload, conflicts=focus_conflicts,
     )
     assistant_structured = {
         "references": references,
@@ -3330,6 +3691,11 @@ def _copilot_impl(
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
         "turn_decision": turn_decision,
+        "model_participation": {
+            "mode": answer_source,
+            "label": "模型生成 + 上下文约束" if answer_source == "model" else "规则生成",
+            "model": self.llm.model if answer_source == "model" else None,
+        },
     }
     if strategy_revision:
         assistant_structured["workflow_revision"] = strategy_revision
@@ -3365,6 +3731,25 @@ def _copilot_impl(
         }
     conn = self._connect()
     try:
+        # 寻访结果卡：已完成/阻塞的寻访工作流在对话中附带可展示的结果卡。
+        if goal_workflow or current_workflow_context:
+            workflow_state = goal_workflow or current_workflow_context
+            workflow_id = str((workflow_state.get("workflow") or {}).get("workflow_id") or "")
+            workflow_status = str(
+                (workflow_state.get("workflow") or {}).get("status")
+                or (workflow_state.get("goal") or {}).get("status")
+                or ""
+            )
+            if workflow_id and workflow_status in {"completed", "blocked"}:
+                try:
+                    from . import sourcing_result_card
+
+                    result_card = sourcing_result_card.build_sourcing_result_card(conn, workflow_id)
+                    if result_card:
+                        assistant_structured["action_card"] = result_card
+                except Exception:
+                    # 结果卡生成失败不应阻塞主回复。
+                    pass
         conn.executemany(
             """
             INSERT INTO agent_copilot_messages
@@ -3372,7 +3757,7 @@ def _copilot_impl(
             VALUES (?,?,?,?,?,?)
             """,
             [
-                (session_id, context_type, context_id, "user", message, _dumps(selected_payload)),
+                (session_id, context_type, context_id, "user", message, _dumps(persisted_payload)),
                 (
                     session_id,
                     context_type,
@@ -3399,6 +3784,7 @@ def _copilot_impl(
         "references": references,
         "suggested_actions": suggested_actions,
         "skill_runs": skill_runs,
+        "model_participation": assistant_structured["model_participation"],
         "goal_id": goal_workflow["goal"]["goal_id"] if goal_workflow else None,
         "workflow_id": (
             goal_workflow["workflow"]["workflow_id"]
@@ -3449,6 +3835,8 @@ def _copilot_impl(
         "intent_understanding": intent_understanding,
         "turn_decision": turn_decision,
         "proactive_suggestions": generate_proactive_suggestions(str(self.db_path)),
+        "action_card": assistant_structured.get("action_card"),
+        "action_cards": [assistant_structured["action_card"]] if assistant_structured.get("action_card") else [],
     }
 
 
@@ -3461,12 +3849,10 @@ def chat(self, job_candidate_id: int, message: str, session_id: str = "") -> dic
     assessment = state.get("assessment") or {}
     if not assessment:
         raise ValueError("请先完成当前人选的 Agent 评估")
-    if "为什么" in message:
-        parts = [*assessment.get("strengths", []), *assessment.get("gaps", []), *assessment.get("risks", [])]
-        answer = "；".join(parts[:8]) or assessment.get("next_action") or "当前证据不足。"
+    if _copilot_response_detail(message) == "expanded":
+        answer = _format_candidate_evidence_answer(assessment)
     elif any(token in message for token in ["缺什么", "还缺", "核验"]):
-        parts = [*assessment.get("gaps", []), *assessment.get("verification_questions", [])]
-        answer = "；".join(parts[:8]) or "当前没有额外核验项。"
+        answer = _format_candidate_evidence_answer(assessment, gaps_only=True)
     else:
         answer = self.llm.chat(context["model_context"], assessment, message)
     session_id = session_id or f"candidate_{job_candidate_id}_{secrets.token_hex(4)}"
@@ -3746,7 +4132,7 @@ def copilot_agent(
         # ---- 复用 _copilot_impl 的预处理 ----
         message = " ".join(str(message or "").split())
         raw_context = dict(context or {})
-        floating_compact = str(raw_context.get("display_mode") or "").strip() == "floating_compact" or str(raw_context.get("source") or "").strip() == "asa_floating"
+        floating_compact = str(raw_context.get("display_mode") or "").strip() == "floating_compact"
         selected = self._normalize_copilot_context(raw_context)
         selected, focus_conflicts = self._copilot_context_from_focus(stable_session_id, message, selected)
         existing_focus = self.get_copilot_focus(stable_session_id)
@@ -3764,10 +4150,12 @@ def copilot_agent(
         # 基础上下文注入
         if context_type == "candidate" and context_id:
             candidate_context = build_candidate_context(self.db_path, context_id)
+            state = self.get_candidate_state(int(context_id))
             identity = candidate_context.get("identity", {})
             position = candidate_context.get("position", {})
             selected_payload["candidate"] = identity
             selected_payload["position"] = position
+            selected_payload["assessment"] = _copilot_assessment_context(state.get("assessment") or {})
             references.append({"type": "candidate", "id": context_id, "label": identity.get("name") or "", "subtitle": f"{position.get('client','')}/{position.get('job','')}"})
         elif context_type == "job" and context_id:
             conn = self._connect()
@@ -3781,14 +4169,19 @@ def copilot_agent(
             if job:
                 selected_payload["client"] = job["client"]
                 selected_payload["job"] = job["job"]
+                selected_payload["position"] = _copilot_job_evidence(self, int(context_id))
                 references.append({"type": "job", "id": context_id, "label": job["job"], "subtitle": job["client"]})
 
         memories = self.search_memories(message, context_type=context_type, context_id=context_id)
 
         # ---- 工具调用 Agent 循环 ----
+        response_mode = "floating_compact" if floating_compact else "default"
+        response_detail = _copilot_response_detail(message)
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": json.dumps({
                 "question": message,
+                "response_mode": response_mode,
+                "response_detail": response_detail,
                 "conversation": self._copilot_conversation_context(stable_session_id, conversation_history),
                 "selected_context": selected_payload,
                 "dashboard": {"summary": dashboard.get("summary", {}), "top_actions": dashboard.get("top_actions", [])[:5]},
@@ -3803,7 +4196,8 @@ def copilot_agent(
         for round_num in range(_MAX_TOOL_ROUNDS):
             request_payload = {
                 "question": message,
-                "response_mode": "floating_compact" if floating_compact else "default",
+                "response_mode": response_mode,
+                "response_detail": response_detail,
                 "selected_context": selected_payload,
                 "dashboard": {"summary": dashboard.get("summary", {}), "tool_round": round_num + 1},
             }
@@ -3861,6 +4255,15 @@ def copilot_agent(
         if not final_answer:
             final_answer = "已执行工具查询，请查看上方结果。"
 
+        agent_assessment = selected_payload.get("assessment")
+        if (
+            context_type == "candidate"
+            and isinstance(agent_assessment, dict)
+            and agent_assessment.get("criteria")
+            and _candidate_evidence_question(message)
+        ):
+            final_answer = _format_candidate_evidence_answer(agent_assessment)
+
         # ---- 后处理（与 _copilot_impl 一致） ----
         business_focus = self._persist_copilot_focus(
             stable_session_id, message, selected_payload,
@@ -3874,6 +4277,11 @@ def copilot_agent(
             "skill_runs": [],
             "tool_calls": tool_results,
             "business_focus": business_focus,
+            "model_participation": {
+                "mode": "model_tools",
+                "label": "模型生成 + 工具证据",
+                "model": self.llm.model,
+            },
         }
         if strategy_patch:
             assistant_structured["strategy_patch"] = strategy_patch
@@ -3903,6 +4311,7 @@ def copilot_agent(
             "skill_runs": [],
             "tool_calls": tool_results,
             "business_focus": business_focus,
+            "model_participation": assistant_structured["model_participation"],
             "memory": {"mode": memories.get("mode"), "hits": len(memories.get("memories") or [])},
             "proactive_suggestions": generate_proactive_suggestions(str(self.db_path)),
             "strategy_patch": strategy_patch,

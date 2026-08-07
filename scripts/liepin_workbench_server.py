@@ -1551,6 +1551,17 @@ def asa_floating_html() -> str:
     .msg-actions { display:flex; gap:7px; flex-wrap:wrap; margin:8px 2px 0; }
     .msg-action { border-color:#d0d7e2; background:#fff; border-radius:999px; padding:5px 9px; font-size:12px; color:#1f2937; }
     .msg-action:hover { background:#f8fafc; }
+    .analysis-card { margin:8px 2px 0; padding:10px 11px; display:grid; gap:8px; border:1px solid #bfd3ff; border-radius:8px; background:#f5f8ff; }
+    .analysis-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .analysis-card-head b { font-size:12px; color:#1d2939; }
+    .analysis-card-head span { font-size:10px; color:#667085; white-space:nowrap; }
+    .analysis-card>p { margin:0; font-size:12.5px; line-height:1.5; color:#1f2937; }
+    .analysis-card-metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); border:1px solid #dbe5f7; background:#fff; }
+    .analysis-card-metrics span { min-height:40px; padding:6px 7px; display:grid; gap:2px; border-right:1px solid #e5eaf2; border-bottom:1px solid #e5eaf2; font-size:10px; color:#667085; }
+    .analysis-card-metrics span:nth-child(2n) { border-right:0; }
+    .analysis-card-metrics span:nth-last-child(-n+2) { border-bottom:0; }
+    .analysis-card-metrics b { font-size:13px; color:#1d2939; }
+    .analysis-card button { width:max-content; border-radius:6px; padding:5px 9px; font-size:11px; }
     .strategy-patch-done { margin:8px 2px 0; font-size:12px; color:#15803d; }
     .patch-modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.38); display:flex; align-items:center; justify-content:center; z-index:80; }
     .patch-modal { width:min(340px, calc(100vw - 32px)); max-height:76vh; overflow:auto; background:#fff; border-radius:12px; box-shadow:0 18px 44px rgba(15,23,42,.22); padding:12px 14px; display:grid; gap:10px; }
@@ -1778,6 +1789,14 @@ function renderFloatingMarkdown(value){
   closeSection();
   return html ? `<div class="msg-body">${html}</div>` : '';
 }
+function renderAnalysisCard(message, index){
+  const card = message?.analysis_card;
+  if (!card?.run_id) return '';
+  const metrics = (Array.isArray(card.metrics) ? card.metrics : []).slice(0, 4);
+  const metricHtml = metrics.map(item => `<span>${esc(item.label || '指标')}<b>${esc(item.value == null ? '数据不足' : item.value)}</b></span>`).join('');
+  const dataTime = String(card.data_as_of || '').replace('T', ' ').slice(0, 16);
+  return `<section class="analysis-card"><div class="analysis-card-head"><b>ASA 分析</b><span>${esc(dataTime)}</span></div><p>${esc(card.headline || '分析已完成')}</p>${metricHtml ? `<div class="analysis-card-metrics">${metricHtml}</div>` : ''}<button class="primary" type="button" data-analysis-open="${index}">查看完整分析</button></section>`;
+}
 function renderFloatingMessage(message, index){
   const role = message?.role === 'user' ? 'user' : 'assistant';
   if (role === 'user') return `<div class="msg user">${esc(message?.content || '')}</div>`;
@@ -1787,6 +1806,7 @@ function renderFloatingMessage(message, index){
     actionList.push({type:'floating_action', id:'fill_resume', label:'补全简历并定位'});
   }
   const actions = actionList
+    .filter(action => !(message?.analysis_card && action.type === 'open_analysis'))
     .filter(action => action && (action.type === 'floating_action' || action.type === 'open_candidate' || action.id))
     .filter(action => !(action.type === 'open_candidate' && actionList.length === 1))
     .slice(0, 3)
@@ -1802,9 +1822,10 @@ function renderFloatingMessage(message, index){
   const workflowCard = renderWorkflowCard(message, index);
   const intentCard = renderFloatingIntentCard(message, index);
   const patchBar = renderStrategyPatchBar(message, index);
+  const analysisCard = renderAnalysisCard(message, index);
   // 流式响应会先写入空壳消息；在首段文本到达前只显示思考状态，不显示伪回复。
-  if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar) return '';
-  return `<div class="msg assistant">${body}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${toolSummary}${toolDetails}${workflowCard}${intentCard}${patchBar}</div>`;
+  if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard) return '';
+  return `<div class="msg assistant">${body}${analysisCard}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${toolSummary}${toolDetails}${workflowCard}${intentCard}${patchBar}</div>`;
 }
 function renderThinkingMessage(){
   return '<div class="msg assistant"><div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>ASA 正在分析当前上下文</span></div></div>';
@@ -2688,6 +2709,9 @@ function renderMessages(){
   document.querySelectorAll('[data-workflow-open]').forEach(button => {
     button.addEventListener('click', () => { const message = state.messages[Number(button.dataset.workflowOpen)]; if (message?.workflow_progress?.workflow_id) runMessageAction('open_workflow', message.workflow_progress.workflow_id); });
   });
+  document.querySelectorAll('[data-analysis-open]').forEach(button => {
+    button.addEventListener('click', () => { const card = state.messages[Number(button.dataset.analysisOpen)]?.analysis_card; if (card?.run_id) runMessageAction('open_analysis', card.run_id); });
+  });
   document.querySelectorAll('[data-workflow-approval]').forEach(button => {
     button.addEventListener('click', () => { const [messageIndex, approvalIndex] = String(button.dataset.workflowApproval).split(':').map(Number); void decideWorkflowApproval(messageIndex, approvalIndex, 'approve'); });
   });
@@ -2736,6 +2760,10 @@ function recoverStuckRequest(){
   renderMessages();
 }
 function runMessageAction(type, id, planRef=null){
+  if (type === 'open_analysis' && id) {
+    openWorkbenchUrl(`/asa-app#analysis=${encodeURIComponent(id)}`);
+    return;
+  }
   if (type === 'open_candidate') {
     const suffix = id ? `#candidate=${encodeURIComponent(id)}` : '';
     openWorkbenchUrl(`/asa-app${suffix}`);
@@ -3076,7 +3104,7 @@ async function sendMessage(){
     saveCurrentSession();
     let answerText = result.answer || result.message || '已处理。';
     const workflowText = result.workflow_id ? '\\n\\n已生成目标计划：' + result.workflow_id : '';
-    const assistantMessage = {role:'assistant', content: answerText + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress: result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null};
+    const assistantMessage = {role:'assistant', content: answerText + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], analysis_card: result.analysis_card || null, proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress: result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null};
     if (result._streamed) Object.assign(state.messages[state.messages.length - 1], assistantMessage);
     else state.messages.push(assistantMessage);
     if (result.workflow_id) void monitorWorkflow(result.workflow_id, 120000, state.messages.length - 1);
@@ -3117,7 +3145,7 @@ async function sendMessageAgent(text, readyAttachments) {
       ans += '\n\n🔧 查询了：' + result.tool_calls.map(tc => `${tc.result?.success ? '✅' : '❌'} ${tc.tool}`).join(', ');
     }
     const workflowProgress = result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null;
-    state.messages.push({role:'assistant', content: ans, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], tool_calls: result.tool_calls || [], proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress:workflowProgress});
+    state.messages.push({role:'assistant', content: ans, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], analysis_card: result.analysis_card || null, tool_calls: result.tool_calls || [], proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress:workflowProgress});
     if (workflowProgress) void monitorWorkflow(workflowProgress.workflow_id, 120000, state.messages.length - 1);
     state.attachments = [];
     document.getElementById('chatStatus').textContent = '';
@@ -3541,6 +3569,19 @@ def action_locator(data: dict[str, Any]) -> dict[str, Any]:
             or first_present(locator, "candidate_title", ""),
             "client": client,
             "job": job,
+            "source_candidate_id": first_present(locator, "source_candidate_id", ""),
+            "source_url": first_present(locator, "source_url", ""),
+            "candidate_profile_text": first_present(locator, "candidate_profile_text", ""),
+            "profile_text": first_present(locator, "profile_text", ""),
+            "full_text": first_present(locator, "full_text", ""),
+            "work_text": first_present(locator, "work_text", ""),
+            "project_text": first_present(locator, "project_text", ""),
+            "education_text": first_present(locator, "education_text", ""),
+            "education": first_present(locator, "education", ""),
+            "experience": first_present(locator, "experience", ""),
+            "city": first_present(locator, "city", ""),
+            "skills": first_present(locator, "skills", ""),
+            "level": first_present(locator, "level", ""),
         }
     )
     return action
@@ -4865,13 +4906,22 @@ def build_talent_action(data: dict[str, Any]) -> dict[str, Any]:
                 "reason": first_present(data, "reason", "") or "插件内人工确认加入统一人才库",
                 "clean_stage": first_present(data, "clean_stage", "H1 最近寻访/待筛") or "H1 最近寻访/待筛",
                 "flow_bucket": first_present(data, "flow_bucket", "最近寻访") or "最近寻访",
-                "source_candidate_id": first_present(data, "source_candidate_id", "") or extract_resume_id(first_present(data, "source_url", "")) or "liepin_plugin",
+                "source_candidate_id": first_present(data, "source_candidate_id", "")
+                or action.get("source_candidate_id", "")
+                or extract_resume_id(first_present(data, "source_url", "") or action.get("source_url", ""))
+                or "liepin_plugin",
                 "raw": {
                     "source": "liepin_plugin",
                     "plugin_surface": first_present(data, "plugin_surface", "resume_match"),
-                    "source_url": first_present(data, "source_url", ""),
+                    "source_url": first_present(data, "source_url", "") or action.get("source_url", ""),
                     "score": first_present(data, "score", ""),
                     "grade": first_present(data, "grade", ""),
+                    "candidate_profile_text": first_present(data, "candidate_profile_text", "") or action.get("candidate_profile_text", ""),
+                    "profile_text": first_present(data, "profile_text", "") or action.get("profile_text", "") or action.get("candidate_profile_text", ""),
+                    "full_text": first_present(data, "full_text", "") or action.get("full_text", ""),
+                    "work_text": first_present(data, "work_text", "") or action.get("work_text", ""),
+                    "project_text": first_present(data, "project_text", "") or action.get("project_text", ""),
+                    "education_text": first_present(data, "education_text", "") or action.get("education_text", ""),
                 },
             }
         )
@@ -5858,6 +5908,7 @@ class WorkbenchState:
         self.agent_lock = threading.Lock()
         self.last_refresh: dict[str, Any] | None = None
         self._agent_service: AgentService | None = None
+        self._owns_agent_service = True
 
     @property
     def base_url(self) -> str:
@@ -5871,8 +5922,15 @@ class WorkbenchState:
                     self._agent_service = AgentService(self.db_path)
         return self._agent_service
 
+    def bind_agent_service(self, service: AgentService) -> None:
+        """Reuse ASA Core's agent so one process has one recovery scheduler."""
+        if self._agent_service is not None and self._agent_service is not service and self._owns_agent_service:
+            self._agent_service.close()
+        self._agent_service = service
+        self._owns_agent_service = False
+
     def close(self) -> None:
-        if self._agent_service is not None:
+        if self._agent_service is not None and self._owns_agent_service:
             self._agent_service.close()
 
     def run_refresh(self) -> dict[str, Any]:

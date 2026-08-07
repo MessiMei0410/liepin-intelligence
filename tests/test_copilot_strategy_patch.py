@@ -308,6 +308,69 @@ class BuildPatchTest(unittest.TestCase):
         assert selected == {"type": "workflow", "id": "workflow_abc123"}
         assert conflicts == []
 
+    def test_result_followup_prefers_saved_focus_job_over_stale_page_context(self) -> None:
+        """模糊结果追问（未提及岗位/客户）时，会话焦点岗位优先于前端残留页面 context。
+
+        2026-08-07 长越机械（job 137）主线被电源专家（job 142）页面 context 串台的回归守护。
+        """
+        db_path = _make_db(self.tmp)
+
+        class FocusService(_StubService):
+            def get_copilot_focus(self, _session_id: str):
+                return {
+                    "context": {"type": "job", "id": 137},
+                    "client": "长越科技",
+                    "job": {"id": 137, "title": "机械高级工程师"},
+                    "confidence": 1.0,
+                }
+
+            def _mentioned_client_names(self, _message: str):
+                return []
+
+            def _mentioned_jobs_for_copilot(self, _message: str):
+                return []
+
+            def _copilot_context_facts(self, _context: dict):
+                return {"client": "士兰微", "job": {"id": 142, "title": "电源专家"}}
+
+        service = FocusService(db_path, _StubLLM(None))
+        selected, conflicts = _copilot_context_from_focus(
+            service, "session-1", "寻访结果呢？", {"type": "job", "id": 142, "page": "positions", "filters": {}}
+        )
+
+        assert selected == {"type": "job", "id": 137, "page": "positions", "filters": {}}
+        assert conflicts == []
+
+    def test_result_followup_keeps_page_job_when_focus_is_unrelated(self) -> None:
+        """消息未提岗位且焦点岗位不同时，若焦点置信不足则保留页面 context（不误切换）。"""
+        db_path = _make_db(self.tmp)
+
+        class WeakFocusService(_StubService):
+            def get_copilot_focus(self, _session_id: str):
+                return {
+                    "context": {"type": "job", "id": 137},
+                    "client": "长越科技",
+                    "job": {"id": 137, "title": "机械高级工程师"},
+                    "confidence": 0.4,
+                }
+
+            def _mentioned_client_names(self, _message: str):
+                return []
+
+            def _mentioned_jobs_for_copilot(self, _message: str):
+                return []
+
+            def _copilot_context_facts(self, _context: dict):
+                return {"client": "士兰微", "job": {"id": 142, "title": "电源专家"}}
+
+        service = WeakFocusService(db_path, _StubLLM(None))
+        selected, conflicts = _copilot_context_from_focus(
+            service, "session-1", "寻访结果呢？", {"type": "job", "id": 142, "page": "positions", "filters": {}}
+        )
+
+        assert selected == {"type": "job", "id": 142, "page": "positions", "filters": {}}
+        assert conflicts == []
+
     def test_gate_failure_skips_llm(self) -> None:
         db_path = _make_db(self.tmp)
         llm = _StubLLM({"changes": [{"type": "add_keyword", "value": "通信电源"}]})

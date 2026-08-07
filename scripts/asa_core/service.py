@@ -34,6 +34,25 @@ CANDIDATE_ACTION_LABELS = {
 CANDIDATE_UPDATE_LABELS = {
     "read_no_reply": "已读未回复",
 }
+# 版本化推荐包客户反馈类型枚举（非法值 → 409；label 用于时间线与回执展示）。
+PACKAGE_FEEDBACK_TYPE_LABELS = {
+    "approved": "客户认可",
+    "interview": "安排面试",
+    "rejected": "客户否决",
+    "hold": "暂缓推进",
+    "other": "其他反馈",
+}
+# 生命周期一等事件（三期驾驶舱）：面试/Offer/入职统一为候选人结构化时间线事件。
+# label 用于时间线摘要与回执；statuses 限定 event_status 合法取值（缺省用 default_status）；
+# followup_task/followup_days 定义自动生成的跟进待办（只建内部任务，不自动对外沟通）。
+LIFECYCLE_EVENT_TYPES: dict[str, dict[str, Any]] = {
+    "interview_scheduled": {"label": "面试安排", "statuses": ("scheduled", "cancelled"), "default_status": "scheduled", "followup_task": "interview_followup", "followup_days": 2},
+    "interview_completed": {"label": "面试完成", "statuses": ("completed", "passed", "failed"), "default_status": "completed", "followup_task": "interview_followup", "followup_days": 1},
+    "offer_extended": {"label": "Offer 发出", "statuses": ("extended", "withdrawn"), "default_status": "extended", "followup_task": "offer_followup", "followup_days": 2},
+    "offer_accepted": {"label": "Offer 已接受", "statuses": ("accepted",), "default_status": "accepted", "followup_task": "onboarding_followup", "followup_days": 7},
+    "offer_declined": {"label": "Offer 已拒绝", "statuses": ("declined",), "default_status": "declined", "followup_task": "offer_followup", "followup_days": 1},
+    "onboarded": {"label": "确认入职", "statuses": ("recorded",), "default_status": "recorded", "followup_task": "onboarding_followup", "followup_days": 7},
+}
 READ_ONLY_COPILOT_ACTIONS = {"open_candidate", "open_job", "open_queue", "open_analysis"}
 NON_BUSINESS_COPILOT_ACTIONS = {*READ_ONLY_COPILOT_ACTIONS, "native_action", "floating_action", "open_workflow"}
 IDEMPOTENCY_LEASE_MINUTES = 5
@@ -86,7 +105,15 @@ def _candidate_action_card(intent: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_sourcing_result_action_card(card: Any) -> bool:
+    return isinstance(card, dict) and card.get("type") == "sourcing_result"
+
+
 def _workflow_action_card(result: dict[str, Any]) -> dict[str, Any] | None:
+    # 已完成的寻访工作流会由 copilot_handler 附带 sourcing_result 结果卡；
+    # 直接返回该结果卡，避免被 workflow 对象卡覆盖或在 copilot_agent 路径被清空。
+    if _is_sourcing_result_action_card(result.get("action_card")):
+        return result.get("action_card")
     workflow_id = str(result.get("workflow_id") or "").strip()
     if not workflow_id:
         return None
@@ -515,6 +542,8 @@ class CoreService:
                     structured = json.loads(existing["structured_json"] or "{}") if existing else {}
                 if not isinstance(structured, dict):
                     structured = {}
+                # 已存在的寻访结果卡不应被 workflow 对象卡覆盖。
+                keep_existing_result_card = _is_sourcing_result_action_card(structured.get("action_card"))
                 structured.update({
                     "references": result.get("references") or [],
                     "suggested_actions": result.get("suggested_actions") or [],
@@ -523,6 +552,9 @@ class CoreService:
                     "action_card": result.get("action_card"),
                     "action_cards": result.get("action_cards") or [],
                 })
+                if keep_existing_result_card:
+                    structured["action_card"] = result.get("action_card") if _is_sourcing_result_action_card(result.get("action_card")) else structured["action_card"]
+                    structured["action_cards"] = result.get("action_cards") if any(_is_sourcing_result_action_card(c) for c in (result.get("action_cards") or [])) else structured.get("action_cards") or []
                 if workflow_card:
                     structured.update({
                         "goal": result.get("goal"), "workflow": result.get("workflow"),
@@ -1348,6 +1380,43 @@ class CoreService:
                 (candidate_id,),
             )]
             item["sourcing_attributions"] = attributions
+            report_rows = conn.execute(
+                """
+                SELECT DISTINCT a.id,a.artifact_id,a.workflow_id,a.artifact_type,a.title,
+                                a.mime_type,a.validation_status,a.created_at
+                FROM agent_artifacts a
+                LEFT JOIN agent_goals g ON g.goal_id=a.goal_id
+                WHERE a.artifact_type IN ('matching_report','recommendation_report','resume_document','salary_report')
+                  AND (
+                    CASE WHEN json_valid(a.metadata_json)
+                         THEN CAST(json_extract(a.metadata_json,'$.job_candidate_id') AS INTEGER)
+                         ELSE 0 END = ?
+                    OR (g.context_type='candidate' AND CAST(g.context_id AS INTEGER)=?)
+                  )
+                ORDER BY datetime(a.created_at),a.id
+                """,
+                (candidate_id, candidate_id),
+            ).fetchall()
+            report_versions: dict[str, int] = {}
+            report_artifacts: list[dict[str, Any]] = []
+            for row in report_rows:
+                report = _row(row)
+                artifact_type = str(report.get("artifact_type") or "")
+                report_versions[artifact_type] = report_versions.get(artifact_type, 0) + 1
+                report["version"] = report_versions[artifact_type]
+                report_artifacts.append(report)
+            item["report_artifacts"] = list(reversed(report_artifacts))
+            # 版本化推荐包摘要列表（顾问确认推荐后生成；无确认推荐为空列表，前端不渲染区块）。
+            item["recommendation_packages"] = [
+                self._package_brief(row) | {"feedback_count": int(row["feedback_count"])}
+                for row in conn.execute(
+                    """SELECT p.*,
+                              (SELECT COUNT(*) FROM recommendation_package_feedback f WHERE f.package_id=p.package_id) AS feedback_count
+                         FROM recommendation_packages p
+                        WHERE p.job_candidate_id=? ORDER BY p.version DESC""",
+                    (candidate_id,),
+                ).fetchall()
+            ]
             item["is_stopped"] = _is_stopped(item.get("clean_stage"), item.get("raw_status"))
             # stop_reason 保留旧语义（备注文本）；R10 新增 stop_reason_code/label 枚举视图。
             stop_reason_code = str(item.get("stop_reason") or "").strip()
@@ -1362,8 +1431,154 @@ class CoreService:
 
     def workflow(self, workflow_id: str) -> dict[str, Any]:
         if self.agent_service:
-            return self.agent_service.get_workflow(workflow_id)
+            return self._compact_workflow_payload(self.agent_service.get_workflow(workflow_id))
         raise RuntimeError("workflow service unavailable")
+
+    def _compact_workflow_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return a first-paint workflow payload; full step output remains on /steps/{id}."""
+        def size(value: Any) -> int:
+            try:
+                return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+            except (TypeError, ValueError):
+                return 0
+
+        def query_plan_index(value: Any) -> dict[str, Any]:
+            plan = value if isinstance(value, dict) else {}
+            cells = plan.get("cells") if isinstance(plan.get("cells"), list) else []
+            return {
+                "schema_version": plan.get("schema_version"),
+                "plan_hash": plan.get("plan_hash"),
+                "cell_count": int(plan.get("cell_count") or len(cells)),
+                "dimensions": plan.get("dimensions") if isinstance(plan.get("dimensions"), dict) else {},
+                "execution_semantics": plan.get("execution_semantics") if isinstance(plan.get("execution_semantics"), dict) else {},
+            }
+
+        def preflight_index(value: Any) -> dict[str, Any]:
+            preflight = value if isinstance(value, dict) else {}
+            compact = {
+                key: item
+                for key, item in preflight.items()
+                if not isinstance(item, (dict, list))
+            }
+            if isinstance(preflight.get("query_plan_v1"), dict):
+                compact["query_plan_v1"] = query_plan_index(preflight["query_plan_v1"])
+            snapshot = preflight.get("strategy_snapshot")
+            if isinstance(snapshot, dict):
+                compact_snapshot = {
+                    key: item
+                    for key, item in snapshot.items()
+                    if not isinstance(item, (dict, list))
+                }
+                if isinstance(snapshot.get("channels"), dict) and size(snapshot["channels"]) <= 48_000:
+                    compact_snapshot["channels"] = snapshot["channels"]
+                if isinstance(snapshot.get("query_plan_v1"), dict):
+                    compact_snapshot["query_plan_v1"] = query_plan_index(snapshot["query_plan_v1"])
+                compact["strategy_snapshot"] = compact_snapshot
+            compact["_summary_only"] = True
+            return compact
+
+        for step in payload.get("steps") or []:
+            output = step.get("output") if isinstance(step, dict) else None
+            if isinstance(output, dict) and size(output) > 160_000:
+                step["output"] = self.agent_service.workflow_engine._compact_step_output(output)
+        for approval in payload.get("approvals") or []:
+            preflight = approval.get("preflight") if isinstance(approval, dict) else None
+            if isinstance(preflight, dict) and size(preflight) > 160_000:
+                approval["preflight"] = preflight_index(preflight)
+        for artifact in payload.get("artifacts") or []:
+            metadata = artifact.get("metadata") if isinstance(artifact, dict) else None
+            if isinstance(metadata, dict) and size(metadata) > 64_000:
+                artifact["metadata"] = {
+                    "schema_version": metadata.get("schema_version"),
+                    "summary_only": True,
+                    "field_count": len(metadata),
+                }
+        for event in payload.get("events") or []:
+            if isinstance(event, dict):
+                event.pop("detail_json", None)
+                event.pop("detail", None)
+        return payload
+
+    def workflow_artifact(self, artifact_id: str, *, preview_limit: int = 200_000) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("workflow service unavailable")
+        try:
+            payload = self.agent_service.get_workflow_artifact(artifact_id)
+        except ValueError as exc:
+            raise LookupError(str(exc)) from exc
+        artifact = dict(payload.get("artifact") or {})
+        content = str(artifact.get("content") or "")
+        safe_path = self._safe_artifact_file(artifact.get("file_path"))
+        mime_type = str(artifact.get("mime_type") or "text/markdown")
+        file_name = safe_path.name if safe_path else self._artifact_download_name(artifact, mime_type)
+        preview = content[:max(1, int(preview_limit))]
+        return {
+            "ok": True,
+            "artifact": {
+                "artifact_id": str(artifact.get("artifact_id") or artifact_id),
+                "workflow_id": str(artifact.get("workflow_id") or ""),
+                "step_id": artifact.get("step_id"),
+                "artifact_type": str(artifact.get("artifact_type") or ""),
+                "title": str(artifact.get("title") or "执行产物"),
+                "mime_type": mime_type,
+                "content": preview,
+                "content_size": len(content.encode("utf-8")),
+                "content_truncated": len(preview) < len(content),
+                "metadata": artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {},
+                "validation_status": str(artifact.get("validation_status") or "pending"),
+                "created_at": str(artifact.get("created_at") or ""),
+                "downloadable": bool(safe_path or content),
+                "download_kind": "file" if safe_path else "content" if content else "none",
+                "file_name": file_name,
+                "download_url": f"/api/v1/artifacts/{artifact_id}/file" if safe_path or content else "",
+            },
+        }
+
+    def workflow_artifact_download(self, artifact_id: str) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("workflow service unavailable")
+        try:
+            artifact = dict((self.agent_service.get_workflow_artifact(artifact_id).get("artifact") or {}))
+        except ValueError as exc:
+            raise LookupError(str(exc)) from exc
+        safe_path = self._safe_artifact_file(artifact.get("file_path"))
+        if safe_path:
+            return {
+                "kind": "file",
+                "path": safe_path,
+                "mime_type": str(artifact.get("mime_type") or "application/octet-stream"),
+                "file_name": safe_path.name,
+            }
+        content = str(artifact.get("content") or "")
+        if content:
+            mime_type = str(artifact.get("mime_type") or "text/markdown")
+            return {
+                "kind": "content",
+                "content": content,
+                "mime_type": mime_type,
+                "file_name": self._artifact_download_name(artifact, mime_type),
+            }
+        raise LookupError("该产物没有可下载文件或正文")
+
+    def _safe_artifact_file(self, value: Any) -> Path | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser().resolve()
+        allowed_root = (self.db_path.parent / "asa_artifacts").resolve()
+        if allowed_root not in path.parents or not path.is_file():
+            return None
+        return path
+
+    @staticmethod
+    def _artifact_download_name(artifact: dict[str, Any], mime_type: str) -> str:
+        artifact_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(artifact.get("artifact_id") or "artifact")).strip("-") or "artifact"
+        extension = {
+            "text/markdown": ".md",
+            "application/json": ".json",
+            "text/plain": ".txt",
+        }.get(mime_type, ".txt")
+        return f"{artifact_id}{extension}"
 
     def workflow_summary(self, workflow_id: str) -> dict[str, Any]:
         if self.agent_service:
@@ -1390,6 +1605,13 @@ class CoreService:
             return self.agent_service.rebuild_strategy_review(workflow_id)
         raise RuntimeError("workflow service unavailable")
 
+    def apply_strategy_item_edits(self, workflow_id: str, edits: list[dict[str, Any]], *, note: str = "") -> dict[str, Any]:
+        # 寻访策略结构化按项编辑：新 revision artifact + 质量门重校验；404=工作流/策略不存在，
+        # 409=状态闸门/目标项缺失/质量校验不过（ValueError/LookupError 由路由层映射）。
+        if self.agent_service:
+            return self.agent_service.apply_strategy_item_edits(workflow_id, edits, note=note)
+        raise RuntimeError("workflow service unavailable")
+
     def create_mapping_task(self, job_id: int, *, trigger: str = "manual") -> dict[str, Any]:
         if self.agent_service:
             return self.agent_service.create_mapping_task(job_id, trigger=trigger)
@@ -1400,9 +1622,9 @@ class CoreService:
             return self.agent_service.get_mapping_task(job_id, artifact_id)
         raise RuntimeError("workflow service unavailable")
 
-    def generate_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
+    def generate_candidate_assessment(self, candidate_id: int, job_id: int, *, force: bool = False) -> dict[str, Any]:
         if self.agent_service:
-            return self.agent_service.generate_candidate_assessment(candidate_id, job_id)
+            return self.agent_service.generate_candidate_assessment(candidate_id, job_id, force=force)
         raise RuntimeError("workflow service unavailable")
 
     def get_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
@@ -1635,6 +1857,44 @@ class CoreService:
                 (min(max(limit, 1), 500), max(offset, 0)),
             )]
             return {"ok": True, "items": items}
+        finally:
+            conn.close()
+
+    def model_audit(self, limit: int = 50, operation: str = "", status: str = "") -> dict[str, Any]:
+        """Recent LLM calls with privacy-safe previews and a compact 24-hour summary."""
+        conn = connect(self.db_path)
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_model_calls'"
+            ).fetchone()
+            if not exists:
+                return {"ok": True, "items": [], "summary": {"total": 0, "failed": 0, "fallback": 0, "avg_duration_ms": 0}}
+            clauses: list[str] = []
+            params: list[Any] = []
+            if operation.strip():
+                clauses.append("operation=?")
+                params.append(operation.strip())
+            if status.strip():
+                clauses.append("status=?")
+                params.append(status.strip())
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                f"""SELECT call_id,operation,provider,model,status,validation_status,fallback_used,
+                           duration_ms,input_tokens,output_tokens,request_hash,request_preview,
+                           response_preview,error,created_at,finished_at
+                      FROM agent_model_calls {where}
+                     ORDER BY id DESC LIMIT ?""",
+                (*params, min(max(int(limit), 1), 200)),
+            ).fetchall()
+            summary = conn.execute(
+                """SELECT COUNT(*) AS total,
+                          COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) AS failed,
+                          COALESCE(SUM(CASE WHEN fallback_used=1 THEN 1 ELSE 0 END),0) AS fallback,
+                          CAST(COALESCE(AVG(CASE WHEN status!='running' THEN duration_ms END),0) AS INTEGER) AS avg_duration_ms
+                     FROM agent_model_calls
+                    WHERE created_at>=datetime('now','localtime','-1 day')"""
+            ).fetchone()
+            return {"ok": True, "items": [_row(row) for row in rows], "summary": _row(summary)}
         finally:
             conn.close()
 
@@ -2071,13 +2331,21 @@ class CoreService:
                 ),
             }
             stage, bucket, event_type, event_status, raw_status, learning_signal, candidate_status = mapping[action]
+            if action == "review":
+                # 评分复核只追加顾问判断事件。候选人可能已推进到联系、推荐等后续阶段，
+                # 不能因为补记一次评分复核而把关系倒退回 S1。
+                stage = str(row["clean_stage"] or "S1 新增寻访/待复核")
+                bucket = str(row["clean_stage"] or "待复核")
+                raw_status = str(row["raw_status"] or "pending_review")
             stop_reason = ""
             if action == "stop":
                 # R10 停止原因标准化：reason 命中 8 枚举→存枚举值；缺失/未知/自由
                 # 文本→存 'other' 并把原文并入备注（不报错阻断，note-only 旧载荷不变）。
                 stop_reason, note = normalize_stop_reason(reason, note)
             event_reason = note or stage
-            if stop_reason:
+            if action == "review":
+                pass
+            elif stop_reason:
                 conn.execute(
                     """
                     UPDATE job_candidates
@@ -2098,7 +2366,7 @@ class CoreService:
                     (stage, bucket, raw_status, stage, event_reason, candidate_id),
                 )
             source_candidate_id = str(row["source_candidate_id"] or "").strip()
-            if source_candidate_id.isdigit():
+            if action != "review" and source_candidate_id.isdigit():
                 conn.execute(
                     """
                     UPDATE candidates
@@ -2143,6 +2411,651 @@ class CoreService:
         }
 
     # ------------------------------------------------------------------
+    # 顾问确认推荐事实链：preflight/commit + 岗位指标
+    # ------------------------------------------------------------------
+
+    def consultant_recommendation_preflight(self, candidate_id: int) -> dict[str, Any]:
+        detail = self.candidate(candidate_id)["candidate"]
+        if detail["is_stopped"]:
+            raise ValueError("该人选关系已停止推进；无法确认推荐")
+        conn = connect(self.db_path)
+        try:
+            existing = conn.execute(
+                "SELECT confirmed_at FROM consultant_confirmed_recommendations WHERE job_candidate_id=?",
+                (int(candidate_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=5)
+        with self._preflight_lock:
+            now = datetime.now()
+            self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
+            self._preflight_tokens[token] = (candidate_id, "consultant_recommendation", expires)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": "consultant_recommendation",
+            "candidate": {"id": candidate_id, "name": detail["name"], "stage": detail.get("clean_stage")},
+            "already_confirmed": existing is not None,
+            "confirmed_at": existing["confirmed_at"] if existing else None,
+            "impact": "记录顾问确认的客户推荐事实（必须附原因），并写入业务时间线；同一人选仅确认一次。",
+        }
+
+    def consultant_recommendation_commit(self, candidate_id: int, reason: str, preflight_token: str) -> dict[str, Any]:
+        reason = " ".join(str(reason or "").split())
+        if not reason:
+            raise ValueError("确认推荐必须填写原因（reason）")
+        with self._preflight_lock:
+            grant = self._preflight_tokens.pop(preflight_token, None)
+        if not grant or grant[0] != candidate_id or grant[1] != "consultant_recommendation" or grant[2] <= datetime.now():
+            raise ValueError("preflight token is invalid, expired, or already used")
+        with transaction(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT person_id,job_id,clean_stage,raw_status FROM job_candidates WHERE id=?",
+                (int(candidate_id),),
+            ).fetchone()
+            if not row:
+                raise LookupError("candidate not found")
+            if _is_stopped(row["clean_stage"], row["raw_status"]):
+                raise ValueError("该人选关系已停止推进；禁止确认推荐")
+            existing = conn.execute(
+                "SELECT id,confirmed_at,event_id,reason FROM consultant_confirmed_recommendations WHERE job_candidate_id=?",
+                (int(candidate_id),),
+            ).fetchone()
+            if existing:
+                # 幂等回读：已确认不重复生成推荐包；历史确认缺包时补齐（同事务）。
+                package = self._ensure_recommendation_package(conn, candidate_id, int(existing["id"]))
+                return {
+                    "ok": True,
+                    "candidate_id": candidate_id,
+                    "action": "consultant_recommendation",
+                    "already_confirmed": True,
+                    "confirmed_at": existing["confirmed_at"],
+                    "reason": existing["reason"],
+                    "event_id": existing["event_id"],
+                    "package": package,
+                }
+            event_cursor = conn.execute(
+                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table)
+                   VALUES (?,?,?,?,?,datetime('now','localtime'),?,?,'api_v1')""",
+                (
+                    int(candidate_id),
+                    int(row["person_id"]),
+                    int(row["job_id"]),
+                    "consultant_confirmed_recommendation",
+                    "confirmed",
+                    f"顾问确认推荐：{reason}",
+                    json.dumps(
+                        {"action": "consultant_recommendation", "reason": reason, "actor": "consultant"},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            event_id = int(event_cursor.lastrowid)
+            try:
+                fact_cursor = conn.execute(
+                    """INSERT INTO consultant_confirmed_recommendations
+                       (job_candidate_id,person_id,job_id,reason,confirmation_token,confirmed_by,confirmed_at,event_id,created_at)
+                       VALUES (?,?,?,?,?,'consultant',datetime('now','localtime'),?,datetime('now','localtime'))""",
+                    (
+                        int(candidate_id),
+                        int(row["person_id"]),
+                        int(row["job_id"]),
+                        reason,
+                        preflight_token,
+                        event_id,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # 并发/重复提交兜底：UNIQUE(job_candidate_id) 命中即视为已确认。
+                existing = conn.execute(
+                    "SELECT id,confirmed_at,event_id,reason FROM consultant_confirmed_recommendations WHERE job_candidate_id=?",
+                    (int(candidate_id),),
+                ).fetchone()
+                package = self._ensure_recommendation_package(conn, candidate_id, int(existing["id"]))
+                return {
+                    "ok": True,
+                    "candidate_id": candidate_id,
+                    "action": "consultant_recommendation",
+                    "already_confirmed": True,
+                    "confirmed_at": existing["confirmed_at"],
+                    "reason": existing["reason"],
+                    "event_id": existing["event_id"],
+                    "package": package,
+                }
+            confirmed_at = conn.execute(
+                "SELECT confirmed_at FROM consultant_confirmed_recommendations WHERE id=?",
+                (int(fact_cursor.lastrowid),),
+            ).fetchone()["confirmed_at"]
+            # 确认成功即生成版本化推荐包 v1（候选摘要+人岗证据+风险+待核验问题，同事务落库）。
+            package = self._ensure_recommendation_package(conn, candidate_id, int(fact_cursor.lastrowid))
+        return {
+            "ok": True,
+            "candidate_id": candidate_id,
+            "action": "consultant_recommendation",
+            "reason": reason,
+            "already_confirmed": False,
+            "confirmed_at": confirmed_at,
+            "event_id": event_id,
+            "business_event_id": event_id,
+            "package": package,
+        }
+
+    def consultant_recommendation_metrics(self, job_id: int) -> dict[str, Any]:
+        conn = connect(self.db_path)
+        try:
+            if not conn.execute("SELECT 1 FROM jobs WHERE id=?", (int(job_id),)).fetchone():
+                raise LookupError("job not found")
+            confirmed = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM consultant_confirmed_recommendations WHERE job_id=?",
+                    (int(job_id),),
+                ).fetchone()[0]
+            )
+            assessed = int(
+                conn.execute(
+                    """SELECT COUNT(DISTINCT a.job_candidate_id)
+                         FROM agent_candidate_assessments a
+                         JOIN agent_runs r ON r.run_id=a.run_id
+                         JOIN job_candidates jc ON jc.id=a.job_candidate_id
+                        WHERE a.is_current=1 AND r.status='completed' AND jc.job_id=?""",
+                    (int(job_id),),
+                ).fetchone()[0]
+            )
+            return {
+                "ok": True,
+                "job_id": int(job_id),
+                "confirmed_recommendations": confirmed,
+                "assessed_candidates": assessed,
+                "rate": round(confirmed / assessed, 4) if assessed else None,
+            }
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # 版本化推荐包闭环：顾问确认推荐 → 聚合推荐包（候选摘要/人岗证据/风险/待核验问题）
+    # → 客户反馈按包版本留痕并回写候选人事件时间线。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _package_brief(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "package_id": row["package_id"],
+            "version": int(row["version"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "recommendation_id": int(row["recommendation_id"]),
+        }
+
+    def _ensure_recommendation_package(self, conn: sqlite3.Connection, candidate_id: int, recommendation_id: int) -> dict[str, Any]:
+        """确认推荐后幂等生成推荐包 v1：已存在则回读，不重复生成。"""
+        existing = conn.execute(
+            "SELECT * FROM recommendation_packages WHERE job_candidate_id=? ORDER BY version DESC LIMIT 1",
+            (int(candidate_id),),
+        ).fetchone()
+        if existing:
+            return self._package_brief(existing)
+        fact = conn.execute(
+            "SELECT id,job_candidate_id,person_id,job_id,reason,confirmed_by,confirmed_at FROM consultant_confirmed_recommendations WHERE id=?",
+            (int(recommendation_id),),
+        ).fetchone()
+        if not fact:
+            raise LookupError("consultant recommendation not found")
+        base = conn.execute(
+            """SELECT jc.clean_stage,jc.flow_bucket,p.display_name name,p.current_company,p.current_title,
+                      p.city,p.education,p.experience,j.title job,c.name client
+                 FROM job_candidates jc JOIN people p ON p.id=jc.person_id
+                 LEFT JOIN jobs j ON j.id=jc.job_id LEFT JOIN clients c ON c.id=j.client_id
+                WHERE jc.id=?""",
+            (int(candidate_id),),
+        ).fetchone()
+        if not base:
+            raise LookupError("candidate not found")
+        assessment = conn.execute(
+            """SELECT a.id,a.fit_score,a.fit_level,a.recommendation,a.confidence,a.evidence_coverage,
+                      a.criteria_json,a.strengths_json,a.gaps_json,a.risks_json,a.verification_questions_json,
+                      a.created_at
+                 FROM agent_candidate_assessments a
+                 JOIN agent_runs r ON r.run_id=a.run_id
+                WHERE a.job_candidate_id=? AND a.is_current=1 AND r.status='completed'
+                ORDER BY datetime(a.created_at) DESC,a.id DESC LIMIT 1""",
+            (int(candidate_id),),
+        ).fetchone()
+        summary = {
+            "name": base["name"],
+            "current_company": base["current_company"] or "",
+            "current_title": base["current_title"] or "",
+            "city": base["city"] or "",
+            "education": base["education"] or "",
+            "experience": base["experience"] or "",
+            "stage": base["clean_stage"] or base["flow_bucket"] or "",
+            "job": {"id": int(fact["job_id"]), "title": base["job"] or "", "client": base["client"] or ""},
+            "recommendation": {
+                "id": int(fact["id"]),
+                "reason": fact["reason"],
+                "confirmed_by": fact["confirmed_by"],
+                "confirmed_at": fact["confirmed_at"],
+            },
+        }
+        if assessment:
+            evidence: dict[str, Any] = {
+                "status": "ready",
+                "assessment_id": int(assessment["id"]),
+                "fit_score": assessment["fit_score"],
+                "fit_level": assessment["fit_level"],
+                "recommendation": assessment["recommendation"],
+                "confidence": assessment["confidence"],
+                "evidence_coverage": assessment["evidence_coverage"],
+                "criteria": json_value(assessment["criteria_json"], {}),
+                "strengths": json_value(assessment["strengths_json"], []),
+                "gaps": json_value(assessment["gaps_json"], []),
+                "assessed_at": assessment["created_at"],
+            }
+            risks = json_value(assessment["risks_json"], [])
+            questions = json_value(assessment["verification_questions_json"], [])
+        else:
+            # 无当前有效评估时如实标注证据缺失，不伪造人岗证据。
+            evidence = {"status": "no_current_assessment", "note": "暂无当前有效的判人评估，人岗匹配证据缺失"}
+            risks, questions = [], []
+        try:
+            cursor = conn.execute(
+                """INSERT INTO recommendation_packages
+                   (package_id,job_candidate_id,person_id,job_id,recommendation_id,version,status,
+                    summary_json,evidence_json,risks_json,verification_questions_json,created_at)
+                   VALUES (?,?,?,?,?,1,'generated',?,?,?,?,datetime('now','localtime'))""",
+                (
+                    f"recpkg_{secrets.token_urlsafe(12)}",
+                    int(candidate_id),
+                    int(fact["person_id"]),
+                    int(fact["job_id"]),
+                    int(fact["id"]),
+                    json.dumps(summary, ensure_ascii=False),
+                    json.dumps(evidence, ensure_ascii=False),
+                    json.dumps(risks if isinstance(risks, list) else [], ensure_ascii=False),
+                    json.dumps(questions if isinstance(questions, list) else [], ensure_ascii=False),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # 并发兜底：UNIQUE(job_candidate_id, version) 命中即视为已生成，回读现有版本。
+            existing = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE job_candidate_id=? ORDER BY version DESC LIMIT 1",
+                (int(candidate_id),),
+            ).fetchone()
+            return self._package_brief(existing)
+        row = conn.execute(
+            "SELECT * FROM recommendation_packages WHERE id=?",
+            (int(cursor.lastrowid),),
+        ).fetchone()
+        return self._package_brief(row)
+
+    def list_recommendation_packages(self, candidate_id: int) -> dict[str, Any]:
+        conn = connect(self.db_path)
+        try:
+            if not conn.execute("SELECT 1 FROM job_candidates WHERE id=?", (int(candidate_id),)).fetchone():
+                raise LookupError("candidate not found")
+            rows = conn.execute(
+                """SELECT p.*,
+                          (SELECT COUNT(*) FROM recommendation_package_feedback f WHERE f.package_id=p.package_id) AS feedback_count
+                     FROM recommendation_packages p
+                    WHERE p.job_candidate_id=? ORDER BY p.version DESC""",
+                (int(candidate_id),),
+            ).fetchall()
+            items = [self._package_brief(row) | {"feedback_count": int(row["feedback_count"])} for row in rows]
+            return {"ok": True, "candidate_id": int(candidate_id), "items": items}
+        finally:
+            conn.close()
+
+    def get_recommendation_package(self, package_id: str) -> dict[str, Any]:
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE package_id=?",
+                (str(package_id or "").strip(),),
+            ).fetchone()
+            if not row:
+                raise LookupError("recommendation package not found")
+            feedback = [
+                {
+                    "id": int(item["id"]),
+                    "feedback_type": item["feedback_type"],
+                    "feedback_type_label": PACKAGE_FEEDBACK_TYPE_LABELS.get(item["feedback_type"], item["feedback_type"]),
+                    "content": item["content"],
+                    "feedback_time": item["feedback_time"],
+                    "recorded_by": item["recorded_by"],
+                    "created_at": item["created_at"],
+                }
+                for item in conn.execute(
+                    "SELECT * FROM recommendation_package_feedback WHERE package_id=? ORDER BY datetime(feedback_time) DESC,id DESC",
+                    (row["package_id"],),
+                ).fetchall()
+            ]
+            payload = self._package_brief(row)
+            payload.update(
+                {
+                    "ok": True,
+                    "candidate_id": int(row["job_candidate_id"]),
+                    "person_id": int(row["person_id"]),
+                    "job_id": int(row["job_id"]),
+                    "summary": json_value(row["summary_json"], {}),
+                    "evidence": json_value(row["evidence_json"], {}),
+                    "risks": json_value(row["risks_json"], []),
+                    "verification_questions": json_value(row["verification_questions_json"], []),
+                    "feedback": feedback,
+                }
+            )
+            return payload
+        finally:
+            conn.close()
+
+    def record_package_feedback(
+        self,
+        package_id: str,
+        feedback_type: str,
+        content: str,
+        feedback_time: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        feedback_type = str(feedback_type or "").strip()
+        if feedback_type not in PACKAGE_FEEDBACK_TYPE_LABELS:
+            raise ValueError(f"未知客户反馈类型：{feedback_type or '空'}（可选：{'/'.join(PACKAGE_FEEDBACK_TYPE_LABELS)}）")
+        content = " ".join(str(content or "").split())
+        if not content:
+            raise ValueError("客户反馈内容不能为空")
+        feedback_time = str(feedback_time or "").strip()
+        with transaction(self.db_path) as conn:
+            package = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE package_id=?",
+                (str(package_id or "").strip(),),
+            ).fetchone()
+            if not package:
+                raise LookupError("recommendation package not found")
+            if request_id:
+                existing = conn.execute(
+                    "SELECT id,event_id,feedback_time,created_at FROM recommendation_package_feedback WHERE package_id=? AND request_id=?",
+                    (package["package_id"], request_id),
+                ).fetchone()
+                if existing:
+                    # 表级幂等兜底：UNIQUE(package_id, request_id) 命中即回读，不重复写事件。
+                    return {
+                        "ok": True,
+                        "package_id": package["package_id"],
+                        "package_version": int(package["version"]),
+                        "candidate_id": int(package["job_candidate_id"]),
+                        "feedback_id": int(existing["id"]),
+                        "event_id": existing["event_id"],
+                        "already_recorded": True,
+                        "feedback": {
+                            "id": int(existing["id"]),
+                            "feedback_type": feedback_type,
+                            "feedback_type_label": PACKAGE_FEEDBACK_TYPE_LABELS[feedback_type],
+                            "content": content,
+                            "feedback_time": existing["feedback_time"],
+                            "recorded_by": "consultant",
+                            "created_at": existing["created_at"],
+                        },
+                    }
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO recommendation_package_feedback
+                       (package_id,package_version,job_candidate_id,person_id,job_id,feedback_type,content,
+                        feedback_time,recorded_by,request_id,created_at)
+                       VALUES (?,?,?,?,?,?,?,COALESCE(NULLIF(?,''),datetime('now','localtime')),'consultant',?,datetime('now','localtime'))""",
+                    (
+                        package["package_id"],
+                        int(package["version"]),
+                        int(package["job_candidate_id"]),
+                        int(package["person_id"]),
+                        int(package["job_id"]),
+                        feedback_type,
+                        content,
+                        feedback_time,
+                        request_id,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                existing = conn.execute(
+                    "SELECT id,event_id,feedback_time,created_at FROM recommendation_package_feedback WHERE package_id=? AND request_id=?",
+                    (package["package_id"], request_id),
+                ).fetchone()
+                return {
+                    "ok": True,
+                    "package_id": package["package_id"],
+                    "package_version": int(package["version"]),
+                    "candidate_id": int(package["job_candidate_id"]),
+                    "feedback_id": int(existing["id"]),
+                    "event_id": existing["event_id"],
+                    "already_recorded": True,
+                    "feedback": {
+                        "id": int(existing["id"]),
+                        "feedback_type": feedback_type,
+                        "feedback_type_label": PACKAGE_FEEDBACK_TYPE_LABELS[feedback_type],
+                        "content": content,
+                        "feedback_time": existing["feedback_time"],
+                        "recorded_by": "consultant",
+                        "created_at": existing["created_at"],
+                    },
+                }
+            feedback_id = int(cursor.lastrowid)
+            event_cursor = conn.execute(
+                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table)
+                   VALUES (?,?,?,?,?,datetime('now','localtime'),?,?,'api_v1')""",
+                (
+                    int(package["job_candidate_id"]),
+                    int(package["person_id"]),
+                    int(package["job_id"]),
+                    "client_feedback",
+                    feedback_type,
+                    f"客户反馈（推荐包 v{int(package['version'])}）：{PACKAGE_FEEDBACK_TYPE_LABELS[feedback_type]}——{content[:60]}",
+                    json.dumps(
+                        {
+                            "action": "client_feedback",
+                            "package_id": package["package_id"],
+                            "package_version": int(package["version"]),
+                            "feedback_id": feedback_id,
+                            "feedback_type": feedback_type,
+                            "content": content,
+                            "actor": "consultant",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            event_id = int(event_cursor.lastrowid)
+            conn.execute(
+                "UPDATE recommendation_package_feedback SET event_id=? WHERE id=?",
+                (event_id, feedback_id),
+            )
+            # 结果回读：以落库行为准返回回执。
+            row = conn.execute(
+                "SELECT * FROM recommendation_package_feedback WHERE id=?",
+                (feedback_id,),
+            ).fetchone()
+        return {
+            "ok": True,
+            "package_id": row["package_id"],
+            "package_version": int(row["package_version"]),
+            "candidate_id": int(row["job_candidate_id"]),
+            "feedback_id": feedback_id,
+            "event_id": event_id,
+            "already_recorded": False,
+            "feedback": {
+                "id": feedback_id,
+                "feedback_type": row["feedback_type"],
+                "feedback_type_label": PACKAGE_FEEDBACK_TYPE_LABELS.get(row["feedback_type"], row["feedback_type"]),
+                "content": row["content"],
+                "feedback_time": row["feedback_time"],
+                "recorded_by": row["recorded_by"],
+                "created_at": row["created_at"],
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # 生命周期一等事件：面试/Offer/入职结构化记录 + 自动跟进待办
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_lifecycle_time(value: str) -> str:
+        """把 occurred_at 规范为 'YYYY-MM-DD HH:MM:SS'；空串表示用服务端当前时间。"""
+        text = str(value or "").strip().replace("T", " ")
+        if not text:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"事件时间格式非法：{text}（示例：2026-08-05 14:30）") from exc
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+    def record_lifecycle_event(
+        self,
+        candidate_id: int,
+        event_type: str,
+        *,
+        notes: str = "",
+        occurred_at: str = "",
+        event_status: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        event_type = str(event_type or "").strip()
+        spec = LIFECYCLE_EVENT_TYPES.get(event_type)
+        if not spec:
+            raise ValueError(f"未知生命周期事件类型：{event_type or '空'}（可选：{'/'.join(LIFECYCLE_EVENT_TYPES)}）")
+        notes = " ".join(str(notes or "").split())
+        event_status = str(event_status or "").strip() or str(spec["default_status"])
+        if event_status not in spec["statuses"]:
+            raise ValueError(f"事件状态非法：{event_status}（{spec['label']} 可选：{'/'.join(spec['statuses'])}）")
+        event_time = self._normalize_lifecycle_time(occurred_at)
+        label = str(spec["label"])
+        summary = f"{label}：{notes}" if notes else label
+        with transaction(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT jc.id,jc.person_id,jc.job_id,jc.source_candidate_id,
+                       p.display_name AS name,p.current_company,
+                       j.title AS job,c.name AS client
+                  FROM job_candidates jc
+                  JOIN people p ON p.id=jc.person_id
+                  LEFT JOIN jobs j ON j.id=jc.job_id
+                  LEFT JOIN clients c ON c.id=j.client_id
+                 WHERE jc.id=?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if not row:
+                raise LookupError("candidate not found")
+            if request_id:
+                existing = conn.execute(
+                    """SELECT id,event_status,event_time,summary FROM candidate_events
+                       WHERE job_candidate_id=? AND event_type=? AND source_table='api_v1' AND source_id=?""",
+                    (candidate_id, event_type, request_id),
+                ).fetchone()
+                if existing:
+                    # 表级幂等兜底：request_id 命中即回读，不重复写事件与待办。
+                    task = conn.execute(
+                        """SELECT id,task_type,due_at,status FROM followup_tasks
+                           WHERE job_candidate_id=? AND source_table='lifecycle_event' AND source_id=?
+                           ORDER BY id DESC LIMIT 1""",
+                        (candidate_id, int(existing["id"])),
+                    ).fetchone()
+                    return {
+                        "ok": True,
+                        "candidate_id": candidate_id,
+                        "event_id": int(existing["id"]),
+                        "followup_task_id": int(task["id"]) if task else None,
+                        "already_recorded": True,
+                        "event": {
+                            "id": int(existing["id"]),
+                            "event_type": event_type,
+                            "event_type_label": label,
+                            "event_status": existing["event_status"],
+                            "event_time": existing["event_time"],
+                            "summary": existing["summary"],
+                        },
+                        "followup": (
+                            {"id": int(task["id"]), "task_type": task["task_type"], "due_at": task["due_at"], "status": task["status"]}
+                            if task
+                            else None
+                        ),
+                    }
+            cursor = conn.execute(
+                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                   VALUES (?,?,?,?,?,COALESCE(NULLIF(?,''),datetime('now','localtime')),?,?,'api_v1',NULLIF(?,''))""",
+                (
+                    candidate_id,
+                    int(row["person_id"]),
+                    row["job_id"],
+                    event_type,
+                    event_status,
+                    event_time,
+                    summary[:1000],
+                    json.dumps(
+                        {
+                            "action": "lifecycle_event",
+                            "event_type": event_type,
+                            "event_status": event_status,
+                            "notes": notes,
+                            "request_id": request_id,
+                            "actor": "consultant",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    request_id,
+                ),
+            )
+            event_id = int(cursor.lastrowid)
+            # 自动跟进待办：复用 followup_tasks 机制（与 Agent 生命周期 followup 同表同字段），
+            # 截止时间相对事件发生时间推算；只建内部任务，不自动对外发任何消息。
+            due_base = datetime.fromisoformat(event_time) if event_time else datetime.now()
+            due_at = (due_base + timedelta(days=int(spec["followup_days"]))).strftime("%Y-%m-%d %H:%M:%S")
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            source_candidate_id = str(row["source_candidate_id"] or "").strip()
+            # followup_tasks.id 非自增（表级 UNIQUE），沿用 capability_runtime._followup 的 MAX(id)+1 口径。
+            task_id = int(conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM followup_tasks").fetchone()[0])
+            conn.execute(
+                """INSERT INTO followup_tasks
+                   (id,candidate_id,candidate_name,candidate_company,client,position,task_type,priority,due_at,status,reason,source_table,source_id,created_at,updated_at,job_candidate_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,?)""",
+                (
+                    task_id,
+                    int(source_candidate_id) if source_candidate_id.isdigit() else None,
+                    row["name"],
+                    row["current_company"],
+                    row["client"],
+                    row["job"],
+                    str(spec["followup_task"]),
+                    2,
+                    due_at,
+                    summary[:1000],
+                    "lifecycle_event",
+                    event_id,
+                    now_text,
+                    now_text,
+                    candidate_id,
+                ),
+            )
+            saved = conn.execute(
+                "SELECT id,event_status,event_time,summary FROM candidate_events WHERE id=?",
+                (event_id,),
+            ).fetchone()
+        return {
+            "ok": True,
+            "candidate_id": candidate_id,
+            "event_id": event_id,
+            "followup_task_id": task_id,
+            "already_recorded": False,
+            "event": {
+                "id": event_id,
+                "event_type": event_type,
+                "event_type_label": label,
+                "event_status": saved["event_status"],
+                "event_time": saved["event_time"],
+                "summary": saved["summary"],
+            },
+            "followup": {"id": task_id, "task_type": str(spec["followup_task"]), "due_at": due_at, "status": "open"},
+        }
+
+    # ------------------------------------------------------------------
     # S7-1：人才流动雷达（路由层薄封装，业务在 AgentService/a_system_agent.radar_scan）
     # ------------------------------------------------------------------
 
@@ -2183,3 +3096,33 @@ class CoreService:
         if self.agent_service:
             return self.agent_service.get_latest_radar_weekly_report()
         raise RuntimeError("workflow service unavailable")
+
+    # ------------------------------------------------------------------
+    # 岗位自动周报（三期驾驶舱缺口）：确定性组装（asa_core.job_weekly_report），
+    # 不依赖 LLM；同周幂等 upsert 版本化 artifact，跨周以上一期漏斗做对比基线。
+    # ------------------------------------------------------------------
+
+    def generate_job_weekly_report(self, job_id: int) -> dict[str, Any]:
+        from . import job_weekly_report
+
+        with transaction(self.db_path) as conn:
+            doc = job_weekly_report.build_job_weekly_report(conn, job_id)
+            artifact_id = job_weekly_report.upsert_job_weekly_report(conn, doc)
+        return {
+            "ok": True,
+            "job_id": int(job_id),
+            "artifact_id": artifact_id,
+            "version": int(doc.get("version") or 1),
+            "week_start": doc.get("week_start"),
+            "week_end": doc.get("week_end"),
+            "report": doc,
+        }
+
+    def list_job_weekly_reports(self, job_id: int, limit: int = 12) -> dict[str, Any]:
+        from . import job_weekly_report
+
+        conn = connect(self.db_path)
+        try:
+            return job_weekly_report.list_job_weekly_reports(conn, job_id, limit=limit)
+        finally:
+            conn.close()

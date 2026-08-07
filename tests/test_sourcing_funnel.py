@@ -1055,7 +1055,7 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         self.assertEqual(continuation["_continuation_index"], 1)
         self.assertEqual(continuation["query_plan_hash"], request["query_plan_hash"])
         runnable = self.service.capability_runtime._resume_query_cells(
-            result["run_id"], request["query_plan_v1"]
+            result["run_id"], request["query_plan_v1"], max_platform_capped_retries=1,
         )
         self.assertEqual([item["cell_id"] for item in runnable], ["qpc_test_liepin"])
         self.assertEqual(runnable[0]["execution_cursor"], {"page": 2})
@@ -1687,7 +1687,7 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
             conn.close()
 
         runnable = self.service.capability_runtime._resume_query_cells(
-            "asa-source-cursor", query_plan, max_retries=3,
+            "asa-source-cursor", query_plan, max_retries=3, max_platform_capped_retries=1,
         )
 
         assert len(runnable) == 1

@@ -29,7 +29,7 @@ describe('工作流动作反馈', () => {
     const start = screen.getByRole('button', { name: '确认计划并准备' })
     await user.click(start)
     expect(start).toBeDisabled()
-    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '立即停止寻访' })).toBeDisabled()
     release(mockResponse({ ok: true }))
     await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
     expect(screen.getByRole('button', { name: '确认计划并准备' })).toBeEnabled()
@@ -46,6 +46,29 @@ describe('工作流动作反馈', () => {
     await user.click(start)
     expect(await screen.findByText('工作流已在运行中')).toBeInTheDocument()
     expect(start).toBeEnabled()
+  })
+
+  it('外部寻访可暂停，暂停后可继续或立即停止', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    const waitingExternal = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'waiting_external' },
+      goal: { ...plannedWorkflow.goal, status: 'waiting_external' },
+      steps: plannedWorkflow.steps.map(step => ({ ...step, status: step.id === 1 ? 'completed' : 'waiting_external' })),
+    }
+    const { rerender } = render(<WorkflowPanel value={waitingExternal} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+
+    await user.click(screen.getByRole('button', { name: '暂停寻访' }))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/workflows/wf-1/pause'))).toBe(true)
+
+    const paused = { ...waitingExternal, workflow: { ...waitingExternal.workflow, status: 'paused' }, goal: { ...waitingExternal.goal, status: 'paused' } }
+    rerender(<WorkflowPanel value={paused} jobs={[]} close={() => undefined} reload={vi.fn()} openCandidate={() => undefined} archived={() => undefined} />)
+    expect(screen.getByText('已暂停，渠道会在当前查询单元结束后停止。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '继续寻访' }))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/workflows/wf-1/resume'))).toBe(true)
+    expect(screen.getByRole('button', { name: '立即停止寻访' })).toBeInTheDocument()
   })
 
   it('R3 寻访审批展示检索轴、评估约束和非平台筛选语义', () => {

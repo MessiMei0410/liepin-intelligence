@@ -45,6 +45,36 @@ XSAAS_QUERY_MAX_TERMS = 2
 XSAAS_QUERY_MAX_COUNT = 8
 XSAAS_AMBIGUOUS_ATOMIC_TERMS = {"ae", "fae", "pc", "pol", "tme"}
 XSAAS_GENERIC_ATOMIC_TERMS = {"产品", "工程师", "总监", "技术", "电源", "经理"}
+CHANNEL_POLICY_VERSION = "channel_policy_v1"
+CHANNEL_MIN_SHARE = 0.3
+CHANNEL_MAX_SHARE = 0.7
+POWER_ROLE_MAX_QUERY_CELLS = 32
+POWER_ROLE_MAX_COMPANY_QUERIES = 12
+POWER_ROLE_AMBIGUOUS_ATOMIC_TERMS = {
+    "and", "delivery", "module", "modules", "or", "power", "vertical", "电源",
+}
+CHANNEL_PLAYBOOK_V1 = {
+    "liepin": {
+        "role": "precision_and_contact",
+        "execution_stage": "verify_and_contact",
+        "best_for": ["targeted_company_skill_pairs", "resume_detail_verification", "job_specific_outreach"],
+        "query_shape": "short_company_skill_pairs_or_anchor_pairs",
+        "intake_stage": "S1 新增寻访/待复核",
+        "review_pass_stage": "job_chat_verified_or_job_recommended_verified_after_page_evidence",
+        "never_claim": ["xsaas_review_pass", "unverified_click_as_job_chat_verified"],
+        "handoff_when": ["pool_saturated", "platform_capped", "detail_capture_failed", "high_duplicate_rate"],
+    },
+    "xsaas": {
+        "role": "breadth_recall",
+        "execution_stage": "broad_recall",
+        "best_for": ["wide_company_sweep", "atomic_distinctive_terms", "finding_unseen_profiles"],
+        "query_shape": "standalone_company_or_distinctive_atomic_terms",
+        "intake_stage": "X1 X-SaaS新增/待复核",
+        "review_pass_stage": "X2 X-SaaS复核通过/待人工联系",
+        "never_claim": ["job_chat_verified", "liepin_outreach_success"],
+        "handoff_when": ["profile_needs_contact", "candidate_needs_liepin_resume_or_wechat", "stale_query", "login_required"],
+    },
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -121,6 +151,10 @@ def query_plan_channel_entries(plan: dict[str, Any], channel: str) -> list[Any]:
         entry = {
             "cell_id": str(cell.get("cell_id") or ""),
             "query": query,
+            "query_family_ids": [
+                str(value) for value in cell.get("query_family_ids") or [] if str(value).strip()
+            ],
+            "channel_variant": str(cell.get("channel_variant") or channel),
             "evaluation_constraints": cell.get("evaluation_constraints") or {
                 "locations": cell.get("locations") or [],
                 "levels": cell.get("levels") or [],
@@ -140,6 +174,98 @@ def query_plan_channel_entries(plan: dict[str, Any], channel: str) -> list[Any]:
         else:
             entries.append(entry)
     return entries
+
+
+def build_channel_policy_v1(plan: dict[str, Any], metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Allocate early execution slots by observed recall and intake quality.
+
+    This policy only changes ordering. All approved query cells remain in the plan,
+    and channels without enough evidence keep a balanced exploration share.
+    """
+    aggregates: dict[str, dict[str, float]] = {}
+    for channel in ("liepin", "xsaas"):
+        rows = [item for item in metrics if isinstance(item, dict) and str(item.get("channel") or "") == channel]
+        runs = sum(max(0, int(item.get("runs") or 0)) for item in rows)
+        raw = sum(max(0, int(item.get("raw_occurrences") or 0)) for item in rows)
+        unique = sum(max(0, int(item.get("unique_identities") or 0)) for item in rows)
+        complete = sum(max(0, int(item.get("detail_complete") or 0)) for item in rows)
+        intake = sum(max(0, int(item.get("intake_count") or 0)) for item in rows)
+        aggregates[channel] = {
+            "historical_runs": float(runs),
+            "raw_occurrences": float(raw),
+            "unique_identities": float(unique),
+            "complete_details": float(complete),
+            "intake_count": float(intake),
+            "unique_yield_per_run": round(unique / max(1, runs), 4),
+            "complete_rate": round(complete / max(1, unique), 4),
+            "intake_rate": round(intake / max(1, unique), 4),
+        }
+    observed = [item for item in aggregates.values() if item["historical_runs"] > 0]
+    max_yield = max((item["unique_yield_per_run"] for item in observed), default=0.0)
+    scores: dict[str, float] = {}
+    for channel, item in aggregates.items():
+        if item["historical_runs"] <= 0 or max_yield <= 0:
+            scores[channel] = 0.5
+        else:
+            yield_score = min(1.0, item["unique_yield_per_run"] / max_yield)
+            quality_score = (item["complete_rate"] + item["intake_rate"]) / 2
+            scores[channel] = round(0.6 * yield_score + 0.4 * quality_score, 4)
+    total = sum(scores.values()) or 1.0
+    liepin_share = min(CHANNEL_MAX_SHARE, max(CHANNEL_MIN_SHARE, scores["liepin"] / total))
+    shares = {"liepin": round(liepin_share, 4), "xsaas": round(1 - liepin_share, 4)}
+    primary = max(scores, key=scores.get)
+    secondary = "xsaas" if primary == "liepin" else "liepin"
+    pilot_required = not bool(observed) or any(item["historical_runs"] <= 0 for item in aggregates.values())
+    execution_mode = "balanced_pilot" if pilot_required else "quality_weighted"
+    return {
+        "schema_version": CHANNEL_POLICY_VERSION,
+        "policy": "pilot_then_quality_weighted_v1",
+        "execution_mode": execution_mode,
+        "roles": {channel: CHANNEL_PLAYBOOK_V1[channel]["role"] for channel in ("liepin", "xsaas")},
+        "channel_playbook": CHANNEL_PLAYBOOK_V1,
+        "combination_playbook": [
+            {
+                "phase": "pilot",
+                "description": "新岗位或证据不足时，两边先跑同一查询族的小样本，校准召回和简历完整度。",
+                "channels": ["xsaas", "liepin"],
+            },
+            {
+                "phase": "breadth_to_precision",
+                "description": "X-SaaS 先拉广度与未见过人选；通过复核后转猎聘、微信或人工联系，不写成猎聘已开聊。",
+                "from_channel": "xsaas",
+                "to_channel": "liepin",
+                "requires_approved_query_family": True,
+            },
+            {
+                "phase": "precision_to_breadth",
+                "description": "猎聘同族查询池枯竭、重复率高或详情失败时，接力到已审批的 X-SaaS 原子查询补洞。",
+                "from_channel": "liepin",
+                "to_channel": "xsaas",
+                "requires_approved_query_family": True,
+            },
+        ],
+        "target_share": shares,
+        "channel_scores": scores,
+        "aggregates": aggregates,
+        "pilot": {
+            "required": pilot_required,
+            "min_share": CHANNEL_MIN_SHARE,
+            "reason": "先让两个渠道各执行一小段同源查询，再按完整详情和新增入库质量调整预算",
+        },
+        "primary_channel": primary,
+        "fallback_order": [primary, secondary],
+        "fallback_rules": {
+            "xsaas": "X-SaaS 单元阻断时，优先执行同查询族的猎聘变体",
+            "liepin": "猎聘池枯竭或详情失败时，优先执行同查询族的 X-SaaS 变体",
+        },
+        "handoff_constraints": {
+            "requires_existing_approved_cell": True,
+            "match_axis": "query_family_ids",
+            "forbid_new_unapproved_query": True,
+            "r3_approval_boundary": "只能执行 strategy_hash/query_plan_hash 内已有的渠道查询单元",
+        },
+        "dedupe_scope": "global_source_id_then_channel_query_profile",
+    }
 
 
 def query_plan_company_vocabulary(plan: dict[str, Any]) -> set[str]:
@@ -202,9 +328,45 @@ def schedule_query_plan_v1(
         cell["base_priority"] = base_priority
         cell["scheduling"] = scheduling
         ranked.append((marginal_score, base_priority, cell))
-    ranked.sort(key=lambda item: (-item[0], item[1], str(item[2].get("cell_id") or "")))
+    policy = build_channel_policy_v1(plan, metrics)
+    by_channel: dict[str, list[tuple[float, int, dict[str, Any]]]] = {"liepin": [], "xsaas": []}
+    for item in ranked:
+        by_channel.setdefault(str(item[2].get("channel") or ""), []).append(item)
+    for channel_items in by_channel.values():
+        channel_items.sort(key=lambda item: (-item[0], item[1], str(item[2].get("cell_id") or "")))
+    # Weighted fair interleave gives the stronger channel earlier slots without
+    # starving its complement before the strategy can observe it.
+    remaining = {channel: list(items) for channel, items in by_channel.items() if items}
+    credit = {channel: 0.0 for channel in remaining}
+    interleaved: list[tuple[float, int, dict[str, Any]]] = []
+    while remaining:
+        for channel in remaining:
+            credit[channel] += float(policy["target_share"].get(channel, 0.5))
+        channel = max(
+            remaining,
+            key=lambda value: (credit[value], policy["channel_scores"].get(value, 0.0)),
+        )
+        interleaved.append(remaining[channel].pop(0))
+        credit[channel] -= 1.0
+        if not remaining[channel]:
+            del remaining[channel]
     cells: list[dict[str, Any]] = []
-    for priority, (_, _base_priority, cell) in enumerate(ranked, 1):
+    for priority, (_, _base_priority, cell) in enumerate(interleaved, 1):
+        channel = str(cell.get("channel") or "")
+        fallback_channel = "xsaas" if channel == "liepin" else "liepin"
+        playbook = CHANNEL_PLAYBOOK_V1.get(channel, {})
+        cell["scheduling"]["channel_policy"] = {
+            "version": CHANNEL_POLICY_VERSION,
+            "role": playbook.get("role", policy["roles"].get(channel, "unknown")),
+            "execution_stage": playbook.get("execution_stage", "unknown"),
+            "query_shape": playbook.get("query_shape", "unknown"),
+            "target_share": policy["target_share"].get(channel, 0.5),
+            "fallback_channel": fallback_channel,
+            "handoff_when": playbook.get("handoff_when", []),
+            "handoff_requires_approved_query_family": True,
+            "intake_stage": playbook.get("intake_stage", ""),
+            "review_pass_stage": playbook.get("review_pass_stage", ""),
+        }
         cell["priority"] = priority
         cells.append(cell)
     scheduled = {
@@ -214,6 +376,7 @@ def schedule_query_plan_v1(
             "historical_metric_count": len(metric_by_query),
             "exploration_cells": sum(cell["scheduling"]["mode"] == "exploration" for cell in cells),
         },
+        "channel_policy_v1": policy,
         "cell_count": len(cells),
         "cells": cells,
     }
@@ -224,6 +387,18 @@ def _dimension_values(strategy: dict[str, Any], key: str) -> list[str]:
     anchors = strategy.get("anchors") if isinstance(strategy.get("anchors"), dict) else {}
     anchor = anchors.get(key) if isinstance(anchors.get(key), dict) else {}
     return list(dict.fromkeys(str(value).strip() for value in anchor.get("values") or [] if str(value).strip()))
+
+
+def _requires_power_evidence(strategy: dict[str, Any]) -> bool:
+    groups = strategy.get("step4_keyword_groups") if isinstance(strategy.get("step4_keyword_groups"), list) else []
+    text = " ".join(
+        str(value)
+        for group in groups
+        if isinstance(group, dict)
+        for value in [group.get("group"), group.get("targets"), *(group.get("terms") or [])]
+    ).casefold()
+    markers = ("vpd", "vrm", "tlvr", "多相buck", "模块电源", "垂直供电")
+    return sum(token.casefold() in text for token in markers) >= 2
 
 
 def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
@@ -256,19 +431,28 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
     evaluation_constraints = {"locations": locations, "levels": levels, "scenarios": scenarios}
 
     companies: list[dict[str, str]] = []
+    rejected_companies: list[dict[str, str]] = []
+    power_role = _requires_power_evidence(strategy)
     for pool in strategy.get("step2_target_pool") or []:
         if not isinstance(pool, dict):
             continue
         for company in pool.get("companies") or []:
             if not isinstance(company, dict) or not str(company.get("name") or "").strip():
                 continue
-            companies.append({
+            normalized_company = {
                 "name": str(company["name"]).strip(),
                 "tier": str(pool.get("tier") or "T3"),
                 "path": str(pool.get("path") or "adjacent"),
                 "source": str(company.get("source") or "llm_inferred"),
                 "confidence": str(company.get("confidence") or "low"),
-            })
+            }
+            if power_role and normalized_company["source"] == "kb_graph":
+                rejected_companies.append({
+                    **normalized_company,
+                    "reason": "电源专家岗位不把公司图谱召回当作电源业务证据",
+                })
+                continue
+            companies.append(normalized_company)
     groups = [
         {
             "group": str(group.get("group") or "").strip(),
@@ -281,12 +465,47 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
     groups = [group for group in groups if group["terms"]]
     vocab = {knowledge_base.normalize_client_name(company["name"]) for company in companies}
     vocab.discard("")
+    if power_role:
+        company_tokens = {
+            token.casefold()
+            for company in companies
+            for token in re.split(r"\s+", company["name"])
+            if token.strip()
+        }
+
+        def sanitize_power_term(term: str) -> str:
+            tokens = [
+                token for token in re.split(r"\s+", term)
+                if token
+                and token.casefold() not in POWER_ROLE_AMBIGUOUS_ATOMIC_TERMS
+                and token.casefold() not in company_tokens
+                and knowledge_base.normalize_client_name(token) not in vocab
+            ]
+            return " ".join(tokens)
+
+        groups = [
+            {
+                **group,
+                "terms": list(dict.fromkeys(
+                    sanitized for term in group["terms"]
+                    if (sanitized := sanitize_power_term(term))
+                )),
+            }
+            for group in groups
+        ]
+        groups = [group for group in groups if group["terms"]]
 
     cells_by_key: dict[tuple[str, str], dict[str, Any]] = {}
 
     def add(channel: str, query: str, priority: int, provenance: dict[str, Any]) -> None:
         normalized_query = " ".join(str(query or "").split())
         if not normalized_query:
+            return
+        if (
+            power_role
+            and provenance.get("kind") == "company_keyword"
+            and knowledge_base.normalize_client_name(normalized_query) in vocab
+        ):
             return
         key = (channel, normalized_query.casefold())
         if key not in cells_by_key:
@@ -302,24 +521,34 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
                 **identity,
                 "evaluation_constraints": evaluation_constraints,
                 "execution_filters": {},
+                "channel_variant": channel,
+                "query_family_ids": [],
                 "priority": priority,
                 "provenance": [],
             }
         cell = cells_by_key[key]
         cell["priority"] = min(int(cell["priority"]), priority)
+        family_kind = str(provenance.get("kind") or "unknown")
+        family_value = str(
+            provenance.get("group") or provenance.get("company") or provenance.get("targets") or query
+        ).strip()
+        family_id = f"{family_kind}:{family_value}" if family_value else family_kind
+        if family_id not in cell["query_family_ids"]:
+            cell["query_family_ids"].append(family_id)
         if provenance not in cell["provenance"]:
             cell["provenance"].append(provenance)
 
     builders = {"liepin": build_liepin_queries, "xsaas": build_xsaas_queries}
     tier_priority = {"T1": 10, "T2": 20, "T3": 30}
-    for company in companies:
-        provenance = {
-            "kind": "company_pool", "company": company["name"], "tier": company["tier"],
-            "path": company["path"], "source": company["source"], "confidence": company["confidence"],
-        }
-        for channel, builder in builders.items():
-            for query in builder([company["name"]], company_terms=vocab):
-                add(channel, query, tier_priority.get(company["tier"], 30) + 10, provenance)
+    if not power_role:
+        for company in companies:
+            provenance = {
+                "kind": "company_pool", "company": company["name"], "tier": company["tier"],
+                "path": company["path"], "source": company["source"], "confidence": company["confidence"],
+            }
+            for channel, builder in builders.items():
+                for query in builder([company["name"]], company_terms=vocab):
+                    add(channel, query, tier_priority.get(company["tier"], 30) + 10, provenance)
 
     for group_index, group in enumerate(groups):
         group_query = " ".join(group["terms"])
@@ -332,13 +561,28 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
                 add(channel, query, 100 + group_index, provenance)
 
         for company in companies:
+            if power_role and group_index > 0:
+                continue
             combined = f"{company['name']} {group_query}"
             combined_provenance = {
                 "kind": "company_keyword", "company": company["name"], "tier": company["tier"],
                 "path": company["path"], "group": group["group"], "targets": group["targets"],
             }
             for channel, builder in builders.items():
-                for query in builder([combined], company_terms=vocab):
+                if power_role and channel == "xsaas":
+                    continue
+                built_queries = builder([combined], company_terms=vocab)
+                if power_role:
+                    company_tokens = {
+                        token.casefold()
+                        for token in re.split(r"\s+", company["name"])
+                        if token.strip()
+                    }
+                    built_queries = [
+                        query for query in built_queries
+                        if company_tokens & {token.casefold() for token in query.split()}
+                    ][:1]
+                for query in built_queries:
                     add(
                         channel, query,
                         tier_priority.get(company["tier"], 30) + group_index,
@@ -349,6 +593,59 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
         cells_by_key.values(),
         key=lambda cell: (int(cell["priority"]), str(cell["channel"]), str(cell["query"]).casefold()),
     )
+    query_budget: dict[str, Any] = {
+        "policy": "specialized_power_balanced_budget_v1" if power_role else "unbounded",
+        "before": len(cells),
+        "after": len(cells),
+        "max_cells": POWER_ROLE_MAX_QUERY_CELLS if power_role else None,
+        "max_company_queries": POWER_ROLE_MAX_COMPANY_QUERIES if power_role else None,
+        "deferred_companies": [],
+    }
+    if power_role:
+        selected_ids: set[str] = set()
+        represented_groups: set[tuple[str, str]] = set()
+        represented_companies: set[str] = set()
+
+        for cell in cells:
+            for ref in cell.get("provenance") or []:
+                if ref.get("kind") != "keyword_group":
+                    continue
+                key = (str(cell.get("channel") or ""), str(ref.get("group") or ""))
+                if key not in represented_groups:
+                    represented_groups.add(key)
+                    selected_ids.add(str(cell["cell_id"]))
+
+        for cell in cells:
+            if len(represented_companies) >= POWER_ROLE_MAX_COMPANY_QUERIES:
+                break
+            companies_for_cell = [
+                str(ref.get("company") or "")
+                for ref in cell.get("provenance") or []
+                if ref.get("kind") == "company_keyword" and str(ref.get("company") or "")
+            ]
+            if not companies_for_cell or all(company in represented_companies for company in companies_for_cell):
+                continue
+            represented_companies.update(companies_for_cell)
+            selected_ids.add(str(cell["cell_id"]))
+
+        for cell in cells:
+            if len(selected_ids) >= POWER_ROLE_MAX_QUERY_CELLS:
+                break
+            if any(ref.get("kind") == "company_keyword" for ref in cell.get("provenance") or []):
+                continue
+            selected_ids.add(str(cell["cell_id"]))
+
+        all_companies = [company["name"] for company in companies]
+        before_count = len(cells)
+        cells = [cell for cell in cells if str(cell["cell_id"]) in selected_ids]
+        query_budget = {
+            "policy": "specialized_power_balanced_budget_v1",
+            "before": before_count,
+            "after": len(cells),
+            "max_cells": POWER_ROLE_MAX_QUERY_CELLS,
+            "max_company_queries": POWER_ROLE_MAX_COMPANY_QUERIES,
+            "deferred_companies": [name for name in all_companies if name not in represented_companies],
+        }
     plan: dict[str, Any] = {
         "schema_version": "query_plan_v1",
         "source_strategy_version": str(strategy.get("schema_version") or ""),
@@ -362,6 +659,13 @@ def compile_query_plan_v1(strategy: dict[str, Any]) -> dict[str, Any]:
                 "scenarios": "post_recall_assessment_context",
             },
         },
+        "company_pool_guard": {
+            "policy": "power_role_requires_business_evidence_v1" if power_role else "default",
+            "company_only_queries": "forbidden_for_specialized_power_role" if power_role else "allowed",
+            "company_keyword_expansion": "first_core_group_only" if power_role else "all_groups",
+            "rejected": rejected_companies,
+        },
+        "query_budget": query_budget,
         "cell_count": len(cells),
         "cells": cells,
     }

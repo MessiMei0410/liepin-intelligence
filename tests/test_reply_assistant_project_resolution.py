@@ -52,6 +52,25 @@ class ReplyAssistantProjectResolutionTest(unittest.TestCase):
         fallback = lookup.index("{ candidate_name: candidateName }")
         self.assertLess(enriched, fallback)
 
+    def test_liepin_candidate_intake_preserves_profile_text(self) -> None:
+        action = server.build_talent_action(
+            {
+                "kind": "candidate_intake",
+                "candidate": "余**",
+                "company": "四创电子股份有限公司",
+                "title": "机械结构工程师",
+                "client": "长越科技",
+                "job": "机械高级工程师",
+                "source_candidate_id": "lp-profile-1",
+                "candidate_profile_text": "四创电子股份有限公司 机械结构工程师\n工作经历：结构设计",
+                "source_url": "https://h.liepin.com/resume/showresumedetail/?res_id_encode=lp-profile-1",
+            }
+        )
+
+        self.assertEqual(action["candidate_profile_text"], "四创电子股份有限公司 机械结构工程师 工作经历：结构设计")
+        self.assertEqual(action["raw"]["candidate_profile_text"], action["candidate_profile_text"])
+        self.assertEqual(action["raw"]["profile_text"], action["candidate_profile_text"])
+
 
 if __name__ == "__main__":
     unittest.main()

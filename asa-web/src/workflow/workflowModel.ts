@@ -78,6 +78,11 @@ export const workflowSchema = z.looseObject({
     total: z.number(),
     ratio: z.number(),
   }).optional(),
+  artifact_summary: z.looseObject({
+    kind: z.string(),
+    count: z.number(),
+    message: z.string(),
+  }).optional(),
   steps: z.array(workflowStepSchema),
   approvals: z.array(z.looseObject({
     approval_id: z.string(),
@@ -107,6 +112,9 @@ export const workflowSchema = z.looseObject({
     title: z.string(),
     artifact_type: z.string(),
     validation_status: z.string(),
+    mime_type: z.string().optional(),
+    has_content: z.boolean().optional(),
+    has_file: z.boolean().optional(),
   })),
   events: z.array(z.looseObject({
     id: z.number(),

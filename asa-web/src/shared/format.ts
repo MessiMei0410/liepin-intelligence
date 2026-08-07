@@ -15,4 +15,12 @@ export const elapsed = (started?: string, finished?: string, now = Date.now()) =
 
 export const sourceLabel=(v='')=>v.toLowerCase().includes('xsaas')||v.toLowerCase().includes('x-saas')?'X-SaaS':v.toLowerCase().includes('liepin')?'猎聘':'人才库'
 export const sourceLinkLabel=(v='')=>sourceLabel(v)==='X-SaaS'?'X-SaaS档案':sourceLabel(v)==='猎聘'?'猎聘简历':'来源档案'
-export const eventStatusLabel=(v='')=>({pending_review:'待复核',completed:'已完成',open:'待处理',done:'已完成',verified:'已核验',failed:'失败',stopped:'已停止'}[v]||v.replaceAll('_',' ')||'已记录')
+export const eventStatusLabel=(v='')=>({pending_review:'待复核',completed:'已完成',open:'待处理',done:'已完成',verified:'已核验',failed:'失败',stopped:'已停止',
+  // 生命周期一等事件状态（面试/Offer/入职）
+  scheduled:'已安排',passed:'通过',extended:'已发出',accepted:'已接受',declined:'已拒绝',recorded:'已记录',cancelled:'已取消',withdrawn:'已撤回',
+  // 旧 client_feedback 口径（event_status 承载反馈类型），保留可读
+  approved:'客户认可',interview:'安排面试',rejected:'客户否决',hold:'暂缓推进',other:'其他反馈',interviewing:'进入面试',interview_passed:'面试通过',interview_failed:'面试未通过',offer:'进入 Offer',hired:'确认入职',
+}[v]||v.replaceAll('_',' ')||'已记录')
+// 生命周期一等事件（面试/Offer/入职）：event_type → 中文标签与时间线圆点色调（空串=非生命周期事件）。
+export const lifecycleEventLabel=(v='')=>({interview_scheduled:'面试安排',interview_completed:'面试完成',offer_extended:'Offer 发出',offer_accepted:'Offer 已接受',offer_declined:'Offer 已拒绝',onboarded:'确认入职'}[v]||'')
+export const lifecycleEventTone=(v='')=>v.startsWith('interview_')?'tone-interview':v.startsWith('offer_')?'tone-offer':v==='onboarded'?'tone-onboard':''

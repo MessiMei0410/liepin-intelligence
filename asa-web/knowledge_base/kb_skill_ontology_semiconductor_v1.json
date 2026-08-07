@@ -1,0 +1,323 @@
+{
+  "meta": {
+    "version": "v1",
+    "created": "2026-08-05",
+    "source": "seed_silan_tme_v1.json（计算电源 TME）/ seed_changyue_motion_control_v1.json / seed_changyue_precision_mechanical_v1.json（长越封测设备）/ kb_seed_jiachi_equipment_v1.json（1168 职位分类法）/ cases/case_*.json 真实技能词归纳",
+    "usage": "半导体/硬件招聘技能本体：技能族→技能→别名/中英文同义词→相关技能→常见证据形式。策略生成做关键词别名归一与相关词提示；简历评估做技能证据归一比对。运行时只读。",
+    "governance": "本体只用于召回增强与证据比对，命中别名单独不构成技能证据；只命中技能标签无项目证据的人选必须标记待核验（沿用 seed 负向规则口径）"
+  },
+  "families": [
+    {
+      "family_id": "power_supply",
+      "label": "计算电源与多相供电",
+      "skills": [
+        {
+          "name": "多相控制器",
+          "aliases": ["多相控制", "多相Buck", "多相 Buck", "multiphase", "multiphase controller", "多相电源"],
+          "related": ["DrMOS", "POL", "VRM", "TLVR"],
+          "evidence": ["多相/DrMOS 产品线立项或量产经历", "参考设计", "客户导入（design-in）", "FAE/AE 支持记录"]
+        },
+        {
+          "name": "DrMOS",
+          "aliases": ["drmos", "驱动MOS", "智能功率级", "SPS", "smart power stage"],
+          "related": ["多相控制器", "POL", "eFuse"],
+          "evidence": ["DrMOS 器件研发/应用经历", "多相供电方案量产", "参考设计"]
+        },
+        {
+          "name": "POL",
+          "aliases": ["负载点电源", "POL电源", "point of load", "POL 电源"],
+          "related": ["多相控制器", "DrMOS", "板级电源"],
+          "evidence": ["板级电源设计", "三次电源方案", "整机客户电源项目"]
+        },
+        {
+          "name": "eFuse",
+          "aliases": ["电子保险丝", "e-fuse", "efuse"],
+          "related": ["DrMOS", "热插拔", "板级电源"],
+          "evidence": ["eFuse/热插拔产品线经历", "服务器电源保护方案"]
+        },
+        {
+          "name": "VRM",
+          "aliases": ["电压调节模块", "voltage regulator module", "vrm"],
+          "related": ["VPD", "TLVR", "多相控制器"],
+          "evidence": ["VRM/多相供电模块研发", "CPU/GPU 供电方案"]
+        },
+        {
+          "name": "VPD",
+          "aliases": ["垂直供电", "vertical power delivery", "vpd"],
+          "related": ["VRM", "TLVR", "模块电源"],
+          "evidence": ["垂直供电方案研发", "模块电源量产项目"]
+        },
+        {
+          "name": "TLVR",
+          "aliases": ["跨电感稳压器", "trans-inductor voltage regulator", "tlvr"],
+          "related": ["VRM", "VPD", "多相控制器"],
+          "evidence": ["TLVR 拓扑研发", "多相 Buck 瞬态优化项目"]
+        },
+        {
+          "name": "模块电源",
+          "aliases": ["电源模块", "power module", "模块电源研发"],
+          "related": ["VPD", "VRM", "磁件"],
+          "evidence": ["模块电源研发/量产", "磁件选型与损耗仿真"]
+        },
+        {
+          "name": "板级电源",
+          "aliases": ["三次电源", "服务器电源", "板级供电"],
+          "related": ["POL", "多相控制器", "eFuse"],
+          "evidence": ["服务器/PC 板级电源设计", "整机厂电源工程师经历"]
+        },
+        {
+          "name": "DC-DC",
+          "aliases": ["dcdc", "直流变换", "Buck", "降压变换", "开关电源"],
+          "related": ["多相控制器", "POL", "AC-DC"],
+          "evidence": ["DC-DC 电源设计", "电源管理 IC 应用"]
+        },
+        {
+          "name": "磁件",
+          "aliases": ["磁性器件", "电感", "功率电感", "变压器", "磁性元件"],
+          "related": ["模块电源", "TLVR", "多相控制器"],
+          "evidence": ["磁件选型/设计", "磁损耗仿真", "样机验证"]
+        }
+      ]
+    },
+    {
+      "family_id": "motion_control",
+      "label": "运动控制与实时系统",
+      "skills": [
+        {
+          "name": "运动控制",
+          "aliases": ["运控", "motion control", "运动控制软件"],
+          "related": ["多轴", "EtherCAT", "闭环控制"],
+          "evidence": ["整机运动控制软件开发", "多轴实时控制项目", "设备节拍优化"]
+        },
+        {
+          "name": "多轴",
+          "aliases": ["多轴联动", "多轴控制", "多轴实时控制", "多轴平台"],
+          "related": ["运动控制", "精密定位", "RTOS"],
+          "evidence": ["多轴同步控制项目", "精密平台运动学开发"]
+        },
+        {
+          "name": "EtherCAT",
+          "aliases": ["ethercat", "EtherCAT总线", "EtherCAT 总线"],
+          "related": ["TwinCAT", "Codesys", "多轴"],
+          "evidence": ["EtherCAT 主从站开发", "总线型伺服调试"]
+        },
+        {
+          "name": "TwinCAT",
+          "aliases": ["twincat", "倍福", "Beckhoff"],
+          "related": ["EtherCAT", "PLC"],
+          "evidence": ["TwinCAT 平台开发", "倍福控制器项目"]
+        },
+        {
+          "name": "Codesys",
+          "aliases": ["codesys", "CODESYS"],
+          "related": ["PLC", "EtherCAT"],
+          "evidence": ["Codesys 运行时/应用开发", "PLC 程序开发"]
+        },
+        {
+          "name": "RTOS",
+          "aliases": ["实时操作系统", "rtos", "实时系统"],
+          "related": ["运动控制", "闭环控制"],
+          "evidence": ["RTOS 上的实时控制开发", "控制周期/抖动指标优化"]
+        },
+        {
+          "name": "PLC",
+          "aliases": ["plc", "可编程控制器"],
+          "related": ["Codesys", "TwinCAT"],
+          "evidence": ["PLC 程序开发", "设备电气控制系统"]
+        },
+        {
+          "name": "闭环控制",
+          "aliases": ["闭环", "伺服控制", "PID", "pid控制"],
+          "related": ["精密定位", "运动控制", "压力控制"],
+          "evidence": ["伺服闭环调试", "控制算法项目"]
+        },
+        {
+          "name": "精密定位",
+          "aliases": ["精密对位", "定位精度", "高精度定位"],
+          "related": ["闭环控制", "光栅尺", "多轴"],
+          "evidence": ["微米/亚微米级定位项目", "定位精度指标交付"]
+        },
+        {
+          "name": "压力控制",
+          "aliases": ["压力闭环", "键合压力", "力控"],
+          "related": ["闭环控制", "温控"],
+          "evidence": ["键合/贴装压力闭环项目", "力控算法"]
+        },
+        {
+          "name": "温控",
+          "aliases": ["温度控制", "温度闭环"],
+          "related": ["压力控制", "闭环控制"],
+          "evidence": ["设备温控系统开发", "热工控制项目"]
+        }
+      ]
+    },
+    {
+      "family_id": "packaging_equipment",
+      "label": "封测设备场景",
+      "skills": [
+        {
+          "name": "键合机",
+          "aliases": ["键合设备", "键合", "die bonder", "die bond", "焊线机", "wire bonder", "wire bond"],
+          "related": ["固晶机", "贴片机", "封装设备"],
+          "evidence": ["键合设备整机研发/交付", "键合工艺调试"]
+        },
+        {
+          "name": "固晶机",
+          "aliases": ["固晶", "die attach", "固晶设备"],
+          "related": ["键合机", "贴片机", "封装设备"],
+          "evidence": ["固晶设备研发", "固晶工艺项目"]
+        },
+        {
+          "name": "贴片机",
+          "aliases": ["贴片", "贴装设备", "SMT贴片机", "SMT"],
+          "related": ["固晶机", "封装设备"],
+          "evidence": ["贴装设备研发", "贴片产线项目"]
+        },
+        {
+          "name": "封装设备",
+          "aliases": ["封测设备", "后道设备", "先进封装设备", "先进封装"],
+          "related": ["键合机", "固晶机", "检测设备"],
+          "evidence": ["封装/封测设备整机经验", "封测厂产线项目"]
+        },
+        {
+          "name": "检测设备",
+          "aliases": ["量检测设备", "AOI", "测试设备", "量测设备"],
+          "related": ["封装设备", "半导体设备"],
+          "evidence": ["检测/量测设备研发", "AOI 光学检测项目"]
+        },
+        {
+          "name": "半导体设备",
+          "aliases": ["半导体装备", "前道设备", "设备研发"],
+          "related": ["封装设备", "检测设备", "精密运动平台"],
+          "evidence": ["半导体设备整机研发", "设备厂研发岗位经历"]
+        }
+      ]
+    },
+    {
+      "family_id": "precision_mechanical",
+      "label": "精密机械与运动元器件",
+      "skills": [
+        {
+          "name": "机械设计",
+          "aliases": ["结构设计", "整机设计", "机械研发", "机械结构"],
+          "related": ["有限元", "结构刚性", "紧固件"],
+          "evidence": ["整机结构设计", "精密设备机械研发项目"]
+        },
+        {
+          "name": "有限元",
+          "aliases": ["FEA", "有限元分析", "结构仿真", "仿真分析"],
+          "related": ["振动", "热变形", "结构刚性"],
+          "evidence": ["有限元优化项目", "仿真-实测闭环"]
+        },
+        {
+          "name": "结构刚性",
+          "aliases": ["刚性", "刚度", "结构刚度"],
+          "related": ["振动", "有限元"],
+          "evidence": ["刚性分析与优化", "整机刚度指标交付"]
+        },
+        {
+          "name": "振动",
+          "aliases": ["振动分析", "模态", "模态分析", "减振"],
+          "related": ["结构刚性", "有限元"],
+          "evidence": ["振动/模态分析项目", "减振设计"]
+        },
+        {
+          "name": "热变形",
+          "aliases": ["热膨胀", "热误差", "热漂移"],
+          "related": ["有限元", "精密定位"],
+          "evidence": ["热变形分析与补偿", "热稳定性优化"]
+        },
+        {
+          "name": "紧固件",
+          "aliases": ["紧固件设计", "连接件", "紧固设计"],
+          "related": ["机械设计", "结构刚性"],
+          "evidence": ["紧固件选型与设计", "连接可靠性验证"]
+        },
+        {
+          "name": "直线电机",
+          "aliases": ["直线马达", "直驱", "linear motor", "直驱电机"],
+          "related": ["丝杠", "导轨", "精密定位"],
+          "evidence": ["直线电机选型/驱动", "直驱平台项目"]
+        },
+        {
+          "name": "丝杠",
+          "aliases": ["滚珠丝杠", "丝杆", "ball screw"],
+          "related": ["导轨", "直线电机"],
+          "evidence": ["传动部件选型", "进给系统设计"]
+        },
+        {
+          "name": "导轨",
+          "aliases": ["直线导轨", "线性导轨", "guide rail"],
+          "related": ["丝杠", "轴承"],
+          "evidence": ["导向部件选型", "精密平台装配"]
+        },
+        {
+          "name": "轴承",
+          "aliases": ["精密轴承", "bearing", "空气轴承", "气浮轴承"],
+          "related": ["导轨", "精密定位"],
+          "evidence": ["轴承选型", "主轴/转台设计"]
+        },
+        {
+          "name": "光栅尺",
+          "aliases": ["光栅", "编码器", "encoder", "光栅尺反馈"],
+          "related": ["精密定位", "闭环控制"],
+          "evidence": ["位置反馈系统选型", "全闭环控制项目"]
+        },
+        {
+          "name": "微米级",
+          "aliases": ["亚微米级", "微米级精度", "μm级"],
+          "related": ["精密定位", "精密运动平台"],
+          "evidence": ["微米/亚微米级精度指标交付"]
+        },
+        {
+          "name": "精密运动平台",
+          "aliases": ["精密平台", "运动平台", "精密运动台", "多轴精密平台"],
+          "related": ["直线电机", "光栅尺", "精密定位"],
+          "evidence": ["精密运动平台整机研发", "运动台精度指标交付"]
+        }
+      ]
+    },
+    {
+      "family_id": "technical_marketing",
+      "label": "技术市场与应用",
+      "skills": [
+        {
+          "name": "TME",
+          "aliases": ["技术市场", "技术市场经理", "technical marketing", "技术市场工程师"],
+          "related": ["FAE", "AE", "客户导入"],
+          "evidence": ["产品线立项", "技术宣讲与培训", "推广材料制作", "项目导入负责"]
+        },
+        {
+          "name": "FAE",
+          "aliases": ["现场应用工程师", "fae", "现场应用"],
+          "related": ["AE", "TME", "客户导入"],
+          "evidence": ["客户端复杂问题支持", "FAE 支持记录"]
+        },
+        {
+          "name": "AE",
+          "aliases": ["应用工程师", "ae", "应用工程"],
+          "related": ["FAE", "电源工程师"],
+          "evidence": ["器件应用方案开发", "应用笔记/参考设计"]
+        },
+        {
+          "name": "电源工程师",
+          "aliases": ["电源研发工程师", "电源硬件工程师", "电源设计工程师"],
+          "related": ["AE", "多相控制器", "板级电源"],
+          "evidence": ["整机/板级电源设计项目"]
+        },
+        {
+          "name": "客户导入",
+          "aliases": ["项目导入", "design-in", "design in", "客户项目导入"],
+          "related": ["参考设计", "TME", "FAE"],
+          "evidence": ["design-in 赢单记录", "客户项目导入负责"]
+        },
+        {
+          "name": "参考设计",
+          "aliases": ["reference design", "参考设计方案", "ref design"],
+          "related": ["客户导入", "AE"],
+          "evidence": ["参考设计制作", "方案评审"]
+        }
+      ]
+    }
+  ]
+}

@@ -65,7 +65,7 @@ def _current_assessed_candidates(self, job_id: int) -> list[dict[str, Any]]:
         conn.close()
 
 
-def generate_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
+def generate_candidate_assessment(self, candidate_id: int, job_id: int, *, force: bool = False) -> dict[str, Any]:
     """S6-1：生成/重新生成判人评估（职业轨迹 + 跳槽质量史），落 candidate_assessment artifact。
 
     404：人选/岗位不存在或不匹配（LookupError）；409：无简历语料、敏感扫描命中、
@@ -77,6 +77,25 @@ def generate_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[
 
     conn = self._connect()
     try:
+        input_hash = candidate_assessment.assessment_input_hash(
+            conn,
+            candidate_id=int(candidate_id),
+            job_id=int(job_id),
+            llm=self.llm,
+        )
+        if not force:
+            cached = candidate_assessment.get_assessment(conn, int(candidate_id), int(job_id))
+            cached_doc = cached.get("assessment") if cached else None
+            if isinstance(cached_doc, dict) and cached_doc.get("input_hash") == input_hash:
+                return {
+                    "ok": True,
+                    "cached": True,
+                    "cache_reason": "assessment_inputs_unchanged",
+                    "candidate_id": int(candidate_id),
+                    "job_id": int(job_id),
+                    "artifact_id": cached["artifact_id"],
+                    "assessment": cached_doc,
+                }
         try:
             doc = candidate_assessment.run_assessment(
                 conn,
@@ -88,10 +107,13 @@ def generate_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[
             )
         except LLMError as exc:
             raise ValueError(f"判人评估模型不可用或输出非法：{exc}") from exc
+        doc["input_hash"] = input_hash
+        doc["cache_policy"] = "source_fingerprint_daily_v1"
         artifact_id = candidate_assessment.persist_assessment(conn, doc)
         conn.commit()
         return {
             "ok": True,
+            "cached": False,
             "candidate_id": int(candidate_id),
             "job_id": int(job_id),
             "artifact_id": artifact_id,

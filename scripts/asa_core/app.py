@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import os
+import secrets
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -26,9 +31,16 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import liepin_workbench_server as legacy
 from a_system_agent.service import AgentService
+from a_system_agent.native_attachments import (
+    MAX_ATTACHMENT_BYTES,
+    SUPPORTED_EXTENSIONS,
+    extract_local_document,
+)
 
 from .analytics import AnalyticsService
-from .database import DEFAULT_DB, migrate
+from .company_calibration import CompanyCalibrationService
+from .database import DEFAULT_DB, migrate, transaction
+from .knowledge_proposals import KnowledgeProposalService
 from .service import CoreService
 
 
@@ -81,6 +93,31 @@ class CopilotMessage(WriteEnvelope):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class CopilotAttachmentUpload(WriteEnvelope):
+    file_name: str = Field(min_length=1, max_length=240)
+    mime_type: str = Field(default="", max_length=160)
+    size_bytes: int = Field(ge=1, le=MAX_ATTACHMENT_BYTES)
+    content_base64: str = Field(min_length=1, max_length=36 * 1024 * 1024)
+
+
+class CopilotAttachmentResponseItem(BaseModel):
+    attachment_id: str
+    access_token: str
+    file_name: str
+    file_type: str
+    mime_type: str
+    size_bytes: int
+    content_available: bool
+    truncated: bool
+    is_image: bool
+    status: str
+
+
+class CopilotAttachmentUploadResponse(BaseModel):
+    ok: bool
+    attachment: CopilotAttachmentResponseItem
+
+
 class CopilotSessionPatch(WriteEnvelope):
     title: str | None = Field(default=None, min_length=1, max_length=80)
     archived: bool | None = None
@@ -108,6 +145,7 @@ class CopilotMessageResponse(BaseModel):
     workflow_progress: dict[str, Any] | None = None
     pending_intent: dict[str, Any] | None = None
     action_card: dict[str, Any] | None = None
+    model_participation: dict[str, Any] | None = None
     created_at: str | None = None
 
 
@@ -144,6 +182,12 @@ class CopilotSessionUpdateResponse(BaseModel):
     business_focus: dict[str, Any] | None = None
 
 
+class CopilotSessionBulkArchiveResponse(BaseModel):
+    ok: bool = True
+    archived_count: int = Field(ge=0)
+    session_ids: list[str] = Field(default_factory=list)
+
+
 class CopilotEvent(WriteEnvelope):
     session_id: str = ""
     event: str = Field(min_length=1)
@@ -166,6 +210,13 @@ class DiffDecision(BaseModel):
 
 class StrategyReviewDiffDecisions(WriteEnvelope):
     decisions: list[DiffDecision] = Field(min_length=1)
+
+
+class StrategyItemEdits(WriteEnvelope):
+    # 寻访策略结构化按项编辑：edits 逐项为 {op, ...}（op 枚举见 strategy_editor.SUPPORTED_OPS，
+    # 服务层逐项校验并给可读 409）；编辑落新 strategy revision，不原地替换。
+    edits: list[dict[str, Any]] = Field(min_length=1)
+    note: str = ""
 
 
 class MappingTaskCreate(WriteEnvelope):
@@ -224,6 +275,67 @@ class CandidateAction(BaseModel):
     note: str = ""
     reason: str = ""
     preflight_token: str = ""
+
+
+class ConsultantRecommendationPreflight(WriteEnvelope):
+    candidate_id: int
+
+
+class ConsultantRecommendationCommit(ConsultantRecommendationPreflight):
+    # 顾问确认推荐必须附原因；缺失/空串在服务层也兜底拒绝（409）。
+    reason: str = Field(min_length=1)
+    preflight_token: str = ""
+
+
+class PackageFeedbackCreate(WriteEnvelope):
+    # 版本化推荐包客户反馈：feedback_type 五枚举 approved/interview/rejected/hold/other
+    # （非法 → 409），content 必填（空白 → 409），feedback_time 选填（默认服务端当前时间）。
+    feedback_type: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    feedback_time: str = ""
+
+
+class JobWeeklyReportCreate(WriteEnvelope):
+    # 岗位周报手动生成（无额外表单字段；同周幂等更新同一 artifact，version 自增留痕）
+    pass
+
+
+class LifecycleEventCreate(WriteEnvelope):
+    # 生命周期一等事件（面试/Offer/入职）：event_type 六枚举 interview_scheduled/interview_completed/
+    # offer_extended/offer_accepted/offer_declined/onboarded（非法 → 409）；occurred_at 选填
+    # （默认服务端当前时间，格式非法 → 409）；event_status 选填（缺省用事件类型默认状态，非法 → 409）。
+    event_type: str = Field(min_length=1)
+    occurred_at: str = ""
+    event_status: str = ""
+    notes: str = ""
+
+
+class KnowledgeProposalGenerate(WriteEnvelope):
+    # 知识增补提案生成（二期知识飞轮）：确定性扫描停止原因/客户反馈/确认推荐聚类，
+    # 证据不足只留候选；同内容幂等不重复提案。
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class KnowledgeProposalDecision(WriteEnvelope):
+    # 两段确认：decision 二枚举 accept/reject；reject 必须附 note（服务层兜底 409）。
+    confirmation_token: str = Field(min_length=1)
+    decision: str = Field(min_length=1)
+    note: str = ""
+
+
+class CompanyCalibrationSubmit(WriteEnvelope):
+    # 二期知识飞轮：核心公司校准提交。status 三枚举 calibrated/rejected/needs_review
+    # （非法 → 409）；公司必须已在图谱（404）；同内容重复提交不 bump version（服务层幂等）。
+    company_name: str = Field(min_length=1)
+    status: str = "calibrated"
+    track: str = ""
+    product_lines: list[str] = Field(default_factory=list)
+    skill_tags: list[str] = Field(default_factory=list)
+    level_system: str = ""
+    no_poach: bool = False
+    non_compete: bool = False
+    note: str = ""
+    calibrated_by: str = "consultant"
 
 
 class ProposalGenerate(WriteEnvelope):
@@ -296,6 +408,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     agent = AgentService(db_path)
     analytics = AnalyticsService(db_path)
     core = CoreService(db_path, agent, analytics)
+    knowledge = KnowledgeProposalService(db_path)
+    calibration = CompanyCalibrationService(db_path)
     if runtime:
         runtime.state.core_service = core
         runtime.state.bind_agent_service(agent)
@@ -401,6 +515,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def agent_action_metrics(days: int = Query(7, ge=1, le=30)) -> dict[str, Any]:
         return core.agent_action_metrics(days)
 
+    @app.get("/api/v1/agent/model-audit")
+    def agent_model_audit(
+        limit: int = Query(50, ge=1, le=200),
+        operation: str = Query("", max_length=80),
+        status: str = Query("", max_length=32),
+    ) -> dict[str, Any]:
+        return core.model_audit(limit, operation, status)
+
     @app.get("/api/v1/jobs")
     def jobs(q: str = "", status: str = "", include_archived: bool = False, limit: int = Query(100, le=200), offset: int = 0) -> dict[str, Any]:
         return core.jobs(query=q, status=status, include_archived=include_archived, limit=limit, offset=offset)
@@ -435,12 +557,12 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def candidate(candidate_id: int) -> dict[str, Any]: return core.candidate(candidate_id)
 
     @app.post("/api/v1/candidates/{candidate_id}/assessments")
-    def candidate_assessment_generate(candidate_id: int, body: WriteEnvelope, job_id: int = Query(...), idempotency_key: str = Header(alias="Idempotency-Key")):
+    def candidate_assessment_generate(candidate_id: int, body: WriteEnvelope, job_id: int = Query(...), force: bool = Query(False), idempotency_key: str = Header(alias="Idempotency-Key")):
         # S6-1：生成/重新生成判人评估（职业轨迹 + 跳槽质量史）。走 execute_idempotent 幂等 + 审计，
         # 重放返回首次响应；404=人选/岗位不存在或不匹配；409=无简历语料/敏感扫描命中/模型不可用。
         # 同人同岗重复 POST 更新原 artifact（as_of 刷新），不重复建行。评估只辅助判断，不做决策。
         return idem("candidate.assessment_generate", body, idempotency_key, "job_candidate", f"{candidate_id}:{job_id}",
-                    lambda: core.generate_candidate_assessment(candidate_id, job_id))
+                    lambda: core.generate_candidate_assessment(candidate_id, job_id, force=force))
 
     @app.get("/api/v1/candidates/{candidate_id}/assessments")
     def candidate_assessment_get(candidate_id: int, job_id: int = Query(...)) -> dict[str, Any]:
@@ -470,6 +592,25 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/workflows/{workflow_id}")
     def workflow(workflow_id: str) -> dict[str, Any]: return core.workflow(workflow_id)
+
+    @app.get("/api/v1/artifacts/{artifact_id}")
+    def workflow_artifact(artifact_id: str) -> dict[str, Any]:
+        return core.workflow_artifact(artifact_id)
+
+    @app.get("/api/v1/artifacts/{artifact_id}/file")
+    def workflow_artifact_file(artifact_id: str):
+        download = core.workflow_artifact_download(artifact_id)
+        if download["kind"] == "file":
+            return FileResponse(
+                download["path"],
+                media_type=download["mime_type"],
+                filename=download["file_name"],
+            )
+        return Response(
+            content=str(download["content"]).encode("utf-8"),
+            media_type=download["mime_type"],
+            headers={"Content-Disposition": f'attachment; filename="{download["file_name"]}"'},
+        )
 
     @app.get("/api/v1/workflows/{workflow_id}/summary")
     def workflow_summary(workflow_id: str) -> dict[str, Any]:
@@ -515,6 +656,16 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("workflow.strategy_review_diff_decisions", body, idempotency_key, "workflow", workflow_id,
                     lambda: core.apply_strategy_review_diff_decisions(
                         workflow_id, [item.model_dump() for item in body.decisions]))
+
+    @app.post("/api/v1/workflows/{workflow_id}/strategy/edits")
+    def workflow_strategy_item_edits(workflow_id: str, body: StrategyItemEdits, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 寻访策略按项编辑（关键词组/公司池/职级/顾问约束的增改删）：走 execute_idempotent
+        # 幂等 + 审计，重放返回首次响应；404=工作流不存在或无 strategy_v2；409=外部寻访已开始、
+        # 目标项不存在（状态漂移）、编辑后质量校验/查询计划编译不过（中文 detail 透出）。
+        # 不绕过 R3：编辑后策略 hash 变化，waiting_approval 的旧审批卡作废并自动换新。
+        return idem("workflow.strategy_item_edits", body, idempotency_key, "workflow", workflow_id,
+                    lambda: core.apply_strategy_item_edits(
+                        workflow_id, [dict(item) for item in body.edits], note=body.note))
 
     @app.get("/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}")
     def job_mapping_task(job_id: int, artifact_id: str) -> dict[str, Any]:
@@ -629,6 +780,78 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem("copilot.message", body, idempotency_key, "copilot_session", body.session_id or "new",
                     lambda: core.copilot(body.message, session_id=body.session_id, context=body.context))
 
+    attachment_parse_slots = threading.BoundedSemaphore(2)
+
+    @app.post("/api/v1/copilot/attachments", response_model=CopilotAttachmentUploadResponse)
+    def copilot_attachment(body: CopilotAttachmentUpload) -> dict[str, Any]:
+        """Read a user-selected local document and return model-ready text without retaining its path."""
+        file_name = str(body.file_name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+        suffix = Path(file_name).suffix.lower()
+        if not file_name or suffix not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(415, f"暂不支持读取 {suffix or '无扩展名'} 文件")
+        try:
+            content = base64.b64decode(body.content_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(400, "附件内容编码无效") from exc
+        if len(content) != body.size_bytes:
+            raise HTTPException(400, "附件大小与上传声明不一致")
+        if len(content) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(413, "附件超过 25 MB 读取上限")
+
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="asa-attachment-", suffix=suffix, delete=False) as handle:
+                handle.write(content)
+                temporary_path = Path(handle.name)
+            with attachment_parse_slots:
+                extracted_text, truncated = extract_local_document(temporary_path)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+        content_available = bool(extracted_text.strip())
+        attachment_id = f"att_{secrets.token_hex(16)}"
+        access_token = secrets.token_urlsafe(32)
+        status = (
+            "已读取附件正文，超长内容已截取前 18000 字。"
+            if truncated
+            else "已读取附件正文。"
+            if content_available
+            else "文件已读取，但没有提取到可分析文本。"
+        )
+        with transaction(db_path) as conn:
+            conn.execute("DELETE FROM agent_copilot_attachments WHERE expires_at<=datetime('now','localtime')")
+            conn.execute(
+                """
+                INSERT INTO agent_copilot_attachments
+                (attachment_id,access_token_hash,file_name,file_type,mime_type,size_bytes,
+                 content_sha256,extracted_text,truncated,status)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    attachment_id, hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
+                    file_name, suffix.lstrip("."), body.mime_type, len(content),
+                    hashlib.sha256(content).hexdigest(), extracted_text, int(truncated), status,
+                ),
+            )
+        return {
+            "ok": True,
+            "attachment": {
+                "attachment_id": attachment_id,
+                "access_token": access_token,
+                "file_name": file_name,
+                "file_type": suffix.lstrip("."),
+                "mime_type": body.mime_type,
+                "size_bytes": len(content),
+                "content_available": content_available,
+                "truncated": truncated,
+                "is_image": False,
+                "status": status,
+            },
+        }
+
     @app.get("/api/v1/copilot/sessions", response_model=CopilotSessionListResponse)
     def copilot_sessions(
         limit: int = Query(30, ge=1, le=100),
@@ -636,6 +859,20 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         include_archived: bool = Query(False),
     ) -> dict[str, Any]:
         return agent.list_copilot_sessions(limit, q, include_archived)
+
+    @app.post("/api/v1/copilot/sessions/archive-all", response_model=CopilotSessionBulkArchiveResponse)
+    def copilot_sessions_archive_all(
+        body: WriteEnvelope,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        return idem(
+            "copilot.sessions_archive_all",
+            body,
+            idempotency_key,
+            "copilot_sessions",
+            "all",
+            agent.archive_all_copilot_sessions,
+        )
 
     @app.get("/api/v1/copilot/sessions/{session_id}", response_model=CopilotSessionDetailResponse)
     def copilot_session(session_id: str, limit: int = Query(100, ge=1, le=200)) -> dict[str, Any]:
@@ -792,10 +1029,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/analytics/runs/{run_id}")
     def analytics_run_get(run_id: str) -> dict[str, Any]:
-        payload = analytics.get_run(run_id)
-        if payload.get("result", {}).get("status") == "expired":
-            raise HTTPException(410, detail={"error": "分析结果已过期", "run_id": run_id, "can_refresh": True})
-        return payload
+        return analytics.get_run(run_id)
 
     @app.post("/api/v1/analytics/runs/{run_id}/refresh", status_code=201)
     def analytics_run_refresh(run_id: str, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
@@ -809,6 +1043,15 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return idem(
             "analytics.run_export", body, idempotency_key, "analysis_run", run_id,
             lambda: analytics.export_run(run_id),
+        )
+
+    @app.get("/api/v1/analytics/runs/{run_id}/download")
+    def analytics_run_download(run_id: str) -> FileResponse:
+        target = analytics.export_file(run_id)
+        return FileResponse(
+            target,
+            media_type="text/markdown; charset=utf-8",
+            filename=f"ASA-analysis-{run_id.removeprefix('analysis_')[:12]}.md",
         )
 
     @app.get("/api/v1/analytics/templates")
@@ -855,13 +1098,19 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return analytics.delete_template(template_id)
 
     @app.get("/api/v1/workbench")
-    def workbench(limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
-        flow = agent.get_flow_inbox(queue="今日待办", limit=300)
+    def workbench(limit: int = Query(1000, ge=1, le=1000)) -> dict[str, Any]:
+        # 响应语义：flow 固定按 1000 拉取（取「全部进行中」，由 analytics.workbench 映射成
+        # 待判断/运行中/待客户/风险逾期/最近交付五个 lane；普通进行中项不进工作台），
+        # summary 基于全量可见项统计（候选队列上限 1000，不随 limit 收缩）；
+        # items 序列化窗口由 analytics.workbench 统一封顶 300，超限时
+        # truncated=True 且 returned_count < summary.total，调用方按截断列表处理。
+        flow = agent.get_flow_inbox(queue="全部进行中", limit=1000)
         return analytics.workbench(flow, limit)
 
     @app.get("/api/v1/inbox")
     def inbox(limit: int = Query(100, ge=1, le=300)) -> dict[str, Any]:
-        flow = agent.get_flow_inbox(queue="今日待办", limit=300)
+        # 与 /api/v1/workbench 同一序列化路径，limit 直接约束窗口（上限 300 与封顶一致）。
+        flow = agent.get_flow_inbox(queue="今日待办", limit=1000)
         return analytics.workbench(flow, limit)
 
     @app.patch("/api/v1/inbox/{item_key:path}/state")
@@ -886,6 +1135,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             "revise": lambda: agent.revise_workflow(workflow_id, body.instruction),
             "revert_revision": lambda: agent.revert_workflow_revision(workflow_id),
             "cancel": lambda: agent.cancel_workflow(workflow_id, body.note),
+            "pause": lambda: agent.pause_workflow(workflow_id, body.note),
+            "resume": lambda: agent.resume_workflow(workflow_id, body.note),
             "archive": lambda: agent.archive_workflow(workflow_id),
         }
         if action_name not in actions:
@@ -910,6 +1161,151 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             raise HTTPException(400, "preflight_token is required")
         return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id),
                     lambda: core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason))
+
+    @app.post("/api/v1/consultant-recommendations/preflight")
+    def consultant_recommendation_preflight(body: ConsultantRecommendationPreflight) -> dict[str, Any]:
+        try:
+            return core.consultant_recommendation_preflight(body.candidate_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/consultant-recommendations/commit")
+    def consultant_recommendation_commit(body: ConsultantRecommendationCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        if not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
+        return idem("consultant_recommendation.commit", body, idempotency_key, "job_candidate", str(body.candidate_id),
+                    lambda: core.consultant_recommendation_commit(body.candidate_id, body.reason, body.preflight_token))
+
+    @app.get("/api/v1/jobs/{job_id}/recommendation-metrics")
+    def job_recommendation_metrics(job_id: int) -> dict[str, Any]:
+        # 顾问确认推荐岗位指标：confirmed_recommendations / assessed_candidates / rate。
+        # 岗位不存在 → 404（LookupError 全局映射）；无评估 → rate=None。
+        return core.consultant_recommendation_metrics(job_id)
+
+    @app.get("/api/v1/candidates/{candidate_id}/recommendation-packages")
+    def candidate_recommendation_packages(candidate_id: int) -> dict[str, Any]:
+        # 版本化推荐包列表（按 version 倒序，含反馈计数）。候选人（job_candidate）不存在 → 404；
+        # 尚未确认推荐 → 200 + 空列表。
+        return core.list_recommendation_packages(candidate_id)
+
+    @app.get("/api/v1/recommendation-packages/{package_id}")
+    def recommendation_package_detail(package_id: str) -> dict[str, Any]:
+        # 推荐包详情：候选摘要/人岗匹配证据/风险/待核验问题 + 已记录客户反馈；不存在 → 404。
+        return core.get_recommendation_package(package_id)
+
+    @app.post("/api/v1/recommendation-packages/{package_id}/feedback")
+    def recommendation_package_feedback_create(package_id: str, body: PackageFeedbackCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 客户反馈记录：关联推荐包版本并回写候选人事件时间线（candidate_events）。
+        # 走 execute_idempotent 幂等 + 审计，重放返回首次响应；表级 UNIQUE(package_id, request_id) 兜底；
+        # 404=推荐包不存在；409=反馈类型非法/内容为空。
+        return idem("recommendation_package.feedback", body, idempotency_key, "recommendation_package", package_id,
+                    lambda: core.record_package_feedback(package_id, body.feedback_type, body.content, body.feedback_time, body.request_id))
+
+    @app.post("/api/v1/candidates/{candidate_id}/lifecycle-events")
+    def candidate_lifecycle_event_create(candidate_id: int, body: LifecycleEventCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 生命周期一等事件（面试/Offer/入职）：写 candidate_events（与旧事件在时间线查询中统一返回）
+        # 并自动生成跟进待办（followup_tasks，不自动对外发任何消息）。
+        # 走 execute_idempotent 幂等 + 审计（重放返回首次响应）；事件表 source_id=request_id 兜底去重；
+        # 404=候选人不存在；409=事件类型/状态/时间格式非法。
+        return idem("candidate_lifecycle.record", body, idempotency_key, "job_candidate", str(candidate_id),
+                    lambda: core.record_lifecycle_event(
+                        candidate_id, body.event_type,
+                        notes=body.notes, occurred_at=body.occurred_at,
+                        event_status=body.event_status, request_id=body.request_id,
+                    ))
+
+    @app.post("/api/v1/jobs/{job_id}/weekly-report")
+    def job_weekly_report_create(job_id: int, body: JobWeeklyReportCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 岗位自动周报：确定性组装（漏斗/有效推荐/渠道质量/风险/建议，不依赖 LLM），
+        # markdown + 结构化 metadata 落 agent_artifacts；同周重复生成更新同一 artifact
+        # （version 自增 + history 留痕），跨周生成新 artifact 并以上一期做对比基线。
+        # 走 execute_idempotent 幂等 + 审计，重放返回首次响应；岗位不存在 → 404（LookupError 全局映射）。
+        return idem("job.weekly_report", body, idempotency_key, "job", f"{job_id}:weekly",
+                    lambda: core.generate_job_weekly_report(job_id))
+
+    @app.get("/api/v1/jobs/{job_id}/weekly-reports")
+    def job_weekly_reports(job_id: int, limit: int = Query(12, ge=1, le=52)) -> dict[str, Any]:
+        # 岗位周报历史（新→旧）+ 最新一期摘要；尚无周报 → 200 + latest=None/items=[]；
+        # 岗位不存在 → 404（LookupError 全局映射）；完整正文走 /api/v1/artifacts/{artifact_id}。
+        return core.list_job_weekly_reports(job_id, limit)
+
+    @app.get("/api/v1/knowledge-proposals")
+    def knowledge_proposals(
+        status: str = "pending",
+        proposal_type: str = "",
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        # 二期知识飞轮：知识增补提案列表（默认 pending）；status/type 非法 → 409。
+        try:
+            return knowledge.list_proposals(status, proposal_type, limit)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/v1/knowledge-proposals/{proposal_id}")
+    def knowledge_proposal_detail(proposal_id: str) -> dict[str, Any]:
+        # 提案详情（内容 JSON + 可读证据列表）；不存在 → 404（LookupError 全局映射）。
+        return knowledge.get_proposal(proposal_id)
+
+    @app.post("/api/v1/knowledge-proposals/generate")
+    def knowledge_proposals_generate(body: KnowledgeProposalGenerate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 确定性生成（不依赖 LLM）：停止原因/客户反馈/确认推荐聚类，达阈值才出提案，
+        # 证据不足只留候选；UNIQUE(proposal_type, content_key) 保证同内容不重复提案。
+        # 走 execute_idempotent 幂等 + 审计，重放返回首次响应。
+        return idem("knowledge_proposal.generate", body, idempotency_key, "knowledge_proposal", "generate",
+                    lambda: knowledge.generate(body.limit))
+
+    @app.post("/api/v1/knowledge-proposals/{proposal_id}/preflight")
+    def knowledge_proposal_preflight(proposal_id: str, body: WriteEnvelope) -> dict[str, Any]:
+        # 两段确认第一段：发 300s 确认令牌 + 内容签名；404=提案不存在；409=非 pending。
+        try:
+            return knowledge.preflight(proposal_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/knowledge-proposals/{proposal_id}/decision")
+    def knowledge_proposal_decision(proposal_id: str, body: KnowledgeProposalDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 两段确认第二段：校验令牌+签名未漂移后执行。accept → 写入对应知识文件
+        # （图谱条目/confirmed_rules 文件，原子写 + 硬链接镜像同步，带 proposed_by 标记）；
+        # reject → 落 rejected 含原因。走 execute_idempotent 幂等 + 审计，重放返回首次响应；
+        # 404=提案不存在；409=令牌无效/过期/内容漂移/决策非法/拒绝缺原因/知识文件异常。
+        return idem("knowledge_proposal.decision", body, idempotency_key, "knowledge_proposal", proposal_id,
+                    lambda: knowledge.decide(proposal_id, body.confirmation_token, body.decision, body.note))
+
+    @app.get("/api/v1/company-calibrations")
+    def company_calibrations(
+        q: str = "",
+        status: str = "",
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        # 二期知识飞轮：核心公司待校准队列（默认 未校准+待复核 优先；q 按名称/赛道/主营业务
+        # 搜索；status=calibrated/rejected/needs_review/pending/all 单选，非法 → 409）。
+        try:
+            return calibration.list_queue(query=q, status=status, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/v1/company-calibrations/progress")
+    def company_calibration_progress() -> dict[str, Any]:
+        # 校准进度指示：已校准 N / 目标 50 + 各状态计数（只读）。
+        return calibration.get_progress()
+
+    @app.get("/api/v1/company-calibrations/{company_key}")
+    def company_calibration_detail(company_key: str) -> dict[str, Any]:
+        # 校准详情（图谱原始条目 + 校准记录）；公司不在图谱 → 404（LookupError 全局映射）。
+        return calibration.get_calibration(company_key)
+
+    @app.post("/api/v1/company-calibrations")
+    def company_calibration_submit(body: CompanyCalibrationSubmit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 提交校准：按 company_key upsert，内容变化 version 自增，同内容重提不 bump（服务层
+        # 幂等）；走 execute_idempotent 幂等 + 审计，重放返回首次响应。404=公司不在图谱；
+        # 409=状态非法/公司名为空（中文 detail 透出）。
+        return idem("company_calibration.submit", body, idempotency_key, "company_calibration", body.company_name,
+                    lambda: calibration.submit(
+                        body.company_name, status=body.status, track=body.track,
+                        product_lines=body.product_lines, skill_tags=body.skill_tags,
+                        level_system=body.level_system, no_poach=body.no_poach,
+                        non_compete=body.non_compete, note=body.note,
+                        calibrated_by=body.calibrated_by))
 
     def app_ui_allowed(request: Request) -> bool:
         return request.headers.get("user-agent", "").startswith(ASA_APP_USER_AGENT_PREFIX)

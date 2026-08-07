@@ -1,0 +1,109 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-05",
+    "source": "真实岗位「士兰微-电源专家」「未归属-ACDC/电源/硬件」（outputs/changyue_auto_multichannel_intake_20260710.json P0 缺口清单）+ seed_silan_tme_v1.json 产品线/公司池扩展变体",
+    "usage": "计算电源研发岗（VRM/VPD/多相/板级电源）岗位原型：策略生成与简历评估直接消费；与 tme_computing_power（技术市场）互为同产品线不同职能的变体",
+    "governance": "公司池 T1 为士兰微 TME 原型同赛道原厂（顾问已校准该赛道），T2 整机厂池与迁移优先级待顾问逐案校准；只命中技能标签无项目证据的人选必须标记待核验"
+  },
+  "job_archetype": {
+    "archetype_id": "power_rd_expert_computing",
+    "title": "电源研发专家/工程师（计算电源 VRM/VPD/多相方向）",
+    "client": "",
+    "client_profile": "功率半导体原厂或整机厂的计算/服务器电源研发岗：多相 Buck、VRM/VPD、DrMOS/POL 应用与量产",
+    "essence": "计算/服务器场景板级电源研发：多相控制器/DrMOS/POL 应用或研发、VRM/VPD 方案、磁件选型与损耗仿真、整机电源项目量产导入。要求有真实电源项目证据，而非只挂技能标签。",
+    "directions": [
+      {
+        "name": "服务器三次电源（板级电源）",
+        "customers": ["浪潮", "新华三"],
+        "products": ["多相控制器", "DrMOS", "eFuse", "POL", "VRM"],
+        "competitors": ["MPS", "矽力杰", "杰华特", "晶丰明源"]
+      },
+      {
+        "name": "PC/计算板级电源",
+        "customers": ["联想", "联宝", "荣耀"],
+        "products": ["多相控制器", "DrMOS", "POL", "VRM"],
+        "competitors": ["MPS", "矽力杰", "杰华特"]
+      }
+    ],
+    "location_policy": "杭州/上海/深圳均可，按人选沟通确认（待顾问逐案校准）",
+    "target_functions": ["电源工程师", "电源研发", "电源硬件工程师", "AE"]
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 同赛道原厂电源研发",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "medium",
+      "rationale": "有多相/DrMOS/POL/VRM 产品线的原厂电源研发，技术栈与场景同时对口（名单沿用士兰微 TME 原型校准口径，研发岗优先级待顾问逐案校准）",
+      "companies": [
+        {"name": "MPS（芯源系统）"},
+        {"name": "矽力杰"},
+        {"name": "杰华特"},
+        {"name": "晶丰明源"},
+        {"name": "南芯科技"},
+        {"name": "希荻微"},
+        {"name": "TI（德州仪器）"},
+        {"name": "英飞凌"},
+        {"name": "安森美"}
+      ]
+    },
+    "T2_reverse": {
+      "label": "T2 整机厂电源工程师",
+      "path": "reverse",
+      "tier": "T2",
+      "confidence": "medium",
+      "rationale": "整机/服务器厂板级电源工程师：深懂客户端应用与工况，转原厂或整机间迁移均是常见路径（待顾问校准）",
+      "companies": [
+        {"name": "浪潮"},
+        {"name": "新华三"},
+        {"name": "联想"},
+        {"name": "联宝"},
+        {"name": "荣耀"},
+        {"name": "台达"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "power_core",
+      "targets": "T1/T2 计算电源研发核心词",
+      "terms": ["多相控制器", "DrMOS", "VRM", "VPD", "TLVR", "POL", "模块电源"]
+    },
+    {
+      "group": "board_power",
+      "targets": "板级/整机电源场景词",
+      "terms": ["板级电源", "三次电源", "服务器电源", "DC-DC", "AC-DC", "开关电源"]
+    },
+    {
+      "group": "components_simulation",
+      "targets": "磁件与仿真兜底词",
+      "terms": ["磁件", "电感", "变压器", "损耗仿真", "热设计"]
+    }
+  ],
+  "negative_rules": [
+    "纯 AC-DC 适配器/充电器背景、无服务器/计算板级电源经历的人选降级为备选",
+    "只命中技能标签但无电源项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "纯射频/纯数字硬件、无电源研发经历的人选不进入优先池"
+  ],
+  "skills_ontology_nodes": [
+    "多相控制器",
+    "DrMOS",
+    "POL",
+    "eFuse",
+    "VRM",
+    "VPD",
+    "TLVR",
+    "模块电源",
+    "板级电源",
+    "DC-DC",
+    "磁件"
+  ],
+  "level_mapping": {
+    "level_band": "expert",
+    "job_title_range": "资深工程师/专家",
+    "accepted_candidate_levels": ["高级工程师", "资深工程师", "专家", "主任工程师", "技术经理"],
+    "note": "按独立负责过的电源产品/平台与量产范围定档，title 相近而职责偏执行的人选降档（沿用 kb_level_mapping expert 带口径：本科10年/硕士7年+ 为专家档参考）",
+    "applies_to": "power_rd_expert_computing 原型；计算电源方向研发岗可复用"
+  }
+}

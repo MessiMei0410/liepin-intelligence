@@ -56,7 +56,7 @@ class OpenCliSourcingShadowTest(unittest.TestCase):
             "profileText": "列表摘要",
         })]
 
-        def capture(_port, candidates, _limit):
+        def capture(_port, candidates, _limit, **_kwargs):
             candidates[0].update({
                 "full_text": "x" * 120,
                 "work_text": "工作经历" * 10,
@@ -200,6 +200,12 @@ class OpenCliSourcingShadowTest(unittest.TestCase):
 
     def test_runtime_missing_query_is_empty_not_string_none(self) -> None:
         self.assertEqual(RecruitingCapabilityRuntime._query_text([{}]), "")
+
+    def test_runtime_liepin_low_risk_mode_caps_detail_pages_but_keeps_recall_fast(self) -> None:
+        detail_limit, args = RecruitingCapabilityRuntime._liepin_detail_capture_options({}, 10)
+        self.assertEqual(detail_limit, 10)
+        self.assertIn("--stop-on-risk-page", args)
+        self.assertIn("--detail-burst-cooldown", args)
 
     def test_load_queries_reads_queries_envelope_and_dict_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -58,6 +58,49 @@ const collectEvidence = (doc: CandidateAssessmentDoc): Array<{ dimension: string
   )
 }
 
+// S6-5 三桶证据卡（一期缺口）：证据只有维度级 confidence（无条目级），按保守口径归桶——
+// 直接证据=维度置信度 certain 且带出处；合理推断=inferred 且带出处；
+// 未知项=缺出处、置信度缺失/未知的证据，以及「需要核实的问题」里的条目（该块本质待核验，不进前两桶）。
+// 只读现有字段、不改后端契约；无法判断的一律进未知项，口径在视图内如实说明。
+type EvidenceBucketKey = 'direct' | 'inferred' | 'unknown'
+type EvidenceCardItem = { dimension: string; type: string; ref: string; bucket: EvidenceBucketKey }
+const EVIDENCE_BUCKET_ORDER: EvidenceBucketKey[] = ['direct', 'inferred', 'unknown']
+const EVIDENCE_BUCKET_LABELS: Record<EvidenceBucketKey, string> = { direct: '直接证据', inferred: '合理推断', unknown: '未知项' }
+
+const evidenceBucketOf = (confidence: string | undefined, hasRef: boolean): EvidenceBucketKey => {
+  if (!hasRef) return 'unknown'
+  if (confidence === 'certain') return 'direct'
+  if (confidence === 'inferred') return 'inferred'
+  return 'unknown'
+}
+
+const collectEvidenceCards = (doc: CandidateAssessmentDoc): EvidenceCardItem[] => {
+  const dimensions = doc.dimensions || {}
+  const groups: Array<{ label: string; confidence?: string; items?: AssessmentEvidence[] }> = [
+    { label: '职业轨迹', confidence: dimensions.trajectory?.confidence, items: dimensions.trajectory?.evidence },
+    { label: '跳槽质量史', confidence: dimensions.move_history?.confidence, items: dimensions.move_history?.evidence },
+    { label: '在同龄人里的位置', confidence: dimensions.percentile?.confidence, items: dimensions.percentile?.evidence },
+    { label: '动机与时机', confidence: dimensions.motivation?.confidence, items: dimensions.motivation?.evidence },
+  ]
+  const cards = groups.flatMap(group =>
+    (group.items || []).map(item => ({
+      dimension: group.label,
+      type: item.type || '未标注',
+      ref: item.ref || '未提供出处',
+      bucket: evidenceBucketOf(group.confidence, Boolean(item.ref)),
+    })),
+  )
+  for (const item of dimensions.risks?.items || []) {
+    cards.push({
+      dimension: '需要核实的问题',
+      type: `待核验 · ${severityLabel(item.severity)}风险`,
+      ref: item.risk || '未说明待核验内容',
+      bucket: 'unknown',
+    })
+  }
+  return cards
+}
+
 export function CandidateAssessment({ candidateId, jobId }: { candidateId: number; jobId?: number }) {
   const [payload, setPayload] = useState<CandidateAssessmentPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -66,6 +109,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
   const [feedback, setFeedback] = useState<{ tone: 'error' | 'success'; text: string }>()
   const [noteOpen, setNoteOpen] = useState(false)
   const [noteDraft, setNoteDraft] = useState('')
+  const [evidenceView, setEvidenceView] = useState<'buckets' | 'dimensions'>('buckets')
 
   const fetchAssessment = useCallback(async () => {
     try {
@@ -78,6 +122,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
   }, [candidateId, jobId])
   useEffect(() => { void fetchAssessment() }, [fetchAssessment])
   const reload = () => {
+    if (loading) return
     setLoading(true)
     setLoadError('')
     void fetchAssessment()
@@ -86,9 +131,10 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
   const generate = async () => {
     setBusy('generate')
     setFeedback(undefined)
+    const force = Boolean(assessmentOf(payload))
     try {
-      setPayload(await api.generateCandidateAssessment(candidateId, jobId || 0))
-      setFeedback({ tone: 'success', text: '评估已生成。评估只辅助判断，最终判语由顾问本人下。' })
+      setPayload(await api.generateCandidateAssessment(candidateId, jobId || 0, force))
+      setFeedback({ tone: 'success', text: `${force ? '评估已重新生成' : '评估已生成'}。评估只辅助判断，最终判语由顾问本人下。` })
     } catch (error) {
       setFeedback({ tone: 'error', text: humanizeActionError(error, '评估生成失败，请重试。') })
     } finally {
@@ -116,8 +162,8 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
   }
   if (loading) {
     return (
-      <section className="assessment" aria-label="判人评估">
-        <div className="empty"><LoaderCircle className="spin" size={14}/> 评估加载中…</div>
+      <section className="assessment" aria-label="判人评估" aria-busy="true">
+        <div className="assessment-loading" role="status"><LoaderCircle className="spin" size={14}/> 评估加载中…</div>
       </section>
     )
   }
@@ -155,6 +201,14 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
   const motivation = doc.dimensions?.motivation || null
   const risks = doc.dimensions?.risks || null
   const evidence = collectEvidence(doc)
+  const evidenceGroups = evidence.reduce<Array<{ dimension: string; items: AssessmentEvidence[] }>>((groups, { dimension, item }) => {
+    const group = groups.find(candidate => candidate.dimension === dimension)
+    if (group) group.items.push(item)
+    else groups.push({ dimension, items: [item] })
+    return groups
+  }, [])
+  const evidenceCards = collectEvidenceCards(doc)
+  const evidenceBuckets = EVIDENCE_BUCKET_ORDER.map(key => ({ key, items: evidenceCards.filter(card => card.bucket === key) }))
   const advisorAction: AssessmentAdvisorAction = doc.advisor_action || 'pending'
 
   return (
@@ -275,7 +329,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
               {(motivation.signals || []).map((signal, index) => (
                 <li key={`${signal.kind || 'signal'}-${index}`}>
                   <span className="tag muted">{signal.source || '信号'}</span>
-                  <span>{signal.summary || ''}</span>
+                  <span className="assessment-signal-summary" title={signal.summary || undefined}>{signal.summary || ''}</span>
                   {signal.url && (
                     <a href={signal.url} target="_blank" rel="noreferrer">
                       来源
@@ -312,7 +366,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
                       {(item.evidence || []).map((ev, evIndex) => (
                         <li key={evIndex}>
                           <span className="tag">{ev.type || '未标注'}</span>
-                          <span>{ev.ref || ''}</span>
+                          <span className="assessment-evidence-ref" title={ev.ref || undefined}>{ev.ref || '未提供出处'}</span>
                         </li>
                       ))}
                     </ul>
@@ -334,18 +388,65 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
         </section>
       )}
 
-      {evidence.length > 0 && (
+      {evidenceCards.length > 0 && (
         <section className="assessment-dim" aria-label="证据">
-          <div className="assessment-dim-head"><h3>证据</h3><span>{evidence.length} 条</span></div>
-          <ul className="assessment-evidence">
-            {evidence.map(({ dimension, item }, index) => (
-              <li key={`${dimension}-${index}`}>
-                <span className="tag muted">{dimension}</span>
-                <span className="tag">{item.type || '未标注'}</span>
-                <span>{item.ref || ''}</span>
-              </li>
-            ))}
-          </ul>
+          <div className="assessment-dim-head">
+            <h3>证据</h3>
+            <span>{evidenceView === 'buckets' ? `${evidenceCards.length} 条 · 按三桶归集` : `${evidence.length} 条 · 按维度分组`}</span>
+            <div className="assessment-evidence-toggle" role="group" aria-label="证据视图切换">
+              <button
+                type="button"
+                className={evidenceView === 'buckets' ? 'active' : ''}
+                aria-pressed={evidenceView === 'buckets'}
+                onClick={() => setEvidenceView('buckets')}
+              >三桶视图</button>
+              <button
+                type="button"
+                className={evidenceView === 'dimensions' ? 'active' : ''}
+                aria-pressed={evidenceView === 'dimensions'}
+                onClick={() => setEvidenceView('dimensions')}
+              >按维度</button>
+            </div>
+          </div>
+          {evidenceView === 'buckets' ? (
+            <>
+              <p className="assessment-note-line">归桶口径：维度置信度「确定」且带出处的进直接证据；「推测」的进合理推断；缺出处、置信度未知的证据，以及「需要核实的问题」里的待核验条目，一律进未知项。</p>
+              {evidenceBuckets.map(bucket => (
+                <div className="assessment-evidence-group" key={bucket.key}>
+                  <h4>{EVIDENCE_BUCKET_LABELS[bucket.key]}<span>{bucket.items.length} 条</span></h4>
+                  {bucket.items.length > 0 ? (
+                    <ul className="assessment-evidence">
+                      {bucket.items.map((card, index) => (
+                        <li key={`${bucket.key}-${index}`}>
+                          <span className="tag muted">{card.dimension}</span>
+                          <span className="tag">{card.type}</span>
+                          <span className="assessment-evidence-ref" title={card.ref}>{card.ref}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="assessment-note-line">本桶暂无条目。</p>
+                  )}
+                </div>
+              ))}
+            </>
+          ) : evidence.length > 0 ? (
+            evidenceGroups.map(group => (
+              <div className="assessment-evidence-group" key={group.dimension}>
+                <h4>{group.dimension}<span>{group.items.length} 条</span></h4>
+                <ul className="assessment-evidence">
+                  {group.items.map((item, index) => (
+                    <li key={`${group.dimension}-${index}`}>
+                      <span className="tag">{item.type || '未标注'}</span>
+                      <span className="assessment-evidence-ref" title={item.ref || undefined}>{item.ref || '未提供出处'}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          ) : (
+            <p className="assessment-note-line">暂无按维度归集的证据。</p>
+          )}
         </section>
       )}
 

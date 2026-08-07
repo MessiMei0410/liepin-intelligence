@@ -3,6 +3,18 @@ import { createAgentTurn, parseAgentSse, streamAgentTurn } from '../agent/transp
 import type { AgentSseEvent } from '../agent/transport'
 
 describe('Agent transport', () => {
+  it('兼容旧会话引用中的 null 可选字段', () => {
+    expect(parseAgentSse('event: context\ndata: {"session_id":"task-1","references":[{"type":"job","id":154,"label":"电源专家","subtitle":null,"href":null}]}\n\n')).toEqual([
+      { type: 'context', data: { session_id: 'task-1', references: [{ type: 'job', id: 154, label: '电源专家', subtitle: undefined, href: undefined }] } },
+    ])
+  })
+
+  it('接受全局 context 的 null id', () => {
+    expect(parseAgentSse('event: context\ndata: {"session_id":"task-1","context":{"type":"page","id":null}}\n\n')).toEqual([
+      { type: 'context', data: { session_id: 'task-1', context: { type: 'page', id: null } } },
+    ])
+  })
+
   it('解析 context、text、done 三类 SSE 事件', () => {
     const events = parseAgentSse([
       'event: context\ndata: {"session_id":"task-1","context":{"type":"job","id":154}}\n\n',
@@ -14,6 +26,30 @@ describe('Agent transport', () => {
       { type: 'context', data: { session_id: 'task-1', context: { type: 'job', id: 154 } } },
       { type: 'text', data: { content: '正在分析' } },
       { type: 'done', data: expect.objectContaining({ session_id: 'task-1', workflow_id: 'wf-1' }) },
+    ])
+  })
+
+  it('透传模型参与信息供消息标签展示', () => {
+    const events = parseAgentSse('event: done\ndata: {"ok":true,"session_id":"task-1","answer":"完成","model_participation":{"mode":"model","label":"模型生成 + 上下文约束","model":"deepseek-v4-flash"}}\n\n')
+    expect(events[0]).toEqual({ type: 'done', data: expect.objectContaining({
+      model_participation: { mode: 'model', label: '模型生成 + 上下文约束', model: 'deepseek-v4-flash' },
+    }) })
+  })
+
+  it('从 workflow/progress/approvals 合成前端可渲染的工作流摘要', () => {
+    const events = parseAgentSse('event: done\ndata: {"ok":true,"session_id":"task-1","answer":"已建立目标","workflow_id":"wf-1","workflow":{"status":"planned","current_stage":"确认推进方案"},"progress":{"completed":0,"total":5},"approvals":[{"approval_id":"a1","status":"pending","risk_level":"R3"}]}\n\n')
+
+    expect(events).toEqual([
+      { type: 'done', data: expect.objectContaining({
+        workflow_progress: {
+          workflow_id: 'wf-1',
+          status: 'planned',
+          completed: 0,
+          total: 5,
+          label: '确认推进方案',
+          pending_approvals: [{ approval_id: 'a1', status: 'pending', risk_level: 'R3' }],
+        },
+      }) },
     ])
   })
 

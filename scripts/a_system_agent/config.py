@@ -11,7 +11,7 @@ DEFAULTS: dict[str, Any] = {
     "runtime": {"max_workers": 3, "copilot_max_skills": 3},
     "model": {
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-v4-flash",
         "timeout_seconds": 60,
         "retry_attempts": 3,
         "keychain_service": "a-system-agent-deepseek",

@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-05",
+    "source": "cases/case_pengxinxu_fab_v1.json（鹏新旭项目管理表：97 职位 by_module，TD 14 / WET 7 / PIE 5 / Etch 4 / CMP 3 / CVD 3 / PVD 3 / Litho 3 等）+ outputs 真实 P0 缺口（TD PIE/TD CMP/TD CVD/PVD 工艺专家、Device 专家）",
+    "usage": "fab TD/工艺技术专家岗位原型：策略生成与简历评估直接消费；12 寸产线代际为结构化硬过滤（源自 case hard_filters「只看12寸背景」）",
+    "governance": "禁挖名单/话术红线属 restricted 层，只走白名单出库，本文件不落地；目标公司池按 12 寸 fab 常识推导，待顾问校准"
+  },
+  "job_archetype": {
+    "archetype_id": "fab_td_process_expert",
+    "title": "Fab TD/工艺技术专家（PIE/CMP/CVD/PVD/Etch/WET/Litho）",
+    "client": "",
+    "client_profile": "12 寸晶圆代工/IDM（40nm/28nm 成熟逻辑制程）工艺整合与模块工艺岗",
+    "essence": "12 寸成熟逻辑制程的工艺整合（PIE/TD）与模块工艺（CMP/CVD/PVD/Etch/WET/Litho/IMP）：量产工艺优化、缺陷与良率协同、工艺 transfer 与新产线量产导入。产线代际是硬过滤：只看 12 寸背景。",
+    "directions": [
+      {
+        "name": "40/28nm 成熟逻辑代工",
+        "customers": ["芯片设计公司（fabless）"],
+        "products": ["40nm", "28nm", "成熟逻辑制程"],
+        "competitors": ["中芯国际", "华虹", "晶合集成"]
+      }
+    ],
+    "location_policy": "深圳（坪山区为主）；异地人选正常进入召回，推进前确认 relocation",
+    "target_functions": ["工艺整合", "PIE", "TD", "模块工艺", "Device"]
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 12寸逻辑代工/存储 fab",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "medium",
+      "rationale": "12 寸产线 + 相近制程世代，模块工艺与工艺整合能力直接迁移（按 fab 常识推导，待顾问校准）",
+      "companies": [
+        {"name": "中芯国际"},
+        {"name": "华虹"},
+        {"name": "晶合集成"},
+        {"name": "粤芯半导体"},
+        {"name": "积塔半导体"},
+        {"name": "长江存储"},
+        {"name": "长鑫存储"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 IDM 12寸产线",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "low",
+      "rationale": "IDM 12 寸产线工艺岗，制程场景相近但产品形态不同，需确认模块对口（待顾问校准）",
+      "companies": [
+        {"name": "士兰集科"},
+        {"name": "华润微"},
+        {"name": "燕东微"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "td_module",
+      "targets": "T1/T2 工艺模块词",
+      "terms": ["TD", "PIE", "工艺整合", "CMP", "CVD", "PVD", "Etch", "WET", "Litho", "IMP", "Device"]
+    },
+    {
+      "group": "fab_common",
+      "targets": "产线代际与量产场景词",
+      "terms": ["12寸", "晶圆代工", "foundry", "量产", "良率", "工艺transfer"]
+    }
+  ],
+  "negative_rules": [
+    "只看 12 寸背景：8寸/6寸背景人选不推（产线代际硬过滤，源自 case_pengxinxu hard_filters）",
+    "只命中模块标签但无量产工艺项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "禁挖名单/竞业限制见 restricted 层（出库走白名单），本文件不落地具体名单"
+  ],
+  "skills_ontology_nodes": [],
+  "skills_ontology_note": "fab 工艺族尚未纳入 kb_skill_ontology_semiconductor_v1（当前 5 族不含 TD/模块工艺）；技能词来自 case_pengxinxu 真实职位，本体扩族后回填 canonical 词",
+  "level_mapping": {
+    "level_band": "expert",
+    "job_title_range": "资深工程师/专家（TD 系列）",
+    "accepted_candidate_levels": ["资深工程师", "专家", "主任工程师", "技术经理"],
+    "note": "专家 本科10年/硕士7年+、工程师 5年+（量产模块普遍口径，源自 case_pengxinxu level_year_mapping）；按模块/产线负责范围定档而非 title",
+    "applies_to": "fab_td_process_expert 原型；fab 工艺/整合岗可复用"
+  }
+}

@@ -69,7 +69,7 @@ test('Agent 对话工作区', async ({ page }) => {
       business_focus: { context: { type: 'job', id: 154, client: '士兰微', job: '技术市场经理' } },
       messages: [
         { role: 'user', content: '复盘这个岗位当前寻访进度。' },
-        { role: 'assistant', content: '本轮已完成初筛，建议先复核待确认人选，再决定是否扩展目标公司。', references: [
+        { role: 'assistant', content: '## 核心结论\n\n本轮已完成初筛，建议先复核待确认人选，再决定是否扩展目标公司。\n\n**下一步**\n\n1. 复核 4 位待确认人选\n2. 根据结果扩展目标公司', references: [
           { type: 'job', id: 154, label: '士兰微 · 技术市场经理', subtitle: '12 位人选 · 4 位待处理' },
           { type: 'candidate', id: 559, label: '衣**', subtitle: 'S1 新增寻访 / 待复核' },
         ] },

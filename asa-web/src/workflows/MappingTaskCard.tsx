@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { LoaderCircle, MapPinned, RefreshCw, X } from 'lucide-react'
 import { api } from '../api'
 import type { MappingCandidate, MappingCandidateStatus, MappingTaskPayload, MappingTaskStats } from '../api'
@@ -51,17 +51,42 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
 }) {
   const [payload, setPayload] = useState<MappingTaskPayload | null>(null)
   const [loadError, setLoadError] = useState('')
-  const [busy, setBusy] = useState('')
+  // 每人选卡一把锁（index → actionKey），不同卡并发动作互不误清。
+  const [busy, setBusy] = useState<Record<number, string>>({})
   const [cardErrors, setCardErrors] = useState<Record<number, string>>({})
   const [icebreakerErrors, setIcebreakerErrors] = useState<Record<number, string[]>>({})
   const [statsOverride, setStatsOverride] = useState<MappingTaskStats | null>(null)
+  const [receipts, setReceipts] = useState<Record<number, string>>({})
+
+  // 动作/加载防护：
+  // - inflight 集合：同人选卡同一动作同步判重，杜绝重渲染前的连点/重复 blur 双发。
+  // - loadSeq 序号：重试/卸载后丢弃过期响应，防旧响应覆盖新数据。
+  // - payloadRef：事件回调读最新 payload，避免闭包读到过期人选。
+  const payloadRef = useRef(payload)
+  useEffect(() => { payloadRef.current = payload }, [payload])
+  const inflight = useRef<Set<string>>(new Set())
+  const loadSeq = useRef(0)
+  const receiptTimeouts = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
+  useEffect(() => () => {
+    // 卸载时作废未决加载，并清理回执计时器
+    loadSeq.current += 1
+    receiptTimeouts.current.forEach(clearTimeout)
+    receiptTimeouts.current.clear()
+  }, [])
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoadError('')
     try {
-      setPayload(await api.mappingTask(jobId, artifactId))
+      const result = await api.mappingTask(jobId, artifactId)
+      if (seq !== loadSeq.current) return
+      setPayload(result)
+      // 重载后以服务端为事实来源：清掉本地动作覆盖与上一轮的瞬态错误
+      setStatsOverride(null)
+      setCardErrors({})
+      setIcebreakerErrors({})
     } catch (error) {
-      setLoadError(humanizeActionError(error, '任务卡加载失败，请重试。'))
+      if (seq === loadSeq.current) setLoadError(humanizeActionError(error, '任务卡加载失败，请重试。'))
     }
   }, [jobId, artifactId])
   useEffect(() => { void load() }, [load])
@@ -76,15 +101,40 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
     } : prev)
   }
 
+  // 瞬态操作回执：成功提示自动消失（3 秒），同卡新回执覆盖旧回执
+  const showReceipt = (index: number, text: string) => {
+    const prior = receiptTimeouts.current.get(index)
+    if (prior) clearTimeout(prior)
+    setReceipts(prev => ({ ...prev, [index]: text }))
+    const timer = setTimeout(() => {
+      setReceipts(prev => {
+        if (prev[index] !== text) return prev
+        const next = { ...prev }
+        delete next[index]
+        return next
+      })
+    }, 3000)
+    receiptTimeouts.current.set(index, timer)
+  }
+
   const run = async (index: number, actionKey: string, call: () => Promise<void>) => {
-    setBusy(`${index}:${actionKey}`)
+    const key = `${index}:${actionKey}`
+    if (inflight.current.has(key)) return
+    inflight.current.add(key)
+    setBusy(prev => ({ ...prev, [index]: actionKey }))
     setCardErrors(prev => ({ ...prev, [index]: '' }))
     try {
       await call()
     } catch (error) {
       setCardErrors(prev => ({ ...prev, [index]: humanizeActionError(error, '操作失败，请重试。') }))
     } finally {
-      setBusy('')
+      inflight.current.delete(key)
+      setBusy(prev => {
+        if (prev[index] !== actionKey) return prev
+        const next = { ...prev }
+        delete next[index]
+        return next
+      })
     }
   }
 
@@ -94,7 +144,12 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
       applyCandidate(index, result.candidate)
       if (result.stats) setStatsOverride(result.stats)
       // 确认后破冰素材质量不合格不阻断状态变更，原因透在 icebreaker_errors，展示原因不显示素材。
-      if (body.status) setIcebreakerErrors(prev => ({ ...prev, [index]: result.icebreaker_errors || [] }))
+      if (body.status) {
+        setIcebreakerErrors(prev => ({ ...prev, [index]: result.icebreaker_errors || [] }))
+        showReceipt(index, `状态已更新为${mappingStatusLabel(result.candidate.status)}`)
+      } else {
+        showReceipt(index, '备注已保存')
+      }
     })
 
   const regenerateIcebreaker = (index: number) =>
@@ -102,12 +157,13 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
       const result = await api.regenerateMappingIcebreaker(artifactId, index)
       applyCandidate(index, result.candidate)
       setIcebreakerErrors(prev => ({ ...prev, [index]: [] }))
+      showReceipt(index, '开场白要点已重新生成')
     })
 
   const intake = (index: number) =>
     run(index, 'intake', async () => {
       const result = await api.intakeMappingCandidate(artifactId, index)
-      const current = (payload?.mapping_task.candidates || [])[index]
+      const current = (payloadRef.current?.mapping_task.candidates || [])[index]
       if (current) {
         applyCandidate(index, {
           ...current,
@@ -122,10 +178,11 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
         })
       }
       if (result.stats) setStatsOverride(result.stats)
+      showReceipt(index, '入库完成')
     })
 
   const saveNote = (index: number, value: string) => {
-    const current = (payload?.mapping_task.candidates || [])[index]
+    const current = (payloadRef.current?.mapping_task.candidates || [])[index]
     if (!current || value === (current.consultant_note || '')) return
     void patchCandidate(index, { consultant_note: value }, 'note')
   }
@@ -149,11 +206,11 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
       </div>
       <button className="button" onClick={onClose} title="收起任务卡"><X />收起</button>
     </header>
-    {loadError && <div className="insight-empty">
+    {loadError && <div className="insight-empty" role="alert">
       <span>{loadError}</span>
       <button className="button" onClick={() => void load()}><RefreshCw />重新加载</button>
     </div>}
-    {!payload && !loadError && <div className="insight-empty"><LoaderCircle className="spin" />任务卡加载中…</div>}
+    {!payload && !loadError && <div className="insight-empty" role="status"><LoaderCircle className="spin" />任务卡加载中…</div>}
     {doc && <>
       <section className="mapping-stats" aria-label="这份名单的效果">
         <div className="review-diffs-head">
@@ -176,20 +233,23 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
       </section>
       <div className="mapping-body">
         <section className="mapping-teams" aria-label="目标团队">
-          <div className="review-diffs-head"><b>目标团队</b><span>{teamGroups.reduce((sum, group) => sum + group.teams.length, 0)} 个团队 · {teamGroups.length} 家公司</span></div>
-          {teamGroups.map(group => <div className="mapping-company" key={group.company}>
-            <b>{group.company}</b>
-            {group.teams.map((team, position) => <div className="mapping-team" key={position}>
-              <div>
-                <span>{team.team || '团队待确认'}</span>
-                {team.tier && <span className="tag muted">{team.tier}</span>}
-              </div>
-              <small>{[team.location, mappingConfidenceLabel(team.confidence)].filter(Boolean).join(' · ')}</small>
+          <div className="review-diffs-head"><b>目标团队</b><span>{teamGroups.length === 0 ? '暂无目标团队' : `${teamGroups.reduce((sum, group) => sum + group.teams.length, 0)} 个团队 · ${teamGroups.length} 家公司`}</span></div>
+          {teamGroups.length === 0
+            ? <div className="mapping-empty">暂无目标团队信息，可返回工作流查看采集说明。</div>
+            : teamGroups.map(group => <div className="mapping-company" key={group.company}>
+              <b>{group.company}</b>
+              {group.teams.map((team, position) => <div className="mapping-team" key={position}>
+                <div>
+                  <span>{team.team || '团队待确认'}</span>
+                  {team.tier && <span className="tag muted">{team.tier}</span>}
+                </div>
+                <small>{[team.location, mappingConfidenceLabel(team.confidence)].filter(Boolean).join(' · ')}</small>
+              </div>)}
             </div>)}
-          </div>)}
         </section>
         <section className="mapping-candidates" aria-label="候选目标人">
           <div className="review-diffs-head"><b>候选目标人</b><span>{active.length} 人在跟进{rejected.length > 0 ? ` · ${rejected.length} 人已淘汰` : ''}</span></div>
+          {candidates.length === 0 && <div className="mapping-empty">暂无候选目标人，可返回工作流调整寻访方向。</div>}
           {active.map(({ candidate, index }) => <CandidateCard
             key={index}
             candidate={candidate}
@@ -202,6 +262,7 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
             onIntake={intake}
             onSaveNote={saveNote}
             openCandidate={openCandidate}
+            receipt={receipts[index] || ''}
           />)}
           {rejected.length > 0 && <details className="mapping-rejected">
             <summary>已淘汰（{rejected.length}）· 软删保留，不物理删除</summary>
@@ -220,24 +281,24 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
   </section>
 }
 
-function CandidateCard({ candidate, index, busy, error, icebreakerErrors, onPatch, onRegenerate, onIntake, onSaveNote, openCandidate }: {
+function CandidateCard({ candidate, index, busy, error, icebreakerErrors, receipt, onPatch, onRegenerate, onIntake, onSaveNote, openCandidate }: {
   candidate: MappingCandidate
   index: number
-  busy: string
+  busy: Record<number, string>
   error: string
   icebreakerErrors: string[]
+  receipt: string
   onPatch: (index: number, body: { status?: MappingCandidateStatus; consultant_note?: string }, actionKey: string) => Promise<void>
   onRegenerate: (index: number) => Promise<void>
   onIntake: (index: number) => Promise<void>
   onSaveNote: (index: number, value: string) => void
   openCandidate: (id: number) => void
 }) {
-  const cardBusy = busy.startsWith(`${index}:`)
+  const cardBusy = busy[index] !== undefined
   const actions = STATUS_ACTIONS[candidate.status] || []
   const sources = candidate.source_urls || []
   const icebreaker = candidate.icebreaker
-  const receipt = candidate.intake
-  return <div className="mapping-candidate">
+  return <div className="mapping-candidate" aria-busy={cardBusy}>
     <div className="mapping-candidate-head">
       <b>{candidate.name || '姓名待补充'}</b>
       <span className={`tag ${STATUS_TAG_TONE[candidate.status] || ''}`}>{mappingStatusLabel(candidate.status)}</span>
@@ -246,12 +307,12 @@ function CandidateCard({ candidate, index, busy, error, icebreakerErrors, onPatc
     <span>{candidate.current_role || '职务待补充'}</span>
     {candidate.reason && <small>{candidate.reason}</small>}
     {sources.length > 0 && <div className="mapping-sources">
-      {sources.map((url, position) => <a key={position} href={url} target="_blank" rel="noreferrer">来源 {position + 1}</a>)}
+      {sources.map((url, position) => <a key={position} href={url} target="_blank" rel="noreferrer" title={url}>来源 {position + 1}</a>)}
     </div>}
-    {candidate.status === 'intaken' && receipt && <div className="mapping-intake">
-      <b>已入库{receipt.intaken_at ? ` · ${date(receipt.intaken_at)}` : ''}</b>
-      {receipt.relation_existed && <small>库里已有该人选与岗位的关系，复用原条目，未重复建档</small>}
-      <button className="button" onClick={() => openCandidate(receipt.job_candidate_id)}>查看候选人</button>
+    {candidate.status === 'intaken' && candidate.intake && <div className="mapping-intake">
+      <b>已入库{candidate.intake.intaken_at ? ` · ${date(candidate.intake.intaken_at)}` : ''}</b>
+      {candidate.intake.relation_existed && <small>库里已有该人选与岗位的关系，复用原条目，未重复建档</small>}
+      <button type="button" className="button" onClick={() => openCandidate(candidate.intake?.job_candidate_id ?? 0)}>查看候选人</button>
     </div>}
     {icebreaker && <div className="mapping-icebreaker">
       <div className="mapping-icebreaker-head">
@@ -272,25 +333,27 @@ function CandidateCard({ candidate, index, busy, error, icebreakerErrors, onPatc
         disabled={cardBusy}
         onBlur={event => onSaveNote(index, event.currentTarget.value)}
       />
-      {busy === `${index}:note` && <LoaderCircle className="spin" />}
+      {busy[index] === 'note' && <LoaderCircle className="spin" />}
     </div>
+    {receipt && <p className="mapping-receipt" role="status">{receipt}</p>}
     {(actions.length > 0 || candidate.status === 'confirmed') && <div className="mapping-actions">
       {actions.map(action => <button
+        type="button"
         key={action.key}
         className={`button${action.primary ? ' primary' : ''}${action.danger ? ' danger' : ''}`}
         title={action.title}
         disabled={cardBusy}
         onClick={() => void onPatch(index, { status: action.status }, action.key)}
-      >{busy === `${index}:${action.key}` && <LoaderCircle className="spin" />}{action.label}</button>)}
+      >{busy[index] === action.key && <LoaderCircle className="spin" />}{action.label}</button>)}
       {candidate.status === 'confirmed' && <>
-        <button className="button primary" disabled={cardBusy} onClick={() => void onIntake(index)}>
-          {busy === `${index}:intake` && <LoaderCircle className="spin" />}入库
+        <button type="button" className="button primary" disabled={cardBusy} onClick={() => void onIntake(index)}>
+          {busy[index] === 'intake' && <LoaderCircle className="spin" />}入库
         </button>
-        <button className="button" disabled={cardBusy} onClick={() => void onRegenerate(index)}>
-          {busy === `${index}:icebreaker` && <LoaderCircle className="spin" />}重新生成开场白
+        <button type="button" className="button" disabled={cardBusy} onClick={() => void onRegenerate(index)}>
+          {busy[index] === 'icebreaker' && <LoaderCircle className="spin" />}重新生成开场白
         </button>
       </>}
     </div>}
-    {error && <span className="tag warn">{error}</span>}
+    {error && <span className="tag warn" role="alert">{error}</span>}
   </div>
 }

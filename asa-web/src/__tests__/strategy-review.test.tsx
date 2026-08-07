@@ -101,7 +101,7 @@ describe('策略复盘展示（StrategyReview）', () => {
     render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 10:05" />)
     const section = await screen.findByRole('region', { name: '没成的原因' })
     // 判定与理由
-    expect(within(section).getByText('策略问题：关键词/目标池太窄')).toBeInTheDocument()
+    expect(await within(section).findByText('策略问题：关键词/目标池太窄')).toBeInTheDocument()
     expect(within(section).getByText(/本轮总召回 12 < step5 预期总量 40/)).toBeInTheDocument()
     expect(within(section).getByText('v1 · 生成于 2026-07-23 10:00:00')).toBeInTheDocument()
     // 关键证据行：召回/入库/评估/高分
@@ -133,7 +133,7 @@ describe('策略复盘展示（StrategyReview）', () => {
     stubReviewFetch(insufficientPayload)
     render(<StrategyReview workflowId="wf-1" status="completed" updatedAt="" />)
     const section = await screen.findByRole('region', { name: '没成的原因' })
-    expect(within(section).getByText('数据不足，不硬判')).toBeInTheDocument()
+    expect(await within(section).findByText('数据不足，不硬判')).toBeInTheDocument()
     expect(within(section).getByText(/无法判断是策略问题还是执行问题/)).toBeInTheDocument()
     expect(within(section).getByText('证据不完整，结论仅供参考')).toBeInTheDocument()
     expect(within(section).queryByText('修订建议')).not.toBeInTheDocument()

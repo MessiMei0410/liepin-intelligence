@@ -1,0 +1,101 @@
+{
+  "meta": {
+    "version": "v1",
+    "created": "2026-08-05",
+    "source": "seed_silan_tme_v1.json / seed_changyue_*_v1.json 的 level_mapping（顾问校准）+ cases/case_pengxinxu_fab_v1.json 的 level_year_mapping（fab TD 系列年限口径）归纳",
+    "usage": "职级映射库：常见职级体系对照（互联网 P/M 序列、半导体原厂技术序列、设备厂工程序列）与 title→职级带映射。策略 step3 职级映射优先查本库，查不到再走 LLM/原型路径。运行时只读。",
+    "governance": "职级映射只做召回与定档参考：按岗位职责范围而非 title 机械过滤（沿用各 seed level_mapping.note 口径）；跨体系对标为初始口径，复盘校准后升版"
+  },
+  "level_bands": [
+    {
+      "band": "engineer",
+      "label": "工程师",
+      "aliases": ["工程师", "研发工程师", "助理工程师"],
+      "accepted": ["工程师", "高级工程师"],
+      "years_hint": "5年+（量产模块普遍口径）",
+      "basis": "case_pengxinxu level_year_mapping：工程师 5年+；部分模块本科8年/硕士5年（如 YE）"
+    },
+    {
+      "band": "senior",
+      "label": "高级/资深工程师",
+      "aliases": ["高级工程师", "资深工程师", "高级研发工程师", "资深研发工程师"],
+      "accepted": ["高级工程师", "资深工程师", "技术经理", "软件架构师"],
+      "years_hint": "5-10年",
+      "basis": "seed_changyue 运动控制/精密机械原型 accepted_candidate_levels：按实时控制深度/整机复杂度定档，不按 title 机械过滤"
+    },
+    {
+      "band": "expert",
+      "label": "专家/架构师",
+      "aliases": ["专家", "架构师", "软件架构师", "主任工程师", "Principal"],
+      "accepted": ["专家", "资深工程师", "软件架构师"],
+      "years_hint": "本科10年/硕士7年+（fab TD 系列普遍口径）",
+      "basis": "case_pengxinxu level_year_mapping：专家 本科10年/硕士7年+（TD 系列普遍）"
+    },
+    {
+      "band": "manager",
+      "label": "主管/经理",
+      "aliases": ["主管", "经理", "技术经理", "机械主管", "机械经理", "项目经理", "研发负责人", "机械负责人", "负责人"],
+      "accepted": ["主管", "经理", "总监"],
+      "years_hint": "8年+",
+      "basis": "seed_silan_tme level_mapping：客户接受范围宽（主管到副总可看），按独立负责过产品线/客户方向定档；seed_changyue 机械主管/机械经理/机械负责人"
+    },
+    {
+      "band": "director",
+      "label": "总监",
+      "aliases": ["总监", "技术总监", "研发总监", "市场总监"],
+      "accepted": ["经理", "总监", "副总"],
+      "years_hint": "10年+",
+      "basis": "seed_silan_tme level_mapping（job_title_range 经理/总监）：title 相近而职责偏执行的人选降档"
+    },
+    {
+      "band": "vp",
+      "label": "副总及以上",
+      "aliases": ["副总", "副总裁", "VP", "副总经理"],
+      "accepted": ["总监", "副总"],
+      "years_hint": "12年+",
+      "basis": "seed_silan_tme level_mapping accepted_candidate_levels 上限（副总）"
+    }
+  ],
+  "systems": [
+    {
+      "system_id": "internet_p",
+      "label": "互联网大厂 P 序列（技术线）",
+      "levels": [
+        {"level": "P5", "band": "engineer", "title": "工程师", "basis": "通行对标：P5 为独立干活的工程师档；初始口径待复盘校准"},
+        {"level": "P6", "band": "senior", "title": "高级/资深工程师", "basis": "通行对标：P6 资深执行档，对标高级/资深工程师"},
+        {"level": "P7", "band": "expert", "title": "技术专家", "basis": "通行对标：P7 专家档，带方向或小团队技术责任"},
+        {"level": "P8", "band": "manager", "title": "高级专家/技术经理", "basis": "通行对标：P8 高级专家档，跨团队技术责任，对标经理/高级专家"},
+        {"level": "P9", "band": "director", "title": "总监/资深专家", "basis": "通行对标：P9 总监档，负责产品线技术方向"}
+      ]
+    },
+    {
+      "system_id": "internet_m",
+      "label": "互联网大厂 M 序列（管理线）",
+      "levels": [
+        {"level": "M1", "band": "manager", "title": "主管/经理", "basis": "通行对标：M1 一线管理档，对标主管/经理"},
+        {"level": "M2", "band": "director", "title": "总监", "basis": "通行对标：M2 部门管理档，对标总监"},
+        {"level": "M3", "band": "vp", "title": "副总/事业部负责人", "basis": "通行对标：M3 高管档，对标副总及以上"}
+      ]
+    },
+    {
+      "system_id": "semiconductor_fab",
+      "label": "半导体原厂/fab 技术序列",
+      "levels": [
+        {"level": "工程师", "band": "engineer", "title": "工程师", "basis": "case_pengxinxu：工程师 5年+（量产模块普遍）"},
+        {"level": "资深工程师", "band": "senior", "title": "资深工程师", "basis": "case_pengxinxu：工程师_部分 本科8年/硕士5年（如 YE）介于工程师与专家之间"},
+        {"level": "专家（TD 系列）", "band": "expert", "title": "专家", "basis": "case_pengxinxu：专家 本科10年/硕士7年+（TD 系列普遍）"},
+        {"level": "部门经理/总监", "band": "director", "title": "经理/总监", "basis": "fab 管理岗通用口径；按职责范围定档"}
+      ]
+    },
+    {
+      "system_id": "equipment_vendor",
+      "label": "半导体设备厂工程序列",
+      "levels": [
+        {"level": "工程师", "band": "engineer", "title": "工程师", "basis": "设备厂入门工程档；case_changyue 职位列表以高级工程师为主力需求"},
+        {"level": "高级工程师", "band": "senior", "title": "高级工程师", "basis": "case_changyue 主力招聘档：自动化软件/电气/失效分析/机械高级工程师"},
+        {"level": "主管/经理", "band": "manager", "title": "主管/经理", "basis": "seed_changyue 精密机械原型：机械主管/机械经理/机械负责人"},
+        {"level": "研发负责人/总监", "band": "director", "title": "负责人/总监", "basis": "seed_changyue 运动控制原型：研发负责人档，按整机交付范围和技术领导力定档"}
+      ]
+    }
+  ]
+}

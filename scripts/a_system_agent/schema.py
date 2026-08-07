@@ -132,6 +132,52 @@ CREATE TABLE IF NOT EXISTS agent_copilot_messages (
 CREATE INDEX IF NOT EXISTS idx_agent_copilot_session
 ON agent_copilot_messages(session_id, id);
 
+CREATE TABLE IF NOT EXISTS agent_copilot_attachments (
+    attachment_id TEXT PRIMARY KEY,
+    access_token_hash TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    mime_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    last_accessed_at TEXT,
+    expires_at TEXT NOT NULL DEFAULT (datetime('now','+7 days'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_copilot_attachments_session
+ON agent_copilot_attachments(session_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id TEXT NOT NULL UNIQUE,
+    operation TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    validation_status TEXT NOT NULL DEFAULT 'pending',
+    fallback_used INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    request_hash TEXT NOT NULL,
+    request_preview TEXT NOT NULL DEFAULT '',
+    response_preview TEXT NOT NULL DEFAULT '',
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_model_calls_recent
+ON agent_model_calls(created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_model_calls_operation
+ON agent_model_calls(operation, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_copilot_sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT,
@@ -769,6 +815,26 @@ CREATE TABLE IF NOT EXISTS job_profile_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_job_profile_feedback_job
 ON job_profile_feedback(job_id);
+
+-- 顾问确认推荐事实链：顾问确认某候选人已向客户推荐（必须附原因）。
+-- 同一人岗关系仅确认一次（UNIQUE job_candidate_id），重复提交幂等返回已确认事实，
+-- 不重复写事件、不重复计入岗位指标。
+CREATE TABLE IF NOT EXISTS consultant_confirmed_recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_candidate_id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    job_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    confirmation_token TEXT NOT NULL UNIQUE,
+    confirmed_by TEXT NOT NULL DEFAULT 'consultant',
+    confirmed_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    event_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    UNIQUE(job_candidate_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_consultant_confirmed_recommendations_job
+ON consultant_confirmed_recommendations(job_id, confirmed_at);
 
 -- S6-4 评估校准：改判样例库（advisor_action ∈ modified/rejected 回流；
 -- 只存口径与维度标签，不存简历原文；敏感因子拒入由写入侧拦截）。

@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_config, public_config
-from .capability_runtime import RecruitingCapabilityRuntime, ZERO_RESULT_ATTRIBUTION_LABELS
+from .capability_runtime import (
+    SERVICE_HANDLED_CAPABILITY_IDS,
+    RecruitingCapabilityRuntime,
+    ZERO_RESULT_ATTRIBUTION_LABELS,
+    assert_workflow_capabilities_resolvable,
+)
 from .context import build_candidate_context
 from .evaluation import compute_evaluation
 from .job_status import job_status_intake_allowed
@@ -171,6 +176,7 @@ from .copilot_handler import (
     get_copilot_session as _h_get_copilot_session,
     list_copilot_sessions as _h_list_copilot_sessions,
     update_copilot_session as _h_update_copilot_session,
+    archive_all_copilot_sessions as _h_archive_all_copilot_sessions,
     _copilot_conversation_history as _h_copilot_conversation_history,
     _copilot_session_business_evidence as _h_copilot_session_business_evidence,
     _ground_copilot_goal as _h_ground_copilot_goal,
@@ -232,6 +238,8 @@ from .workflow_handler import (
     revise_workflow as _h_revise_workflow,
     revert_workflow_revision as _h_revert_workflow_revision,
     cancel_workflow as _h_cancel_workflow,
+    pause_workflow as _h_pause_workflow,
+    resume_workflow as _h_resume_workflow,
     archive_workflow as _h_archive_workflow,
     retry_workflow_step as _h_retry_workflow_step,
     complete_external_workflow_step as _h_complete_external_workflow_step,
@@ -278,6 +286,9 @@ from .strategy_handler import (
     activate_radar_company as _h_activate_radar_company,
     create_radar_weekly_report as _h_create_radar_weekly_report,
     get_latest_radar_weekly_report as _h_get_latest_radar_weekly_report,
+)
+from .strategy_editor import (
+    apply_strategy_item_edits as _h_apply_strategy_item_edits,
 )
 
 
@@ -495,6 +506,13 @@ class AgentService:
                     audit_event_type=f"capability.{capability_id}",
                 )
             )
+        # 能力完整性门禁：注册的工作流能力必须能在启动时解析到确定性 Runner 或服务层处理器，
+        # 避免“已注册但无执行实现”的能力在运行时才以原始异常暴露给用户。
+        assert_workflow_capabilities_resolvable(
+            workflow_capabilities,
+            self.capability_runtime.deterministic_runner_ids(),
+            SERVICE_HANDLED_CAPABILITY_IDS,
+        )
 
     def list_skills(self) -> dict[str, Any]:
         return {"ok": True, "skills": self.skills.list()}
@@ -776,7 +794,7 @@ class AgentService:
         self, queue: str = "今日待办", client: str = "", job: str = "", search: str = "",
         view: str = "action", limit: int = 100, **_: Any,
     ) -> dict[str, Any]:
-        limit = max(1, min(int(limit or 100), 300))
+        limit = max(1, min(int(limit or 100), 1000))
         conn = self._connect()
         try:
             due_select = (
@@ -1677,6 +1695,7 @@ AgentService._persist_copilot_focus = _h_persist_copilot_focus
 AgentService.get_copilot_session = _h_get_copilot_session
 AgentService.list_copilot_sessions = _h_list_copilot_sessions
 AgentService.update_copilot_session = _h_update_copilot_session
+AgentService.archive_all_copilot_sessions = _h_archive_all_copilot_sessions
 AgentService._copilot_conversation_history = _h_copilot_conversation_history
 AgentService._copilot_session_business_evidence = _h_copilot_session_business_evidence
 AgentService._ground_copilot_goal = _h_ground_copilot_goal
@@ -1738,6 +1757,8 @@ AgentService.start_workflow = _h_start_workflow
 AgentService.revise_workflow = _h_revise_workflow
 AgentService.revert_workflow_revision = _h_revert_workflow_revision
 AgentService.cancel_workflow = _h_cancel_workflow
+AgentService.pause_workflow = _h_pause_workflow
+AgentService.resume_workflow = _h_resume_workflow
 AgentService.archive_workflow = _h_archive_workflow
 AgentService.retry_workflow_step = _h_retry_workflow_step
 AgentService.complete_external_workflow_step = _h_complete_external_workflow_step
@@ -1784,3 +1805,6 @@ AgentService.start_mapping_from_radar = _h_start_mapping_from_radar
 AgentService.activate_radar_company = _h_activate_radar_company
 AgentService.create_radar_weekly_report = _h_create_radar_weekly_report
 AgentService.get_latest_radar_weekly_report = _h_get_latest_radar_weekly_report
+
+# Strategy item edits（按项编辑）
+AgentService.apply_strategy_item_edits = _h_apply_strategy_item_edits

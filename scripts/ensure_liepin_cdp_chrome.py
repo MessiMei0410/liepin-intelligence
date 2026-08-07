@@ -12,14 +12,24 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from liepin_cdp_config import (
+    cdp_launch_agent_label,
+    cdp_launch_agent_path,
+    cdp_profile_dir,
+    opencli_extension_dir,
+)
+
 
 PORT = 9223
 CDP_BASE = f"http://127.0.0.1:{PORT}"
-PROFILE_DIR = Path.home() / ".hermes" / "chrome_profile_xhs"
-LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "ai.hermes.chrome-cdp.plist"
+PROFILE_DIR = cdp_profile_dir()
+LAUNCH_AGENT = cdp_launch_agent_path()
+OPENCLI_EXTENSION_DIR = opencli_extension_dir()
 START_URL = "https://h.liepin.com/search/getConditionItem"
 STATUS_FILE = Path("/tmp/liepin_cdp_status.json")
 CHROME_PATHS = [
+    Path.home() / "Library" / "Caches" / "ms-playwright" / "chromium-1228" / "chrome-mac-arm64"
+    / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing",
     Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome",
 ]
@@ -83,7 +93,7 @@ def wait_for_cdp(seconds: float = 12) -> tuple[bool, dict[str, object]]:
 
 def restart_launch_agent() -> None:
     uid = str(os.getuid())
-    label = f"gui/{uid}/ai.hermes.chrome-cdp"
+    label = f"gui/{uid}/{cdp_launch_agent_label()}"
     run_quiet("launchctl", "enable", label)
     run_quiet("launchctl", "bootout", label)
     cleanup_profile_locks()
@@ -108,6 +118,8 @@ def start_direct_chrome() -> None:
             str(chrome_path),
             f"--remote-debugging-port={PORT}",
             f"--user-data-dir={PROFILE_DIR}",
+            f"--load-extension={OPENCLI_EXTENSION_DIR}",
+            f"--disable-extensions-except={OPENCLI_EXTENSION_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
             START_URL,

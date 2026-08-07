@@ -1,0 +1,79 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-05",
+    "source": "outputs/changyue_auto_multichannel_intake_20260710.json 真实 P0 缺口（苏科思-FPGA技术主管、未归属-ACDC/电源/硬件）",
+    "usage": "FPGA/嵌入式硬件岗位原型：策略生成与简历评估直接消费；半导体设备/测控方向的逻辑设计与板级硬件岗",
+    "governance": "目标公司池按半导体设备/测控与工控常识推导，待顾问校准；只命中技能标签无项目证据的人选必须标记待核验"
+  },
+  "job_archetype": {
+    "archetype_id": "fpga_embedded_hardware",
+    "title": "FPGA/嵌入式硬件工程师（技术主管档）",
+    "client": "",
+    "client_profile": "半导体设备/测控/仪器厂商的 FPGA 逻辑设计与嵌入式硬件岗",
+    "essence": "FPGA 逻辑设计与嵌入式硬件：Verilog/SystemVerilog 开发、时序约束、高速接口、原理图/PCB 协同、板级调试与量产导入；主管档要求独立带队或负责整板卡/子系统。",
+    "directions": [
+      {
+        "name": "半导体测控/设备硬件",
+        "customers": ["封测厂", "fab", "面板/3C 检测产线"],
+        "products": ["测试机台", "检测设备", "控制板卡"],
+        "competitors": ["华峰测控", "长川科技", "中科飞测"]
+      }
+    ],
+    "location_policy": "按客户需求逐案确认；异地人选推进前确认 relocation",
+    "target_functions": ["FPGA工程师", "硬件工程师", "嵌入式工程师", "逻辑设计"]
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 半导体测控/设备 FPGA 岗",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "medium",
+      "rationale": "测控/测试设备厂商的 FPGA 与板级硬件岗场景最近（待顾问校准）",
+      "companies": [
+        {"name": "华峰测控"},
+        {"name": "长川科技"},
+        {"name": "中科飞测"},
+        {"name": "精测电子"},
+        {"name": "北方华创"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 通信/工控 FPGA 岗",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "low",
+      "rationale": "通信/工控 FPGA 技术栈对口，需补半导体设备场景（待顾问校准）",
+      "companies": [
+        {"name": "中兴通讯"},
+        {"name": "汇川技术"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "fpga_core",
+      "targets": "T1/T2 FPGA 核心词",
+      "terms": ["FPGA", "Verilog", "SystemVerilog", "Xilinx", "Altera", "逻辑设计", "时序约束"]
+    },
+    {
+      "group": "hardware_board",
+      "targets": "板级硬件兜底词",
+      "terms": ["嵌入式", "硬件工程师", "原理图", "PCB", "高速信号", "板级调试"]
+    }
+  ],
+  "negative_rules": [
+    "纯 PCB Layout/画板背景、无 FPGA 或系统设计经历的人选不进入优先池",
+    "只命中技能标签但无项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "纯软件/纯测试背景无硬件项目经历的人选不进入优先池"
+  ],
+  "skills_ontology_nodes": [],
+  "skills_ontology_note": "FPGA/嵌入式硬件族尚未纳入 kb_skill_ontology_semiconductor_v1；技能词来自真实岗位缺口，本体扩族后回填 canonical 词",
+  "level_mapping": {
+    "level_band": "manager",
+    "job_title_range": "资深工程师/技术主管",
+    "accepted_candidate_levels": ["资深工程师", "技术经理", "主管", "经理"],
+    "note": "主管档按独立带队或负责整板卡/子系统范围定档（沿用 kb_level_mapping manager 带口径：8年+）；title 相近而职责偏执行的人选降档",
+    "applies_to": "fpga_embedded_hardware 原型；FPGA/嵌入式硬件岗可复用"
+  }
+}

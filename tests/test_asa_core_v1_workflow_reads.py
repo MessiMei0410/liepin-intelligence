@@ -102,6 +102,16 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "summary": "多渠道寻访完成",
             "channel_runs": [{"channel": "liepin", "status": "completed"}],
             "audit": {"ok": True, "stdout": BIG_STDOUT},
+            "strategy_v2": {
+                "schema_version": "strategy_v2",
+                "archetype_id": "power_rd_expert_computing",
+                "input_level": "L2",
+                "coverage_report": {"consumed_count": 3},
+                "consultant_judgement": {
+                    "version": "senior_consultant_v1",
+                    "role_diagnosis": {"candidate_archetype": "项目证据优先的电源研发专家"},
+                },
+            },
         }
         conn.execute(
             "UPDATE agent_workflow_steps SET output_json=? WHERE id=?",
@@ -161,7 +171,11 @@ def test_workflow_step_detail_returns_full_output(env: dict) -> None:
             for item in client.get(f"/api/v1/workflows/{env['workflow_id']}").json()["steps"]
             if item["id"] == env["audited_step_id"]
         )
-        assert step == detail_step
+        assert detail_step["output"]["_summary_only"] is True
+        assert detail_step["output"]["full_detail_available"] is True
+        assert "stdout" not in detail_step["output"].get("audit", {})
+        assert detail_step["output"]["strategy_v2"]["consultant_judgement"]["version"] == "senior_consultant_v1"
+        assert step != detail_step
 
 
 def test_workflow_step_detail_injects_assessed_items(env: dict) -> None:

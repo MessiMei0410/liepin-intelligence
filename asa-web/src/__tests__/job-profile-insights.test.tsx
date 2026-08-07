@@ -148,10 +148,17 @@ describe('岗位画像区块（JobProfileInsights）', () => {
     expect(screen.getByText(textOf('PC电源多相控制器 ×3'))).toBeInTheDocument()
   })
 
-  it('加载失败如实呈现错误', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ error: '服务不可用' }, false, 503)))
+  it('加载失败如实呈现错误并可原地重试', async () => {
+    let attempts = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => {
+      attempts += 1
+      return attempts === 1 ? mockResponse({ error: '服务不可用' }, false, 503) : mockResponse(readyPayload)
+    }))
     render(<JobProfileInsights jobId={154} />)
     expect(await screen.findByText('服务不可用')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '重新加载岗位画像' }))
+    expect(await screen.findByText(/来源 5 份人选履历/)).toBeInTheDocument()
+    expect(attempts).toBe(2)
   })
 })
 

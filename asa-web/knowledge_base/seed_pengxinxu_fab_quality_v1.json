@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-05",
+    "source": "cases/case_pengxinxu_fab_v1.json（97 职位 by_module：PQE 2、QS 1）+ outputs 真实 P0 缺口（PQE主任工程师 P0最急、PQE专家 P1）",
+    "usage": "fab 质量/可靠性岗位原型：策略生成与简历评估直接消费；覆盖 PQE/QS/可靠性方向",
+    "governance": "目标公司池按 12 寸 fab 与封测厂常识推导，待顾问校准；只命中技能标签无产线质量项目证据的人选必须标记待核验"
+  },
+  "job_archetype": {
+    "archetype_id": "fab_quality_reliability",
+    "title": "Fab 质量/可靠性工程师（PQE/QS）",
+    "client": "",
+    "client_profile": "晶圆厂过程质量与可靠性岗：SPC/FMEA/8D、客诉处理、体系审核、量产质量闭环",
+    "essence": "晶圆厂过程质量与可靠性：产线质量监控（SPC）、失效模式分析（FMEA）、客诉 8D 闭环、体系审核（IATF16949/ISO9001）与量产质量改进。要求有产线质量项目证据，纯体系文职不算。",
+    "directions": [
+      {
+        "name": "fab 过程质量与可靠性",
+        "customers": ["fab 内部产线", "芯片设计公司（fabless）客诉"],
+        "products": ["过程质量", "可靠性验证", "客诉闭环"],
+        "competitors": ["中芯国际", "华虹", "晶合集成"]
+      }
+    ],
+    "location_policy": "深圳（坪山区为主）；异地人选正常进入召回，推进前确认 relocation",
+    "target_functions": ["PQE", "质量工程师", "可靠性工程师", "QS"]
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 12寸 fab 质量/可靠性岗",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "medium",
+      "rationale": "同代际产线质量岗直接迁移（按 fab 常识推导，待顾问校准）",
+      "companies": [
+        {"name": "中芯国际"},
+        {"name": "华虹"},
+        {"name": "晶合集成"},
+        {"name": "粤芯半导体"},
+        {"name": "长江存储"},
+        {"name": "长鑫存储"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 封测厂质量岗",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "low",
+      "rationale": "OSAT 质量/可靠性岗方法论相通，需补前道产线场景（待顾问校准）",
+      "companies": [
+        {"name": "长电科技"},
+        {"name": "通富微电"},
+        {"name": "华天科技"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "quality_core",
+      "targets": "T1/T2 质量核心词",
+      "terms": ["PQE", "质量工程师", "可靠性", "品质工程师", "SPC", "FMEA", "8D", "客诉"]
+    },
+    {
+      "group": "quality_system",
+      "targets": "体系与审核兜底词",
+      "terms": ["IATF16949", "ISO9001", "体系审核", "QS", "可靠性验证"]
+    }
+  ],
+  "negative_rules": [
+    "纯体系文职/文控背景、无产线质量项目证据的人选不进入优先池",
+    "只命中技能标签但无质量项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "非半导体行业质量背景（如快消/建筑）不进入优先池"
+  ],
+  "skills_ontology_nodes": [],
+  "skills_ontology_note": "质量/可靠性族尚未纳入 kb_skill_ontology_semiconductor_v1；技能词来自 case_pengxinxu 真实职位，本体扩族后回填 canonical 词",
+  "level_mapping": {
+    "level_band": "expert",
+    "job_title_range": "高级工程师/主任工程师/专家",
+    "accepted_candidate_levels": ["高级工程师", "资深工程师", "主任工程师", "专家"],
+    "note": "主任工程师落 kb_level_mapping expert 带（别名含主任工程师）；按产线质量闭环负责范围定档而非 title",
+    "applies_to": "fab_quality_reliability 原型；半导体质量/可靠性岗可复用"
+  }
+}

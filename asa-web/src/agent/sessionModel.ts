@@ -3,15 +3,15 @@ import type { AgentContext, AgentReference } from './transport'
 
 const contextSchema = z.object({
   type: z.string().optional(),
-  id: z.union([z.string(), z.number()]).optional(),
+  id: z.union([z.string(), z.number()]).nullable().optional(),
 }).catchall(z.unknown())
 
 const referenceSchema = z.object({
   type: z.string(),
   id: z.union([z.string(), z.number()]),
   label: z.string(),
-  subtitle: z.string().optional(),
-  href: z.string().optional(),
+  subtitle: z.string().nullish().transform(value => value || undefined),
+  href: z.string().nullish().transform(value => value || undefined),
 })
 
 const structuredRecord = z.record(z.string(), z.unknown())
@@ -39,6 +39,7 @@ const messageSchema = z.object({
   workflow_progress: structuredRecord.nullable().optional(),
   pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  model_participation: structuredRecord.nullable().optional(),
   created_at: z.string().optional(),
 })
 

@@ -698,9 +698,9 @@ class AssessmentApiTest(DbCase):
             assert replay.status_code == 200
             assert replay.json()["receipt"]["idempotent_replay"] is True
 
-            # 不同幂等键再 POST → 更新同一行，不重复建行，as_of 刷新
+            # 显式 force 再 POST → 更新同一行，不重复建行，as_of 刷新
             again = client.post(
-                "/api/v1/candidates/1/assessments?job_id=154",
+                "/api/v1/candidates/1/assessments?job_id=154&force=true",
                 json={"request_id": "req-a3"}, headers={"Idempotency-Key": "k-a3"},
             )
             assert again.status_code == 200, again.text

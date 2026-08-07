@@ -8,7 +8,6 @@ EXTENSION="$ROOT/opencli-extension-v1.0.22"
 LOG="/tmp/opencli_chrome_testing.log"
 
 mkdir -p "$PROFILE"
-pkill -f "$PROFILE" >/dev/null 2>&1 || true
 /Users/messi/.hermes/node/bin/opencli daemon stop >/dev/null 2>&1 || true
 
 nohup "$CHROME" \

@@ -241,6 +241,137 @@ MIGRATIONS: list[tuple[int, str, str]] = [
           );
         """,
     ),
+    (
+        5,
+        "recommendation_packages",
+        # 版本化推荐包闭环：consultant_confirmed_recommendations 确认后聚合生成
+        # 推荐包（候选摘要/人岗证据/风险/待核验问题），客户反馈按包版本关联留痕。
+        """
+        CREATE TABLE IF NOT EXISTS recommendation_packages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id TEXT NOT NULL UNIQUE,
+            job_candidate_id INTEGER NOT NULL,
+            person_id INTEGER NOT NULL,
+            job_id INTEGER NOT NULL,
+            recommendation_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'generated',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            risks_json TEXT NOT NULL DEFAULT '[]',
+            verification_questions_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(job_candidate_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_recommendation_packages_candidate
+            ON recommendation_packages(job_candidate_id, version DESC);
+
+        CREATE TABLE IF NOT EXISTS recommendation_package_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id TEXT NOT NULL,
+            package_version INTEGER NOT NULL,
+            job_candidate_id INTEGER NOT NULL,
+            person_id INTEGER NOT NULL,
+            job_id INTEGER NOT NULL,
+            feedback_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            feedback_time TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            recorded_by TEXT NOT NULL DEFAULT 'consultant',
+            request_id TEXT NOT NULL,
+            event_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(package_id, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_recommendation_package_feedback_candidate
+            ON recommendation_package_feedback(job_candidate_id, created_at DESC);
+        """,
+    ),
+    (
+        6,
+        "knowledge_proposals",
+        # 二期知识飞轮：knowledge_proposal 知识增补提案。Agent 从停止原因聚类/客户反馈/
+        # 已确认推荐中确定性生成提案（证据不足只留候选），顾问 preflight/commit 两段确认后
+        # 才写入知识文件；UNIQUE(proposal_type, content_key) 保证同一内容不重复提案。
+        """
+        CREATE TABLE IF NOT EXISTS knowledge_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proposal_id TEXT NOT NULL UNIQUE,
+            proposal_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content_json TEXT NOT NULL DEFAULT '{}',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            content_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            confirm_token TEXT,
+            applied_to TEXT,
+            decided_by TEXT,
+            decision_note TEXT,
+            decided_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(proposal_type, content_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_proposals_status
+            ON knowledge_proposals(status, created_at DESC);
+        """,
+    ),
+    (
+        7,
+        "company_calibrations",
+        # 二期知识飞轮：company_calibration 核心公司校准覆盖层。图谱 JSON 保持原始名单不改；
+        # 顾问逐公司确认/修正的（行业/产品线/技能标签/职级体系/禁挖竞业标记/备注）落本表，
+        # 消费侧经 knowledge_base 校准覆盖层合并钩子按 company_key（规范化公司名）覆盖。
+        # UNIQUE(company_key) 保证一家公司一条校准；version 随内容变更自增（同内容重提不 bump）。
+        """
+        CREATE TABLE IF NOT EXISTS company_calibrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            calibration_id TEXT NOT NULL UNIQUE,
+            company_key TEXT NOT NULL UNIQUE,
+            company_name TEXT NOT NULL,
+            track TEXT NOT NULL DEFAULT '',
+            product_lines_json TEXT NOT NULL DEFAULT '[]',
+            skill_tags_json TEXT NOT NULL DEFAULT '[]',
+            level_system TEXT NOT NULL DEFAULT '',
+            no_poach INTEGER NOT NULL DEFAULT 0,
+            non_compete INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'needs_review',
+            calibrated_by TEXT NOT NULL DEFAULT 'consultant',
+            calibrated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_company_calibrations_status
+            ON company_calibrations(status, updated_at DESC);
+        """,
+    ),
+    (
+        8,
+        "copilot_attachment_registry",
+        """
+        CREATE TABLE IF NOT EXISTS agent_copilot_attachments (
+            attachment_id TEXT PRIMARY KEY,
+            access_token_hash TEXT NOT NULL,
+            session_id TEXT NOT NULL DEFAULT '',
+            file_name TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            mime_type TEXT NOT NULL DEFAULT '',
+            size_bytes INTEGER NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            extracted_text TEXT NOT NULL DEFAULT '',
+            truncated INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            last_accessed_at TEXT,
+            expires_at TEXT NOT NULL DEFAULT (datetime('now','+7 days'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_copilot_attachments_session
+            ON agent_copilot_attachments(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_copilot_attachments_expiry
+            ON agent_copilot_attachments(expires_at);
+        """,
+    ),
 ]
 
 

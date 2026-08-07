@@ -50,6 +50,38 @@ def _row(candidate_id: str, name: str, status: str, **extra):
 
 
 class OpenCliPrimaryRecallTest(unittest.TestCase):
+    def test_specialized_power_role_rejects_non_power_titles_before_intake(self) -> None:
+        if not MULTICHANNEL.exists():
+            self.skipTest(f"入库脚本不在本机: {MULTICHANNEL}")
+        spec = importlib.util.spec_from_file_location("a_system_multichannel_quality", MULTICHANNEL)
+        assert spec and spec.loader
+        multichannel = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(multichannel)
+        context = {
+            "client": "士兰微", "job": "电源专家", "job_id": 142,
+            "ability_keywords": ["VPD", "VRM", "TLVR", "模块电源"],
+            "hard_requirements": ["模块电源3年以上研发经验"], "exclusions": [],
+        }
+        complete = {
+            "resume_capture_status": "complete", "url": "https://example.test/resume",
+            "full_text": "完整履历" * 40, "work_text": "工作经历" * 10,
+            "education_text": "教育经历" * 5, "project_text": "项目经历" * 5,
+        }
+        records = [
+            {"channel": "liepin", "name": "销售候选人", "company": "某设备厂", "title": "大客户销售", **complete},
+            {"channel": "liepin", "name": "电源候选人", "company": "某电源公司", "title": "电源研发工程师", "profile_text": "VPD VRM 多相Buck TLVR 模块电源研发 仿真 磁件", **complete},
+        ]
+
+        staged = multichannel.stage_candidates(
+            records,
+            context,
+            {"records": [], "summary": {}, "by_candidate_id": {}, "by_xsaas_id": {}, "by_identity": {}},
+        )
+
+        self.assertEqual([item["name"] for item in staged["accepted"]], ["电源候选人"])
+        self.assertEqual(len(staged["errors"]), 1)
+        self.assertIn("岗位方向硬门槛", staged["errors"][0]["error"])
+
     def test_primary_flag_defaults_on_and_can_be_explicitly_disabled(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(RecruitingCapabilityRuntime._opencli_primary_enabled({}))
@@ -140,7 +172,7 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
         }
         captured: list[list[str]] = []
 
-        def capture(_channel, rows, *_args):
+        def capture(_channel, rows, *_args, **_kwargs):
             captured.append([item["candidate_id"] for item in rows])
             for item in rows:
                 item["resume_capture_status"] = "complete"

@@ -47,6 +47,55 @@
 ## 基线更新流程（策略生成逻辑改动后）
 
 1. 跑 `PYTHONPATH=scripts /usr/local/bin/python3 scripts/strategy_replay_eval.py --json` 拿新指标与明细；
+   也可用 `--compare <旧基线.json>` 自动逐项 diff（按指标方向判倒退，有倒退退出码 1）；
 2. 对比 `tests/test_strategy_replay_s4.py` 的 `REPLAY_BASELINE` 与本文件，逐项核对未命中明细变化；
 3. 确认是能力提升（非口径漂移/倒退洗白）后，手动更新测试常量（改注释日期）并同步本文件数值与明细；
 4. 指标下降一律视为回归——修策略生成逻辑，不得改基线放行。
+
+## 二期扩展指标（2026-08-05，additive）
+
+新增三指标，原①②③口径与门槛语义不变；指标方向登记在 `scripts/strategy_replay_eval.py` 的
+`METRIC_DIRECTIONS`（noise_rate 越低越好，其余越高越好），回归门槛与 `--compare` 均按方向判定。
+
+### 口径定义
+
+- **④ 证据覆盖率（evidence_coverage）**：选择「策略要素来源标注」口径而非 scoring.py 的
+  候选人级 evidence_coverage（回放 case 无候选人评分数据，无法对齐该口径）。
+  统计 strategy_v2 产物中带 source 字段的三类要素里有依据来源的占比：
+  - 目标池公司（T1/T2）：有依据 = source ∈ {client_doc, kb_profile, kb_graph}；llm_inferred 无依据；
+  - present 锚点（missing 锚点不计分母）：有依据 = source ∈ {client_doc, jd, consultant, kb_archetype}；
+  - 约束（negative_rules 中 rule 文本非空条目；空 rule「不适用」留痕条目不计入）：
+    有依据 = source ∈ {client_doc, jd, consultant, kb_profile, restricted_client}；
+  - step4 关键词组无 source 字段，无法确定性判定来源，显式不计入。
+- **⑤ 噪音率（noise_rate）**：= 1 − pool_precision，显式输出；precision 语义不变。方向：越低越好。
+- **⑥ 推荐率 proxy（recommendation_rate_proxy）**：回放 case 无「顾问确认可推荐」结果数据，
+  真实推荐率无法确定性回放，故输出 proxy 并明确标注，不伪造口径：
+  Agent T1/T2 池中「命中 case 参考池 且 source ≠ llm_inferred」的公司占比。
+  顾问确认口径接入后应替换本 proxy。
+
+### 首版基线数值（2026-08-05 实跑，首次以当日真实值入基线，非历史目标值）
+
+| case | ④ 证据覆盖率 | ⑤ 噪音率（↓好） | ⑥ 推荐率 proxy |
+| --- | --- | --- | --- |
+| case_silan_tme（士兰微 TME，v1.1，L1） | 1.000（31/31：池 23/23、锚点 4/4、约束 4/4） | 0.3478（= 1 − 0.6522） | 0.6522（15/23） |
+| case_changyue_equipment（长越 自动化软件高工，v1.2，L3） | 1.000（10/10：池 8/8、锚点 2/2、约束 0/0） | 1.000（= 1 − 0） | 0.000（0/8） |
+| **汇总（均值）** | 1.000 | 0.6739 | 0.3261 |
+
+说明：两 case 证据覆盖率均为 1.0——当前确定性模式下全部要素来自 KB/JD/客户语料，
+无 llm_inferred 要素；该指标的真实约束力在引入 LLM 生成要素后体现（llm_inferred 出现即拉低）。
+长越约束 0/0：L3 裸跑五类排除清单全部不适用（rule 为空），无计入要素，不拉低覆盖率。
+
+### 基线 diff 工具
+
+`PYTHONPATH=scripts python3 scripts/strategy_replay_eval.py --compare <baseline.json>`：
+baseline 为本脚本 `--out`/`--json` 产出的报告文件；逐 case × 指标输出 baseline/current/delta
+与倒退标记（按 METRIC_DIRECTIONS 方向），基线缺的新指标标 "new"，当前缺基线已有指标按倒退处理；
+有倒退退出码 1、无倒退 0、文件错误 2；与 `--json` 同用时 diff 并入 JSON 的 "compare" 键。
+
+### 评估链指标化回放（assessment_replay.py --metrics）
+
+`scripts/assessment_replay.py` 新增 `--metrics` 可选模式（盲评 markdown 导出不变），
+对生成结果输出确定性指标 JSON：五维覆盖率（dimension_coverage，有非空 verdict 的维度占比）、
+证据条数分布（evidence_distribution：kept 的 min/max/avg + stripped 总数）、
+unknown 占比（unknown_ratio：枚举字段 == "unknown" 的比例，字段清单见脚本 docstring）、
+推测维度占比（inferred_ratio，沿用原口径）。评估回放不进 CI 门槛，供变更前后对比使用。

@@ -14,6 +14,11 @@
 每类输出 {type, applicable, rule, basis, source}——"适用/不适用 + 依据"逐类留痕，
 由运行时并入 strategy_v2 的 negative_rules。无依据的类标 applicable=false 并给出理由。
 
+知识飞轮二期：kb_agent_confirmed_rules_v1.json 中 negative_rule 类顾问确认提案
+（knowledge_proposals accept 后写入）追加进清单（固定五类之后），条目沿用同一字段
+结构 + proposal_id，source=consultant_confirmed；文件缺失/坏 JSON/无有效条目时跳过，
+五类清单输出与现状逐字节一致。
+
 P0 边界：restricted 层只经 knowledge_base.load_restricted_constraints 白名单出库
 （禁挖名单/竞业限制），本模块不直接读取 restricted 文件；费率/手机号/offer 金额/
 话术红线永远不会出现在本模块的任何输出里。
@@ -27,11 +32,16 @@ from pathlib import Path
 from typing import Any
 
 from .strategy_v2 import knowledge_base_dir
+from .knowledge_base import CONFIRMED_RULES_FILE, load_confirmed_rules
 
 # 五类检查清单（PRD §4 顺序；typology 以 KB 为准，缺失时按此默认清单降级）
 NEGATIVE_RULE_TYPES = ("在职保护名单", "学历门槛", "身份/背景限制", "竞业协议排除", "稳定性筛选")
 
 TYPOLOGY_GLOB = "kb_seed_*.json"
+
+# 顾问确认排除规则（kb_agent_confirmed_rules_v1.json，negative_rule 类提案 accept 后写入）
+# 追加进五类清单之后的条目类型；source=consultant_confirmed。
+CONFIRMED_NEGATIVE_TYPE = "顾问确认排除规则"
 
 # 各类别的判定信号词（可解释：命中哪个词写进依据）
 _EDUCATION_TOKENS = ("统招", "全日制", "本科", "硕士", "博士", "一本", "二本", "学历", "985", "211")
@@ -103,6 +113,38 @@ def load_negative_rule_typology(kb_dir: str | Path | None = None) -> tuple[list[
 
 def _default_typology() -> list[dict[str, Any]]:
     return [{"type": name, "example": "", "note": "PRD §4 默认分类", "source_file": ""} for name in NEGATIVE_RULE_TYPES]
+
+
+def load_confirmed_negative_rules(kb_dir: str | Path | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """读取 kb_agent_confirmed_rules_v1.json 中 negative_rule 类确认规则，转成清单条目。
+
+    条目沿用五类清单字段结构（type/applicable/rule/basis/source）并附加 proposal_id；
+    source=consultant_confirmed。content 缺 rule 文本的条目跳过；
+    文件缺失/坏 JSON/无有效条目 → 空列表 + 留痕（不炸，不影响五类清单）。
+    """
+    entries, trace = load_confirmed_rules(kb_dir, rule_type="negative_rule")
+    rules: list[dict[str, Any]] = []
+    for entry in entries:
+        content = entry["content"]
+        text = str(content.get("rule") or "").strip()
+        if not text:
+            continue
+        proposal_id = str(entry.get("proposal_id") or "").strip()
+        scope = str(content.get("scope") or "").strip()
+        rules.append(
+            {
+                "type": CONFIRMED_NEGATIVE_TYPE,
+                "applicable": True,
+                "rule": text,
+                "basis": (
+                    f"知识增补提案 {proposal_id or '（无ID）'} 经顾问确认入库"
+                    + (f"（适用范围：{scope}）" if scope else "")
+                ),
+                "source": "consultant_confirmed",
+                "proposal_id": proposal_id,
+            }
+        )
+    return rules, trace
 
 
 def _segments(text: str) -> list[str]:
@@ -275,4 +317,19 @@ def build_negative_rule_checklist(
     for entry in checklist:
         state = "适用" if entry["applicable"] else "不适用"
         trace.append(f"五类清单[{entry['type']}]：{state}（{entry['basis']}）")
+
+    # 知识飞轮二期：顾问确认的 negative_rule 提案（kb_agent_confirmed_rules_v1.json）
+    # 追加进清单（固定五类之后），source=consultant_confirmed + proposal_id；
+    # 文件缺失 → 完全跳过（清单与 trace 均与现状逐字节一致）；
+    # 文件存在但坏 JSON/无有效条目 → 不进清单，但降级留痕进 trace。
+    confirmed, confirmed_trace = load_confirmed_negative_rules(kb_dir)
+    if confirmed:
+        checklist.extend(confirmed)
+    directory = Path(kb_dir) if kb_dir else knowledge_base_dir()
+    if confirmed or (directory / CONFIRMED_RULES_FILE).is_file():
+        trace.extend(confirmed_trace)
+    if confirmed:
+        trace.append(f"顾问确认排除规则追加 {len(confirmed)} 条（source=consultant_confirmed）")
+    for entry in confirmed:
+        trace.append(f"确认规则[{entry['proposal_id'] or '（无ID）'}]：适用（{entry['basis']}）")
     return checklist, trace

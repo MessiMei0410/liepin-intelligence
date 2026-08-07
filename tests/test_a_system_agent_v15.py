@@ -17,7 +17,7 @@ class AgentV15ServiceTest(AgentDbCase):
     def test_v16_config_and_skill_registry_are_public_and_allowlisted(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment()))
         config = service.get_public_config()["config"]
-        self.assertEqual(config["model"]["model"], "deepseek-v4-pro")
+        self.assertEqual(config["model"]["model"], "deepseek-v4-flash")
         self.assertNotIn("api_key", config["model"])
         skills = {item["id"]: item for item in service.list_skills()["skills"]}
         self.assertTrue({"job_diagnosis", "candidate_assessment", "verification_plan", "communication_draft", "liepin_resume_capture"}.issubset(skills))

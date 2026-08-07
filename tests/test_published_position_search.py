@@ -2,14 +2,18 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from run_published_position_search import (
     CAPTURE_LINKS_JS,
     EXTRACT_JS,
     PositionProfile,
+    capture_resume_details,
+    detail_pause_seconds,
     _split_profile_terms,
     load_query_rounds,
     merge_resume_detail,
+    risk_page_reason,
     score_candidate_for_profile,
     technical_market_hard_gate,
     write_report,
@@ -182,6 +186,60 @@ class PublishedPositionSearchReportTest(unittest.TestCase):
         self.assertIn("产品市场经理", merged["work_text"])
         self.assertIn("多相控制器", merged["project_text"])
         self.assertIn("华中科技大学", merged["education_text"])
+
+    def test_risk_page_reason_detects_captcha_and_login_separately(self) -> None:
+        self.assertEqual(
+            risk_page_reason({"href": "https://h.liepin.com/account/login", "body": ""}),
+            "login_required",
+        )
+        self.assertIn(
+            "risk_page",
+            risk_page_reason({"href": "https://safe.liepin.com/page/liepin/captchaPage_PC", "body": "人机验证"}),
+        )
+
+    def test_detail_pause_adds_burst_cooldown(self) -> None:
+        with patch("run_published_position_search.random.uniform", return_value=3.0):
+            self.assertEqual(
+                detail_pause_seconds(5, min_delay=2.0, max_delay=4.0, burst_size=5, burst_cooldown=12.0),
+                15.0,
+            )
+
+    def test_capture_resume_details_pauses_on_risk_page_without_marking_rest_failed(self) -> None:
+        cards = [
+            {"name": "张**", "current_company": "A", "current_title": "工程师", "resume_url": "https://h.liepin.com/resume/showresumedetail/?res_id_encode=1"},
+            {"name": "李**", "current_company": "B", "current_title": "工程师", "resume_url": "https://h.liepin.com/resume/showresumedetail/?res_id_encode=2"},
+            {"name": "王**", "current_company": "C", "current_title": "工程师", "resume_url": "https://h.liepin.com/resume/showresumedetail/?res_id_encode=3"},
+        ]
+
+        class FakeCDP:
+            def __init__(self, _ws_url, timeout=20):
+                self.timeout = timeout
+
+            def close(self):
+                return None
+
+        def fake_evaluate(_cdp, _expression, timeout=8):
+            return {
+                "href": "https://safe.liepin.com/page/liepin/captchaPage_PC",
+                "title": "安全验证",
+                "ready": "complete",
+                "text": 500,
+                "text_sample": "请完成验证码",
+            }
+
+        with patch("run_published_position_search.create_cdp_tab", return_value="ws://test"), patch(
+            "run_published_position_search.close_cdp_tab",
+        ), patch("run_published_position_search.CDP", FakeCDP), patch(
+            "run_published_position_search.evaluate", side_effect=fake_evaluate,
+        ), patch("run_published_position_search.time.sleep"):
+            stats = capture_resume_details(9223, cards, 3)
+
+        self.assertEqual(stats["status"], "risk_paused")
+        self.assertEqual(stats["attempted"], 1)
+        self.assertEqual(cards[0]["resume_capture_status"], "risk_paused")
+        self.assertEqual(cards[1]["resume_capture_status"], "not_requested_risk_pause")
+        self.assertEqual(cards[2]["resume_capture_status"], "not_requested_risk_pause")
+        self.assertEqual(stats["failed"], 0)
 
 
 if __name__ == "__main__":

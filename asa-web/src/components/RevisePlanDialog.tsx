@@ -4,6 +4,7 @@ import { api } from '../api'
 import type { ExpansionTreeStep, StrategyReviewDiff } from '../api'
 import { buildDecisionSuffix, diffContentText, diffOpLabel, diffStepLabel, diffSuggestionText, mergeReviewDecisions, loadDiffDecisions, persistDiffDecisions, saveDiffDecision } from '../workflows/strategyReviewDiff'
 import type { DiffDecision } from '../workflows/strategyReviewDiff'
+import { useDialogFocus } from '../shared/useDialogFocus'
 import { buildTreeDecisionSuffix, expansionActionLabel, loadTreeDecisions, saveTreeDecision, sortedTreeSteps, treeStepSummary, treeSuggestionText } from '../workflows/strategyExpansionTree'
 
 // 工作流“修改计划”内联对话框：替代原 window.prompt，样式复用候选人操作确认层（.action-dialog）。
@@ -22,6 +23,7 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
   const [decisions, setDecisions] = useState<Record<string, DiffDecision>>({})
   const [tree, setTree] = useState<ExpansionTreeStep[]>([])
   const [treeDecisions, setTreeDecisions] = useState<Record<string, DiffDecision>>({})
+  const dialogRef = useDialogFocus<HTMLElement>(true)
   const valid = instruction.trim().length > 0
 
   useEffect(() => {
@@ -86,7 +88,7 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
 
   return (
     <div className="action-dialog-backdrop" role="presentation" onClick={onCancel}>
-      <section className="action-dialog" role="dialog" aria-modal="true" aria-labelledby="revise-plan-title" onClick={event => event.stopPropagation()}>
+      <section ref={dialogRef} className="action-dialog" role="dialog" aria-modal="true" aria-labelledby="revise-plan-title" onClick={event => event.stopPropagation()}>
         <header>
           <span className="action-dialog-icon"><SquarePen /></span>
           <div><small>工作流</small><h3 id="revise-plan-title">修改计划</h3></div>
@@ -162,7 +164,7 @@ export function RevisePlanDialog({ workflowId, onCancel, onSubmit }: { workflowI
           )}
           <label>
             <span>修改意见（必填）</span>
-            <textarea value={instruction} onChange={event => setInstruction(event.target.value)} placeholder="例如：优先补充华东区域的候选人，提高学历门槛" rows={4} autoFocus />
+            <textarea value={instruction} onChange={event => setInstruction(event.target.value)} placeholder="例如：优先补充华东区域的候选人，提高学历门槛" rows={4} />
           </label>
         </div>
         <footer>

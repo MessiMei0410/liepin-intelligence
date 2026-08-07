@@ -62,6 +62,12 @@ export type CandidateDetail = Candidate & {
     review_pass_count: number; contacted_count: number; recommended_count: number; stopped_count: number;
     client_positive_count: number; client_rejected_count: number;
   }>;
+  report_artifacts?: Array<{
+    id: number; artifact_id: string; workflow_id?: string; artifact_type: string; title: string;
+    mime_type?: string; validation_status: string; created_at?: string; version: number;
+  }>;
+  // 版本化推荐包摘要（顾问确认推荐后生成；无确认推荐为空数组，前端不渲染区块）。
+  recommendation_packages?: RecommendationPackageSummary[];
 }
 
 // R5 typed client：dashboard / workflow / candidate-action 三个高频接口全链路类型化。
@@ -73,6 +79,9 @@ export type ContractAnchor = [
   paths['/api/v1/workflows/{workflow_id}/summary']['get'],
   paths['/api/v1/workflows/{workflow_id}/steps/{step_id}']['get'],
   paths['/api/v1/workflows/{workflow_id}/candidates']['get'],
+  paths['/api/v1/artifacts/{artifact_id}']['get'],
+  paths['/api/v1/artifacts/{artifact_id}/file']['get'],
+  paths['/api/v1/analytics/runs/{run_id}/download']['get'],
   // R8 增补：渠道寻访漏斗路由入锚。
   paths['/api/v1/workflows/{workflow_id}/sourcing-funnel']['get'],
   paths['/api/v1/events']['get'],
@@ -124,6 +133,18 @@ export type Dashboard = {
   ok?: boolean; counts?: DashboardCounts; workflows?: DashboardWorkflow[];
   recent_events?: Array<Record<string, unknown>>;
 }
+export type ModelAuditCall = {
+  call_id: string; operation: string; provider: string; model: string;
+  status: string; validation_status: string; fallback_used: number;
+  duration_ms: number; input_tokens: number; output_tokens: number;
+  request_hash: string; request_preview: string; response_preview: string;
+  error?: string | null; created_at: string; finished_at?: string | null;
+}
+export type ModelAuditResponse = {
+  ok: boolean;
+  items: ModelAuditCall[];
+  summary: { total: number; failed: number; fallback: number; avg_duration_ms: number };
+}
 export type Bootstrap = {
   ok?: boolean;
   core?: { status?: string; db?: string; api_version?: string };
@@ -134,6 +155,8 @@ export type Bootstrap = {
 export type AnalysisMetric = {
   id: string; label: string; value: number | null; unit: string;
   definition_id: string; definition_version: string;
+  // 交付记分卡等目录附加的样本量与口径说明；旧目录项不下发这两个字段。
+  sample_size?: number | null; note?: string;
 }
 export type AnalysisReference = {
   type: 'job' | 'candidate' | 'workflow' | string; id: string | number; label: string; href?: string;
@@ -182,16 +205,30 @@ export type AnalysisTrend = {
 export type WorkbenchAction = {
   type: 'open_candidate' | 'open_workflow' | 'open_analysis'; id: string; label: string;
 }
+// 工作台五分组：decision 待判断 / running 运行中 / waiting_client 待客户 / risk 风险/逾期 / delivered 最近交付。
+// 'pending' 仅作历史兼容保留在联合类型里，服务端自五分组起不再下发。
+export type WorkbenchLane = 'decision' | 'running' | 'waiting_client' | 'risk' | 'delivered'
 export type WorkbenchItem = {
-  item_key: string; source_revision: string; kind: 'candidate_action' | 'approval' | 'analysis';
-  lane: 'pending' | 'running' | 'delivered'; priority_score: number; title: string; subtitle: string;
+  item_key: string; source_revision: string; kind: 'candidate_action' | 'approval' | 'analysis' | 'workflow';
+  lane: WorkbenchLane | 'pending'; priority_score: number; title: string; subtitle: string;
   status_label: string; reason: string; source_label: string; updated_at?: string;
   inbox_state: 'unread' | 'read' | 'later' | 'hidden'; primary_action: WorkbenchAction;
 }
-export type Workbench = {
-  ok: boolean; version: string; summary: { pending: number; running: number; delivered: number; total: number };
-  items: WorkbenchItem[];
+export type WorkbenchSummary = {
+  pending: number; running: number; delivered: number; total: number;
+  decision?: number; waiting_client?: number; risk?: number;
 }
+export type Workbench = {
+  ok: boolean; version: string; summary: WorkbenchSummary;
+  items: WorkbenchItem[]; returned_count?: number; truncated?: boolean;
+}
+// summary.pending 是 decision 的兼容别名；新 lane 计数缺失时回落（decision→pending，其余→0）。
+export const workbenchLaneCount = (workbench: Workbench, lane: WorkbenchLane): number =>
+  lane === 'decision' ? (workbench.summary.decision ?? workbench.summary.pending) : (workbench.summary[lane] ?? 0)
+// 工作台窗口契约：/api/v1/workbench 接受 1..1000 的 limit；服务端序列化窗口统一封顶 300
+// （analytics.workbench），超出部分由 truncated/returned_count 显式告知，summary 仍按
+// flow 全量可见项（最多 1000）统计。请求端固定拉取声明上限，让截断只由服务端真实数据触发。
+export const WORKBENCH_LIMIT = 1000
 export type PreflightResult = { token: string; impact: string; expires_at?: string }
 type WriteAck = Record<string, unknown> & { ok?: boolean }
 export type AgentProposal = {
@@ -209,6 +246,59 @@ export type AgentActionMetrics = {
   confirmation_rate: number | null; rejection_rate: number | null; execution_failure_rate: number | null;
   r3_approvals: { total: number; approved: number; approval_rate: number | null };
 }
+export type FloatingActiveContext = {
+  surface?: string; source_label?: string; type?: string; id?: string | number | null;
+  title?: string; subtitle?: string; status?: string; connected?: boolean; stopped?: boolean;
+  job_candidate_id?: number | null; updated_at?: string; age_seconds?: number; stale?: boolean;
+}
+export type FloatingSuggestedAction = {
+  id: string; type?: string; title?: string; detail?: string; kind?: string;
+}
+export type FloatingBridgeContext = {
+  surface?: string; context_key?: string; instance_id?: string; job_candidate_id?: number | null;
+  title?: string; subtitle?: string; updated_at?: string;
+}
+export type FloatingStatePayload = {
+  ok?: boolean; server_time?: string; active_context?: FloatingActiveContext; active_context_raw?: Record<string, unknown>;
+  context_quality?: Record<string, unknown>; diagnostics?: Array<Record<string, unknown>>;
+  suggested_actions?: FloatingSuggestedAction[];
+}
+export type FloatingActionResult = WriteAck & {
+  status?: string; message?: string; open_url?: string; workflow_id?: string;
+  command?: Record<string, unknown>; result?: Record<string, unknown>; workflow?: Record<string, unknown>;
+}
+export type AgentCandidateAssessResult = WriteAck & {
+  status?: string; message?: string; assessment_id?: number; job_candidate_id?: number; run_id?: string;
+  cached?: boolean; coalesced?: boolean; error?: string;
+  result?: Record<string, unknown>;
+}
+export type AgentRunResult = AgentCandidateAssessResult & { updated_at?: string }
+export type CandidateActionResult = WriteAck & {
+  candidate_id?: number; action?: string; stage?: string; already_applied?: boolean;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+}
+export type ConsultantRecommendationPreflight = PreflightResult & {
+  action?: 'consultant_recommendation'; already_confirmed?: boolean; confirmed_at?: string | null;
+}
+export type ConsultantRecommendationResult = WriteAck & {
+  candidate_id?: number; action?: string; reason?: string; already_confirmed?: boolean;
+  confirmed_at?: string; event_id?: number; business_event_id?: number;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+  // 确认成功即生成的版本化推荐包（status: generated=已生成；旧后端无此字段时缺省，不冒充成功）。
+  package?: RecommendationPackageRef | null;
+}
+export type RecommendationMetrics = {
+  ok?: boolean; job_id?: number; confirmed_recommendations: number;
+  assessed_candidates: number; rate: number | null;
+}
+export type WorkflowArtifactDetail = {
+  artifact_id: string; workflow_id?: string; step_id?: number | null;
+  artifact_type: string; title: string; mime_type: string; content: string;
+  content_size: number; content_truncated: boolean; metadata: Record<string, unknown>;
+  validation_status: string; created_at?: string; downloadable: boolean;
+  download_kind: 'file' | 'content' | 'none'; file_name: string; download_url: string;
+}
+export type WorkflowArtifactPayload = { ok?: boolean; artifact: WorkflowArtifactDetail }
 
 // S4-3 策略复盘：Core 返回动态 dict（openapi 只描述为 object），按 strategy_review.py 实际 payload 收窄声明。
 // revision_diff 逐项可采纳/拒绝（status: pending → accepted/rejected）；S4-3c 起决策经
@@ -475,6 +565,52 @@ export type JobProfileFeedbackResult = {
   ok?: boolean; status?: string; already_disputed?: boolean; item_type?: string; item_key?: string
 }
 
+// 版本化推荐包闭环：顾问确认推荐 → 推荐包（候选摘要/人岗证据/风险/待核验问题）→ 客户反馈按包版本留痕。
+// Core 返回动态 dict（openapi 只描述为 object），按 asa_core/service.py 推荐包方法实际 payload 收窄声明。
+export type RecommendationPackageRef = {
+  package_id: string; version: number; status: string; created_at?: string; recommendation_id?: number;
+}
+export type RecommendationPackageSummary = RecommendationPackageRef & { feedback_count?: number }
+export type RecommendationPackageFeedback = {
+  id: number; feedback_type: string; feedback_type_label: string; content: string;
+  feedback_time?: string; recorded_by?: string; created_at?: string;
+}
+export type RecommendationPackageEvidence = {
+  // status: ready=有当前有效判人评估 / no_current_assessment=证据缺失（如实呈现，不伪造）。
+  status?: string; note?: string; assessment_id?: number; fit_score?: number; fit_level?: string;
+  recommendation?: string; confidence?: number; evidence_coverage?: number;
+  criteria?: Record<string, unknown>; strengths?: string[]; gaps?: string[]; assessed_at?: string;
+}
+export type RecommendationPackageSummaryBlock = {
+  name?: string; current_company?: string; current_title?: string; city?: string;
+  education?: string; experience?: string; stage?: string;
+  job?: { id?: number; title?: string; client?: string };
+  recommendation?: { id?: number; reason?: string; confirmed_by?: string; confirmed_at?: string };
+}
+export type RecommendationPackageDetailPayload = RecommendationPackageRef & {
+  ok?: boolean; candidate_id?: number; person_id?: number; job_id?: number;
+  summary?: RecommendationPackageSummaryBlock;
+  evidence?: RecommendationPackageEvidence;
+  risks?: string[];
+  verification_questions?: string[];
+  feedback?: RecommendationPackageFeedback[];
+}
+export type PackageFeedbackResult = WriteAck & {
+  package_id?: string; package_version?: number; candidate_id?: number;
+  feedback_id?: number; event_id?: number; already_recorded?: boolean;
+  feedback?: RecommendationPackageFeedback;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+}
+
+// 生命周期一等事件（面试/Offer/入职）：Core 返回动态 dict，按 asa_core/service.py record_lifecycle_event
+// 实际 payload 收窄声明；新路由 generated/api.d.ts 尚无，主控 regenerate 后可补锚。
+export type LifecycleEventResult = WriteAck & {
+  candidate_id?: number; event_id?: number; followup_task_id?: number | null; already_recorded?: boolean;
+  event?: { id: number; event_type: string; event_type_label: string; event_status: string; event_time?: string; summary?: string };
+  followup?: { id: number; task_type: string; due_at?: string; status?: string } | null;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+}
+
 // 策略复盘客户端缓存：30 秒 TTL，避免切换 tab 时重复请求。
 // 导出 clearStrategyReviewCache 供测试重置。
 const STRATEGY_REVIEW_CACHE_TTL = 30_000
@@ -497,19 +633,21 @@ const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
 export const api = {
   bootstrap: () => json<Bootstrap>('/api/v1/bootstrap'),
   dashboard: () => json<Dashboard>('/api/v1/dashboard'),
-  workbench: () => json<Workbench>('/api/v1/workbench?limit=300'),
+  workbench: () => json<Workbench>(`/api/v1/workbench?limit=${WORKBENCH_LIMIT}`),
   agentSessions: (limit = 30, q = '') => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`).then(parseAgentSessionList),
   agentSession: (sessionId: string, limit = 100) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}`).then(parseAgentSession),
   health: () => json<{ ok?: boolean; status?: string }>('/api/v1/health'),
   updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
     write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),
+  archiveAllAgentSessions: () =>
+    write<{ ok: boolean; archived_count: number; session_ids: string[] }>('/api/v1/copilot/sessions/archive-all', {}),
   analysisRun: (runId: string) => json<{ ok: boolean; result: AnalysisResult; duration_ms: number; template_id?: string | null }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}`),
   createAnalysis: (catalogId: string, question = '', scope: Record<string, unknown> = {}) =>
     write<{ ok: boolean; result: AnalysisResult; duration_ms: number }>('/api/v1/analytics/runs', { catalog_id: catalogId, question, scope }),
   refreshAnalysis: (runId: string) =>
     write<{ ok: boolean; result: AnalysisResult; duration_ms: number }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}/refresh`, {}),
   exportAnalysis: (runId: string) =>
-    write<{ ok: boolean; artifact: { artifact_id: string; file_path: string; title: string } }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}/export`, {}),
+    write<{ ok: boolean; artifact: { artifact_id: string; download_url: string; title: string } }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}/export`, {}),
   analyticsCatalog: () => json<{ ok: boolean; version: string; items: AnalysisCatalogItem[] }>('/api/v1/analytics/catalog'),
   analyticsTemplates: () => json<{ ok: boolean; items: AnalysisTemplate[] }>('/api/v1/analytics/templates'),
   createAnalyticsTemplate: (input: AnalysisTemplateInput) =>
@@ -529,17 +667,56 @@ export const api = {
   agentProposals: (status = 'pending', limit = 20) =>
     json<{ ok: boolean; status: string; proposals: AgentProposal[] }>(`/api/v1/agent/proposals?status=${encodeURIComponent(status)}&limit=${limit}`),
   agentActionMetrics: (days = 7) => json<{ ok: boolean; window_days: number; metrics: AgentActionMetrics }>(`/api/v1/agent/metrics?days=${days}`),
+  modelAudit: (limit = 50, operation = '', status = '') =>
+    json<ModelAuditResponse>(`/api/v1/agent/model-audit?limit=${limit}${operation ? `&operation=${encodeURIComponent(operation)}` : ''}${status ? `&status=${encodeURIComponent(status)}` : ''}`),
+  floatingState: () => json<FloatingStatePayload>('/api/asa/floating/state'),
+  floatingAction: (action: string, payload: Record<string, unknown> = {}) =>
+    write<FloatingActionResult>('/api/asa/floating/action', { action, ...payload }),
+  agentCandidateAssess: (jobCandidateId: number, force = true, trigger = 'agent_page_context') =>
+    write<AgentCandidateAssessResult>('/api/agent/candidate-assess', { job_candidate_id: jobCandidateId, force, trigger }),
+  agentRun: (runId: string) =>
+    json<AgentRunResult>(`/api/agent/run?run_id=${encodeURIComponent(runId)}`),
   generateAgentProposals: (jobCandidateIds: number[] = [], limit = 12) =>
     write<{ ok: boolean; proposals: AgentProposal[]; skipped: Array<Record<string, unknown>> }>('/api/v1/agent/proposals/generate', { job_candidate_ids: jobCandidateIds, limit }),
   preflightAgentProposal: (proposalId: string) =>
     write<AgentProposalPreflight>(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/preflight`, {}),
   decideAgentProposal: (proposalId: string, confirmationToken: string, decision: 'approve' | 'reject', note = '') =>
     write<WriteAck>(`/api/v1/agent/proposals/${encodeURIComponent(proposalId)}/decision`, { confirmation_token: confirmationToken, decision, note }),
-  jobs: (q = '') => json<{items: Job[]; total: number}>(`/api/v1/jobs?limit=200&q=${encodeURIComponent(q)}`),
+  jobs: (q = '', limit = 200, offset = 0) =>
+    json<{items: Job[]; total: number; limit?: number; offset?: number}>(
+      `/api/v1/jobs?limit=${limit}&offset=${offset}&q=${encodeURIComponent(q)}`,
+    ),
+  allJobs: async (q = '') => {
+    const limit = 200
+    const first = await api.jobs(q, limit, 0)
+    const items = [...first.items]
+    while (items.length < first.total) {
+      const page = await api.jobs(q, limit, items.length)
+      if (!page.items.length) break
+      items.push(...page.items)
+    }
+    return { items, total: first.total }
+  },
   job: (id: number) => json<{job: JobDetail}>(`/api/v1/jobs/${id}`),
-  candidates: (q = '', jobId?: number) => json<{items: Candidate[]; total: number}>(`/api/v1/candidates?limit=200&q=${encodeURIComponent(q)}${jobId ? `&job_id=${jobId}` : ''}`),
+  candidates: (q = '', jobId?: number, limit = 200, offset = 0) =>
+    json<{items: Candidate[]; total: number; limit?: number; offset?: number}>(
+      `/api/v1/candidates?limit=${limit}&offset=${offset}&q=${encodeURIComponent(q)}${jobId ? `&job_id=${jobId}` : ''}`,
+    ),
+  allCandidates: async (q = '', jobId?: number) => {
+    const limit = 200
+    const first = await api.candidates(q, jobId, limit, 0)
+    const items = [...first.items]
+    while (items.length < first.total) {
+      const page = await api.candidates(q, jobId, limit, items.length)
+      if (!page.items.length) break
+      items.push(...page.items)
+    }
+    return { items, total: first.total }
+  },
   candidate: (id: number) => json<{candidate: CandidateDetail}>(`/api/v1/candidates/${id}`),
   workflow: async (id: string): Promise<Workflow> => parseWorkflow(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}`)),
+  workflowArtifact: (artifactId: string) =>
+    json<WorkflowArtifactPayload>(`/api/v1/artifacts/${encodeURIComponent(artifactId)}`),
   // R7 增量路由：轮询打 summary，步骤完整 output 与人选列表按需分页拉取。
   workflowSummary: async (id: string): Promise<WorkflowSummary> => parseWorkflowSummary(await json<unknown>(`/api/v1/workflows/${encodeURIComponent(id)}/summary`)),
   workflowStep: async (id: string, stepId: number): Promise<Workflow['steps'][number]> => {
@@ -603,8 +780,8 @@ export const api = {
       throw error
     }
   },
-  generateCandidateAssessment: (candidateId: number, jobId: number) =>
-    write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}`, {}),
+  generateCandidateAssessment: (candidateId: number, jobId: number, force = false) =>
+    write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}${force ? '&force=true' : ''}`, {}),
   patchAssessmentAdvisorAction: (candidateId: number, jobId: number, action: AssessmentAdvisorAction, note?: string) =>
     write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments/${jobId}/advisor-action`, { action, ...(note ? { note } : {}) }, 'PATCH'),
   // S6-4 评估校准度量（只读）：数据不足的分组率为 null，由展示层如实呈现。
@@ -626,12 +803,187 @@ export const api = {
   },
   commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string) => {
     const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}) }
-    return write('/api/v1/candidate-actions/commit', body)
+    return write<CandidateActionResult>('/api/v1/candidate-actions/commit', body)
   },
+  consultantRecommendationPreflight: (candidate_id: number) => {
+    const body = { request_id: requestId(), candidate_id }
+    return json<ConsultantRecommendationPreflight>('/api/v1/consultant-recommendations/preflight', { method: 'POST', body: JSON.stringify(body) })
+  },
+  consultantRecommendationCommit: (candidate_id: number, reason: string, preflight_token: string) =>
+    write<ConsultantRecommendationResult>('/api/v1/consultant-recommendations/commit', { candidate_id, reason, preflight_token }),
+  recommendationMetrics: (job_id: number) =>
+    json<RecommendationMetrics>(`/api/v1/jobs/${job_id}/recommendation-metrics`),
+  // 寻访策略按项编辑（本期新上，generated/api.d.ts 尚无此路由，主控 regenerate 后可补锚）。
+  // 走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应）；
+  // 404=工作流/策略不存在，409=外部寻访已开始/目标项缺失/质量校验不过（中文 detail 透出）。
+  applyStrategyEdits: (workflowId: string, edits: StrategyItemEdit[], note = '') =>
+    write<StrategyItemEditResult>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/strategy/edits`, { edits, note }),
+  // 版本化推荐包：列表随候选人详情返回（recommendation_packages 字段），详情/反馈按需拉取与写入。
+  // 详情 404=推荐包不存在；反馈走 write 幂等封装，404=推荐包不存在，409=反馈类型非法/内容为空。
+  recommendationPackages: (candidateId: number) =>
+    json<{ ok?: boolean; candidate_id?: number; items: RecommendationPackageSummary[] }>(`/api/v1/candidates/${candidateId}/recommendation-packages`),
+  recommendationPackage: (packageId: string) =>
+    json<RecommendationPackageDetailPayload>(`/api/v1/recommendation-packages/${encodeURIComponent(packageId)}`),
+  recordPackageFeedback: (packageId: string, input: { feedback_type: string; content: string; feedback_time?: string }) =>
+    write<PackageFeedbackResult>(`/api/v1/recommendation-packages/${encodeURIComponent(packageId)}/feedback`, { ...input }),
+  // 生命周期一等事件（面试/Offer/入职）：写候选人时间线并自动生成跟进待办（不自动对外沟通）。
+  // 走 write 幂等封装；404=候选人不存在，409=事件类型/状态/时间格式非法（中文 detail 透出）。
+  recordLifecycleEvent: (candidateId: number, input: { event_type: string; occurred_at?: string; event_status?: string; notes?: string }) =>
+    write<LifecycleEventResult>(`/api/v1/candidates/${candidateId}/lifecycle-events`, { ...input }),
+  // 岗位自动周报：生成走 write 幂等封装（同周更新同一 artifact，version 自增）；
+  // 列表只读，尚无周报时 latest=null/items=[]；完整正文走 workflowArtifact 查看器。
+  generateJobWeeklyReport: (jobId: number) =>
+    write<JobWeeklyReportCreateResult>(`/api/v1/jobs/${jobId}/weekly-report`, {}),
+  jobWeeklyReports: (jobId: number) =>
+    json<JobWeeklyReportListPayload>(`/api/v1/jobs/${jobId}/weekly-reports`),
+  // 二期知识飞轮：knowledge_proposal 知识增补提案。列表/详情只读；生成走 write 幂等封装
+  // （同内容不重复提案）；确认走 preflight（300s 令牌+内容签名）→ decision 两段，
+  // 409=令牌无效/过期/内容漂移/非法决策/拒绝缺原因（中文 detail 透出）。
+  knowledgeProposals: (status = 'pending', limit = 50, proposalType = '') =>
+    json<KnowledgeProposalListPayload>(`/api/v1/knowledge-proposals?status=${encodeURIComponent(status)}&limit=${limit}${proposalType ? `&proposal_type=${encodeURIComponent(proposalType)}` : ''}`),
+  knowledgeProposal: (proposalId: string) =>
+    json<KnowledgeProposalDetailPayload>(`/api/v1/knowledge-proposals/${encodeURIComponent(proposalId)}`),
+  generateKnowledgeProposals: (limit = 50) =>
+    write<KnowledgeProposalGenerateResult>('/api/v1/knowledge-proposals/generate', { limit }),
+  preflightKnowledgeProposal: (proposalId: string) =>
+    write<KnowledgeProposalPreflight>(`/api/v1/knowledge-proposals/${encodeURIComponent(proposalId)}/preflight`, {}),
+  decideKnowledgeProposal: (proposalId: string, confirmationToken: string, decision: KnowledgeProposalDecisionKind, note = '') =>
+    write<KnowledgeProposalDecisionResult>(`/api/v1/knowledge-proposals/${encodeURIComponent(proposalId)}/decision`, { confirmation_token: confirmationToken, decision, note }),
+  // 二期知识飞轮：核心公司校准（company_calibration）。队列/进度/详情只读；提交走 write
+  // 幂等封装（Idempotency-Key + request_id；同内容重提不 bump version，重放返回首次响应）。
+  // 404=公司不在图谱，409=校准状态非法（中文 detail 透出）。
+  companyCalibrations: (q = '', status = '', limit = 50) =>
+    json<CompanyCalibrationQueuePayload>(`/api/v1/company-calibrations?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}${status ? `&status=${encodeURIComponent(status)}` : ''}`),
+  companyCalibrationProgress: () =>
+    json<CompanyCalibrationProgress>('/api/v1/company-calibrations/progress'),
+  companyCalibrationDetail: (companyKey: string) =>
+    json<CompanyCalibrationDetailPayload>(`/api/v1/company-calibrations/${encodeURIComponent(companyKey)}`),
+  submitCompanyCalibration: (input: CompanyCalibrationSubmitInput) =>
+    write<CompanyCalibrationResult>('/api/v1/company-calibrations', { ...input }),
+}
+
+// 寻访策略按项编辑：op 枚举与参数见后端 strategy_editor.SUPPORTED_OPS；[key: string] unknown
+// 承载各 op 的参数位（group/terms/targets/tier/name/accepted_levels/constraints 等）。
+export type StrategyItemEdit = { op: string } & Record<string, unknown>
+export type StrategyItemEditResult = WriteAck & {
+  workflow_id?: string; revision?: number; edit_count?: number;
+  applied?: Array<{ op?: string; summary?: string }>;
+  artifact_id?: string; approval_refreshed?: boolean;
+  strategy_hash?: string; query_plan_hash?: string; strategy_ready?: boolean;
+  strategy_v2?: Record<string, unknown>;
+  receipt?: { idempotent_replay?: boolean; request_id?: string };
+}
+
+// 岗位自动周报：Core 返回动态 dict，按 asa_core/job_weekly_report.py 实际 payload 收窄声明。
+export type JobWeeklyReportSummary = {
+  total?: number | null; active?: number | null; recommended?: number | null;
+  confirmed_this_week?: number | null; comparison?: string;
+  risk_count?: number; suggestion_count?: number;
+}
+export type JobWeeklyReportBrief = {
+  artifact_id: string; title: string; version: number;
+  week_start: string; week_end: string; generated_at?: string; created_at?: string;
+  validation_status?: string; summary?: JobWeeklyReportSummary;
+}
+export type JobWeeklyReportListPayload = {
+  ok?: boolean; job_id?: number; latest: JobWeeklyReportBrief | null; items: JobWeeklyReportBrief[];
+}
+export type JobWeeklyReportCreateResult = WriteAck & {
+  job_id?: number; artifact_id?: string; version?: number;
+  week_start?: string; week_end?: string;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
 }
 
 const requestId = () => `web_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`
 const write = <T = WriteAck>(url: string, payload: Record<string, unknown>, method: 'POST' | 'PATCH' = 'POST'): Promise<T> => {
   const request_id = requestId()
   return json<T>(url, { method, headers: { 'Idempotency-Key': `${request_id}_${url}` }, body: JSON.stringify({ ...payload, request_id }) })
+}
+
+// 二期知识飞轮（knowledge_proposal）：Core 返回动态 dict（openapi 只描述为 object），
+// 按 asa_core/knowledge_proposals.py 实际 payload 收窄声明。本期为后端新上路由，
+// generated/api.d.ts 尚无，待主控 regenerate 后补锚。
+export type KnowledgeProposalType = 'company_graph_entry' | 'skill_alias' | 'level_mapping' | 'negative_rule'
+export type KnowledgeProposalStatus = 'pending' | 'accepted' | 'rejected' | 'superseded'
+export type KnowledgeProposalDecisionKind = 'accept' | 'reject'
+export type KnowledgeProposalBrief = {
+  proposal_id: string; proposal_type: KnowledgeProposalType; proposal_type_label: string;
+  title: string; status: KnowledgeProposalStatus; status_label: string;
+  created_at?: string; decided_at?: string | null; decided_by?: string | null;
+}
+export type KnowledgeProposalEvidence = {
+  source_type?: string; source_ids?: number[]; summary?: string;
+  samples?: Array<Record<string, unknown>>;
+}
+export type KnowledgeProposalContent = {
+  scope_type?: string; scope?: string; rule?: string; rationale?: string;
+  name?: string; track?: string; business?: string; categories?: string[];
+  trigger?: string; trigger_code?: string; occurrences?: number;
+}
+export type KnowledgeProposalDetailPayload = KnowledgeProposalBrief & {
+  ok?: boolean; content: KnowledgeProposalContent; evidence: KnowledgeProposalEvidence[];
+  applied_to?: string | null; decision_note?: string | null; updated_at?: string;
+}
+export type KnowledgeProposalListPayload = {
+  ok?: boolean; status: string; items: KnowledgeProposalBrief[];
+  counts?: Partial<Record<KnowledgeProposalStatus, number>>;
+  type_labels?: Record<string, string>;
+}
+// 低于阈值/不可结构化的聚类只留候选不生成提案，如实呈现。
+export type KnowledgeProposalCandidate = { kind?: string; key?: string; count?: number; needed?: number; reason?: string }
+export type KnowledgeProposalGenerateResult = WriteAck & {
+  created?: KnowledgeProposalBrief[]; existing?: KnowledgeProposalBrief[];
+  candidates?: KnowledgeProposalCandidate[];
+  thresholds?: { stop_reason_min_cluster?: number; feedback_min_cluster?: number; company_min_cluster?: number };
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+}
+export type KnowledgeProposalPreflight = {
+  ok?: boolean; confirmation_token: string; expires_in?: number; signature?: string;
+  proposal?: KnowledgeProposalDetailPayload; impact?: string;
+}
+export type KnowledgeProposalDecisionResult = WriteAck & {
+  proposal_id?: string; decision?: KnowledgeProposalDecisionKind;
+  status?: KnowledgeProposalStatus; status_label?: string; applied_to?: string;
+  proposal?: KnowledgeProposalDetailPayload;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
+}
+
+// 二期知识飞轮：核心公司校准（company_calibration）。图谱 JSON 保持原始名单，校准是 DB 覆盖层；
+// Core 返回动态 dict（openapi 只描述为 object），按 asa_core/company_calibration.py 实际 payload
+// 收窄声明。本期为后端新上路由，generated/api.d.ts 尚无，待主控 regenerate 后补锚。
+export type CompanyCalibrationStatus = 'calibrated' | 'rejected' | 'needs_review'
+// 队列条目额外有 pending（未校准：无校准记录）。
+export type CompanyCalibrationQueueStatus = CompanyCalibrationStatus | 'pending'
+export type CompanyCalibrationRecord = {
+  calibration_id: string; company_key: string; company_name: string;
+  track: string; product_lines: string[]; skill_tags: string[]; level_system: string;
+  no_poach: boolean; non_compete: boolean; note: string;
+  status: CompanyCalibrationStatus; status_label: string;
+  calibrated_by?: string; calibrated_at?: string; version: number; updated_at?: string;
+}
+export type CompanyCalibrationQueueItem = {
+  company_key: string; company_name: string; track: string; business: string; categories: string[];
+  status: CompanyCalibrationQueueStatus; status_label: string;
+  calibration: CompanyCalibrationRecord | null;
+}
+export type CompanyCalibrationQueuePayload = {
+  ok?: boolean; status: string; query?: string;
+  items: CompanyCalibrationQueueItem[]; total: number;
+  status_labels?: Record<string, string>;
+}
+export type CompanyCalibrationProgress = {
+  ok?: boolean; target: number; calibrated: number; needs_review: number; rejected: number;
+  pending: number; total: number; ratio: number | null;
+}
+export type CompanyCalibrationDetailPayload = CompanyCalibrationQueueItem & { ok?: boolean }
+export type CompanyCalibrationSubmitInput = {
+  company_name: string; status: CompanyCalibrationStatus;
+  track?: string; product_lines?: string[]; skill_tags?: string[]; level_system?: string;
+  no_poach?: boolean; non_compete?: boolean; note?: string; calibrated_by?: string;
+}
+export type CompanyCalibrationResult = WriteAck & {
+  changed?: boolean; company_key?: string; company_name?: string;
+  status?: CompanyCalibrationStatus; status_label?: string; version?: number;
+  calibration?: CompanyCalibrationRecord; progress?: CompanyCalibrationProgress;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
 }

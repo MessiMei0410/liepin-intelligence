@@ -162,6 +162,19 @@ describe('判人评估区（CandidateAssessment）', () => {
     expect(screen.getByRole('region', { name: '顾问口径摘要' })).toHaveTextContent('技术市场线轨迹清晰')
   })
 
+  it('已有评估点击重新评估时显式 force，生成新版本而非复用缓存', async () => {
+    const forcedUrl = `${ASSESSMENT_URL}&force=true`
+    const fetchMock = stubFetch((url, init) => {
+      if (url === forcedUrl && init?.method === 'POST') return { body: assessmentPayload }
+      return undefined
+    })
+    renderAssessment()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '重新评估' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => String(url) === forcedUrl && init?.method === 'POST')).toBe(true))
+    expect(await screen.findByRole('status')).toHaveTextContent('评估已重新生成')
+  })
+
   it('证据列表：类型中文（简历/图谱）+ ref，标注维度', async () => {
     stubFetch()
     renderAssessment()
@@ -442,5 +455,150 @@ describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）',
     expect(screen.queryByRole('region', { name: '在同龄人里的位置' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '动机与时机' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '需要核实的问题' })).not.toBeInTheDocument()
+  })
+})
+
+describe('判人评估区加载 / 重试 / 长引用', () => {
+  it('加载中：status 加载态 + aria-busy，请求完成后移除', async () => {
+    let resolveFetch!: (value: Response) => void
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(resolve => { resolveFetch = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    renderAssessment()
+    const loading = screen.getByRole('status')
+    expect(loading).toHaveTextContent('评估加载中')
+    expect(screen.getByRole('region', { name: '判人评估' })).toHaveAttribute('aria-busy', 'true')
+    resolveFetch(mockResponse(assessmentPayload))
+    await screen.findByRole('region', { name: '职业轨迹' })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('加载失败：错误文案 + 重新加载按钮，重试成功后渲染评估', async () => {
+    let attempts = 0
+    stubFetch((url, init) => {
+      if (!init?.method && attempts++ === 0) return { body: { detail: 'Core 连接中断，评估服务暂不可用' }, ok: false, status: 502 }
+      return undefined
+    })
+    renderAssessment()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Core 连接中断')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '重新加载' }))
+    expect(await screen.findByRole('region', { name: '职业轨迹' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('证据按维度分组展示，长引用保留完整出处 title', async () => {
+    const longRef = `https://example.com/resume-source?line=${'a'.repeat(240)}`
+    const doc = {
+      ...assessmentDoc,
+      dimensions: {
+        ...assessmentDoc.dimensions,
+        move_history: {
+          ...assessmentDoc.dimensions.move_history,
+          evidence: [{ type: '简历', ref: longRef }],
+        },
+      },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, assessment: doc } } : undefined))
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    // S6-5 起默认三桶视图，按维度分组需显式切换
+    const user = userEvent.setup()
+    await user.click(within(evidence).getByRole('button', { name: '按维度' }))
+    expect(within(evidence).getByText(/职业轨迹/)).toBeInTheDocument()
+    expect(within(evidence).getByText(/跳槽质量史/)).toBeInTheDocument()
+    expect(within(evidence).getAllByRole('listitem')).toHaveLength(3)
+    const longItem = within(evidence).getByTitle(longRef)
+    expect(longItem).toHaveTextContent(longRef)
+    expect(longItem).toHaveClass('assessment-evidence-ref')
+  })
+})
+
+
+// S6-5 三桶证据卡：直接证据=维度置信度 certain 且带出处；合理推断=inferred 且带出处；
+// 未知项=缺出处/置信度未知的证据 +「需要核实的问题」待核验条目。默认三桶视图，可切回按维度。
+const bucketGroup = (evidence: HTMLElement, label: string) => {
+  const head = within(evidence).getByText(label)
+  return head.closest('.assessment-evidence-group') as HTMLElement
+}
+
+describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知项）', () => {
+  it('默认三桶视图：certain 维证据进直接证据、inferred 进合理推断，并如实说明归桶口径', async () => {
+    stubFetch()
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    expect(within(evidence).getByText(/归桶口径/)).toBeInTheDocument()
+    const direct = bucketGroup(evidence, '直接证据')
+    expect(within(direct).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(direct).getByText(/2021\.03-至今 杰华特/)).toBeInTheDocument()
+    const inferred = bucketGroup(evidence, '合理推断')
+    expect(within(inferred).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(inferred).getByText(/晶丰明源/)).toBeInTheDocument()
+  })
+
+  it('空桶如实显示「本桶暂无条目」，不编造', async () => {
+    stubFetch()
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    const unknown = bucketGroup(evidence, '未知项')
+    expect(within(unknown).queryAllByRole('listitem')).toHaveLength(0)
+    expect(within(unknown).getByText('本桶暂无条目。')).toBeInTheDocument()
+  })
+
+  it('缺出处或置信度未知的证据按保守口径进未知项', async () => {
+    const doc = {
+      ...assessmentDoc,
+      dimensions: {
+        ...assessmentDoc.dimensions,
+        trajectory: {
+          ...assessmentDoc.dimensions.trajectory,
+          confidence: undefined,
+          evidence: [{ type: '简历', ref: '' }, { type: '图谱', ref: '杰华特微电子股份有限公司' }],
+        },
+        move_history: null,
+      },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, assessment: doc } } : undefined))
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    const unknown = bucketGroup(evidence, '未知项')
+    const items = within(unknown).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('未提供出处')
+    expect(items[1]).toHaveTextContent('杰华特微电子股份有限公司')
+    expect(within(bucketGroup(evidence, '直接证据')).queryAllByRole('listitem')).toHaveLength(0)
+  })
+
+  it('「需要核实的问题」条目无论置信度一律进未知项（待核验），不与维度证据重复计数', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    const unknown = bucketGroup(evidence, '未知项')
+    const items = within(unknown).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('待核验 · 高风险')
+    expect(items[0]).toHaveTextContent(/9 个月简历空窗/)
+    expect(items[1]).toHaveTextContent('待核验 · 中风险')
+    // 直接证据 = 职业轨迹 2 + 在同龄人里的位置 1 + 动机与时机 1；合理推断 = 跳槽质量史 1
+    expect(within(bucketGroup(evidence, '直接证据')).getAllByRole('listitem')).toHaveLength(4)
+    expect(within(bucketGroup(evidence, '合理推断')).getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  it('三桶 ↔ 按维度视图可切换，aria-pressed 如实回写', async () => {
+    stubFetch()
+    renderAssessment()
+    const evidence = await screen.findByRole('region', { name: '证据' })
+    const user = userEvent.setup()
+    const bucketsButton = within(evidence).getByRole('button', { name: '三桶视图' })
+    const dimensionsButton = within(evidence).getByRole('button', { name: '按维度' })
+    expect(bucketsButton).toHaveAttribute('aria-pressed', 'true')
+    expect(dimensionsButton).toHaveAttribute('aria-pressed', 'false')
+    await user.click(dimensionsButton)
+    expect(within(evidence).getByText(/职业轨迹/)).toBeInTheDocument()
+    expect(within(evidence).queryByText(/归桶口径/)).not.toBeInTheDocument()
+    expect(dimensionsButton).toHaveAttribute('aria-pressed', 'true')
+    expect(bucketsButton).toHaveAttribute('aria-pressed', 'false')
+    await user.click(bucketsButton)
+    expect(within(evidence).getByText(/归桶口径/)).toBeInTheDocument()
+    expect(bucketsButton).toHaveAttribute('aria-pressed', 'true')
   })
 })

@@ -223,9 +223,12 @@ def _bounded_working_copy_candidates(root: Path, filename: str, timeout_seconds:
         process.join(1)
         return []
     try:
-        paths = [Path(value) for value in output.get_nowait()]
+        paths = [Path(value) for value in output.get(timeout=1.0)]
     except Exception:
         paths = []
+    finally:
+        output.close()
+        output.join_thread()
     if paths:
         _cache_working_copy(filename, paths[0])
     return paths
@@ -418,6 +421,8 @@ def _extract_text(path: Path) -> tuple[str, bool]:
     if size > MAX_ATTACHMENT_BYTES:
         raise ValueError("附件超过 25 MB 读取上限")
     suffix = path.suffix.lower()
+    if suffix in {".docx", ".xlsx", ".pptx"}:
+        _validate_zip_container(path)
     if suffix == ".docx":
         text = _extract_docx(path)
     elif suffix == ".pdf":
@@ -434,6 +439,24 @@ def _extract_text(path: Path) -> tuple[str, bool]:
         raise ValueError(f"暂不支持读取 {suffix} 文件")
     cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     return cleaned[:MAX_EXTRACTED_CHARS], len(cleaned) > MAX_EXTRACTED_CHARS
+
+
+def _validate_zip_container(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > 10000:
+                raise ValueError("Office 文件内部条目过多")
+            total_size = sum(max(0, info.file_size) for info in infos)
+            if total_size > 200 * 1024 * 1024:
+                raise ValueError("Office 文件解压后超过 200 MB 安全上限")
+            for info in infos:
+                if info.file_size > 50 * 1024 * 1024:
+                    raise ValueError("Office 文件包含超大内部条目")
+                if info.file_size > 1024 * 1024 and info.compress_size > 0 and info.file_size / info.compress_size > 200:
+                    raise ValueError("Office 文件压缩比异常")
+    except zipfile.BadZipFile as exc:
+        raise ValueError("Office 文件结构损坏") from exc
 
 
 def _extract_text_worker(path_text: str, output: Any) -> None:
@@ -454,9 +477,12 @@ def _extract_text_bounded(path: Path, timeout_seconds: float = 8.0) -> tuple[str
         process.join(1)
         raise ValueError("附件仍在微信云端或正被占用，请先打开下载后重试")
     try:
-        payload = output.get_nowait()
+        payload = output.get(timeout=1.0)
     except Exception as exc:
         raise ValueError("附件解析子进程未返回结果") from exc
+    finally:
+        output.close()
+        output.join_thread()
     if not payload.get("ok"):
         raise ValueError(str(payload.get("error") or "附件解析失败"))
     text, truncated = payload["result"]

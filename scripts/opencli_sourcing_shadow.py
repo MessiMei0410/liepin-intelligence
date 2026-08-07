@@ -161,6 +161,8 @@ def opencli_endpoint(channel: str, port: int) -> tuple[str, str]:
         )
         if not tab or not tab.get("webSocketDebuggerUrl"):
             raise RuntimeError("LIEPIN_LOGIN_REQUIRED: no signed-in Liepin search tab")
+        if not liepin_tab_is_authenticated(tab):
+            raise RuntimeError("LIEPIN_LOGIN_REQUIRED: Liepin search page is no longer authenticated")
         return str(tab["webSocketDebuggerUrl"]), ""
 
     source = choose_authenticated_tab(port)
@@ -178,6 +180,34 @@ def opencli_endpoint(channel: str, port: int) -> tuple[str, str]:
         target.close()
 
 
+def liepin_tab_is_authenticated(tab: dict[str, Any]) -> bool:
+    """Reject login pages before OpenCLI can misclassify them as empty results."""
+    endpoint = str(tab.get("webSocketDebuggerUrl") or "")
+    if not endpoint:
+        return False
+    cdp = CDP(endpoint)
+    try:
+        probe = cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": "JSON.stringify({href:location.href,title:document.title,body:(document.body?.innerText||'').slice(0,1200)})",
+                "returnByValue": True,
+            },
+        )
+    finally:
+        cdp.close()
+    value = ((probe or {}).get("result") or {}).get("result", {}).get("value", "")
+    try:
+        state = json.loads(value) if isinstance(value, str) else {}
+    except json.JSONDecodeError:
+        state = {}
+    href = str(state.get("href") or tab.get("url") or "").lower()
+    title = str(state.get("title") or tab.get("title") or "")
+    body = str(state.get("body") or "")
+    login_markers = ("/login", "passport", "登录猎聘", "扫码登录", "密码登录", "手机号登录")
+    return not any(marker in href or marker in title or marker in body for marker in login_markers)
+
+
 def close_target(port: int, target_id: str) -> None:
     if not target_id:
         return
@@ -190,7 +220,15 @@ def close_target(port: int, target_id: str) -> None:
 
 
 def capture_opencli_details(
-    channel: str, rows: list[dict[str, Any]], port: int, endpoint: str,
+    channel: str,
+    rows: list[dict[str, Any]],
+    port: int,
+    endpoint: str,
+    *,
+    detail_min_delay: float = 2.5,
+    detail_max_delay: float = 5.5,
+    detail_burst_size: int = 6,
+    detail_burst_cooldown: float = 15.0,
 ) -> dict[str, Any]:
     if not rows:
         return {"requested": 0, "complete": 0, "partial": 0, "failed": 0, "status": "completed_empty"}
@@ -213,7 +251,15 @@ def capture_opencli_details(
 
     try:
         if channel == "liepin":
-            stats: dict[str, Any] = capture_resume_details(port, rows, len(rows))
+            stats: dict[str, Any] = capture_resume_details(
+                port,
+                rows,
+                len(rows),
+                min_delay=detail_min_delay,
+                max_delay=detail_max_delay,
+                burst_size=detail_burst_size,
+                burst_cooldown=detail_burst_cooldown,
+            )
         else:
             detail_cdp = CDP(endpoint)
             try:
@@ -327,6 +373,11 @@ def capture_primary_details(
     rows: list[dict[str, Any]],
     detail_limit: int,
     port: int,
+    *,
+    detail_min_delay: float = 2.5,
+    detail_max_delay: float = 5.5,
+    detail_burst_size: int = 6,
+    detail_burst_cooldown: float = 15.0,
 ) -> dict[str, Any]:
     selected = rows[: max(0, detail_limit)]
     pending = [
@@ -336,7 +387,16 @@ def capture_primary_details(
     if pending:
         endpoint, target_id = opencli_endpoint(channel, port)
         try:
-            capture_opencli_details(channel, pending, port, endpoint)
+            capture_opencli_details(
+                channel,
+                pending,
+                port,
+                endpoint,
+                detail_min_delay=detail_min_delay,
+                detail_max_delay=detail_max_delay,
+                detail_burst_size=detail_burst_size,
+                detail_burst_cooldown=detail_burst_cooldown,
+            )
         finally:
             close_target(port, target_id)
     counts = {
@@ -363,6 +423,10 @@ def run_primary_recall(
     min_score: int,
     max_queries: int,
     detail_limit: int,
+    detail_min_delay: float = 2.5,
+    detail_max_delay: float = 5.5,
+    detail_burst_size: int = 6,
+    detail_burst_cooldown: float = 15.0,
 ) -> dict[str, Any]:
     """OpenCLI 默认主渠道召回：多词召回 + 生产同款分数门/详情采集/完整度标准。
 
@@ -426,7 +490,16 @@ def run_primary_recall(
             continue
         seen.add(key)
         deduped.append(item)
-    detail_capture = capture_primary_details(channel, deduped, detail_limit, port)
+    detail_capture = capture_primary_details(
+        channel,
+        deduped,
+        detail_limit,
+        port,
+        detail_min_delay=detail_min_delay,
+        detail_max_delay=detail_max_delay,
+        detail_burst_size=detail_burst_size,
+        detail_burst_cooldown=detail_burst_cooldown,
+    )
     gated = apply_position_score_gate(deduped, db, client, job, min_score)
     accepted = gated
     complete = sum(1 for item in accepted if item.get("resume_capture_status") == "complete")
@@ -510,6 +583,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--raw-output", type=Path, default=None)
     parser.add_argument("--detail-limit", type=int, default=24)
+    parser.add_argument("--detail-min-delay", type=float, default=2.5)
+    parser.add_argument("--detail-max-delay", type=float, default=5.5)
+    parser.add_argument("--detail-burst-size", type=int, default=6)
+    parser.add_argument("--detail-burst-cooldown", type=float, default=15.0)
     parser.add_argument("--max-queries", type=int, default=3)
     parser.add_argument("--client", required=True)
     parser.add_argument("--job", required=True)
@@ -535,6 +612,7 @@ def main() -> int:
         summary = run_primary_recall(
             args.channel, queries, args.limit, args.port, args.opencli_bin,
             args.db, args.client, args.job, args.min_score, args.max_queries, args.detail_limit,
+            args.detail_min_delay, args.detail_max_delay, args.detail_burst_size, args.detail_burst_cooldown,
         )
         rows = summary.pop("rows")
         raw_rows = summary.pop("raw_rows")

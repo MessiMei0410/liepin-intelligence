@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MappingTaskCard } from '../workflows/MappingTaskCard'
 import { StrategyReviewExpansion } from '../workflows/StrategyReviewExpansion'
+import {
+  groupMappingTeams,
+  humanizeMappingFailure,
+  mappingClueRate,
+  mappingConfidenceLabel,
+  mappingStatusLabel,
+} from '../workflows/mappingTask'
 import { mockResponse } from './helpers'
 
 // S5-2 Mapping 任务卡视图 + 决策树入口：团队树/人选卡/七态动作/确认破冰/备注 PATCH/入库/失败记账人话/淘汰折叠。
@@ -113,6 +120,7 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
     const link = card.getByRole('link', { name: '来源 1' })
     expect(link).toHaveAttribute('href', 'https://doi.org/10.1109/example')
     expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('title', 'https://doi.org/10.1109/example')
     expect(cardOf('L**').getByText('已接触')).toBeInTheDocument()
     expect(cardOf('D**').getByText('已回复')).toBeInTheDocument()
     expect(cardOf('P**').getByText('已搁置')).toBeInTheDocument()
@@ -256,6 +264,7 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
     const card = cardOf('K**')
     expect(await card.findByText(/已入库 · 2026-07-23 12:00/)).toBeInTheDocument()
     expect(card.getByText('已入库')).toBeInTheDocument()
+    expect(await card.findByText('入库完成')).toHaveAttribute('role', 'status')
     const intakeCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/candidates/1/intake'))
     expect(intakeCalls).toHaveLength(1)
     expect((intakeCalls[0][1]?.headers as Record<string, string>)['Idempotency-Key']).toMatch(/^web_/)
@@ -295,7 +304,187 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
     await renderCard()
     const user = userEvent.setup()
     await user.click(cardOf('Y**').getByRole('button', { name: '确认' }))
-    expect(await cardOf('Y**').findByText(/非法状态迁移/)).toBeInTheDocument()
+    const error = await cardOf('Y**').findByText(/非法状态迁移/)
+    expect(error).toBeInTheDocument()
+    expect(error).toHaveAttribute('role', 'alert')
+  })
+
+  it('加载中给 status 提示；失败给 alert 与重试，重试成功后恢复内容', async () => {
+    let resolveLoad!: (response: Response) => void
+    const pending = new Promise<Response>(resolve => { resolveLoad = resolve })
+    const fetchMock = vi.fn<typeof fetch>()
+    fetchMock.mockImplementationOnce(() => pending)
+    fetchMock.mockImplementationOnce(() => Promise.resolve(mockResponse(taskPayload)))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    render(<MappingTaskCard jobId={154} artifactId="mapping_task_wf-1" openCandidate={vi.fn()} onClose={() => undefined} />)
+    expect(screen.getByRole('status')).toHaveTextContent('任务卡加载中')
+    resolveLoad(mockResponse({ detail: '任务卡加载失败（模拟）' }, false, 500))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('任务卡加载失败（模拟）')
+    await user.click(screen.getByRole('button', { name: /重新加载/ }))
+    await screen.findByText('目标团队')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('动作进行中卡片 aria-busy，按钮禁用，连点不重复发 PATCH', async () => {
+    let resolvePatch!: (response: Response) => void
+    const patchGate = new Promise<Response>(resolve => { resolvePatch = resolve })
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      if (init?.method === 'PATCH') return patchGate
+      return Promise.resolve(mockResponse(taskPayload))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await renderCard()
+    const user = userEvent.setup()
+    await user.click(cardOf('Y**').getByRole('button', { name: '确认' }))
+    const cardElement = cardOf('Y**').getByRole('button', { name: '确认' }).closest('.mapping-candidate') as HTMLElement
+    expect(cardElement).toHaveAttribute('aria-busy', 'true')
+    expect(cardOf('Y**').getByRole('button', { name: '确认' })).toBeDisabled()
+    expect(cardOf('Y**').getByRole('button', { name: '删除' })).toBeDisabled()
+    // 未返回前重复点（React 对 disabled 按钮不发 click），只允许 1 个 PATCH
+    fireEvent.click(cardOf('Y**').getByRole('button', { name: '确认' }))
+    fireEvent.click(cardOf('Y**').getByRole('button', { name: '删除' }))
+    expect(patchCalls(fetchMock)).toHaveLength(1)
+    resolvePatch(mockResponse({
+      ok: true, artifact_id: 'mapping_task_wf-1', index: 0,
+      candidate: { ...taskPayload.mapping_task.candidates[0], status: 'confirmed' },
+      status: 'confirmed', status_label: '已确认', stats: taskPayload.mapping_task.stats,
+      icebreaker_generated: false, icebreaker_errors: [],
+    }))
+    expect(await cardOf('Y**').findByText('已确认')).toBeInTheDocument()
+    expect(cardElement).toHaveAttribute('aria-busy', 'false')
+  })
+
+  it('不同卡片并发动作互不误清 busy（先完成的不解锁另一张在途卡）', async () => {
+    let resolveY!: (response: Response) => void
+    const yGate = new Promise<Response>(resolve => { resolveY = resolve })
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      if (String(input).endsWith('/candidates/0') && init?.method === 'PATCH') return yGate
+      if (init?.method === 'PATCH') {
+        return Promise.resolve(mockResponse({
+          ok: true, artifact_id: 'mapping_task_wf-1', index: 2,
+          candidate: { ...taskPayload.mapping_task.candidates[2], status: 'replied' },
+          status: 'replied', status_label: '已回复', stats: taskPayload.mapping_task.stats,
+          icebreaker_generated: false, icebreaker_errors: [],
+        }))
+      }
+      return Promise.resolve(mockResponse(taskPayload))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await renderCard()
+    const user = userEvent.setup()
+    const yCard = cardOf('Y**')
+    const lCard = cardOf('L**')
+    const yCardElement = yCard.getByRole('button', { name: '确认' }).closest('.mapping-candidate') as HTMLElement
+    await user.click(yCard.getByRole('button', { name: '确认' }))
+    await user.click(lCard.getByRole('button', { name: '已回复' }))
+    // L 已返回，Y 仍在途：Y 的 aria-busy 与禁用状态不能被 L 完成误清
+    await waitFor(() => expect(lCard.getByText('已回复')).toBeInTheDocument())
+    expect(yCard.getByRole('button', { name: '确认' })).toBeDisabled()
+    expect(yCardElement).toHaveAttribute('aria-busy', 'true')
+    resolveY(mockResponse({
+      ok: true, artifact_id: 'mapping_task_wf-1', index: 0,
+      candidate: { ...taskPayload.mapping_task.candidates[0], status: 'confirmed' },
+      status: 'confirmed', status_label: '已确认', stats: taskPayload.mapping_task.stats,
+      icebreaker_generated: false, icebreaker_errors: [],
+    }))
+    expect(await yCard.findByText('已确认')).toBeInTheDocument()
+    expect(yCardElement).toHaveAttribute('aria-busy', 'false')
+  })
+
+  it('状态迁移/备注保存成功给出可访问回执（role=status）', async () => {
+    stubFetch((url, init) => {
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as { consultant_note?: string }
+        return {
+          ok: true, artifact_id: 'mapping_task_wf-1', index: 0,
+          candidate: {
+            ...taskPayload.mapping_task.candidates[0],
+            status: 'confirmed',
+            consultant_note: body.consultant_note || '',
+          },
+          status: 'confirmed', status_label: '已确认', stats: taskPayload.mapping_task.stats,
+          icebreaker_generated: false, icebreaker_errors: [],
+        }
+      }
+      return undefined
+    })
+    await renderCard()
+    const user = userEvent.setup()
+    const card = cardOf('Y**')
+    await user.click(card.getByRole('button', { name: '确认' }))
+    expect(await card.findByText('状态已更新为已确认')).toHaveAttribute('role', 'status')
+    const note = card.getByRole('textbox', { name: 'Y** 的顾问备注' })
+    await user.clear(note)
+    await user.type(note, '客户平移优先')
+    await user.tab()
+    expect(await card.findByText('备注已保存')).toHaveAttribute('role', 'status')
+  })
+
+  it('无目标团队/无候选时给出空态提示', async () => {
+    stubFetch(() => ({
+      ...taskPayload,
+      mapping_task: {
+        ...taskPayload.mapping_task,
+        target_teams: [],
+        candidates: [],
+        stats: { ...taskPayload.mapping_task.stats, teams: 0, candidates: 0, confirmed: 0, intaken: 0, clues: 0, failures: [] },
+      },
+    }))
+    const { section } = await renderCard()
+    const teams = within(section).getByRole('region', { name: '目标团队' })
+    expect(within(teams).getByText('暂无目标团队信息，可返回工作流查看采集说明。')).toBeInTheDocument()
+    expect(within(teams).getByText('暂无目标团队')).toBeInTheDocument()
+    const candidates = within(section).getByRole('region', { name: '候选目标人' })
+    expect(within(candidates).getByText('暂无候选目标人，可返回工作流调整寻访方向。')).toBeInTheDocument()
+  })
+})
+
+describe('mappingTask 纯展示逻辑', () => {
+  it('groupMappingTeams：按公司分组、保序、缺省公司名兜底', () => {
+    const groups = groupMappingTeams([
+      { company: 'MPS', team: 'PC 方向 TME 团队' },
+      { company: '矽力杰', team: '电源 IC 团队' },
+      { company: 'MPS', team: 'AE 支持团队' },
+      { company: '', team: '无公司团队' },
+    ])
+    expect(groups.map(group => group.company)).toEqual(['MPS', '矽力杰', '公司待确认'])
+    expect(groups[0].teams.map(team => team.team)).toEqual(['PC 方向 TME 团队', 'AE 支持团队'])
+    expect(groups[2].teams[0].team).toBe('无公司团队')
+    expect(groupMappingTeams([])).toEqual([])
+  })
+
+  it('humanizeMappingFailure：机器 reason 说人话，未知透原文附 note', () => {
+    expect(humanizeMappingFailure({ source: '官网', reason: 'blocked' })).toBe('官网有反爬保护，没抓到')
+    expect(humanizeMappingFailure({ source: '专利', reason: 'timeout' })).toBe('专利访问超时，没抓到')
+    expect(humanizeMappingFailure({ source: '猎聘', reason: 'no_site_hint' })).toBe('没有找到猎聘入口，已跳过')
+    expect(humanizeMappingFailure({ source: '官网', reason: 'parse_error' })).toBe('官网页面结构变了，没解析出来')
+    expect(humanizeMappingFailure({ source: '官网', reason: 'skipped_after_failure', note: '三次失败，跳过' })).toBe('三次失败，跳过')
+    expect(humanizeMappingFailure({ source: '官网', reason: 'http_429' })).toBe('官网返回异常（HTTP 429），没抓到')
+    expect(humanizeMappingFailure({ source: '官网', reason: 'unknown_x', note: '补充' })).toBe('官网没抓到：unknown_x（补充）')
+    expect(humanizeMappingFailure({})).toBe('来源没抓到：原因未知')
+  })
+
+  it('mappingClueRate：clues 为 0 不硬编百分比', () => {
+    expect(mappingClueRate({ confirmed: 3, clues: 9 })).toEqual({ confirmed: 3, clues: 9, percent: 33 })
+    expect(mappingClueRate({ confirmed: 0, clues: 0 })).toEqual({ confirmed: 0, clues: 0, percent: null })
+    expect(mappingClueRate({})).toEqual({ confirmed: 0, clues: 0, percent: null })
+  })
+
+  it('mappingConfidenceLabel：high/medium/low 中文，未知原文透出', () => {
+    expect(mappingConfidenceLabel('high')).toBe('把握大')
+    expect(mappingConfidenceLabel('medium')).toBe('把握一般')
+    expect(mappingConfidenceLabel('low')).toBe('把握偏小')
+    expect(mappingConfidenceLabel('unusual')).toBe('unusual')
+    expect(mappingConfidenceLabel(undefined)).toBe('把握待评估')
+  })
+
+  it('mappingStatusLabel：七态中文，未知值原文透出', () => {
+    expect(mappingStatusLabel('pending')).toBe('待确认')
+    expect(mappingStatusLabel('replied')).toBe('已回复')
+    expect(mappingStatusLabel('weird')).toBe('weird')
+    expect(mappingStatusLabel('')).toBe('待确认')
   })
 })
 

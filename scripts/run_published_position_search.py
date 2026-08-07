@@ -25,15 +25,29 @@ from urllib.parse import quote, urlparse
 
 from a_system_agent.liepin_capture import EXTRACT_RESUME_JS, resume_matches_identity
 from a_system_agent.sourcing_pagination import PageResult, collect_pages, seek_to_page
+from liepin_cdp_config import (
+    cdp_launch_agent_label,
+    cdp_launch_agent_path,
+    cdp_profile_dir,
+    opencli_extension_dir,
+)
 
 
 DEFAULT_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "Codex" / "2026-06-18" / "liepin-intelligence" / "outputs"
 LIEPIN_SEARCH_URL = "https://h.liepin.com/search/getConditionItem"
 MODEL_VERSION = "published-position-liepin-v1"
-CDP_PROFILE_DIR = Path.home() / ".hermes" / "chrome_profile_xhs"
-CDP_LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "ai.hermes.chrome-cdp.plist"
+CDP_PROFILE_DIR = cdp_profile_dir()
+CDP_LAUNCH_AGENT = cdp_launch_agent_path()
+OPENCLI_EXTENSION_DIR = opencli_extension_dir()
+RISK_PAGE_MARKERS = (
+    "safe.liepin.com", "captcha", "captchaPage", "compliancecommitment",
+    "验证码", "人机验证", "安全验证", "安全中心", "访问频繁", "操作频繁", "账号风险",
+)
+LOGIN_PAGE_MARKERS = ("account/login", "passport.liepin.com", "请先登录", "登录已过期")
 CHROME_PATHS = [
+    Path.home() / "Library" / "Caches" / "ms-playwright" / "chromium-1228" / "chrome-mac-arm64"
+    / "Google Chrome for Testing.app" / "Contents" / "MacOS" / "Google Chrome for Testing",
     Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
     Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome",
 ]
@@ -216,7 +230,7 @@ def start_cdp_chrome(port: int) -> bool:
     CDP_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     uid = str(os.getuid())
     if CDP_LAUNCH_AGENT.exists():
-        label = f"gui/{uid}/ai.hermes.chrome-cdp"
+        label = f"gui/{uid}/{cdp_launch_agent_label()}"
         run_quiet("launchctl", "enable", label)
         run_quiet("launchctl", "bootout", label)
         cleanup_cdp_profile_locks()
@@ -239,6 +253,8 @@ def start_cdp_chrome(port: int) -> bool:
                 str(chrome_path),
                 f"--remote-debugging-port={port}",
                 f"--user-data-dir={CDP_PROFILE_DIR}",
+                f"--load-extension={OPENCLI_EXTENSION_DIR}",
+                f"--disable-extensions-except={OPENCLI_EXTENSION_DIR}",
                 "--no-first-run",
                 "--no-default-browser-check",
                 LIEPIN_SEARCH_URL,
@@ -356,17 +372,72 @@ def merge_resume_detail(card: dict[str, Any], resume: dict[str, Any]) -> dict[st
     return card
 
 
-def capture_resume_details(port: int, candidates: list[dict[str, Any]], limit: int) -> dict[str, int]:
-    stats = {"requested": len(candidates), "attempted": min(len(candidates), max(0, limit)), "complete": 0, "partial": 0, "failed": 0}
-    for card in candidates[: max(0, limit)]:
+def risk_page_reason(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return ""
+    text = " ".join(
+        str(state.get(key) or "") for key in ("href", "title", "body", "text_sample")
+    ).casefold()
+    if any(marker.casefold() in text for marker in LOGIN_PAGE_MARKERS):
+        return "login_required"
+    marker = next((item for item in RISK_PAGE_MARKERS if item.casefold() in text), "")
+    return f"risk_page:{marker}" if marker else ""
+
+
+def detail_pause_seconds(
+    attempted: int,
+    *,
+    min_delay: float,
+    max_delay: float,
+    burst_size: int,
+    burst_cooldown: float,
+) -> float:
+    lo = max(0.0, float(min_delay))
+    hi = max(lo, float(max_delay))
+    pause = random.uniform(lo, hi) if hi > 0 else 0.0
+    if burst_size > 0 and attempted > 0 and attempted % burst_size == 0:
+        pause += max(0.0, float(burst_cooldown))
+    return pause
+
+
+def capture_resume_details(
+    port: int,
+    candidates: list[dict[str, Any]],
+    limit: int,
+    *,
+    min_delay: float = 2.5,
+    max_delay: float = 5.5,
+    burst_size: int = 6,
+    burst_cooldown: float = 15.0,
+    stop_on_risk_page: bool = True,
+) -> dict[str, int | str]:
+    selected_count = min(len(candidates), max(0, limit))
+    stats: dict[str, int | str] = {
+        "requested": len(candidates),
+        "planned": selected_count,
+        "attempted": 0,
+        "complete": 0,
+        "partial": 0,
+        "failed": 0,
+        "risk_paused": 0,
+        "not_requested_risk_pause": 0,
+        "not_requested_detail_limit": 0,
+        "status": "completed",
+    }
+    risk_reason = ""
+    selected = candidates[:selected_count]
+    processed = 0
+    for card in selected:
+        processed += 1
         url = clean_text(card.get("resume_url", ""))
         if not url:
             card.update({"resume_capture_status": "failed", "resume_capture_missing": ["来源链接"], "resume_capture_error": "搜索卡片未返回简历详情链接"})
-            stats["failed"] += 1
+            stats["failed"] = int(stats["failed"]) + 1
             continue
         ws_url = ""
         detail_cdp: CDP | None = None
         try:
+            stats["attempted"] = int(stats["attempted"]) + 1
             ws_url = create_cdp_tab(port, url)
             detail_cdp = CDP(ws_url, timeout=20)
             deadline = time.time() + 18
@@ -374,11 +445,15 @@ def capture_resume_details(port: int, candidates: list[dict[str, Any]], limit: i
             while time.time() < deadline:
                 state = evaluate(
                     detail_cdp,
-                    "({href:location.href,ready:document.readyState,text:(document.body?.innerText||'').length,login:location.href.includes('login')})",
+                    "({href:location.href,title:document.title,ready:document.readyState,text:(document.body?.innerText||'').length,text_sample:(document.body?.innerText||'').slice(0,500),login:location.href.includes('login')})",
                     timeout=8,
                 ) or {}
-                if state.get("login"):
+                reason = risk_page_reason(state)
+                if reason == "login_required" or state.get("login"):
                     raise RuntimeError("猎聘登录已过期")
+                if reason:
+                    risk_reason = reason
+                    raise RuntimeError(reason)
                 if state.get("ready") == "complete" and int(state.get("text") or 0) >= 200:
                     ready = True
                     break
@@ -391,18 +466,52 @@ def capture_resume_details(port: int, candidates: list[dict[str, Any]], limit: i
             if not resume_matches_identity(identity, resume):
                 raise RuntimeError("详情页身份与搜索卡片不一致")
             merge_resume_detail(card, resume)
-            stats[str(card["resume_capture_status"])] += 1
+            status = str(card.get("resume_capture_status") or "failed")
+            stats[status] = int(stats.get(status, 0) or 0) + 1
         except Exception as exc:
+            if stop_on_risk_page and (risk_reason or "risk_page:" in str(exc)):
+                reason = risk_reason or str(exc)[:300]
+                card.update({
+                    "resume_capture_status": "risk_paused",
+                    "resume_capture_missing": ["完整履历"],
+                    "resume_capture_error": reason,
+                })
+                stats["risk_paused"] = int(stats["risk_paused"]) + 1
+                stats["status"] = "risk_paused"
+                stats["risk_reason"] = reason
+                break
             card.update({"resume_capture_status": "failed", "resume_capture_missing": ["完整履历"], "resume_capture_error": str(exc)[:300]})
-            stats["failed"] += 1
+            stats["failed"] = int(stats["failed"]) + 1
         finally:
             if detail_cdp:
                 detail_cdp.close()
             if ws_url:
                 close_cdp_tab(port, ws_url)
-    for card in candidates[max(0, limit) :]:
-        card.update({"resume_capture_status": "failed", "resume_capture_missing": ["完整履历"], "resume_capture_error": "超过本轮详情抓取上限"})
-        stats["failed"] += 1
+        if not risk_reason and processed < selected_count:
+            pause = detail_pause_seconds(
+                int(stats["attempted"]),
+                min_delay=min_delay,
+                max_delay=max_delay,
+                burst_size=burst_size,
+                burst_cooldown=burst_cooldown,
+            )
+            if pause > 0:
+                time.sleep(pause)
+    if risk_reason:
+        for card in selected[processed:]:
+            card.update({
+                "resume_capture_status": "not_requested_risk_pause",
+                "resume_capture_missing": ["完整履历"],
+                "resume_capture_error": f"检测到猎聘风险页后暂停：{risk_reason}",
+            })
+            stats["not_requested_risk_pause"] = int(stats["not_requested_risk_pause"]) + 1
+    for card in candidates[selected_count:]:
+        card.update({
+            "resume_capture_status": "not_requested_detail_limit",
+            "resume_capture_missing": ["完整履历"],
+            "resume_capture_error": "超过本轮详情抓取上限，保留列表召回等待后续批次",
+        })
+        stats["not_requested_detail_limit"] = int(stats["not_requested_detail_limit"]) + 1
     return stats
 
 
@@ -1737,7 +1846,16 @@ def run_search(args: argparse.Namespace) -> dict[str, Any]:
 
     all_candidates.sort(key=lambda item: int(item.get("fit_score") or 0), reverse=True)
     detail_capture = (
-        capture_resume_details(args.port, all_candidates, args.detail_limit)
+        capture_resume_details(
+            args.port,
+            all_candidates,
+            args.detail_limit,
+            min_delay=args.detail_min_delay,
+            max_delay=args.detail_max_delay,
+            burst_size=args.detail_burst_size,
+            burst_cooldown=args.detail_burst_cooldown,
+            stop_on_risk_page=args.stop_on_risk_page,
+        )
         if args.capture_details
         else {"requested": 0, "complete": 0, "partial": 0, "failed": 0}
     )
@@ -1873,6 +1991,12 @@ def main() -> int:
     parser.add_argument("--capture-details", dest="capture_details", action="store_true", default=True)
     parser.add_argument("--no-capture-details", dest="capture_details", action="store_false")
     parser.add_argument("--detail-limit", type=int, default=40)
+    parser.add_argument("--detail-min-delay", type=float, default=2.5)
+    parser.add_argument("--detail-max-delay", type=float, default=5.5)
+    parser.add_argument("--detail-burst-size", type=int, default=6)
+    parser.add_argument("--detail-burst-cooldown", type=float, default=15.0)
+    parser.add_argument("--stop-on-risk-page", dest="stop_on_risk_page", action="store_true", default=True)
+    parser.add_argument("--no-stop-on-risk-page", dest="stop_on_risk_page", action="store_false")
     parser.add_argument("--open-links", dest="open_links", action="store_true", default=True)
     parser.add_argument("--no-open-links", dest="open_links", action="store_false")
     parser.add_argument("--open-link-limit", type=int, default=5)

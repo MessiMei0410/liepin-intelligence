@@ -239,7 +239,7 @@ def execute_search_candidates(
             conditions.append("j.title LIKE ?")
             params.append(f"%{job_title}%")
         if name:
-            conditions.append("c.name LIKE ?")
+            conditions.append("p.display_name LIKE ?")
             params.append(f"%{name}%")
         if stage:
             conditions.append("jc.clean_stage = ?")
@@ -505,4 +505,3 @@ def generate_proactive_suggestions(db_path: str) -> list[dict[str, Any]]:
             seen_types.add(s["type"])
             deduped.append(s)
     return deduped[:5]  # 最多5条
-

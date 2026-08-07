@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-05",
+    "source": "cases/case_pengxinxu_fab_v1.json（YE 2 职位 + level_year_mapping：YE 工程师本科8年/硕士5年）+ outputs 真实 P0 缺口（TD YE技术专家、YE技术专家）",
+    "usage": "fab 良率/YE 技术专家岗位原型：策略生成与简历评估直接消费；12 寸产线代际为结构化硬过滤",
+    "governance": "目标公司池按 12 寸 fab 常识推导，待顾问校准；只命中技能标签无缺陷分析项目证据的人选必须标记待核验"
+  },
+  "job_archetype": {
+    "archetype_id": "fab_yield_expert",
+    "title": "Fab 良率/YE 技术专家",
+    "client": "",
+    "client_profile": "12 寸晶圆代工/IDM 良率提升岗：缺陷分析、良率建模与爬坡、与 TD/PIE 协同攻关",
+    "essence": "12 寸产线良率提升：缺陷检测与分析、良率建模与爬坡、低良率批次攻关，与 TD/PIE/设备模块协同。YE 工程师年限口径本科8年/硕士5年（源自 case_pengxinxu level_year_mapping），专家档本科10年/硕士7年+。",
+    "directions": [
+      {
+        "name": "12寸产线良率提升",
+        "customers": ["fab 内部产线"],
+        "products": ["良率爬坡", "缺陷分析", "良率建模"],
+        "competitors": ["中芯国际", "华虹", "晶合集成"]
+      }
+    ],
+    "location_policy": "深圳（坪山区为主）；异地人选正常进入召回，推进前确认 relocation",
+    "target_functions": ["YE", "良率工程师", "缺陷分析", "良率提升"]
+  },
+  "target_company_pool": {
+    "T1_same_layer": {
+      "label": "T1 12寸 fab YE/良率岗",
+      "path": "same_layer",
+      "tier": "T1",
+      "confidence": "medium",
+      "rationale": "同代际产线良率岗直接迁移（按 fab 常识推导，待顾问校准）",
+      "companies": [
+        {"name": "中芯国际"},
+        {"name": "华虹"},
+        {"name": "晶合集成"},
+        {"name": "粤芯半导体"},
+        {"name": "长江存储"},
+        {"name": "长鑫存储"}
+      ]
+    },
+    "T2_adjacent": {
+      "label": "T2 量测/检测设备厂应用工程师",
+      "path": "adjacent",
+      "tier": "T2",
+      "confidence": "low",
+      "rationale": "量测/检测设备厂应用工程师深懂缺陷检测手段，转 fab YE 需补产线良率闭环经验（待顾问校准）",
+      "companies": [
+        {"name": "中科飞测"},
+        {"name": "精测电子"},
+        {"name": "KLA"}
+      ]
+    }
+  },
+  "keyword_groups": [
+    {
+      "group": "ye_core",
+      "targets": "T1/T2 良率核心词",
+      "terms": ["YE", "良率", "yield", "缺陷分析", "缺陷检测", "良率爬坡", "SPC"]
+    },
+    {
+      "group": "ye_tools",
+      "targets": "检测/量测手段兜底词",
+      "terms": ["KLA", "检测设备", "量测", "数据分析", "8D"]
+    }
+  ],
+  "negative_rules": [
+    "只看 12 寸背景：8寸/6寸背景人选不推（产线代际硬过滤，源自 case_pengxinxu hard_filters）",
+    "纯封测厂测试良率背景、无 fab 产线缺陷分析经历的降级为备选",
+    "只命中技能标签但无缺陷分析/良率项目证据时必须标记待核验，不得直接判定满足硬门槛"
+  ],
+  "skills_ontology_nodes": ["检测设备"],
+  "skills_ontology_note": "YE/良率族尚未纳入 kb_skill_ontology_semiconductor_v1；仅检测设备等可复用节点引用 canonical，本体扩族后回填",
+  "level_mapping": {
+    "level_band": "expert",
+    "job_title_range": "资深工程师/专家",
+    "accepted_candidate_levels": ["资深工程师", "专家", "主任工程师"],
+    "note": "YE 工程师本科8年/硕士5年、专家本科10年/硕士7年+（case_pengxinxu level_year_mapping）；按良率攻关项目负责范围定档而非 title",
+    "applies_to": "fab_yield_expert 原型；fab 良率/缺陷分析岗可复用"
+  }
+}

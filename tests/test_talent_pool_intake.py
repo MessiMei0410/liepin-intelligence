@@ -9,6 +9,7 @@ process_action intake 分支。全程使用临时 DB 副本，绝不写正式库
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 from pathlib import Path
 
@@ -117,6 +118,35 @@ def test_pool_only_intake_writes_pool_records(db_path: Path) -> None:
         conn.close()
 
 
+def test_pool_only_intake_persists_resume_profile_text(db_path: Path) -> None:
+    conn = _connect(db_path)
+    try:
+        profile_text = "测试储备人选\n工作经历：示例公司 示例职位\n项目经历：结构设计"
+        result = _process(
+            conn,
+            _pool_action(
+                action_id="pool-test-profile",
+                source_id="pool-test:pool-test-profile",
+                source_candidate_id="lp-profile-1",
+                candidate_profile_text=profile_text,
+                source_url="https://h.liepin.com/resume/showresumedetail/?res_id_encode=lp-profile-1",
+            ),
+        )
+        conn.commit()
+        assert result["status"] == "written"
+        profile = conn.execute(
+            "SELECT raw_json FROM source_profiles WHERE person_id = ? AND source_candidate_id = ?",
+            (int(result["person_id"]), "lp-profile-1"),
+        ).fetchone()
+        assert profile is not None
+        raw = json.loads(profile["raw_json"])
+        assert raw["candidate_profile_text"] == profile_text
+        assert raw["profile_text"] == profile_text
+        assert raw["full_text"] == profile_text
+    finally:
+        conn.close()
+
+
 def test_pool_only_intake_repeat_is_already_exists(db_path: Path) -> None:
     conn = _connect(db_path)
     try:
@@ -158,17 +188,23 @@ def test_explicit_pool_only_flag_bypasses_job_even_with_client_and_job(db_path: 
 def test_full_intake_with_client_and_job_unchanged(db_path: Path) -> None:
     conn = _connect(db_path)
     try:
+        profile_text = "测试储备人选\n工作经历：示例公司 示例职位\n教育经历：本科"
         action = _pool_action(
             action_id="pool-test-full",
             source_id="pool-test:pool-test-full",
             client="长越科技",
             job="自动化软件高级工程师",
+            source_candidate_id="lp-full-1",
+            candidate_profile_text=profile_text,
+            source_url="https://h.liepin.com/resume/showresumedetail/?res_id_encode=lp-full-1",
         )
         result = _process(conn, action)
         conn.commit()
         assert result["status"] == "written"
         assert result["resolve_status"] == "created_or_reused"
         assert result["job_candidate_id"]
+        candidate_id = result["updates"]["candidate_id"]
+        assert candidate_id
         event = conn.execute(
             "SELECT * FROM candidate_events WHERE source_table = 'cross_thread_sync' AND source_id = ?",
             ("pool-test:pool-test-full",),
@@ -176,10 +212,23 @@ def test_full_intake_with_client_and_job_unchanged(db_path: Path) -> None:
         assert event is not None
         assert event["job_candidate_id"] is not None
         assert event["job_id"] is not None
+        raw_event = json.loads(event["raw_json"])
+        assert raw_event["source_candidate_id"] == "lp-full-1"
+        assert raw_event["local_candidate_id"] == candidate_id
+        assert raw_event["candidate_profile_text"] == profile_text
         relation = conn.execute(
             "SELECT * FROM job_candidates WHERE id = ?", (int(result["job_candidate_id"]),)
         ).fetchone()
         assert relation is not None
+        assert relation["source_candidate_id"] == str(candidate_id)
+        profile = conn.execute(
+            "SELECT raw_json FROM source_profiles WHERE person_id = ? AND source_candidate_id = ?",
+            (int(relation["person_id"]), "lp-full-1"),
+        ).fetchone()
+        assert profile is not None
+        raw_profile = json.loads(profile["raw_json"])
+        assert raw_profile["candidate_profile_text"] == profile_text
+        assert raw_profile["full_text"] == profile_text
     finally:
         conn.close()
 

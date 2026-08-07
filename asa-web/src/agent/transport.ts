@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export type AgentContext = Record<string, unknown> & { type?: string; id?: string | number }
+export type AgentContext = Record<string, unknown> & { type?: string; id?: string | number | null }
 
 export type AgentReference = {
   type: string
@@ -21,8 +21,14 @@ export type AgentTurnResult = {
   business_focus?: Record<string, unknown> | null
   workflow_id?: string | null
   workflow_progress?: Record<string, unknown> | null
+  workflow?: Record<string, unknown> | null
+  progress?: Record<string, unknown> | null
+  approvals?: Array<Record<string, unknown>>
+  plan_summary?: Array<Record<string, unknown>>
+  goal?: Record<string, unknown> | null
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
+  model_participation?: Record<string, unknown> | null
 }
 
 export type AgentSseEvent =
@@ -34,11 +40,12 @@ export type AgentSseEvent =
 
 const structuredRecord = z.record(z.string(), z.unknown())
 const contextSchema = z.object({
-  type: z.string().optional(), id: z.union([z.string(), z.number()]).optional(),
+  type: z.string().optional(), id: z.union([z.string(), z.number()]).nullable().optional(),
 }).catchall(z.unknown())
 const referenceSchema = z.object({
   type: z.string(), id: z.union([z.string(), z.number()]), label: z.string(),
-  subtitle: z.string().optional(), href: z.string().optional(),
+  subtitle: z.string().nullish().transform(value => value || undefined),
+  href: z.string().nullish().transform(value => value || undefined),
 })
 const contextEventSchema = z.object({
   session_id: z.string().min(1), context: contextSchema.optional(), references: z.array(referenceSchema).optional(),
@@ -50,10 +57,36 @@ const doneEventSchema = z.object({
   ok: z.boolean().optional(), session_id: z.string().min(1), answer: z.string(), error: z.string().optional(), context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(), suggested_actions: z.array(structuredRecord).optional(),
   business_focus: structuredRecord.nullable().optional(), workflow_id: z.string().nullable().optional(),
+  workflow: structuredRecord.nullable().optional(), progress: structuredRecord.nullable().optional(),
+  approvals: z.array(structuredRecord).optional(), plan_summary: z.array(structuredRecord).optional(),
+  goal: structuredRecord.nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  model_participation: structuredRecord.nullable().optional(),
 })
 const errorEventSchema = z.object({ error: z.string() })
+
+const asRecord = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {}
+
+const synthesizeWorkflowProgress = (data: AgentTurnResult): Record<string, unknown> | null => {
+  if (data.workflow_progress) return data.workflow_progress
+  const workflowId = String(data.workflow_id || '').trim()
+  if (!workflowId) return null
+  const workflow = asRecord(data.workflow)
+  const progress = asRecord(data.progress)
+  const planSummary = Array.isArray(data.plan_summary) ? data.plan_summary : []
+  const approvals = Array.isArray(data.approvals) ? data.approvals.filter(item => asRecord(item).status === 'pending') : []
+  const completed = Number(progress.completed ?? 0)
+  const total = Number(progress.total ?? planSummary.length ?? 0)
+  return {
+    workflow_id: workflowId,
+    status: workflow.status || 'planned',
+    completed: Number.isFinite(completed) ? completed : 0,
+    total: Number.isFinite(total) ? total : 0,
+    label: workflow.current_stage || progress.label || '准备执行',
+    pending_approvals: approvals,
+  }
+}
 
 const parseEvent = (block: string): AgentSseEvent | undefined => {
   const lines = block.split(/\r?\n/)
@@ -73,7 +106,10 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   if (event === 'context') return { type: 'context', data: parsed.data as Extract<AgentSseEvent, { type: 'context' }>['data'] }
   if (event === 'text') return { type: 'text', data: parsed.data as Extract<AgentSseEvent, { type: 'text' }>['data'] }
   if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
-  if (event === 'done') return { type: 'done', data: parsed.data as AgentTurnResult }
+  if (event === 'done') {
+    const data = parsed.data as AgentTurnResult
+    return { type: 'done', data: { ...data, workflow_progress: synthesizeWorkflowProgress(data) } }
+  }
   if (event === 'error') return { type: 'error', data: parsed.data as { error: string } }
   return undefined
 }

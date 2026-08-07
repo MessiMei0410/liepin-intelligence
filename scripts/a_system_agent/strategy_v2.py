@@ -42,7 +42,7 @@ STRATEGY_V2_REQUIRED_KEYS = (
     "consultant_edits",
 )
 
-_POOL_SOURCES = {"client_doc", "kb_graph", "kb_profile", "llm_inferred"}
+_POOL_SOURCES = {"client_doc", "kb_graph", "kb_profile", "llm_inferred", "consultant_calibrated"}
 _POOL_PATHS = {"same_layer", "reverse", "adjacent"}
 _POOL_TIERS = {"T1", "T2", "T3"}
 _CONFIDENCES = {"high", "medium", "low"}
@@ -92,6 +92,8 @@ def knowledge_base_health(kb_dir: str | Path | None = None) -> dict[str, Any]:
         "client_profiles": (directory / "kb_client_profiles_v1.json").is_file(),
         "company_graph": (directory / "kb_company_graph_jsj_v1.json").is_file(),
         "job_archetypes": any(directory.glob("seed_*.json")) if directory.is_dir() else False,
+        "skill_ontology": (directory / "kb_skill_ontology_semiconductor_v1.json").is_file(),
+        "level_mapping": (directory / "kb_level_mapping_v1.json").is_file(),
     }
     return {
         "ok": bool(directory.is_dir() and any(available.values())),
@@ -153,6 +155,13 @@ def load_job_archetypes(kb_dir: str | Path | None = None) -> tuple[list[dict[str
                 "target_company_pool": doc.get("target_company_pool") if isinstance(doc.get("target_company_pool"), dict) else {},
                 "golden_candidates": doc.get("golden_candidates") if isinstance(doc.get("golden_candidates"), list) else [],
                 "golden_replay_min_recall": golden_replay_min_recall,
+                # 知识飞轮二期：原型技能词（kb_skill_ontology canonical），供评估消费时
+                # 取本体典型证据形式；缺失按空列表处理。
+                "skills_ontology_nodes": [
+                    str(node).strip()
+                    for node in doc.get("skills_ontology_nodes") or []
+                    if str(node or "").strip()
+                ],
                 "source_file": path.name,
             }
         )
@@ -170,6 +179,35 @@ _ARCHETYPE_TITLE_TOKENS: dict[str, tuple[str, ...]] = {
     ),
     "changyue_precision_equipment_mechanical": (
         "机械高级", "高级机械", "机械设计", "机械工程师", "结构设计",
+    ),
+    # 知识飞轮二期扩充原型（seed_*_v1.json，2026-08-05）：电源研发 / fab 工艺·设备·良率·质量 /
+    # 长越电气·失效分析 / FPGA·嵌入式硬件。token 选择原则：足够具体，不抢占既有原型
+    # （如电源研发不收“电源”裸词，避免抢走「技术市场经理（三次电源）」的 TME 命中）。
+    "power_rd_expert_computing": (
+        "电源专家", "电源研发", "电源工程师", "电源设计", "电源硬件",
+        "vrm", "vpd", "tlvr", "acdc", "ac-dc", "ac/dc", "dc-dc", "dcdc",
+    ),
+    "fab_td_process_expert": (
+        "工艺专家", "工艺工程师", "工艺整合", "制程整合", "制程工程师",
+        "pie", "device专家", "器件专家",
+    ),
+    "fab_equipment_expert": (
+        "设备专家", "设备工程师", "量测设备", "设备研发工程师",
+    ),
+    "fab_yield_expert": (
+        "ye技术", "ye工程师", "ye专家", "良率", "缺陷分析", "yield",
+    ),
+    "fab_quality_reliability": (
+        "pqe", "cqe", "sqe", "质量工程师", "质量专家", "品质工程师", "可靠性",
+    ),
+    "changyue_bonding_electrical": (
+        "电气工程师", "电气高级", "电气设计", "电气研发",
+    ),
+    "changyue_failure_analysis": (
+        "失效分析", "fa工程师", "failure analysis",
+    ),
+    "fpga_embedded_hardware": (
+        "fpga", "嵌入式", "硬件工程师", "逻辑设计", "pcb工程师",
     ),
 }
 
@@ -516,6 +554,354 @@ def _graph_company_is_explicitly_excluded(company_name: str, fragment: dict[str,
     return False
 
 
+def _brief_items(value: Any, *, limit: int = 6) -> list[str]:
+    """把顾问简报里的输入压成短、稳定、可展示的事实片段。"""
+    if isinstance(value, str):
+        values = _split_terms(value)
+    elif isinstance(value, (list, tuple)):
+        values = [str(item).strip() for item in value if str(item or "").strip()]
+    else:
+        values = []
+    return list(dict.fromkeys(values))[:limit]
+
+
+def _infer_role_family(title: str, corpus: str) -> str:
+    """岗位族只用于顾问口径，不参与硬筛选，避免 title 被当成能力证据。"""
+    text = f"{title}\n{corpus}".lower()
+    if any(token in text for token in ("技术市场", "tme", "technical marketing", "fae", "应用工程", "ae")):
+        return "技术市场/应用"
+    if any(token in text for token in ("总监", "负责人", "主管", "经理", "head", "director", "manager")):
+        return "研发管理"
+    if any(token in text for token in ("研发", "工程师", "专家", "设计", "开发", "engineer", "expert")):
+        return "研发/工程"
+    return "待核验岗位族"
+
+
+def build_consultant_judgement(
+    plan: dict[str, Any],
+    classification: dict[str, Any],
+    *,
+    archetype: dict[str, Any] | None = None,
+    consultant: dict[str, Any] | None = None,
+    profile_context: dict[str, Any] | None = None,
+    canonical_position: dict[str, Any] | None = None,
+    step1: dict[str, Any] | None = None,
+    step2: list[dict[str, Any]] | None = None,
+    step3: dict[str, Any] | None = None,
+    step4: list[dict[str, Any]] | None = None,
+    step5: dict[str, Any] | None = None,
+    negative_rules: list[dict[str, Any]] | None = None,
+    learning: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """生成资深猎头顾问简报：把岗位事实转成判断、顺序、边界和复盘动作。
+
+    这个对象是策略的解释层，不替代 step1-5，也不改变硬条件。它的价值在于把
+    “找什么人”与“为什么先找、什么时候放宽、放宽要付出什么代价”明确记录下来。
+    所有事实均来自岗位、画像、原型或已确认的历史反馈；无法确认的内容进入
+    must_confirm，而不是伪装成客户偏好。
+    """
+    canonical = canonical_position or {}
+    consultant = consultant or {}
+    profile_context = profile_context or {}
+    learning = learning or {}
+    step1 = step1 or {}
+    step2 = step2 or []
+    step3 = step3 or {}
+    step4 = step4 or []
+    step5 = step5 or {}
+    negative_rules = negative_rules or []
+
+    title = str(canonical.get("job") or plan.get("job") or "").strip()
+    corpus = " ".join(
+        str(canonical.get(key) or "")
+        for key in (
+            "job", "requirements", "responsibilities", "education", "experience",
+            "hard_requirements", "exclusions", "location", "objective",
+        )
+    )
+    anchors = classification.get("anchors") if isinstance(classification.get("anchors"), dict) else {}
+    product_anchor = _brief_items((anchors.get("product_tech_line") or {}).get("values"), limit=5)
+    scenario_anchor = _brief_items((anchors.get("scenario_track") or {}).get("values"), limit=4)
+    customer_anchor = _brief_items((anchors.get("customer_of_customer") or {}).get("values"), limit=4)
+    hard_requirements = _brief_items(
+        "；".join(
+            str(canonical.get(key) or "")
+            for key in ("hard_requirements", "requirements", "experience", "education")
+        ),
+        limit=6,
+    )
+    missing_labels = [ANCHOR_LABELS[key] for key in classification.get("missing_anchors") or [] if key in ANCHOR_LABELS]
+    role_family = _infer_role_family(title, corpus)
+    product_text = "、".join(product_anchor) or "岗位要求中的核心产品/技术线"
+    scenario_text = "、".join(scenario_anchor) or "岗位明确的应用场景"
+    levels = _brief_items(step3.get("accepted_levels"), limit=5)
+    pool_entries = [entry for entry in step2 if isinstance(entry, dict)]
+    path_entries = {
+        path: [entry for entry in pool_entries if str(entry.get("path") or "") == path]
+        for path in ("same_layer", "reverse", "adjacent")
+    }
+    pool_count = sum(
+        len(entry.get("companies") or [])
+        for entry in pool_entries
+        if isinstance(entry.get("companies"), list)
+    )
+    same_layer_count = sum(len(entry.get("companies") or []) for entry in path_entries["same_layer"])
+    transfer_paths = [path for path in ("adjacent", "reverse") if path_entries[path]]
+
+    direct_evidence = list(dict.fromkeys([
+        *hard_requirements[:4],
+        *(f"产品/技术线：{item}" for item in product_anchor[:3]),
+        *(f"应用场景：{item}" for item in scenario_anchor[:2]),
+        *(f"客户场景：{item}" for item in customer_anchor[:2]),
+    ]))[:8]
+    transferable_evidence = [
+        "相邻产品或相邻客户场景只能证明迁移基础，不能直接等同于岗位硬技能",
+        "目标公司和 title 只能作为召回线索，必须回到候选人项目/职责核验本人证据",
+    ]
+    must_verify = [
+        "真实职责边界：独立负责、主导交付，还是协同支持",
+        "项目证据：具体产品/技术、应用场景、复杂度与可核验结果",
+        "求职动机与可接受条件：地点、薪资、汇报线和到岗节奏",
+    ]
+    if missing_labels:
+        must_verify.insert(0, f"客户尚未明确：{'、'.join(missing_labels)}")
+
+    search_sequence = [
+        {
+            "round": "R1",
+            "name": "核心同层",
+            "target": f"T1/T2 同层公司 + {role_family}",
+            "purpose": f"先验证 {product_text} 在 {scenario_text} 中的直接项目证据",
+            "gate": "硬条件和直接证据不降级",
+        },
+        {
+            "round": "R2",
+            "name": "岗位原型变体",
+            "target": "相邻职称、产品别名、项目交付物和场景词",
+            "purpose": "补齐 title 不一致但职责相同的人选，降低单一关键词偏差",
+            "gate": "仍需回到项目/职责核验，不能只看公司或 title",
+        },
+    ]
+    if transfer_paths:
+        search_sequence.append(
+            {
+                "round": "R3",
+                "name": "迁移池",
+                "target": "、".join(transfer_paths) + " 路径公司/场景",
+                "purpose": "核心池不足时补充可迁移人选，明确迁移成本再交顾问复核",
+                "gate": "仅在核心池不足或客户允许迁移候选时启用",
+            }
+        )
+    search_sequence.append(
+        {
+            "round": "R4",
+            "name": "复核与再平衡",
+            "target": "去重、噪音复盘、渠道/关键词边际产出",
+            "purpose": "把客户反馈和真实下游结果转成下一轮策略调整",
+            "gate": "先记录原因，再决定扩池、改词或回到客户校准",
+        }
+    )
+
+    expansion_ladder = [
+        {
+            "step": 1,
+            "direction": "同层目标公司",
+            "trigger": "首轮建立直接证据基线",
+            "preserve": "全部硬条件、核心场景和职责深度",
+            "tradeoff": "池子相对小，但判断最稳",
+        },
+        {
+            "step": 2,
+            "direction": "关键词与 title 变体",
+            "trigger": "公司池有覆盖但召回不足，或 title 命名不统一",
+            "preserve": "岗位本质不变，只扩大表达方式",
+            "tradeoff": "需要加强去重和噪音复核",
+        },
+    ]
+    if "adjacent" in transfer_paths:
+        expansion_ladder.append(
+            {
+                "step": len(expansion_ladder) + 1,
+                "direction": "相邻产品/场景迁移",
+                "trigger": "核心池不足且客户接受可迁移人选",
+                "preserve": "保留解决问题的方法论和交付深度",
+                "tradeoff": "产品或场景差距必须通过项目追问补证",
+            }
+        )
+    if "reverse" in transfer_paths:
+        expansion_ladder.append(
+            {
+                "step": len(expansion_ladder) + 1,
+                "direction": "客户侧/反向人才池",
+                "trigger": "同层供给不足，且岗位允许从客户或整机侧迁移",
+                "preserve": "必须保留对产品/技术线的真实理解",
+                "tradeoff": "角色责任、研发深度和动机需要单独核验",
+            }
+        )
+    expansion_ladder.append(
+        {
+            "step": len(expansion_ladder) + 1,
+            "direction": "地域/职级边界调整",
+            "trigger": "前述路径仍不足，并经顾问确认",
+            "preserve": "不自动放宽硬门槛",
+            "tradeoff": "候选人意愿、薪资和到岗风险上升",
+        }
+    )
+
+    must_confirm = list(dict.fromkeys([
+        *(f"补齐四锚点：{label}" for label in missing_labels),
+        "确认哪些条件是一票否决，哪些只是优先项",
+        "确认薪资范围、汇报线、团队配置和决策周期",
+    ]))[:6]
+    if not must_confirm:
+        must_confirm = ["确认客户对直接证据、迁移候选和职级跨度的排序"]
+    assumptions = []
+    if str(classification.get("input_level") or "") == "L3":
+        assumptions.append("当前主要依据 JD 和知识库原型，客户口味仍需一轮校准")
+    if profile_context.get("notes"):
+        assumptions.append("客户注意事项已挂载，仍以本轮顾问确认后的版本为准")
+    if (profile_context or {}).get("hiring_preferences"):
+        assumptions.append("已参考客户用人偏好，但未把偏好自动升级为硬门槛")
+    if str(consultant.get("consultant_answers") or "").strip():
+        assumptions.append("已纳入顾问本轮补充，原话约束优先于模型推断")
+    if not assumptions:
+        assumptions.append("未写明的条件不自动升级为硬门槛")
+
+    positive_signals: list[str] = []
+    negative_signals: list[str] = []
+    for outcome in learning.get("business_outcomes") or []:
+        if not isinstance(outcome, dict):
+            continue
+        channel = str(outcome.get("channel") or "未知渠道")
+        query = str(outcome.get("source_query") or "").strip()
+        try:
+            score = float(outcome.get("experience_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        positive = int(outcome.get("client_positive") or 0) + int(outcome.get("recommended") or 0)
+        negative = int(outcome.get("client_rejected") or 0) + int(outcome.get("stopped") or 0)
+        label = f"{channel}「{query}」" if query else channel
+        if positive or score > 0:
+            positive_signals.append(f"{label}有正向下游信号（经验分 {score:g}）")
+        if negative:
+            negative_signals.append(f"{label}出现停止/客户否决信号（{negative} 条）")
+        noise = str(outcome.get("noise_notes") or "").strip()
+        if noise:
+            negative_signals.append(f"{label}记录噪音：{noise[:100]}")
+    for memory in learning.get("approved_memories") or []:
+        if isinstance(memory, dict) and str(memory.get("content") or "").strip() and len(positive_signals) < 4:
+            positive_signals.append(str(memory["content"])[:140])
+    if not positive_signals and not negative_signals:
+        learning_note = ["首轮历史反馈不足，先建立渠道、关键词和客户反馈基线"]
+    else:
+        learning_note = [
+            "优先复用有正向下游信号的渠道/词组，同时保留岗位硬门槛",
+            "对持续低产出或高噪音项先降权复核，不直接删除，避免把一次失败误判为永久负向规则",
+        ]
+
+    if pool_count == 0:
+        difficulty, difficulty_reason = "unknown", "当前没有可核验的目标公司池，市场难度不能靠模型估计"
+    elif pool_count < 8:
+        difficulty, difficulty_reason = "hard", f"当前可执行公司池仅 {pool_count} 家，供给可能偏窄"
+    elif pool_count < 16:
+        difficulty, difficulty_reason = "challenging", f"当前可执行公司池 {pool_count} 家，需要分轮扩池"
+    else:
+        difficulty, difficulty_reason = "normal", f"当前可执行公司池 {pool_count} 家，适合先做核心池验证"
+
+    return {
+        "version": "senior_consultant_v1",
+        "basis": [
+            "岗位事实",
+            *(["客户画像"] if profile_context else []),
+            *(["岗位原型"] if archetype else []),
+            *(["历史实验/业务反馈"] if positive_signals or negative_signals else []),
+        ],
+        "role_diagnosis": {
+            "role_family": role_family,
+            "business_mandate": str(step1.get("statement") or "围绕岗位硬条件和真实业务场景建立可执行人才池"),
+            "core_differentiator": (
+                f"直接证据优先看 {product_text}；场景落地优先看 {scenario_text}"
+                + (f"；客户链路关注 { '、'.join(customer_anchor) }" if customer_anchor else "")
+            ),
+            "candidate_archetype": (
+                f"能在{scenario_text}中独立负责{product_text}相关工作，并能讲清项目边界、交付物和结果的人选"
+                + (f"；职级参考 { '、'.join(levels) }" if levels else "")
+            ),
+        },
+        "search_sequence": search_sequence,
+        "expansion_ladder": expansion_ladder,
+        "evidence_standard": {
+            "direct_evidence": direct_evidence,
+            "transferable_evidence": transferable_evidence,
+            "must_verify": must_verify[:8],
+        },
+        "client_calibration": {
+            "must_confirm": must_confirm,
+            "assumptions": assumptions,
+            "selling_points": _brief_items(profile_context.get("selling_points"), limit=4),
+            "hiring_preferences": _brief_items(profile_context.get("hiring_preferences"), limit=4),
+        },
+        "market_view": {
+            "difficulty": difficulty,
+            "reason": difficulty_reason,
+            "same_layer_company_count": same_layer_count,
+            "transfer_paths_available": transfer_paths,
+            "pool_risk": (
+                "四锚点仍有缺口，初筛容易把相邻经验误判为直接匹配"
+                if missing_labels else "需防止目标公司/ title 替代本人项目证据"
+            ),
+        },
+        "learning_application": {
+            "positive_signals": positive_signals[:6],
+            "negative_signals": negative_signals[:6],
+            "applied_adjustments": learning_note,
+        },
+        "hard_gate_policy": "先守住硬门槛，再按同义词、相邻池、反向池、地域/职级顺序扩展；任何放宽都要记录代价并经顾问确认。",
+    }
+
+
+def refresh_consultant_judgement(value: dict[str, Any]) -> dict[str, Any]:
+    """策略按项修订后补建或刷新顾问简报，保留已有画像与反馈结论。"""
+    existing = value.get("consultant_judgement")
+    if not isinstance(existing, dict):
+        existing = {}
+    classification = {
+        "input_level": str(value.get("input_level") or "L3"),
+        "anchors": value.get("anchors") if isinstance(value.get("anchors"), dict) else {},
+        "missing_anchors": value.get("missing_anchors") if isinstance(value.get("missing_anchors"), list) else [],
+    }
+    current_statement = str((value.get("step1_job_essence") or {}).get("statement") or "").strip()
+    refreshed = build_consultant_judgement(
+        {"strategy_summary": current_statement},
+        classification,
+        canonical_position={"job": current_statement, "responsibilities": current_statement},
+        step1=value.get("step1_job_essence") if isinstance(value.get("step1_job_essence"), dict) else {},
+        step2=value.get("step2_target_pool") if isinstance(value.get("step2_target_pool"), list) else [],
+        step3=value.get("step3_level_mapping") if isinstance(value.get("step3_level_mapping"), dict) else {},
+        step4=value.get("step4_keyword_groups") if isinstance(value.get("step4_keyword_groups"), list) else [],
+        step5=value.get("step5_expectation") if isinstance(value.get("step5_expectation"), dict) else {},
+        negative_rules=value.get("negative_rules") if isinstance(value.get("negative_rules"), list) else [],
+    )
+    existing_role = existing.get("role_diagnosis") if isinstance(existing.get("role_diagnosis"), dict) else {}
+    refreshed_role = refreshed["role_diagnosis"]
+    for key in ("role_family", "core_differentiator"):
+        existing_value = str(existing_role.get(key) or "").strip()
+        if existing_value and not (key == "role_family" and existing_value == "待核验岗位族"):
+            refreshed_role[key] = existing_role[key]
+    if current_statement:
+        refreshed_role["business_mandate"] = current_statement
+
+    existing_evidence = existing.get("evidence_standard") if isinstance(existing.get("evidence_standard"), dict) else {}
+    for key in ("direct_evidence", "must_verify"):
+        if isinstance(existing_evidence.get(key), list) and existing_evidence[key]:
+            refreshed["evidence_standard"][key] = list(existing_evidence[key])
+    for key in ("basis", "client_calibration", "learning_application"):
+        if existing.get(key):
+            refreshed[key] = json.loads(json.dumps(existing[key], ensure_ascii=False))
+    value["consultant_judgement"] = refreshed
+    return value
+
+
 def build_strategy_v2(
     plan: dict[str, Any],
     classification: dict[str, Any],
@@ -528,6 +914,10 @@ def build_strategy_v2(
     restricted_rules: list[dict[str, Any]] | None = None,
     negative_checklist: list[dict[str, Any]] | None = None,
     canonical_position: dict[str, Any] | None = None,
+    skill_ontology: dict[str, Any] | None = None,
+    level_hit: dict[str, Any] | None = None,
+    profile_context: dict[str, Any] | None = None,
+    learning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """组装 strategy_v2：LLM 填充各步，运行时兜底必备键并强制版本号/定级/顾问留痕。
 
@@ -536,6 +926,9 @@ def build_strategy_v2(
     restricted_rules（禁挖/竞业白名单，source=restricted_client）由运行时传入并合。
     S4-3：negative_checklist（排除规则引擎五类清单，negative_rules 模块输出，逐项含
     applicable/rule/basis/source）由运行时传入，强制逐类留痕并入 negative_rules。
+    知识飞轮二期：skill_ontology（技能本体，kb_skill）用于 step4 关键词别名归一与相关词
+    提示（有本体则增强、无本体则现状）；level_hit（kb_level_mapping 职级命中）优先于
+    LLM/原型路径填充 step3（source=kb_level），未命中时维持现有路径。
     """
     consultant = consultant or {}
     fragment = llm_fragment if isinstance(llm_fragment, dict) else {}
@@ -594,6 +987,7 @@ def build_strategy_v2(
             ]
 
     # S4-2：公司图谱池并入 step2（source=kb_graph + confidence，按公司名去重）。
+    # 知识飞轮二期：校准覆盖层命中的公司保留 source=consultant_calibrated（二期校准覆盖层）。
     # governance：图谱命中只用于召回与排序，必须回候选人详情核验本人证据。
     graph_companies: list[dict[str, str]] = []
     excluded_graph_companies: list[str] = []
@@ -607,7 +1001,11 @@ def build_strategy_v2(
             excluded_graph_companies.append(name)
             continue
         graph_companies.append(
-            {"name": name, "source": "kb_graph", "confidence": str(company.get("confidence") or "low")}
+            {
+                "name": name,
+                "source": str(company.get("source") or "kb_graph"),
+                "confidence": str(company.get("confidence") or "low"),
+            }
         )
     if excluded_graph_companies:
         assembly_trace.append(f"图谱公司命中显式排除规则，未并入 step2：{len(excluded_graph_companies)} 家")
@@ -621,19 +1019,50 @@ def build_strategy_v2(
                     "知识库公司图谱按赛道/主营业务召回；只用于召回与排序，须回候选人详情核验本人证据",
                 )
             )
-            assembly_trace.append(f"step2 并入图谱公司 {len(new_companies)} 家（source=kb_graph）")
+            calibrated = sum(1 for company in new_companies if company["source"] == "consultant_calibrated")
+            assembly_trace.append(
+                f"step2 并入图谱公司 {len(new_companies)} 家（source=kb_graph"
+                + (f"，含顾问校准 {calibrated} 家 source=consultant_calibrated）" if calibrated else "）")
+            )
         else:
             assembly_trace.append("图谱召回公司已在池内，step2 不重复并入")
 
     step3_raw = fragment.get("step3_level_mapping") if isinstance(fragment.get("step3_level_mapping"), dict) else {}
     archetype_levels = ((archetype or {}).get("level_mapping") or {})
-    accepted_levels = step3_raw.get("accepted_levels") or archetype_levels.get("accepted_candidate_levels") or []
-    step3 = {
-        "accepted_levels": [str(level) for level in accepted_levels],
-        "calibration_rule": str(
-            step3_raw.get("calibration_rule") or archetype_levels.get("note") or "按岗位职责范围而非 title 定档，待顾问确认"
-        ),
-    }
+    if level_hit and level_hit.get("accepted_levels"):
+        # 知识飞轮二期：step3 职级映射优先查职级知识（source=kb_level 内置库 /
+        # consultant_confirmed 顾问确认规则），查不到（level_hit=None）才走现有
+        # LLM/原型路径；按职责定档口径保留。
+        basis = str(level_hit.get("basis") or "").strip()
+        years_hint = str(level_hit.get("years_hint") or "").strip()
+        level_source = str(level_hit.get("source") or "kb_level")
+        step3 = {
+            "accepted_levels": [str(level) for level in level_hit.get("accepted_levels") or []],
+            "calibration_rule": "；".join(
+                part
+                for part in (
+                    f"职级带 {level_hit.get('band')}（{level_hit.get('label')}）" + (f"，{years_hint}" if years_hint else ""),
+                    "按岗位职责范围而非 title 机械定档，待顾问确认",
+                )
+                if part
+            ),
+            "level_source": level_source,
+            "kb_level_band": str(level_hit.get("band") or ""),
+        }
+        if basis:
+            step3["kb_level_basis"] = basis
+        assembly_trace.append(
+            f"step3 职级映射采用知识库（source={level_source}）：{level_hit.get('label')}，接受职级 "
+            f"{'、'.join(step3['accepted_levels'])}；LLM/原型职级路径未启用"
+        )
+    else:
+        accepted_levels = step3_raw.get("accepted_levels") or archetype_levels.get("accepted_candidate_levels") or []
+        step3 = {
+            "accepted_levels": [str(level) for level in accepted_levels],
+            "calibration_rule": str(
+                step3_raw.get("calibration_rule") or archetype_levels.get("note") or "按岗位职责范围而非 title 定档，待顾问确认"
+            ),
+        }
     canonical_position = canonical_position or {}
     locations = [
         item.strip()
@@ -652,18 +1081,61 @@ def build_strategy_v2(
     step4_raw = fragment.get("step4_keyword_groups")
     step4: list[dict[str, Any]] = []
     source_groups = step4_raw if isinstance(step4_raw, list) else (archetype or {}).get("keyword_groups") or []
+    ontology = skill_ontology if isinstance(skill_ontology, dict) and skill_ontology.get("skills") else None
+    if ontology:
+        from . import knowledge_base  # 局部导入避免环：knowledge_base 依赖本模块的 knowledge_base_dir
     for group in source_groups:
         if not isinstance(group, dict):
             continue
         terms = [str(term) for term in group.get("terms") or [] if str(term or "").strip()]
-        if terms:
-            step4.append(
-                {
-                    "group": str(group.get("group") or f"group_{len(step4) + 1}"),
-                    "targets": str(group.get("targets") or ""),
-                    "terms": terms[:20],
+        if not terms:
+            continue
+        entry = {
+            "group": str(group.get("group") or f"group_{len(step4) + 1}"),
+            "targets": str(group.get("targets") or ""),
+            "terms": terms[:20],
+        }
+        if ontology:
+            # 知识飞轮二期（source=kb_skill）：别名归一 —— 同一 canonical 的多个写法只保留
+            # 首个原词（不破坏召回口径，仅去重归一）；相关技能提示附在组上供顾问参考。
+            normalized: list[dict[str, str]] = []
+            deduped_terms: list[str] = []
+            seen_keys: set[str] = set()
+            for term in terms:
+                info = knowledge_base.normalize_skill(term, ontology)
+                key = info["canonical"] if info["matched"] else info["normalized"]
+                if not key or key in seen_keys:
+                    if info["matched"]:
+                        normalized.append({"raw": term, "canonical": info["canonical"], "family": info["family"]})
+                    continue
+                seen_keys.add(key)
+                deduped_terms.append(term)
+                if info["matched"]:
+                    normalized.append({"raw": term, "canonical": info["canonical"], "family": info["family"]})
+            hints: list[str] = []
+            hint_keys = {knowledge_base._normalize_skill_key(term) for term in deduped_terms}
+            for item in normalized:
+                for related in knowledge_base.related_skills(item["canonical"], ontology):
+                    if related not in hints and knowledge_base._normalize_skill_key(related) not in hint_keys:
+                        hints.append(related)
+            hints = hints[:5]
+            if normalized or hints:
+                entry["terms"] = deduped_terms[:20]
+                entry["skill_ontology"] = {
+                    "source": "kb_skill",
+                    "normalized": normalized,
+                    "related_terms_hint": hints,
                 }
-            )
+                if normalized:
+                    assembly_trace.append(
+                        f"关键词组[{entry['group']}]技能别名归一（source=kb_skill）："
+                        + "、".join(f"{item['raw']}→{item['canonical']}" for item in normalized[:6])
+                    )
+                if hints:
+                    assembly_trace.append(
+                        f"关键词组[{entry['group']}]相关技能提示（source=kb_skill，仅供顾问参考，不进查询）：{'、'.join(hints)}"
+                    )
+        step4.append(entry)
     if not step4:
         channels = plan.get("channels") if isinstance(plan.get("channels"), dict) else {}
         for channel, queries in channels.items():
@@ -726,6 +1198,9 @@ def build_strategy_v2(
             "basis": str(item.get("basis") or ""),
             "source": str(item.get("source") or "none"),
         }
+        # 顾问确认规则（consultant_confirmed）附提案 ID 留痕；其余条目无此键，输出不变。
+        if item.get("proposal_id"):
+            entry["proposal_id"] = str(item["proposal_id"])
         if (entry["type"], entry["rule"]) in existing_pairs:
             continue
         negative_rules.append(entry)
@@ -776,6 +1251,10 @@ def build_strategy_v2(
         "missing_anchors": list(classification.get("missing_anchors") or []),
         "classification_trace": [*list(classification.get("trace") or []), *assembly_trace],
         "archetype_id": str(classification.get("archetype_id") or ""),
+        # 知识飞轮二期：原型命中显式标注（方案验收口径：新 P0 岗位复用同类原型或
+        # 明确说明无可用原型）；未命中时 archetype_note 给出原因，coverage_report=None
+        # 与该标记互证，不算要素缺失。
+        "archetype_matched": bool(archetype),
         "profile_matched": {
             "name": profile_name,
             "rule": str(matched.get("rule") or "none"),
@@ -783,6 +1262,36 @@ def build_strategy_v2(
         },
         "step2_source_distribution": source_distribution,
     }
+    v2["consultant_judgement"] = build_consultant_judgement(
+        plan,
+        classification,
+        archetype=archetype,
+        consultant=consultant,
+        profile_context=profile_context,
+        canonical_position=canonical_position,
+        step1=step1,
+        step2=step2,
+        step3=step3,
+        step4=step4,
+        step5=step5,
+        negative_rules=negative_rules,
+        learning=learning,
+    )
+    assembly_trace.append(
+        "资深顾问判断已生成：岗位诊断、搜索顺序、扩池阶梯、证据标准、客户校准与复盘应用"
+    )
+    v2["classification_trace"] = [*list(v2.get("classification_trace") or []), *assembly_trace[-1:]]
+    if archetype:
+        v2["classification_trace"].append(
+            f"岗位原型已命中并消费：{archetype.get('archetype_id')}（source=kb_archetype，{archetype.get('matched_by') or 'match'}）"
+        )
+    else:
+        v2["archetype_note"] = (
+            "无可用岗位原型：知识库 seed_*.json 的标题职能词与客户兜底规则均未命中本岗位"
+            "（原型匹配留痕见 classification_trace）；策略要素按 JD/顾问输入/LLM 推断生成，"
+            "推断项标记待确认。若该岗位族将反复出现，建议复盘后沉淀新原型。"
+        )
+        v2["classification_trace"].append("原型管理闭环：archetype_matched=false，已显式说明无可用原型及原因")
     if consultant.get("consultant_answers"):
         v2["consultant_answers"] = str(consultant["consultant_answers"])[:800]
     return v2
@@ -1091,6 +1600,8 @@ def validate_strategy_v2(value: Any) -> tuple[bool, list[str]]:
         errors.append("negative_rules 必须是数组（可为空）")
     if not isinstance(value.get("consultant_edits"), list):
         errors.append("consultant_edits 必须是数组（可为空）")
+    if value.get("consultant_judgement") is not None and not isinstance(value.get("consultant_judgement"), dict):
+        errors.append("consultant_judgement 必须是对象")
     return not errors, errors
 
 

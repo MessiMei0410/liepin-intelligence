@@ -4,12 +4,12 @@ import { zeroAttributionLabel } from '../workflow/statusMapping'
 
 export const stepStatusLabel: Record<string,string> = {
   pending:'待执行', queued:'排队中', running:'执行中', waiting_approval:'等待审批', waiting_external:'等待外部结果',
-  completed:'已完成', skipped:'已跳过', blocked:'已阻塞', failed:'失败', cancelled:'已取消',
+  completed:'已完成', skipped:'已跳过', blocked:'已阻塞', failed:'失败', paused:'已暂停', cancelled:'已取消',
 }
 // 渠道 ID → 中文名（猎聘/X-SaaS），utils 与 WorkflowFunnel 共用，不再各自内联。
 export const channelLabel = (name: string) => name==='liepin'?'猎聘':name==='xsaas'?'X-SaaS':name||'渠道'
 export const activeWorkflowStatuses = new Set(['queued','running','waiting_approval','waiting_external'])
-export const stepTone = (status='') => ['completed','skipped'].includes(status) ? 'done' : ['running','queued','waiting_external'].includes(status) ? 'active' : status==='waiting_approval' ? 'needs-approval' : ['failed','blocked'].includes(status) ? 'error' : ['cancelled'].includes(status) ? 'muted' : 'pending'
+export const stepTone = (status='') => ['completed','skipped'].includes(status) ? 'done' : ['running','queued','waiting_external'].includes(status) ? 'active' : status==='waiting_approval' ? 'needs-approval' : ['failed','blocked'].includes(status) ? 'error' : ['paused','cancelled'].includes(status) ? 'muted' : 'pending'
 export const humanizeWorkflowError = (error?: string) => {
   const text=String(error||'').trim()
   if(!text)return '执行失败，尚未记录明确原因。'
@@ -41,6 +41,10 @@ export const stepBusinessResult = (step:Workflow['steps'][number]) => {
   const readyChannels=recordValue(preflight.channels)
   if(Object.keys(readyChannels).length){const ready=Object.entries(readyChannels).filter(([,item])=>recordValue(item).ready).map(([name])=>name==='liepin'?'猎聘':name==='xsaas'?'X-SaaS':name);facts.push(`渠道已就绪：${ready.join('、')||'等待浏览器连接'}。`)}
   const external=recordValue(data.external_result)
+  const channelRiskStop=recordValue(external.channel_risk_stop)
+  if(channelRiskStop.active){
+    facts.push(String(channelRiskStop.message||`${channelLabel(String(channelRiskStop.channel||''))}命中平台风险提示，已停止该渠道及后续分页。`))
+  }
   const runs=arrayValue(external.channel_runs)
   if(runs.length){
     // R8：0 候选的渠道不得只显示 completed——有质量标记/归因时展示“0 条候选 · 归因”，否则回落原状态文案。

@@ -1,4 +1,4 @@
-"""S4-4：策略回放评测 —— 两个定稿 case 跑策略生成链（确定性模式），产出三指标并进回归。
+"""S4-4：策略回放评测 —— 两个定稿 case 跑策略生成链（确定性模式），产出六指标并进回归。
 
 口径来源：docs/ASA_PRD_S4_sourcing_strategy_agent_2026-07-23.md §6（回放评测）。
 
@@ -20,7 +20,7 @@
   长越 case 按其 meta 声明的 L3 构造（仅 JD，无顾问补充）——L3 裸跑下「客户的客户/竞争格局」
   锚点缺失是该 case 的真实基线，不是评测 bug。
 
-三指标口径：
+原有三指标口径（additive 保留，语义不变）：
 ① 目标池重合度（pool_recall / pool_precision）
    - 参考池：case 的 T1+T2 公司（T3 不计入——士兰微 T3 为相邻待确认池、长越 T3 逆向默认关闭）。
      长越 T1 的三个名单（companies_international / companies_domestic_added_v1.1 /
@@ -40,6 +40,25 @@
      长越取岗位 anchor_analysis（customer_of_client/product_tech/competitors/scene），
      其中 competitors 标注「缺失，见 target_company_pool.T1」→ 参考答案用 T1 具体公司池。
    - 值重合 = 压缩归一（去空白/括号内容/小写）后相等或双向包含（短值 ≥2 字符）。
+
+二期扩展指标（2026-08-05  additive，不改前三指标语义）：
+④ 证据覆盖率（evidence_coverage）
+   - 口径选择说明：scoring.py 的 evidence_coverage 是「评分准则有证据支撑」的候选人级口径，
+     回放 case 无候选人评分数据，无法直接对齐；故采用可确定性计算的「策略要素来源标注」口径——
+     strategy_v2 产物中带 source 字段的要素里，来源标注为有依据来源（非 llm_inferred/none/missing）的比例。
+   - 计入的要素三类（step4_keyword_groups 无 source 字段，无法确定性判定来源，显式不计入）：
+     a) 目标池公司（T1/T2）：有依据 = source ∈ {client_doc, kb_profile, kb_graph}；llm_inferred = 无依据；
+     b) 锚点（仅 present 的计入分母，missing 锚点是「缺失要素」而非「无依据要素」）：
+        有依据 = source ∈ {client_doc, jd, consultant, kb_archetype}；
+     c) 约束（negative_rules 中 rule 文本非空的条目；空 rule 的「不适用」留痕条目不计入）：
+        有依据 = source ∈ {client_doc, jd, consultant, kb_profile, restricted_client}。
+   - 指标 = 有依据要素数 / 要素总数；details.evidence.breakdown 给三类分项。
+⑤ 噪音率（noise_rate）= 1 - pool_precision，显式输出（precision 语义不变）；
+   方向为「越低越好」（METRIC_DIRECTIONS 登记，回归门槛与 --compare 据此判定）。
+⑥ 推荐率 proxy（recommendation_rate_proxy，明确标注为 proxy）
+   - 回放 case 无「顾问确认可推荐」结果数据，真实推荐率无法确定性回放，故输出 proxy 不伪造口径：
+     Agent T1/T2 池中「命中 case 参考池 且 source ≠ llm_inferred」的公司占比——
+     即「既有历史校准背书、又可直接进入寻访」的公司比例。顾问确认口径接入后替换本 proxy。
 
 公司名归一规则（①的匹配基础，company_keys/companies_match）：
 - 大小写不敏感、去全部空白；全角/半角括号内容作为别名键（如 MPS（芯源系统）→ {mps, 芯源系统}）；
@@ -61,7 +80,10 @@
    并同步更新基线文档的数值与明细；指标下降一律视为回归，修生成逻辑而不是改基线。
 
 CLI：默认打印人类可读表格；--json 打印 JSON；--out PATH 把 JSON 报告写文件；
---case 只跑指定 case；--kb-dir 覆盖知识库目录（等价于 ASA_KNOWLEDGE_BASE_DIR）。
+--case 只跑指定 case；--kb-dir 覆盖知识库目录（等价于 ASA_KNOWLEDGE_BASE_DIR）；
+--compare BASELINE.json 与既有基线（--out/--json 产出的报告文件）逐项 diff：
+按 METRIC_DIRECTIONS 方向判定是否倒退并打印明细，有倒退退出码 1，无倒退 0；
+--json 同用时 diff 结果并入 JSON 的 "compare" 键。
 case 文件缺失/坏 JSON/结构不符 → 抛 ReplayCaseError（退出码 2），绝不静默全过。
 """
 
@@ -101,7 +123,26 @@ CASE_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
-METRIC_KEYS = ("pool_recall", "pool_precision", "keyword_coverage", "anchor_completeness")
+METRIC_KEYS = (
+    "pool_recall", "pool_precision", "keyword_coverage", "anchor_completeness",
+    "evidence_coverage", "noise_rate", "recommendation_rate_proxy",
+)
+
+# 指标方向：回归门槛与 --compare 据此判定倒退（缺省 higher=越高越好；noise_rate 越低越好）。
+METRIC_DIRECTIONS: dict[str, str] = {
+    "pool_recall": "higher",
+    "pool_precision": "higher",
+    "keyword_coverage": "higher",
+    "anchor_completeness": "higher",
+    "evidence_coverage": "higher",
+    "noise_rate": "lower",
+    "recommendation_rate_proxy": "higher",
+}
+
+# ④ 证据覆盖率的「有依据来源」集合（口径见模块 docstring ④；step4 关键词组无 source 字段不计入）
+EVIDENCE_BACKED_POOL_SOURCES = frozenset({"client_doc", "kb_profile", "kb_graph"})
+EVIDENCE_BACKED_ANCHOR_SOURCES = frozenset({"client_doc", "jd", "consultant", "kb_archetype"})
+EVIDENCE_BACKED_RULE_SOURCES = frozenset({"client_doc", "jd", "consultant", "kb_profile", "restricted_client"})
 
 # 归一规则常量（口径见模块 docstring）
 _CORP_SUFFIXES = ("股份有限公司", "有限责任公司", "有限公司", "集团公司", "集团", "公司")
@@ -428,6 +469,11 @@ def evaluate_pool(
         if any(companies_match(agent["name"], reference, graph_keys) for reference in reference_pool):
             matched_agent.add(agent_index)
     total_ref, total_agent = len(reference_pool), len(agent_pool)
+    # 指标⑥ proxy：命中参考池且来源非 llm_inferred 的 Agent 公司（口径见模块 docstring ⑥）
+    recommendable = [
+        agent_pool[i] for i in sorted(matched_agent)
+        if str(agent_pool[i].get("source") or "") != "llm_inferred"
+    ]
     return {
         "recall": round(len(matched_ref) / total_ref, 4) if total_ref else 0.0,
         "precision": round(len(matched_agent) / total_agent, 4) if total_agent else 0.0,
@@ -438,6 +484,47 @@ def evaluate_pool(
             {"name": agent_pool[i]["name"], "source": agent_pool[i].get("source", ""), "tier": agent_pool[i].get("tier", "")}
             for i in range(total_agent) if i not in matched_agent
         ],
+        "recommendation_proxy": round(len(recommendable) / total_agent, 4) if total_agent else 0.0,
+        "recommendation_proxy_hits": len(recommendable),
+    }
+
+
+def evaluate_evidence(agent_pool: list[dict[str, Any]], v2: dict[str, Any]) -> dict[str, Any]:
+    """指标④：证据覆盖率 —— 带 source 的策略要素中「有依据来源」占比（口径见模块 docstring ④）。
+
+    三类要素：目标池公司（T1/T2）/ present 锚点 / rule 文本非空的约束条目；
+    step4 关键词组无 source 字段，显式不计入。返回总比例 + 三类分项明细。
+    """
+    pool_total = len(agent_pool)
+    pool_backed = sum(1 for c in agent_pool if str(c.get("source") or "") in EVIDENCE_BACKED_POOL_SOURCES)
+    anchors = v2.get("anchors") if isinstance(v2.get("anchors"), dict) else {}
+    anchor_items = [
+        (key, anchors.get(key)) for key in strategy_v2.ANCHOR_KEYS
+        if isinstance(anchors.get(key), dict) and anchors[key].get("present")
+    ]
+    anchor_total = len(anchor_items)
+    anchor_backed = sum(
+        1 for _key, anchor in anchor_items
+        if str(anchor.get("source") or "") in EVIDENCE_BACKED_ANCHOR_SOURCES
+    )
+    rules = [
+        rule for rule in v2.get("negative_rules") or []
+        if isinstance(rule, dict) and str(rule.get("rule") or "").strip()
+    ]
+    rule_total = len(rules)
+    rule_backed = sum(1 for rule in rules if str(rule.get("source") or "") in EVIDENCE_BACKED_RULE_SOURCES)
+    total = pool_total + anchor_total + rule_total
+    backed = pool_backed + anchor_backed + rule_backed
+    return {
+        "coverage": round(backed / total, 4) if total else 0.0,
+        "backed": backed,
+        "total": total,
+        "breakdown": {
+            "target_pool": {"backed": pool_backed, "total": pool_total},
+            "anchors_present": {"backed": anchor_backed, "total": anchor_total},
+            "constraints": {"backed": rule_backed, "total": rule_total},
+        },
+        "excluded": "step4_keyword_groups 无 source 字段，不计入（口径见模块 docstring ④）",
     }
 
 
@@ -602,6 +689,7 @@ def run_replay(case_id: str, kb_dir: str | Path | None = None) -> dict[str, Any]
     pool_metrics = evaluate_pool(agent_pool, reference["pool"], graph_keys)
     keyword_metrics = evaluate_keywords(v2.get("step4_keyword_groups") or [], reference["keyword_groups"])
     anchor_metrics = evaluate_anchors(v2.get("anchors") or {}, reference["anchors"])
+    evidence_metrics = evaluate_evidence(agent_pool, v2)
 
     return {
         "case_id": case_id,
@@ -619,12 +707,17 @@ def run_replay(case_id: str, kb_dir: str | Path | None = None) -> dict[str, Any]
             "pool_precision": pool_metrics["precision"],
             "keyword_coverage": keyword_metrics["coverage"],
             "anchor_completeness": anchor_metrics["score"],
+            # 二期扩展指标（口径见模块 docstring ④⑤⑥；recommendation_rate_proxy 为 proxy 非真实口径）
+            "evidence_coverage": evidence_metrics["coverage"],
+            "noise_rate": round(1.0 - pool_metrics["precision"], 4),
+            "recommendation_rate_proxy": pool_metrics["recommendation_proxy"],
         },
         "details": {
             "pool": pool_metrics,
             "pool_generic_excluded": reference["pool_generic_excluded"],
             "keywords": keyword_metrics,
             "anchors": anchor_metrics,
+            "evidence": evidence_metrics,
         },
     }
 
@@ -674,6 +767,20 @@ def render_text(report: dict[str, Any]) -> str:
             f"（{keywords['covered_groups']}/{keywords['total_groups']} 组命中）"
         )
         lines.append(f"  ③ 锚点完整率    {_fmt(metrics['anchor_completeness'])}（四锚点均值）")
+        evidence = case["details"]["evidence"]
+        lines.append(
+            f"  ④ 证据覆盖率    {_fmt(metrics['evidence_coverage'])}"
+            f"（{evidence['backed']}/{evidence['total']} 要素有依据来源；"
+            f"池 {evidence['breakdown']['target_pool']['backed']}/{evidence['breakdown']['target_pool']['total']}"
+            f" 锚点 {evidence['breakdown']['anchors_present']['backed']}/{evidence['breakdown']['anchors_present']['total']}"
+            f" 约束 {evidence['breakdown']['constraints']['backed']}/{evidence['breakdown']['constraints']['total']}）"
+        )
+        lines.append(f"  ⑤ 噪音率        {_fmt(metrics['noise_rate'])}（= 1 - precision，越低越好）")
+        lines.append(
+            f"  ⑥ 推荐率 proxy  {_fmt(metrics['recommendation_rate_proxy'])}"
+            f"（proxy 口径：参考池命中且非 llm_inferred 的 Agent 公司 "
+            f"{pool['recommendation_proxy_hits']}/{pool['agent_size']} 家；非顾问确认真实推荐率）"
+        )
         lines.append("  未命中明细：")
         missed = pool["missed_reference"]
         lines.append(f"    - case 池未覆盖公司（{len(missed)}）：{'、'.join(missed) if missed else '无'}")
@@ -701,8 +808,97 @@ def render_text(report: dict[str, Any]) -> str:
         f"  precision={_fmt(overall['pool_precision'])}"
         f"  keyword={_fmt(overall['keyword_coverage'])}"
         f"  anchor={_fmt(overall['anchor_completeness'])}"
+        f"  evidence={_fmt(overall['evidence_coverage'])}"
+        f"  noise={_fmt(overall['noise_rate'])}"
+        f"  recommend_proxy={_fmt(overall['recommendation_rate_proxy'])}"
     )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 基线对比（--compare）
+# ---------------------------------------------------------------------------
+
+def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """当前报告 vs 基线报告逐项 diff，按 METRIC_DIRECTIONS 判定倒退。
+
+    baseline 取本脚本 --out/--json 产出的报告文件（cases[].metrics + overall）。
+    基线里有的 case/指标才参与对比；基线缺的新指标标 "new"（不算倒退）；
+    当前报告缺基线已有的指标按倒退处理（current=None）。
+    """
+    baseline_cases = {case.get("case_id"): case for case in baseline.get("cases") or [] if isinstance(case, dict)}
+    case_diffs: dict[str, Any] = {}
+    regressions: list[str] = []
+
+    def _diff_metrics(scope: str, current_metrics: dict[str, Any], baseline_metrics: dict[str, Any]) -> dict[str, Any]:
+        entries: dict[str, Any] = {}
+        for key, base_value in baseline_metrics.items():
+            if not isinstance(base_value, (int, float)):
+                continue
+            direction = METRIC_DIRECTIONS.get(key, "higher")
+            cur_value = current_metrics.get(key)
+            if isinstance(cur_value, (int, float)):
+                delta = round(float(cur_value) - float(base_value), 4)
+                regressed = delta < 0 if direction == "higher" else delta > 0
+            else:
+                delta = None
+                regressed = True  # 基线有、当前没有 → 按倒退处理
+            if regressed:
+                regressions.append(f"{scope}.{key}")
+            entries[key] = {
+                "baseline": base_value,
+                "current": cur_value,
+                "delta": delta,
+                "direction": direction,
+                "regressed": regressed,
+            }
+        for key in current_metrics:
+            if key not in entries and isinstance(current_metrics[key], (int, float)):
+                entries[key] = {"baseline": None, "current": current_metrics[key], "delta": None,
+                                "direction": METRIC_DIRECTIONS.get(key, "higher"), "regressed": False, "note": "new"}
+        return entries
+
+    for case in current.get("cases") or []:
+        case_id = case.get("case_id")
+        base_case = baseline_cases.get(case_id)
+        if not isinstance(base_case, dict) or not isinstance(base_case.get("metrics"), dict):
+            case_diffs[str(case_id)] = {"note": "基线无此 case，跳过对比", "metrics": {}}
+            continue
+        case_diffs[str(case_id)] = {"metrics": _diff_metrics(str(case_id), case.get("metrics") or {}, base_case["metrics"])}
+    overall_diff = {}
+    if isinstance(baseline.get("overall"), dict):
+        overall_diff = _diff_metrics("overall", current.get("overall") or {}, baseline["overall"])
+    return {"cases": case_diffs, "overall": overall_diff, "regressions": regressions}
+
+
+def render_compare_text(diff: dict[str, Any]) -> str:
+    lines = ["=" * 68, "回放基线对比（--compare）", "=" * 68]
+    for case_id, case_diff in diff["cases"].items():
+        lines.append(f"\n■ {case_id}")
+        if case_diff.get("note"):
+            lines.append(f"  {case_diff['note']}")
+        for key, entry in case_diff.get("metrics", {}).items():
+            lines.append(_format_diff_entry(key, entry))
+    if diff.get("overall"):
+        lines.append("\n■ 汇总（overall）")
+        for key, entry in diff["overall"].items():
+            lines.append(_format_diff_entry(key, entry))
+    lines.append("")
+    if diff["regressions"]:
+        lines.append(f"结论：发现倒退 {len(diff['regressions'])} 项 → {'、'.join(diff['regressions'])}（退出码 1）")
+    else:
+        lines.append("结论：无倒退（退出码 0）")
+    return "\n".join(lines)
+
+
+def _format_diff_entry(key: str, entry: dict[str, Any]) -> str:
+    if entry.get("note") == "new":
+        return f"  {key}: 新增指标（基线无）current={_fmt(entry['current'])}"
+    current = _fmt(entry["current"]) if isinstance(entry.get("current"), (int, float)) else "缺失"
+    delta = f"{entry['delta']:+.4f}" if isinstance(entry.get("delta"), (int, float)) else "—"
+    mark = "  ← 倒退" if entry["regressed"] else ""
+    arrow = "↑好" if entry["direction"] == "higher" else "↓好"
+    return f"  {key}: baseline={_fmt(entry['baseline'])} current={current} delta={delta}（{arrow}）{mark}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -711,6 +907,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case", action="append", choices=sorted(CASE_SPECS), help="只跑指定 case（可多次）")
     parser.add_argument("--json", action="store_true", help="打印 JSON 报告")
     parser.add_argument("--out", default=None, help="把 JSON 报告写入该文件")
+    parser.add_argument("--compare", default=None, metavar="BASELINE.json",
+                        help="与基线报告文件逐项 diff；有倒退退出码 1，无倒退 0")
     args = parser.parse_args(argv)
 
     try:
@@ -719,13 +917,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"回放评测失败：{exc}", file=sys.stderr)
         return 2
 
+    diff: dict[str, Any] | None = None
+    if args.compare:
+        try:
+            baseline = json.loads(Path(args.compare).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"基线文件读取失败：{args.compare}（{exc.__class__.__name__}: {exc}）", file=sys.stderr)
+            return 2
+        diff = compare_reports(report, baseline)
+        report = {**report, "compare": diff}
+
     if args.out:
         Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print(render_text(report))
-    return 0
+        if diff is not None:
+            print("\n" + render_compare_text(diff))
+    return 1 if diff is not None and diff["regressions"] else 0
 
 
 if __name__ == "__main__":

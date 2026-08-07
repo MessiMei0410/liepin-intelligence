@@ -146,6 +146,14 @@ class AgentCoreTest(AgentDbCase):
         self.assertNotIn("https://h.liepin.com", encoded)
         self.assertIn("高级机械设计工程师", encoded)
 
+    def test_context_includes_resume_text(self) -> None:
+        context = build_candidate_context(self.db_path, 30)
+        resume = context["model_context"].get("resume", {})
+        self.assertIn("8年精密设备经验", resume.get("full_text", ""))
+        # 简历原文中的隐私字段仍需被 sanitize_payload 过滤
+        self.assertNotIn("13800138000", resume.get("full_text", ""))
+        self.assertNotIn("test@example.com", resume.get("full_text", ""))
+
     def test_privacy_filter_removes_account_keys_recursively(self) -> None:
         result = sanitize_payload(
             {
@@ -226,8 +234,11 @@ class AgentServiceTest(AgentDbCase):
     def test_context_chat_is_recorded(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment()))
         service.submit_assessment(30, wait=True)
-        response = service.chat(30, "为什么建议这样判断？")
-        self.assertIn("精密设备经验完整", response["answer"])
+        response = service.chat(30, "请详细解释为什么建议这样判断？")
+        self.assertIn("逐条证据链", response["answer"])
+        self.assertIn("7年以上精密设备机械设计经验", response["answer"])
+        self.assertIn("候选人履历显示8年精密设备机械设计经验", response["answer"])
+        self.assertIn("判断边界", response["answer"])
         conn = sqlite3.connect(self.db_path)
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM agent_messages").fetchone()[0], 2)

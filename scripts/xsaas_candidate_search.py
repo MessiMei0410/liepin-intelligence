@@ -72,6 +72,26 @@ def choose_authenticated_tab(port: int) -> dict[str, Any]:
     return candidates[0]
 
 
+def close_runner_tabs(port: int) -> int:
+    """Close only ASA-owned isolated tabs left behind by killed/expired runners."""
+    tabs = load_json(f"http://127.0.0.1:{port}/json/list")
+    target_ids = [
+        str(tab.get("id") or "")
+        for tab in tabs
+        if RUNNER_MARKER in str(tab.get("url") or "") and str(tab.get("id") or "")
+    ]
+    if not target_ids:
+        return 0
+    browser_ws = load_json(f"http://127.0.0.1:{port}/json/version")["webSocketDebuggerUrl"]
+    browser = CDP(browser_ws)
+    try:
+        for target_id in target_ids:
+            browser.send("Target.closeTarget", {"targetId": target_id})
+    finally:
+        browser.close()
+    return len(target_ids)
+
+
 def clone_authenticated_tab(port: int, source_tab: dict[str, Any]) -> tuple[CDP, str]:
     source = CDP(source_tab["webSocketDebuggerUrl"])
     browser_ws = load_json(f"http://127.0.0.1:{port}/json/version")["webSocketDebuggerUrl"]
@@ -494,6 +514,7 @@ def run_search(
     capture_details: bool = True,
     max_pages: int = 50,
 ) -> dict[str, Any]:
+    close_runner_tabs(port)
     source = choose_authenticated_tab(port)
     browser_ws = load_json(f"http://127.0.0.1:{port}/json/version")["webSocketDebuggerUrl"]
     browser = CDP(browser_ws)

@@ -88,7 +88,7 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
   }
 
   if (error) {
-    return <section className="job-detail-section job-profile-section"><h3>这个岗位实际在干什么</h3><div className="empty">{error}</div></section>
+    return <section className="job-detail-section job-profile-section"><h3>这个岗位实际在干什么</h3><div className="empty"><span>{error}</span><button className="button" onClick={() => void load()}>重新加载岗位画像</button></div></section>
   }
   if (!data) {
     return (

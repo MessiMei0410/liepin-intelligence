@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CandidatePanel } from '../panels/CandidatePanel'
+import type { CandidateDetail } from '../api'
 import { candidateDetail, mockResponse } from './helpers'
 
 const preflightUrl = '/api/v1/candidate-actions/preflight'
@@ -49,6 +50,19 @@ describe('候选人停止确认层', () => {
     expect(changed).not.toHaveBeenCalled()
   })
 
+  it('初始焦点落在确认动作，取消后归还停止按钮', async () => {
+    const user = userEvent.setup()
+    render(<CandidatePanel value={candidateDetail} close={() => undefined} changed={() => undefined} />)
+    const trigger = screen.getByRole('button', { name: '停止' })
+    trigger.focus()
+    await user.click(trigger)
+    const dialog = await screen.findByRole('alertdialog')
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: '确认停止推进' })).toHaveFocus())
+
+    await user.click(within(dialog).getAllByRole('button', { name: '取消' })[0])
+    expect(trigger).toHaveFocus()
+  })
+
   it('确认提交携带 preflight token 并原地刷新', async () => {
     const { user, changed, dialog } = await openDialog()
     await user.click(within(dialog).getByRole('button', { name: '确认停止推进' }))
@@ -59,6 +73,48 @@ describe('候选人停止确认层', () => {
     expect(JSON.parse(String(init.body))).toMatchObject({ candidate_id: 1, action: 'stop', preflight_token: 'tok-1', note: '' })
     expect(changed).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('快速双击确认只提交一次', async () => {
+    const { dialog } = await openDialog()
+    const confirm = within(dialog).getByRole('button', { name: '确认停止推进' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    await screen.findByText(/候选人状态已更新/)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(commitUrl))).toHaveLength(1)
+  })
+
+  it('后端判断动作此前已完成时显示同步回执', async () => {
+    fetchMock.mockImplementation(async input => {
+      const url = String(input)
+      if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '候选人状态将更新' })
+      if (url.includes(commitUrl)) return mockResponse({ ok: true, already_applied: true, stage: 'S7 已推荐客户/待反馈' })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const { user, dialog } = await openDialog()
+    await user.click(within(dialog).getByRole('button', { name: '确认停止推进' }))
+    expect(await screen.findByText(/此前已完成，已同步当前候选人状态/)).toBeInTheDocument()
+    expect(await screen.findByText(/（S7 已推荐客户\/待反馈）/)).toBeInTheDocument()
+  })
+})
+
+
+describe('候选人详情缺省字段防御', () => {
+  it('后端缺省 resume/数组字段时仍可渲染并切换 tab', async () => {
+    const user = userEvent.setup()
+    render(
+      <CandidatePanel
+        value={{ ...candidateDetail, resume: undefined, source_links: undefined, events: undefined, job_relations: undefined } as unknown as CandidateDetail}
+        close={() => undefined}
+        changed={() => undefined}
+      />,
+    )
+    expect(screen.getByRole('heading', { name: '张三' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '履历' }))
+    expect(screen.getByText('尚未采集结构化工作经历，可通过来源链接核对原始简历。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '记录' }))
+    expect(screen.getByRole('heading', { name: '业务时间线' })).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { name: '岗位关系' }).length).toBeGreaterThan(0)
   })
 })
 

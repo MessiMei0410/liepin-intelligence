@@ -710,6 +710,46 @@ class UpgradeAndRouteTest(DbCase):
             fetched = client.get("/api/v1/candidates/1/assessments?job_id=154")
             assert fetched.json()["assessment"]["dimensions"]["motivation"]["signals"] == motivation["signals"]
 
+    def test_unchanged_assessment_inputs_reuse_artifact_without_model_calls(self) -> None:
+        _seed_person(self.db_path, candidate_id=1, job_id=154, person_id=1)
+        calls = {"trajectory": 0, "pm": 0, "risks": 0}
+
+        def trajectory(_payload: dict) -> dict:
+            calls["trajectory"] += 1
+            return GOOD_LLM
+
+        def pm(_payload: dict) -> dict:
+            calls["pm"] += 1
+            return GOOD_PM
+
+        def risks(_payload: dict) -> dict:
+            calls["risks"] += 1
+            return {"items": []}
+
+        llm = FakeLLM({}, trajectory=trajectory, percentile_motivation=pm, risks=risks)
+        app = create_app(db_path=self.db_path, start_legacy=False)
+        app.state.core.agent_service.llm = llm
+        app.state.core.agent_service.assessment_signal_fetcher = _stub_fetcher
+        with TestClient(app) as client:
+            first = client.post(
+                "/api/v1/candidates/1/assessments?job_id=154",
+                json={"request_id": "req-cache-1"}, headers={"Idempotency-Key": "cache-1"},
+            )
+            second = client.post(
+                "/api/v1/candidates/1/assessments?job_id=154",
+                json={"request_id": "req-cache-2"}, headers={"Idempotency-Key": "cache-2"},
+            )
+            forced = client.post(
+                "/api/v1/candidates/1/assessments?job_id=154&force=true",
+                json={"request_id": "req-cache-3"}, headers={"Idempotency-Key": "cache-3"},
+            )
+        assert first.status_code == second.status_code == forced.status_code == 200
+        assert first.json()["cached"] is False
+        assert second.json()["cached"] is True
+        assert second.json()["cache_reason"] == "assessment_inputs_unchanged"
+        assert forced.json()["cached"] is False
+        assert calls == {"trajectory": 2, "pm": 2, "risks": 2}
+
 
 # ---------------------------------------------------------------------------
 # 6. 回测工具：band × 实际推进对照表 + 错例归因 + 导出（临时库 + FakeLLM）

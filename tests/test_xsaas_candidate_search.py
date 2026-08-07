@@ -9,6 +9,7 @@ from xsaas_candidate_search import (
     DETAIL_READY_JS,
     apply_position_score_gate,
     capture_candidate_details,
+    close_runner_tabs,
     merge_round_candidates,
     query_execution_spec,
     query_matches,
@@ -55,6 +56,23 @@ class XsaasQueryRoundBindingTest(unittest.TestCase):
                 ("mps-2", "MPS"),
             ],
         )
+
+    def test_cleanup_closes_only_owned_runner_tabs(self) -> None:
+        browser = unittest.mock.Mock()
+        tabs = [
+            {"id": "runner-1", "url": "https://headhunt.x-saas.com.cn/?asa_search_runner=1#/app/candidate/list"},
+            {"id": "desktop", "url": "https://headhunt.x-saas.com.cn/#/app/desktop"},
+            {"id": "other", "url": "https://example.com/"},
+        ]
+        with patch(
+            "xsaas_candidate_search.load_json",
+            side_effect=[tabs, {"webSocketDebuggerUrl": "ws://browser"}],
+        ), patch("xsaas_candidate_search.CDP", return_value=browser):
+            closed = close_runner_tabs(9223)
+
+        self.assertEqual(closed, 1)
+        browser.send.assert_called_once_with("Target.closeTarget", {"targetId": "runner-1"})
+        browser.close.assert_called_once_with()
 
 
 class XsaasCandidateDetailCaptureTest(unittest.TestCase):

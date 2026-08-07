@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import sqlite3
 import uuid
 from pathlib import Path
 
 import pytest
+import openpyxl
 from fastapi.testclient import TestClient
 
 from asa_core.app import create_app
@@ -21,6 +24,108 @@ import liepin_workbench_server as legacy
 
 
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+
+
+def test_copilot_attachment_reads_xlsx_without_exposing_a_local_path(db_path: Path) -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "新增需求"
+    sheet.append(["客户", "岗位方向", "优先级"])
+    sheet.append(["长川科技", "探针台 CPO", "急"])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    content = buffer.getvalue()
+
+    app = create_app(db_path=db_path, start_legacy=False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/copilot/attachments",
+            json={
+                "request_id": "attachment-test-xlsx",
+                "file_name": "探针台CPO方向新增需求.xlsx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "size_bytes": len(content),
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+
+    assert response.status_code == 200
+    attachment = response.json()["attachment"]
+    assert attachment["content_available"] is True
+    assert "asa-attachment-" not in json.dumps(attachment, ensure_ascii=False)
+    assert "extracted_text" not in attachment
+    conn = sqlite3.connect(db_path)
+    stored = conn.execute(
+        "SELECT extracted_text,session_id FROM agent_copilot_attachments WHERE attachment_id=?",
+        (attachment["attachment_id"],),
+    ).fetchone()
+    conn.close()
+    assert "[工作表] 新增需求" in stored[0]
+    assert "长川科技\t探针台 CPO\t急" in stored[0]
+    assert stored[1] == ""
+
+
+def test_copilot_attachment_rejects_unsupported_and_invalid_content(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    with TestClient(app) as client:
+        unsupported = client.post(
+            "/api/v1/copilot/attachments",
+            json={
+                "request_id": "attachment-test-bin",
+                "file_name": "payload.bin",
+                "size_bytes": 4,
+                "content_base64": "dGVzdA==",
+            },
+        )
+        invalid = client.post(
+            "/api/v1/copilot/attachments",
+            json={
+                "request_id": "attachment-test-invalid",
+                "file_name": "需求.txt",
+                "size_bytes": 4,
+                "content_base64": "not-base64",
+            },
+        )
+
+    assert unsupported.status_code == 415
+    assert invalid.status_code == 400
+
+
+def test_copilot_session_restores_attachment_metadata_without_document_text(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO agent_copilot_messages
+        (session_id,context_type,context_id,role,content,structured_json)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            "attachment-history", "page", None, "user", "请分析附件",
+            json.dumps({
+                "uploaded_attachment_evidence": {
+                    "items": [{
+                        "attachment_id": "att-history", "file_name": "需求.xlsx",
+                        "file_type": "xlsx", "size_bytes": 128, "content_available": True,
+                        "extracted_text": "这是仅供模型使用的岗位正文", "truncated": False,
+                        "status": "已读取附件正文。",
+                    }]
+                }
+            }, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/copilot/sessions/attachment-history")
+
+    assert response.status_code == 200
+    attachment = response.json()["messages"][0]["context"]["uploaded_attachments"][0]
+    assert attachment["file_name"] == "需求.xlsx"
+    assert attachment["content_available"] is True
+    assert "extracted_text" not in attachment
 
 
 def test_read_no_reply_update_requires_a_statement_or_write_intent() -> None:
@@ -97,6 +202,51 @@ def test_copilot_session_metadata_can_be_renamed_archived_and_clear_focus(db_pat
     assert "agent-task-manage" not in {item["session_id"] for item in hidden.json()["sessions"]}
     assert included.json()["sessions"][0]["session_id"] == "agent-task-manage"
     assert openapi["paths"]["/api/v1/copilot/sessions"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("CopilotSessionListResponse")
+
+
+def test_copilot_sessions_can_be_archived_in_one_idempotent_action(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO agent_copilot_messages(session_id,role,content) VALUES (?,?,?)",
+            [
+                ("bulk-task-1", "user", "任务一"),
+                ("bulk-task-2", "user", "任务二"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(app) as client:
+        before = client.get("/api/v1/copilot/sessions", params={"limit": 100})
+        response = client.post(
+            "/api/v1/copilot/sessions/archive-all",
+            headers={"Idempotency-Key": "archive-all-agent-tasks"},
+            json={"request_id": "archive-all-1"},
+        )
+        replay = client.post(
+            "/api/v1/copilot/sessions/archive-all",
+            headers={"Idempotency-Key": "archive-all-agent-tasks"},
+            json={"request_id": "archive-all-1"},
+        )
+        visible = client.get("/api/v1/copilot/sessions", params={"limit": 100})
+        archived = client.get(
+            "/api/v1/copilot/sessions",
+            params={"limit": 100, "include_archived": "true"},
+        )
+
+    assert response.status_code == 200
+    before_ids = {item["session_id"] for item in before.json()["sessions"]}
+    assert {"bulk-task-1", "bulk-task-2"}.issubset(before_ids)
+    assert response.json()["archived_count"] == len(before_ids)
+    assert set(response.json()["session_ids"]) == before_ids
+    assert replay.json() == response.json()
+    assert visible.json()["sessions"] == []
+    assert {"bulk-task-1", "bulk-task-2"}.issubset(
+        {item["session_id"] for item in archived.json()["sessions"]}
+    )
 
 
 def test_copilot_session_patch_requires_visible_messages(db_path: Path) -> None:
@@ -573,6 +723,83 @@ def test_migrations_are_idempotent(db_path: Path) -> None:
     assert second["foreign_key_issues"] == []
 
 
+def test_workflow_artifact_detail_download_and_path_boundary(db_path: Path) -> None:
+    migrate(db_path, backup=False)
+    artifact_root = db_path.parent / "asa_artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    safe_file = artifact_root / "matching-report.docx"
+    safe_file.write_bytes(b"docx-content")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        goal_id, workflow_id = conn.execute(
+            "SELECT goal_id,workflow_id FROM agent_workflows ORDER BY id LIMIT 1"
+        ).fetchone()
+        rows = [
+            (
+                "artifact_content_test", goal_id, workflow_id, None, "search_strategy", "多渠道寻访策略",
+                "text/markdown", "", "# 结论\n\n可执行策略", "{}", "passed",
+            ),
+            (
+                "artifact_file_test", goal_id, workflow_id, None, "matching_report", "人岗匹配报告",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                str(safe_file), "", "{}", "passed",
+            ),
+            (
+                "artifact_external_path_test", goal_id, workflow_id, None, "matching_report", "越界文件",
+                "text/plain", "/etc/hosts", "", "{}", "passed",
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO agent_artifacts
+                (artifact_id,goal_id,workflow_id,step_id,artifact_type,title,mime_type,file_path,content,metadata_json,validation_status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        detail = client.get("/api/v1/artifacts/artifact_content_test")
+        assert detail.status_code == 200
+        artifact = detail.json()["artifact"]
+        assert artifact["content"] == "# 结论\n\n可执行策略"
+        assert artifact["downloadable"] is True
+        assert artifact["download_kind"] == "content"
+        assert "file_path" not in artifact
+
+        content_download = client.get("/api/v1/artifacts/artifact_content_test/file")
+        assert content_download.status_code == 200
+        assert content_download.content.decode("utf-8") == "# 结论\n\n可执行策略"
+        assert "attachment" in content_download.headers["content-disposition"]
+
+        file_download = client.get("/api/v1/artifacts/artifact_file_test/file")
+        assert file_download.status_code == 200
+        assert file_download.content == b"docx-content"
+
+        blocked = client.get("/api/v1/artifacts/artifact_external_path_test")
+        assert blocked.status_code == 200
+        assert blocked.json()["artifact"]["downloadable"] is False
+        assert blocked.json()["artifact"]["download_url"] == ""
+        assert client.get("/api/v1/artifacts/artifact_external_path_test/file").status_code == 404
+
+        workflow = client.get(f"/api/v1/workflows/{workflow_id}")
+        assert workflow.status_code == 200
+        listed = {item["artifact_id"]: item for item in workflow.json()["artifacts"]}
+        assert listed["artifact_content_test"]["has_content"] is True
+        assert "content" not in listed["artifact_content_test"]
+        assert "file_path" not in listed["artifact_file_test"]
+
+        denied = client.get(
+            "/api/v1/artifacts/artifact_content_test",
+            headers={"Origin": "https://example.invalid"},
+        )
+        assert denied.status_code == 403
+
+
 def test_migration_recovers_abandoned_idempotency_processing_records(db_path: Path) -> None:
     migrate(db_path, backup=False)
     conn = sqlite3.connect(db_path)
@@ -836,9 +1063,18 @@ def test_dashboard_and_jobs_exclude_stopped_and_empty_left_join_rows(db_path: Pa
 
 def test_stopped_candidate_cannot_be_reactivated_by_preflight(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        candidates = []
+        first_page = client.get("/api/v1/candidates?limit=200").json()
+        candidates.extend(first_page["items"])
+        while len(candidates) < first_page["total"]:
+            page = client.get(
+                "/api/v1/candidates",
+                params={"limit": 200, "offset": len(candidates)},
+            ).json()
+            candidates.extend(page["items"])
         stopped = next(
             item
-            for item in client.get("/api/v1/candidates?limit=200").json()["items"]
+            for item in candidates
             if "初筛不通过" in (item.get("clean_stage") or "")
         )
         detail = client.get(f"/api/v1/candidates/{stopped['id']}").json()["candidate"]
@@ -855,6 +1091,36 @@ def test_candidate_event_source_urls_are_available_in_detail(db_path: Path) -> N
         detail = client.get("/api/v1/candidates/549").json()["candidate"]
         urls = [item.get("source_url") for item in detail["source_links"] if item.get("source_url")]
         assert any("liepin.com/resume/" in url for url in urls)
+
+
+def test_candidate_detail_lists_report_artifact_versions_without_internal_paths(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        candidate_id = int(conn.execute("SELECT id FROM job_candidates ORDER BY id LIMIT 1").fetchone()[0])
+        metadata = json.dumps({"job_candidate_id": candidate_id}, ensure_ascii=False)
+        conn.executemany(
+            """
+            INSERT INTO agent_artifacts
+                (artifact_id,goal_id,workflow_id,step_id,artifact_type,title,mime_type,file_path,content,metadata_json,validation_status,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                ("report-version-1", "goal-report", "workflow-report", None, "recommendation_report", "嘉驰推荐报告 v1", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "/private/report-v1.docx", "secret-v1", metadata, "passed", "2026-08-04 10:00:00"),
+                ("report-version-2", "goal-report", "workflow-report", None, "recommendation_report", "嘉驰推荐报告 v2", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "/private/report-v2.docx", "secret-v2", metadata, "passed", "2026-08-04 11:00:00"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = client.get(f"/api/v1/candidates/{candidate_id}")
+        assert response.status_code == 200
+        reports = response.json()["candidate"]["report_artifacts"]
+        selected = [item for item in reports if item["artifact_id"].startswith("report-version-")]
+        assert [item["artifact_id"] for item in selected] == ["report-version-2", "report-version-1"]
+        assert [item["version"] for item in selected] == [2, 1]
+        assert all("file_path" not in item and "content" not in item for item in selected)
 
 
 def test_candidate_detail_falls_back_to_sourcing_card_profile(db_path: Path) -> None:
@@ -1336,6 +1602,48 @@ def test_workflow_archive_hides_current_card_but_preserves_detail(db_path: Path)
         assert detail.json()["workflow"]["archived_at"]
 
 
+def test_workflow_pause_and_resume_actions_use_the_core_route(db_path: Path) -> None:
+    app = create_app(db_path=db_path, start_legacy=False)
+    created = app.state.core.agent_service.create_goal(
+        "给士兰微技术市场经理再找些候选人",
+        {"type": "job", "id": 111},
+    )
+    workflow_id = created["workflow"]["workflow_id"]
+    step_id = next(step["id"] for step in created["steps"] if step["capability_id"] == "multi_channel_sourcing")
+    request = {"client": "士兰微", "job": "技术市场经理", "query_plan_v1": {"plan_hash": "test"}}
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE agent_workflows SET status='waiting_external' WHERE workflow_id=?", (workflow_id,))
+    conn.execute("UPDATE agent_goals SET status='waiting_external' WHERE goal_id=?", (created["goal"]["goal_id"],))
+    conn.execute(
+        "UPDATE agent_workflow_steps SET status='waiting_external',recovery_json=? WHERE id=?",
+        (json.dumps({"retry_mode": "sourcing_continuation", "request": request}), step_id),
+    )
+    conn.commit()
+    conn.close()
+    scheduled: list[tuple[int, str, dict]] = []
+    app.state.core.agent_service.schedule_external_workflow_step = (  # type: ignore[method-assign]
+        lambda resumed_step_id, capability_id, resumed_request: scheduled.append((resumed_step_id, capability_id, resumed_request))
+    )
+
+    with TestClient(app) as client:
+        paused = client.post(
+            f"/api/v1/workflows/{workflow_id}/pause",
+            headers={"Idempotency-Key": "workflow-pause-route"},
+            json={"request_id": "workflow-pause-route", "note": "暂停"},
+        )
+        resumed = client.post(
+            f"/api/v1/workflows/{workflow_id}/resume",
+            headers={"Idempotency-Key": "workflow-resume-route"},
+            json={"request_id": "workflow-resume-route", "note": "继续"},
+        )
+
+    assert paused.status_code == 200, paused.json()
+    assert paused.json()["workflow"]["status"] == "paused"
+    assert resumed.status_code == 200, resumed.json()
+    assert resumed.json()["workflow"]["status"] == "waiting_external"
+    assert scheduled == [(step_id, "multi_channel_sourcing", request)]
+
+
 def test_dashboard_workflows_expose_business_outcome_matching_summary(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         request_id = f"dashboard-outcome-{uuid.uuid4().hex[:8]}"
@@ -1461,6 +1769,46 @@ def test_candidate_write_is_idempotent_and_preflight_is_single_use(db_path: Path
         assert replay.status_code == 200
         assert replay.json()["receipt"]["idempotent_replay"] is True
         assert reused.status_code == 409
+
+
+def test_candidate_score_review_records_event_without_regressing_stage(db_path: Path) -> None:
+    candidate_id = 558
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE job_candidates SET clean_stage='S7 已推荐客户/待反馈',flow_bucket='客户推荐',raw_status='recommended' WHERE id=?",
+            (candidate_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        preflight = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": "score-review-preflight", "candidate_id": candidate_id, "action": "review"},
+        ).json()
+        response = client.post(
+            "/api/v1/candidate-actions/commit",
+            headers={"Idempotency-Key": "score-review-commit"},
+            json={
+                "request_id": "score-review-commit",
+                "candidate_id": candidate_id,
+                "action": "review",
+                "preflight_token": preflight["token"],
+                "note": "【评分复核】结论：尺太严",
+            },
+        )
+        detail = client.get(f"/api/v1/candidates/{candidate_id}").json()["candidate"]
+
+    assert response.status_code == 200
+    assert response.json()["stage"] == "S7 已推荐客户/待反馈"
+    assert detail["clean_stage"] == "S7 已推荐客户/待反馈"
+    assert any(
+        item["event_type"] == "candidate_review_requested"
+        and "尺太严" in (item.get("summary") or "")
+        for item in detail["events"]
+    )
 
 
 def test_failed_idempotent_action_is_audited_and_never_left_processing(db_path: Path) -> None:

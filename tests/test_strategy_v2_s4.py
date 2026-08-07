@@ -251,6 +251,68 @@ class StrategyV2SchemaTest(unittest.TestCase):
         assert any("source" in error for error in errors)
         assert any("confidence" in error for error in errors)
 
+        bad_judgement = dict(v2, consultant_judgement=[])
+        ok, errors = strategy_v2.validate_strategy_v2(bad_judgement)
+        assert not ok and any("consultant_judgement" in error for error in errors)
+
+    def test_builds_evidence_backed_senior_consultant_judgement(self) -> None:
+        classification = self._classification("L2")
+        classification["anchors"].update({
+            "customer_of_customer": {
+                "present": True, "values": ["服务器整机厂"], "source": "consultant",
+                "inferred": False, "confidence": "",
+            },
+            "product_tech_line": {
+                "present": True, "values": ["VPD", "多相 Buck"], "source": "jd",
+                "inferred": False, "confidence": "",
+            },
+            "scenario_track": {
+                "present": True, "values": ["服务器"], "source": "jd",
+                "inferred": False, "confidence": "",
+            },
+        })
+        classification["missing_anchors"] = ["competitive_landscape"]
+        v2 = strategy_v2.build_strategy_v2(
+            {"channels": {}, "strategy_summary": "服务器 VPD 电源研发人才寻访"},
+            classification,
+            consultant={"consultant_answers": "VPD 必须；多相 VRM 可看但需评估"},
+            canonical_position={
+                "job": "电源专家", "hard_requirements": "VPD 项目经验；模块电源研发经验",
+                "responsibilities": "负责垂直供电模块设计、仿真与测试", "location": "杭州",
+            },
+            profile_context={"selling_points": "核心产品从 0 到 1", "hiring_preferences": "看项目深度"},
+            llm_fragment={
+                "step2_target_pool": [
+                    {"path": "same_layer", "tier": "T1", "companies": [{"name": "MPS", "source": "kb_profile", "confidence": "high"}], "rationale": "同层原厂"},
+                    {"path": "adjacent", "tier": "T2", "companies": [{"name": "台达", "source": "kb_profile", "confidence": "medium"}], "rationale": "模块电源迁移池"},
+                    {"path": "reverse", "tier": "T2", "companies": [{"name": "服务器 ODM", "source": "client_doc", "confidence": "medium"}], "rationale": "整机客户侧"},
+                ],
+                "step3_level_mapping": {"accepted_levels": ["高级工程师", "专家"], "calibration_rule": "按项目深度定档"},
+                "step4_keyword_groups": [{"group": "core", "targets": "VPD 直接证据", "terms": ["VPD", "多相 Buck"]}],
+            },
+            learning={
+                "business_outcomes": [{
+                    "channel": "猎聘", "source_query": "VPD 多相", "experience_score": 2.5,
+                    "recommended": 1, "client_positive": 1, "stopped": 0, "client_rejected": 0,
+                }],
+                "approved_memories": [],
+            },
+        )
+
+        judgement = v2["consultant_judgement"]
+        assert judgement["version"] == "senior_consultant_v1"
+        assert judgement["role_diagnosis"]["role_family"] == "研发/工程"
+        assert "VPD" in judgement["role_diagnosis"]["candidate_archetype"]
+        assert judgement["search_sequence"][0]["name"] == "核心同层"
+        directions = [item["direction"] for item in judgement["expansion_ladder"]]
+        assert "相邻产品/场景迁移" in directions
+        assert "客户侧/反向人才池" in directions
+        assert any("目标公司和 title" in item for item in judgement["evidence_standard"]["transferable_evidence"])
+        assert any("竞争格局" in item for item in judgement["client_calibration"]["must_confirm"])
+        assert judgement["learning_application"]["positive_signals"]
+        assert "客户画像" in judgement["basis"]
+        assert strategy_v2.validate_strategy_v2(v2)[0]
+
     def test_build_marks_consultant_override_and_inferred(self) -> None:
         classification = self._classification()
         classification["anchors"]["product_tech_line"] = {

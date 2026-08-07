@@ -1,4 +1,4 @@
-export const recordValue = (value: unknown): Record<string,any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string,any> : {}
+export const recordValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 export const arrayValue = (value: unknown): unknown[] => Array.isArray(value) ? value : []
 export const textList = (...values: unknown[]): string[] => [...new Set(values.flatMap(value => {
   if(Array.isArray(value))return value.map(String)

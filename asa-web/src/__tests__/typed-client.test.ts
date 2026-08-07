@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api'
+import { api, WORKBENCH_LIMIT } from '../api'
 import { mockResponse, plannedWorkflow } from './helpers'
 
 describe('typed client 高频接口契约', () => {
@@ -17,6 +17,64 @@ describe('typed client 高频接口契约', () => {
     const dashboard = await api.dashboard()
     expect(dashboard.counts?.active_jobs).toBe(3)
     expect(dashboard.workflows?.[0]?.workflow_id).toBe('wf-1')
+  })
+
+  it('allCandidates 按 200 条分页读取完整候选人关系', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const offset = Number(new URL(String(input), 'http://asa.local').searchParams.get('offset') || 0)
+      const remaining = Math.max(0, 450 - offset)
+      return mockResponse({
+        items: Array.from({ length: Math.min(200, remaining) }, (_, index) => ({ id: offset + index + 1 })),
+        total: 450,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await api.allCandidates()
+
+    expect(result.items).toHaveLength(450)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
+      '/api/v1/candidates?limit=200&offset=0&q=',
+      '/api/v1/candidates?limit=200&offset=200&q=',
+      '/api/v1/candidates?limit=200&offset=400&q=',
+    ])
+  })
+
+  it('allJobs 按 200 条分页读取完整岗位列表', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const offset = Number(new URL(String(input), 'http://asa.local').searchParams.get('offset') || 0)
+      const remaining = Math.max(0, 401 - offset)
+      return mockResponse({
+        items: Array.from({ length: Math.min(200, remaining) }, (_, index) => ({ id: offset + index + 1 })),
+        total: 401,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await api.allJobs()
+
+    expect(result.items).toHaveLength(401)
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual([
+      '/api/v1/jobs?limit=200&offset=0&q=',
+      '/api/v1/jobs?limit=200&offset=200&q=',
+      '/api/v1/jobs?limit=200&offset=400&q=',
+    ])
+  })
+
+  it('workbench 请求服务端最大窗口并透传截断语义', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({
+      ok: true, version: 'v1', summary: { pending: 445, running: 0, delivered: 0, total: 445 },
+      items: [], returned_count: 300, truncated: true,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const workbench = await api.workbench()
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe(`/api/v1/workbench?limit=${WORKBENCH_LIMIT}`)
+    // 序列化窗口封顶 300 时，服务端必须显式告知截断，首页据此渲染“已加载 X / 共 N”。
+    expect(workbench.truncated).toBe(true)
+    expect(workbench.returned_count).toBe(300)
   })
 
   it('workflow 经 zod schema 解析并保留 business_outcome', async () => {

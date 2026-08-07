@@ -32,13 +32,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 from datetime import date, datetime
 from typing import Any, Callable
 
-from . import assessment_signals, knowledge_base
+from . import assessment_calibration, assessment_signals, knowledge_base
 from .llm import BaseLLM, LLMError
 
 ARTIFACT_TYPE = "candidate_assessment"
@@ -286,6 +287,18 @@ def verify_evidence(
 # 图谱命中（确定性）：候选人雇主公司 → 图谱条目
 # ---------------------------------------------------------------------------
 
+def _conn_db_path(conn: sqlite3.Connection) -> str:
+    """从连接解析主库文件路径（供校准覆盖层读库）；内存库/读取失败返回空串。
+
+    空串走 load_calibration_overlay 的缺省口径（回退 A_SYSTEM_DB 环境变量）。
+    """
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row[2] or "") if row else ""
+
+
 def match_graph_hits(companies: list[str], graph: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """把简历里的雇主公司名规范化后命中图谱 key；命中即真实条目（含名称/赛道/主营业务/分类）。"""
     hits: list[dict[str, Any]] = []
@@ -300,15 +313,18 @@ def match_graph_hits(companies: list[str], graph: dict[str, dict[str, Any]]) -> 
                 continue
             rule, _reason = knowledge_base.name_match_rule(raw, norm, name)
             if rule:
-                hits.append(
-                    {
-                        "company": raw,
-                        "graph_name": name,
-                        "track": str(info.get("track") or ""),
-                        "business": str(info.get("business") or ""),
-                        "categories": list(info.get("categories") or []),
-                    }
-                )
+                hit: dict[str, Any] = {
+                    "company": raw,
+                    "graph_name": name,
+                    "track": str(info.get("track") or ""),
+                    "business": str(info.get("business") or ""),
+                    "categories": list(info.get("categories") or []),
+                }
+                # 校准覆盖层合并后的条目带 source=consultant_calibrated；原始图谱条目
+                # 无 source 键（不补默认值），无覆盖层时输出与现状逐字节一致。
+                if info.get("source"):
+                    hit["source"] = str(info["source"])
+                hits.append(hit)
                 used.add(name)
                 break
     return hits
@@ -831,14 +847,67 @@ def validate_assessment(doc: Any) -> list[str]:
     return errors
 
 
+def build_archetype_reference(
+    archetype: dict[str, Any] | None,
+    *,
+    skill_ontology: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """岗位原型评估对照上下文（source=kb_archetype）：硬门槛 + 典型证据形式。
+
+    知识飞轮二期：评估直接消费岗位原型。命中原型时返回对照块（注入 LLM payload）：
+    - hard_gates：原型 negative_rules（客户校准硬门槛/负向规则）；
+    - typical_evidence_forms：原型 skills_ontology_nodes（canonical 词）在技能本体里的
+      典型证据形式，供技能证据归一比对；
+    只做对照提示，不改变评分门槛；无命中/无 id 返回 None，调用方完全不注入（保持现状）。
+    """
+    if not isinstance(archetype, dict) or not str(archetype.get("archetype_id") or "").strip():
+        return None
+    level_mapping = archetype.get("level_mapping") if isinstance(archetype.get("level_mapping"), dict) else {}
+    hard_gates = [str(rule).strip() for rule in archetype.get("negative_rules") or [] if str(rule or "").strip()][:8]
+    typical_evidence: list[str] = []
+    ontology_skills = (skill_ontology or {}).get("skills") if isinstance(skill_ontology, dict) else None
+    if isinstance(ontology_skills, dict):
+        for node in archetype.get("skills_ontology_nodes") or []:
+            skill = ontology_skills.get(str(node or "").strip()) or {}
+            for form in skill.get("evidence") or []:
+                text = str(form or "").strip()
+                if text and text not in typical_evidence:
+                    typical_evidence.append(text)
+    return {
+        "source": "kb_archetype",
+        "archetype_id": str(archetype.get("archetype_id") or ""),
+        "archetype_title": str(archetype.get("title") or ""),
+        "matched_by": str(archetype.get("matched_by") or ""),
+        "match_reason": str(archetype.get("match_reason") or ""),
+        "essence": str(archetype.get("essence") or ""),
+        "hard_gates": hard_gates,
+        "accepted_levels": [str(item) for item in level_mapping.get("accepted_candidate_levels") or []],
+        "level_note": str(level_mapping.get("note") or ""),
+        "location_policy": str(archetype.get("location_policy") or ""),
+        "typical_evidence_forms": typical_evidence[:12],
+        "usage_note": "评估对照上下文：用于硬门槛核验与技能证据形式比对，不改变评分门槛；"
+        "只命中技能标签无项目证据的人选必须标记待核验（沿用原型负向规则口径）",
+    }
+
+
 def build_llm_payload(
     *,
     candidate: dict[str, Any],
     job: dict[str, Any],
     strategy_doc: dict[str, Any] | None,
     graph_hits: list[dict[str, Any]],
+    skill_ontology: dict[str, Any] | None = None,
+    archetype: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """组装 LLM 输入：简历原文 + 岗位/策略要点 + 确定性图谱命中（只读事实）。"""
+    """组装 LLM 输入：简历原文 + 岗位/策略要点 + 确定性图谱命中（只读事实）。
+
+    知识飞轮二期：skill_ontology 非空时，把策略 step4 关键词经本体别名归一后的
+     canonical 技能词（source=kb_skill）一并注入，供技能证据归一比对；保守接入，
+    只做提示，不改变评分门槛；无本体或无命中时该块整个不出现。
+    知识飞轮二期（原型直消）：archetype 非空（strategy_v2.match_job_archetype 同一套
+    可解释匹配命中）时注入 archetype_reference 对照块（source=kb_archetype：硬门槛 +
+    典型证据形式）；无命中时该键整个不出现，行为与之前完全一致。
+    """
     strategy: dict[str, Any] = {}
     if strategy_doc:
         step1 = strategy_doc.get("step1_job_essence") if isinstance(strategy_doc.get("step1_job_essence"), dict) else {}
@@ -871,7 +940,28 @@ def build_llm_payload(
             },
             "target_pool": pool[:20],
         }
-    return {
+        ontology = skill_ontology if isinstance(skill_ontology, dict) and skill_ontology.get("skills") else None
+        if ontology:
+            normalized_terms: list[dict[str, str]] = []
+            seen_canonical: set[str] = set()
+            for group in strategy_doc.get("step4_keyword_groups") or []:
+                if not isinstance(group, dict):
+                    continue
+                for term in group.get("terms") or []:
+                    info = knowledge_base.normalize_skill(term, ontology)
+                    if info["matched"] and info["canonical"] not in seen_canonical:
+                        seen_canonical.add(info["canonical"])
+                        normalized_terms.append(
+                            {
+                                "raw": str(term or "").strip(),
+                                "canonical": info["canonical"],
+                                "family": info["family"],
+                                "source": "kb_skill",
+                            }
+                        )
+            if normalized_terms:
+                strategy["skill_terms_normalized"] = normalized_terms[:30]
+    payload: dict[str, Any] = {
         "task": "判人评估：职业轨迹 + 跳槽质量史（S6-1）",
         "candidate": {
             "current_company": str(candidate.get("current_company") or ""),
@@ -892,6 +982,11 @@ def build_llm_payload(
         "strategy_v2": strategy,
         "graph_hits": graph_hits,
     }
+    # 知识飞轮二期：岗位原型对照块（source=kb_archetype）；无命中完全不注入，保持现状。
+    archetype_reference = build_archetype_reference(archetype, skill_ontology=skill_ontology)
+    if archetype_reference:
+        payload["archetype_reference"] = archetype_reference
+    return payload
 
 
 def _artifact_markdown(doc: dict[str, Any]) -> str:
@@ -1252,6 +1347,61 @@ def load_candidate_resume(conn: sqlite3.Connection, candidate_id: int) -> dict[s
     return item
 
 
+def assessment_input_hash(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: int,
+    job_id: int,
+    llm: BaseLLM,
+    today: date | None = None,
+) -> str:
+    """Fingerprint every local input that can materially change an assessment.
+
+    The date deliberately participates so public-company signals are refreshed at
+    least daily, while repeated clicks against unchanged evidence avoid three model calls.
+    """
+    candidate = load_candidate_resume(conn, int(candidate_id))
+    if candidate is None:
+        raise LookupError(f"人选不存在：{candidate_id}")
+    if int(candidate.get("job_id") or 0) != int(job_id):
+        raise LookupError(f"人选 {candidate_id} 不属于岗位 {job_id}")
+    job = conn.execute(
+        """SELECT j.id,j.title,j.summary,j.hard_requirements,c.name AS client
+             FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?""",
+        (int(job_id),),
+    ).fetchone()
+    if job is None:
+        raise LookupError(f"岗位不存在：{job_id}")
+    strategy = conn.execute(
+        """SELECT a.artifact_id,a.metadata_json
+             FROM agent_workflows w
+             JOIN agent_goals g ON g.goal_id=w.goal_id
+             JOIN agent_artifacts a ON a.workflow_id=w.workflow_id AND a.artifact_type='search_strategy'
+            WHERE g.context_type='job' AND g.context_id=?
+            ORDER BY a.id DESC LIMIT 1""",
+        (int(job_id),),
+    ).fetchone()
+    calibration_rows = conn.execute(
+        """SELECT id,created_at FROM assessment_calibration_samples
+            WHERE client=? OR job_type=? ORDER BY id DESC LIMIT 5""",
+        (
+            str(job["client"] or ""),
+            assessment_calibration.normalize_job_type(job["title"]),
+        ),
+    ).fetchall()
+    payload = {
+        "candidate": candidate,
+        "job": dict(job),
+        "strategy": dict(strategy) if strategy is not None else None,
+        "calibration": [dict(row) for row in calibration_rows],
+        "assessor_version": ASSESSOR_VERSION,
+        "model": str(getattr(llm, "model", "unknown")),
+        "refresh_date": (today or date.today()).isoformat(),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def log_scan_block(
     conn: sqlite3.Connection,
     *,
@@ -1345,6 +1495,8 @@ def run_assessment(
     signal_fetcher/today 仅供测试与回测注入（默认真实采集 / 真实当天）。
     S6-4：同客户/同岗位类型改判样例 ≤5 条注入三次 LLM 调用的 calibration 块
     （无样例不注入）；样例内容只进 prompt，不进 artifact 正文与任何对外文本。
+    知识飞轮二期：命中岗位原型时把原型硬门槛/典型证据形式作为对照上下文注入首调
+    payload（source=kb_archetype，signal_stats.archetype_reference 留痕）；无命中不注入。
     """
     today = today or date.today()
     candidate = load_candidate_resume(conn, candidate_id)
@@ -1387,6 +1539,22 @@ def run_assessment(
         strategy_ref = str(strategy["artifact_id"])
 
     graph, _trace = knowledge_base.load_company_graph(kb_dir)
+    # 知识飞轮二期：公司校准覆盖层（company_calibrations 表）合并后再做 graph_hits
+    # 匹配 —— 只增强命中信息（校准 track/categories + source=consultant_calibrated），
+    # 不改任何评分；覆盖层为空/DB 不可用时图谱保持原样，行为与现状一致。
+    calibration_overlay, _overlay_trace = knowledge_base.load_calibration_overlay(_conn_db_path(conn))
+    if calibration_overlay:
+        graph, _apply_trace = knowledge_base.apply_calibration_overlay(graph, calibration_overlay)
+    # 知识飞轮二期：技能本体（source=kb_skill）供技能证据归一比对；缺文件降级为空本体。
+    skill_ontology, _skill_trace = knowledge_base.load_skill_ontology(kb_dir)
+    # 知识飞轮二期（原型直消）：评估直接消费岗位原型 —— 用 strategy_v2 同一套可解释
+    # 匹配，命中后把原型硬门槛/典型证据形式作为对照上下文注入 payload（source=kb_archetype，
+    # 见 build_archetype_reference）；无命中时 archetype_hit=None，完全不注入，保持现状。
+    from . import strategy_v2
+
+    archetype_hit, _archetype_trace = strategy_v2.match_job_archetype(
+        str(job_item.get("client") or ""), str(job_item.get("title") or ""), kb_dir=kb_dir
+    )
     employers = extract_employers(corpus)
     current_company = str(candidate.get("current_company") or "").strip()
     if current_company and current_company not in employers:
@@ -1422,6 +1590,8 @@ def run_assessment(
         job=job_item,
         strategy_doc=strategy_doc,
         graph_hits=graph_hits,
+        skill_ontology=skill_ontology,
+        archetype=archetype_hit,
     )
     if calibration_block:
         payload["calibration"] = calibration_block
@@ -1478,6 +1648,15 @@ def run_assessment(
         "dropped_sensitive_signals": dropped_sensitive_signals,
         "pm_llm": "ok",
     }
+    if archetype_hit:
+        # 知识飞轮二期：原型对照块注入留痕（source=kb_archetype）；无命中不记，保持现状。
+        signal_stats["archetype_reference"] = {
+            "matched": True,
+            "source": "kb_archetype",
+            "archetype_id": str(archetype_hit.get("archetype_id") or ""),
+            "matched_by": str(archetype_hit.get("matched_by") or ""),
+            "match_reason": str(archetype_hit.get("match_reason") or ""),
+        }
 
     # LLM 第二调：只把 band/信号读成顾问口径 verdict；失败降级确定性模板（不阻断）
     pm_payload = {
@@ -1518,6 +1697,7 @@ def run_assessment(
         if not isinstance(raw_pm, dict):
             raise LLMError("分位/动机模型输出非 JSON 对象")
     except LLMError:
+        llm.mark_last_call_fallback()
         raw_pm = None
         signal_stats["pm_llm"] = "fallback_template"
     percentile_dim, motivation_dim = build_s62_dimensions(
@@ -1599,6 +1779,7 @@ def run_assessment(
             raise LLMError("风险点模型输出非 JSON 对象")
         signal_stats["risks_llm"] = "ok"
     except LLMError:
+        llm.mark_last_call_fallback()
         raw_risks = None
         signal_stats["risks_llm"] = "fallback_deterministic"
     dimensions["risks"] = build_risks_dimension(

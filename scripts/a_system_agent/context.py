@@ -107,6 +107,52 @@ def _candidate_row(
     return _row(row)
 
 
+def _extract_resume_text(
+    conn: sqlite3.Connection,
+    candidate_id: int | None,
+    person_id: int,
+    job_candidate_id: int,
+) -> dict[str, str]:
+    """从 source_profiles、candidate_events 和 candidates 表中召回最完整的简历原文。"""
+    texts: list[str] = []
+
+    def add_text(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+        elif isinstance(value, dict):
+            for key in ("full_text", "profile_text", "candidate_profile_text", "content"):
+                add_text(value.get(key))
+
+    for row in conn.execute(
+        "SELECT raw_json FROM source_profiles WHERE person_id=? ORDER BY id DESC",
+        (int(person_id),),
+    ).fetchall():
+        add_text(_json_value(row["raw_json"], {}))
+
+    event_source = "v_effective_candidate_events" if _table_exists(conn, "v_effective_candidate_events") else "candidate_events"
+    for row in conn.execute(
+        f"SELECT raw_json FROM {event_source} WHERE job_candidate_id=? OR person_id=? ORDER BY COALESCE(event_time,'') DESC, id DESC LIMIT 100",
+        (int(job_candidate_id), int(person_id)),
+    ).fetchall():
+        add_text(_json_value(row["raw_json"], {}))
+
+    if candidate_id is not None:
+        try:
+            row = conn.execute(
+                "SELECT legacy_profile_text FROM candidates WHERE id=? LIMIT 1", (int(candidate_id),)
+            ).fetchone()
+            if row:
+                add_text(row["legacy_profile_text"])
+        except sqlite3.OperationalError:
+            pass
+
+    best = max(texts, key=len) if texts else ""
+    return {
+        "full_text": best,
+        "summary": best[:800] if best else "",
+    }
+
+
 def build_candidate_context(db_path: str | Path, job_candidate_id: int) -> dict[str, Any]:
     conn = sqlite3.connect(str(Path(db_path).expanduser()))
     conn.row_factory = sqlite3.Row
@@ -145,6 +191,7 @@ def build_candidate_context(db_path: str | Path, job_candidate_id: int) -> dict[
             job,
         )
         candidate_id = candidate.get("id")
+        resume = _extract_resume_text(conn, candidate_id, relation["person_id"], int(job_candidate_id))
         candidate_profile = {}
         if candidate_id is not None and _table_exists(conn, "candidate_profiles"):
             candidate_profile = _row(
@@ -260,6 +307,7 @@ def build_candidate_context(db_path: str | Path, job_candidate_id: int) -> dict[
             "source_profiles": source_profiles,
             "events": events,
             "learning_rules": learning_rules,
+            "resume": resume,
         }
         model_context = sanitize_payload(
             {
@@ -270,6 +318,7 @@ def build_candidate_context(db_path: str | Path, job_candidate_id: int) -> dict[
                 "source_profiles": source_profiles,
                 "events": evaluation_events,
                 "learning_rules": learning_rules,
+                "resume": resume,
             }
         )
         context["model_context"] = model_context

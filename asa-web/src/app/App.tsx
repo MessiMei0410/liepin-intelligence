@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, Database, MessageSquareText, Pin, Search, ShieldAlert, Wifi, X } from 'lucide-react'
+import { Activity, Database, MessageSquareText, Pin, ShieldAlert, Wifi, X } from 'lucide-react'
 import { api, AnalysisCatalogItem, AnalysisResult, AnalysisTemplate, AnalysisTemplateInput, AnalysisTrend, Bootstrap, Candidate, CandidateDetail, Dashboard, Job, JobDetail, Workbench, WorkbenchItem, Workflow } from '../api'
 import { Tab, tabs } from '../shared/tabs'
 import { Jobs } from '../pages/Jobs'
@@ -18,13 +18,32 @@ import type { AgentContext, AgentReference } from '../agent/transport'
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
+const analysisScopeLabels: Record<string, string> = {
+  days: '统计周期', job_id: '岗位', candidate_id: '候选人', client: '客户', job: '岗位名称',
+  candidate: '候选人名称', channel: '渠道', start_date: '开始日期', end_date: '结束日期',
+}
+
+const analysisScopeValue = (key: string, value: unknown) => {
+  if (key === 'days') return `近 ${String(value)} 天`
+  if (key === 'job_id' || key === 'candidate_id') return `#${String(value)}`
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return String(value)
+}
+
+const analysisTime = (value: string) => {
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(timestamp)
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>('agent')
   const [boot, setBoot] = useState<Bootstrap>()
   const [dashboard, setDashboard] = useState<Dashboard>()
   const [jobs, setJobs] = useState<Job[]>([])
   const [candidates, setCandidates] = useState<Candidate[]>([])
-  const [query, setQuery] = useState('')
   const [job, setJob] = useState<JobDetail>()
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
@@ -43,6 +62,7 @@ export function App() {
   const [agentContext, setAgentContext] = useState<AgentContext>({ type: 'page', page: 'agent', mode: 'page_review' })
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
   const coreFailuresRef = useRef(0)
+  const workbenchRefreshRef = useRef(0)
 
   // Core 健康探测：连续 2 次失败才判定离线；成功一次即复位，不重复打搅。
   const probeCore = async () => {
@@ -57,19 +77,41 @@ export function App() {
   }
 
   const refreshWorkbench = async () => {
-    const [nextWorkbench, nextTemplates] = await Promise.allSettled([api.workbench(), api.analyticsTemplates()])
-    if (nextWorkbench.status === 'fulfilled' && Array.isArray(nextWorkbench.value.items) && nextWorkbench.value.summary) setWorkbench(nextWorkbench.value)
-    if (nextTemplates.status === 'fulfilled' && Array.isArray(nextTemplates.value.items)) setTemplates(nextTemplates.value.items)
+    const refreshId = ++workbenchRefreshRef.current
+    await Promise.allSettled([
+      api.workbench().then(next => {
+        if (refreshId === workbenchRefreshRef.current && Array.isArray(next.items) && next.summary) setWorkbench(next)
+      }),
+      api.analyticsTemplates().then(next => {
+        if (refreshId === workbenchRefreshRef.current && Array.isArray(next.items)) setTemplates(next.items)
+      }),
+    ])
   }
 
   useEffect(() => {
-    Promise.all([api.bootstrap(), api.dashboard(), api.jobs(), api.candidates()])
-      .then(([b, d, j, c]) => { setBoot(b); setDashboard(d); setJobs(j.items); setCandidates(c.items); setError('') })
-      .catch(e => setError(String(e.message || e)))
+    let active = true
+    api.bootstrap()
+      .then(value => { if (active) setBoot(value) })
+      .catch(e => { if (active) setError(String(e.message || e)) })
+    Promise.allSettled([api.dashboard(), api.allJobs(), api.allCandidates()])
+      .then(results => {
+        if (!active) return
+        const [dashboardResult, jobsResult, candidatesResult] = results
+        const failures: string[] = []
+        if (dashboardResult.status === 'fulfilled') setDashboard(dashboardResult.value)
+        else failures.push(`经营概况：${String(dashboardResult.reason?.message || dashboardResult.reason)}`)
+        if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value.items)
+        else failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
+        if (candidatesResult.status === 'fulfilled') setCandidates(candidatesResult.value.items)
+        else failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
+        if (failures.length) setError(`部分模块加载失败。${failures.join('；')}`)
+        else setError('')
+      })
     queueMicrotask(() => void refreshWorkbench())
     queueMicrotask(() => {
       void api.analyticsCatalog().then(result => setAnalysisCatalog(result.items)).catch(() => undefined)
     })
+    return () => { active = false }
   }, [refreshKey])
 
   useEffect(() => {
@@ -99,7 +141,7 @@ export function App() {
   // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
   // dashboard 计数由统一轮询自然收敛。
   const refreshCandidateList = async () => {
-    try { setCandidates((await api.candidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
+    try { setCandidates((await api.allCandidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
   }
 
   // 合并双轮询：单一定时器统一刷新 dashboard + 候选人详情，避免两个独立 setInterval(2000)。
@@ -240,7 +282,11 @@ export function App() {
     setAnalysisBusy('export')
     try {
       const result = await api.exportAnalysis(analysis.run_id)
-      setNotice(`已导出：${result.artifact.file_path}`)
+      const link = document.createElement('a')
+      link.href = result.artifact.download_url
+      link.download = ''
+      link.click()
+      setNotice(`已导出分析报告：${result.artifact.title}`)
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setAnalysisBusy('') }
   }
@@ -267,8 +313,6 @@ export function App() {
     finally { setAnalysisBusy('') }
   }
   const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); history.replaceState(null, '', `${location.pathname}${location.search}`) }
-  const visibleJobs = jobs.filter(j => !query || `${j.id} ${j.client} ${j.title} ${j.status}`.toLowerCase().includes(query.toLowerCase()))
-  const visibleCandidates = candidates.filter(c => !query || `${c.name} ${c.current_company} ${c.current_title} ${c.job} ${c.client}`.toLowerCase().includes(query.toLowerCase()))
   const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
   const workflowJobId = Number(workflowContext?.id || 0)
   const workflowJob = jobs.find(item => item.id === workflowJobId)
@@ -298,11 +342,11 @@ export function App() {
     return () => window.removeEventListener(AGENT_NAVIGATE_EVENT, navigate)
   }, [showAgent])
 
-  if (error && !boot) return <Diagnostics error={error} retry={() => setRefreshKey(x => x + 1)} />
+  if (error && !boot) return <Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} />
 
   const pageTitle = analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
   const navigateTab = (id: Tab) => {
-    setTab(id); setQuery(''); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)
   }
 
@@ -329,22 +373,21 @@ export function App() {
     <main className="main">
       <header className="topbar">
         <div><h1>{pageTitle}</h1><p>{boot?.core?.status === 'connected' ? 'ASA Agent 在线 · Core 已连接 · v3 实时数据' : 'ASA Agent 正在连接 Core'}</p></div>
-        {!analysis && (tab === 'jobs' || tab === 'candidates' || tab === 'progress') && <label className="search"><Search/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索姓名、公司或岗位" aria-label="搜索姓名、公司或岗位" /></label>}
         {!analysis && tab !== 'agent' && <button className="button copilot-launch" title="交给 Agent" aria-label="交给 Agent" onClick={()=>openAgent(activeContext)}><MessageSquareText/><span>Agent</span></button>}
       </header>
       {coreOffline && <div className="core-offline-banner" role="alert"><span>ASA Core 连接中断，检查本机服务后可点击重连</span><button className="button" onClick={() => void probeCore()}>重连</button></div>}
       <div className="content">
         {analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
-        {!analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
-        {!analysis && tab === 'jobs' && <Jobs items={visibleJobs} onSelect={openJob} />}
-        {!analysis && tab === 'progress' && <Progress items={visibleCandidates} openCandidate={openCandidate} />}
-        {!analysis && tab === 'candidates' && <Candidates items={visibleCandidates} openCandidate={openCandidate} />}
+        {!analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
+        {!analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
+        {!analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
+        {!analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}
       </div>
     </main>
     {(tab !== 'agent' || analysis) && <aside className="context-rail">
       {analysis ? <>
-        <section><header><Activity/><h2>分析范围</h2></header><dl>{Object.entries(analysis.scope).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}{!Object.keys(analysis.scope).length && <div><dt>scope</dt><dd>全部业务数据</dd></div>}</dl></section>
-        <section><header><Database/><h2>数据口径</h2></header><p>{analysis.data_as_of}</p><p>{analysis.catalog_version}</p>{analysis.truncated && <span className="rail-warning">结果已截断</span>}</section>
+        <section><header><Activity/><h2>分析范围</h2></header><dl>{Object.entries(analysis.scope).map(([key, value]) => <div key={key}><dt>{analysisScopeLabels[key] || key.replaceAll('_', ' ')}</dt><dd>{analysisScopeValue(key, value)}</dd></div>)}{!Object.keys(analysis.scope).length && <div><dt>范围</dt><dd>全部业务数据</dd></div>}</dl></section>
+        <section><header><Database/><h2>数据口径</h2></header><p>数据截至 {analysisTime(analysis.data_as_of)}</p><p>口径版本 {analysis.catalog_version}</p>{analysis.truncated && <span className="rail-warning">结果已截断</span>}</section>
         <section><header><Pin/><h2>证据引用</h2></header><div className="rail-links">{analysis.references.map(reference => <a key={`${reference.type}:${reference.id}`} href={reference.href}>{reference.label}</a>)}{!analysis.references.length && <p>当前分析无对象引用</p>}</div></section>
         {!!analysis.caveats.length && <section><header><ShieldAlert/><h2>数据提示</h2></header>{analysis.caveats.map(item => <p key={item}>{item}</p>)}</section>}
       </> : <>

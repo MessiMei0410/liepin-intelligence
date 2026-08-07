@@ -11,9 +11,23 @@
 - 导出 markdown 到 work/assessment_replay/（已 gitignore）：每人一段——职业轨迹结论 +
   跳槽质量史 + 证据 + 置信度（推测=inferred），业务语言（UX-1），供顾问盲评。
 
+--metrics 指标模式（二期扩展，2026-08-05，可选，additive）：
+- 在盲评 markdown 之外输出可确定性计算的指标 JSON（不依赖人工阅读），口径：
+  ① 五维覆盖率 dimension_coverage：生成的 dimensions 五维（DIMENSIONS_IMPLEMENTED）中
+     「有非空 verdict」的维度占比（逐人 → 均值；另给逐维命中计数）；
+  ② 证据条数分布 evidence_distribution：逐人 evidence_stats.kept 的 min/max/avg + 逐人明细
+     + 被剥离证据总数（stripped）；
+  ③ unknown 占比 unknown_ratio：五维产物中枚举字段取值 == "unknown" 的比例，计数字段为
+     trajectory.promotion_pace / trajectory.tech_evolution / 各 segment.tier /
+     move_history.current_move / 各 move 的 direction/platform/title_direction/responsibility_direction /
+     percentile.band；
+  ④ 推测维度占比 inferred_ratio：confidence == "inferred" 的维度占比（沿用原汇总口径）。
+- 指标只读 dimensions/evidence_stats 产物字段，markdown 导出内容与流程完全不变。
+
 用法：
   PYTHONPATH=scripts python3 scripts/assessment_replay.py --job-id 154 --limit 5
   PYTHONPATH=scripts python3 scripts/assessment_replay.py --db <备份库副本> --job-id 38 --limit 5
+  PYTHONPATH=scripts python3 scripts/assessment_replay.py --job-id 154 --limit 5 --metrics
 """
 
 from __future__ import annotations
@@ -203,6 +217,84 @@ def render_person_markdown(index: int, person: dict[str, Any], doc: dict[str, An
     return "\n".join(lines)
 
 
+def compute_assessment_metrics(succeeded: list[dict[str, Any]]) -> dict[str, Any]:
+    """--metrics 模式：对已成功生成的评估 doc 计算确定性指标（口径见模块 docstring）。
+
+    succeeded：run_replay 中 ok=True 的条目（含 doc）。不依赖人工阅读，纯字段统计。
+    """
+    dims = candidate_assessment.DIMENSIONS_IMPLEMENTED
+    per_dimension_hits = {name: 0 for name in dims}
+    coverage_per_person: list[float] = []
+    evidence_counts: list[int] = []
+    stripped_total = 0
+    unknown_fields = 0
+    total_fields = 0
+    inferred_dims = 0
+    total_dims = 0
+
+    def _count_unknown(value: Any) -> None:
+        nonlocal unknown_fields, total_fields
+        total_fields += 1
+        if str(value or "") == "unknown":
+            unknown_fields += 1
+
+    for entry in succeeded:
+        doc = entry["doc"]
+        dimensions = doc.get("dimensions") or {}
+        covered = 0
+        for name in dims:
+            dim = dimensions.get(name) or {}
+            total_dims += 1
+            if dim.get("confidence") == "inferred":
+                inferred_dims += 1
+            if str(dim.get("verdict") or "").strip():
+                covered += 1
+                per_dimension_hits[name] += 1
+        coverage_per_person.append(round(covered / len(dims), 4) if dims else 0.0)
+
+        stats = doc.get("evidence_stats") or {}
+        evidence_counts.append(int(stats.get("kept", 0)))
+        stripped_total += int(stats.get("stripped", 0) or 0)
+
+        trajectory = dimensions.get("trajectory") or {}
+        _count_unknown(trajectory.get("promotion_pace"))
+        _count_unknown(trajectory.get("tech_evolution"))
+        for segment in trajectory.get("segments") or []:
+            if isinstance(segment, dict):
+                _count_unknown(segment.get("tier"))
+        move_history = dimensions.get("move_history") or {}
+        _count_unknown(move_history.get("current_move"))
+        for move in move_history.get("moves") or []:
+            if isinstance(move, dict):
+                for field in ("direction", "platform", "title_direction", "responsibility_direction"):
+                    _count_unknown(move.get(field))
+        percentile = dimensions.get("percentile") or {}
+        if percentile:
+            _count_unknown(percentile.get("band"))
+
+    persons = len(succeeded)
+    return {
+        "persons": persons,
+        "dimension_coverage": {
+            "mean": round(sum(coverage_per_person) / persons, 4) if persons else 0.0,
+            "per_person": coverage_per_person,
+            "per_dimension_hits": per_dimension_hits,
+            "dimensions": list(dims),
+        },
+        "evidence_distribution": {
+            "kept_per_person": evidence_counts,
+            "min": min(evidence_counts) if evidence_counts else 0,
+            "max": max(evidence_counts) if evidence_counts else 0,
+            "avg": round(sum(evidence_counts) / len(evidence_counts), 2) if evidence_counts else 0.0,
+            "stripped_total": stripped_total,
+        },
+        "unknown_ratio": round(unknown_fields / total_fields, 4) if total_fields else 0.0,
+        "unknown_fields": unknown_fields,
+        "total_enum_fields": total_fields,
+        "inferred_ratio": round(inferred_dims / total_dims, 4) if total_dims else 0.0,
+    }
+
+
 def run_replay(
     db_path: Path,
     job_id: int,
@@ -212,10 +304,13 @@ def run_replay(
     llm: BaseLLM | None = None,
     kb_dir: str | None = None,
     signal_fetcher: Any = None,
+    with_metrics: bool = False,
 ) -> dict[str, Any]:
     """回放主流程：抽样 → 逐人生成（写 artifact）→ 导出 markdown → 返回统计。
 
     signal_fetcher：S6-2 公司近况采集器（默认真实只读采集；测试注入 stub 防真实网络）。
+    with_metrics=True 时在返回统计中附带 "metrics" 键（compute_assessment_metrics，口径见模块 docstring）；
+    默认 False，返回结构与盲评 markdown 完全不变。
     """
     llm = llm or create_default_llm()
     conn = _connect(db_path)
@@ -286,7 +381,7 @@ def run_replay(
             )
             sections.append("")
         out_path.write_text("\n".join(header + sections), encoding="utf-8")
-        return {
+        summary: dict[str, Any] = {
             "ok": True,
             "db": str(db_path),
             "job_id": int(job_id),
@@ -304,6 +399,9 @@ def run_replay(
                 for entry in results
             ],
         }
+        if with_metrics:
+            summary["metrics"] = compute_assessment_metrics(succeeded)
+        return summary
     finally:
         conn.close()
 
@@ -315,6 +413,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=5, help="每岗位抽样人数（默认 5）")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="导出目录（默认 work/assessment_replay/）")
     parser.add_argument("--no-company-signals", action="store_true", help="跳过公司近况公开采集（工况信号仍计算）")
+    parser.add_argument("--metrics", action="store_true",
+                        help="附加输出确定性指标 JSON（五维覆盖率/证据条数分布/unknown 占比/推测占比；盲评 markdown 不变）")
     args = parser.parse_args()
     fetcher = (lambda url, timeout: (0, "", "skipped_by_flag")) if args.no_company_signals else None
     summaries = []
@@ -325,6 +425,7 @@ def main() -> int:
             limit=max(1, args.limit),
             out_dir=Path(args.out_dir).expanduser(),
             signal_fetcher=fetcher,
+            with_metrics=args.metrics,
         )
         summaries.append(summary)
         print(json.dumps({key: value for key, value in summary.items() if key != "results"}, ensure_ascii=False, indent=2))

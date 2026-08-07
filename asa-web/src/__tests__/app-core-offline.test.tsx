@@ -72,4 +72,25 @@ describe('App Core 离线横幅', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
     expect(screen.getByRole('alert')).toHaveTextContent('ASA Core 连接中断，检查本机服务后可点击重连')
   })
+
+  it('单个业务模块加载失败时保留 Agent 主界面并指出故障模块', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url === '/api/v1/bootstrap') return mockResponse({ ok: true, core: { status: 'connected' } })
+      if (url === '/api/v1/dashboard') return mockResponse({ ok: true, counts: { active_jobs: 3 } })
+      if (url.startsWith('/api/v1/jobs')) return mockResponse({ items: [], total: 0 })
+      if (url.startsWith('/api/v1/candidates')) throw new Error('candidate query failed')
+      if (url.startsWith('/api/v1/workbench')) return mockResponse({ ok: true, version: 'v1', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] })
+      if (url.startsWith('/api/v1/analytics/')) return mockResponse({ ok: true, items: [] })
+      if (url.startsWith('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({ ok: true })
+    }))
+
+    render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(screen.getByRole('heading', { name: '今天从哪里开始？' })).toBeInTheDocument()
+    expect(screen.getByText(/部分模块加载失败。人选模块：candidate query failed/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'ASA Core 无法连接' })).not.toBeInTheDocument()
+  })
 })

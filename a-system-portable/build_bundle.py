@@ -34,6 +34,7 @@ INTEGRATION_SCRIPTS = [
     "generate_next_search_strategy.py",
     "generate_position_dashboard.py",
     "generate_workflow_status_report.py",
+    "liepin_cdp_config.py",
     "liepin_workbench_server.py",
     "position_storage.py",
     "record_candidate_reply.py",

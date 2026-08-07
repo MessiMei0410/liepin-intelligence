@@ -5,13 +5,15 @@ import hashlib
 import os
 import re
 import secrets
+import signal
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .context import build_candidate_context
 from .policy import is_stopped
@@ -32,6 +34,42 @@ JIASHI_REPORT = Path("/Users/messi/.codex/skills/jiashi-recommendation-report/sc
 JIASHI_AUDIT = Path("/Users/messi/.codex/skills/jiashi-recommendation-report/scripts/audit_generated_report.py")
 SALARY_REPORT = Path("/Users/messi/.codex/skills/candidate-salary-report/scripts/build_salary_report.py")
 JIASHI_TEMPLATE = Path("/Users/messi/Desktop/嘉驰推荐报告/2026-06散落归档/嘉驰国际+客户名称--岗位名称--人选姓名（嘉驰模板）.docx")
+
+DEFAULT_SOURCING_CELL_BATCH_SIZE = 8
+MAX_SOURCING_CELL_BATCH_SIZE = 20
+DEFAULT_PAGINATION_CONTINUATION_HEADROOM = 20
+MAX_SOURCING_CONTINUATION_BATCHES = 256
+
+# 注册在服务层（workflow_handler._execute_workflow_capability）实现、没有 run_* 确定性 Runner 的能力。
+# 必须与 workflow_handler 的 locally_specialized 集合保持一致；注册期不变量
+# assert_workflow_capabilities_resolvable 会在 AgentService 启动时校验漂移。
+SERVICE_HANDLED_CAPABILITY_IDS: frozenset[str] = frozenset({
+    "talent_pool_search",
+    "candidate_batch_assessment",
+    "reply_triage",
+    "communication_draft_batch",
+})
+
+# execute_external（后台渠道执行）当前支持的能力；只读/内部能力一律不允许后台渠道执行。
+EXTERNAL_EXECUTION_CAPABILITY_IDS: frozenset[str] = frozenset({"multi_channel_sourcing"})
+
+
+def assert_workflow_capabilities_resolvable(
+    workflow_capabilities: list[Any],
+    deterministic_runner_ids: set[str] | frozenset[str],
+    service_handled_ids: set[str] | frozenset[str] = SERVICE_HANDLED_CAPABILITY_IDS,
+) -> None:
+    """注册期不变量：每个注册的工作流能力必须落到确定性 Runner（run_*）或服务层处理器。"""
+    missing = sorted({
+        str(item[0])
+        for item in workflow_capabilities
+        if str(item[0]) not in deterministic_runner_ids and str(item[0]) not in service_handled_ids
+    })
+    if missing:
+        raise RuntimeError(
+            "已注册工作流能力缺少执行实现（既无 run_* 确定性 Runner，也不在服务层处理器集合）："
+            + "、".join(missing)
+        )
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -227,6 +265,10 @@ class ExternalPhaseError(RuntimeError):
         self.detail = detail
 
 
+class ExternalExecutionCancelled(RuntimeError):
+    """Raised after the workflow is stopped while a channel subprocess is active."""
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     try:
         parsed = json.loads(str(value or ""))
@@ -393,6 +435,39 @@ class RecruitingCapabilityRuntime:
         self.output_dir = service.db_path.parent / "asa_artifacts"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    @classmethod
+    def deterministic_runner_ids(cls) -> frozenset[str]:
+        """当前 run_* 确定性 Runner 覆盖的能力集合。"""
+        return frozenset(
+            name[len("run_"):]
+            for name in dir(cls)
+            if name.startswith("run_") and callable(getattr(cls, name, None))
+        )
+
+    def availability(self, capability_id: str | None = None) -> dict[str, Any]:
+        """能力可用性与调用语义元数据：确定性 Runner / 服务层处理器 / 后台渠道执行支持。"""
+        runner_ids = self.deterministic_runner_ids()
+        known = sorted(runner_ids | set(SERVICE_HANDLED_CAPABILITY_IDS))
+        selected = [str(capability_id)] if capability_id else known
+        rows: list[dict[str, Any]] = []
+        for cid in selected:
+            spec = self.service.skills.get(cid) if hasattr(self.service, "skills") else None
+            deterministic = cid in runner_ids
+            service_handled = cid in SERVICE_HANDLED_CAPABILITY_IDS
+            rows.append({
+                "capability_id": cid,
+                "registered": spec is not None,
+                "deterministic_runner": deterministic,
+                "service_handler": service_handled,
+                "external_execution_supported": cid in EXTERNAL_EXECUTION_CAPABILITY_IDS,
+                "execution_path": (
+                    "deterministic_runner" if deterministic
+                    else "service_handler" if service_handled
+                    else "unsupported"
+                ),
+            })
+        return {"ok": True, "capabilities": rows[0] if capability_id and len(rows) == 1 else rows}
+
     @staticmethod
     def _resolve_python() -> str:
         candidates = [
@@ -419,21 +494,122 @@ class RecruitingCapabilityRuntime:
     def execute(self, capability_id: str, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         handler = getattr(self, f"run_{capability_id}", None)
         if handler is None:
-            raise ValueError(f"能力尚未实现确定性 Runner：{capability_id}")
+            spec = self.service.skills.get(capability_id) if capability_id in SERVICE_HANDLED_CAPABILITY_IDS else None
+            if spec is not None:
+                # 注册在服务层（workflow_handler）实现的能力：走已注册 handler，保证调用语义完整。
+                return spec.handler(context, inputs)
+            available = "、".join(sorted(self.deterministic_runner_ids() | set(SERVICE_HANDLED_CAPABILITY_IDS)))
+            raise ValueError(f"能力没有可用的确定性 Runner 或服务层处理器：{capability_id}；可用能力：{available}")
         return handler(context, inputs)
 
+    @staticmethod
+    def _sourcing_score_thresholds(job: str, ability_terms: set[str]) -> tuple[int, int]:
+        text = " ".join([str(job or ""), *(str(term or "") for term in ability_terms)]).casefold()
+        markers = ("vpd", "vrm", "tlvr", "多相buck", "模块电源", "垂直供电")
+        return (70, 80) if sum(marker.casefold() in text for marker in markers) >= 2 else (55, 65)
+
+    @staticmethod
+    def _channel_risk_stop_reason(result: dict[str, Any]) -> str:
+        text = json.dumps(result, ensure_ascii=False).casefold()
+        markers = (
+            "安全风险", "风险提示", "安全合规", "合规墙", "compliancecommitment",
+            "captcha", "人机验证", "操作频繁", "访问频繁", "账号风险",
+        )
+        return next((marker for marker in markers if marker.casefold() in text), "")
+
+    @staticmethod
+    def _channel_page_budget(request: dict[str, Any]) -> int:
+        try:
+            requested = int(request.get("max_pages_per_query") or 3)
+        except (TypeError, ValueError):
+            requested = 3
+        return max(1, min(requested, 10))
+
+    @staticmethod
+    def _platform_capped_continuation_limit(request: dict[str, Any]) -> int:
+        """Bound pagination retries so capped queries cannot keep re-entering the queue."""
+        raw = request.get("max_platform_capped_retries")
+        if raw not in (None, ""):
+            try:
+                return max(0, min(int(raw), 3))
+            except (TypeError, ValueError):
+                pass
+        mode = str(request.get("liepin_risk_mode") or os.environ.get("ASA_LIEPIN_RISK_MODE", "low")).strip().lower()
+        return 1 if mode in {"fast", "balanced_fast"} else 0
+
+    @staticmethod
+    def _liepin_detail_capture_options(request: dict[str, Any], target: int) -> tuple[int, list[str]]:
+        """Low-risk fast mode: keep recall broad, throttle only resume detail pages."""
+        mode = str(request.get("liepin_risk_mode") or os.environ.get("ASA_LIEPIN_RISK_MODE", "low")).strip().lower()
+        if mode in {"fast", "balanced_fast"}:
+            defaults = {"min": 1.8, "max": 4.0, "burst": 8, "cooldown": 8.0}
+        elif mode in {"very_low", "safe", "conservative"}:
+            defaults = {"min": 4.0, "max": 8.0, "burst": 4, "cooldown": 25.0}
+        else:
+            defaults = {"min": 2.8, "max": 6.2, "burst": 5, "cooldown": 16.0}
+
+        def _int_value(key: str, fallback: int, minimum: int, maximum: int) -> int:
+            raw = request.get(key) or os.environ.get(f"ASA_{key.upper()}")
+            try:
+                value = int(raw) if raw not in (None, "") else fallback
+            except (TypeError, ValueError):
+                value = fallback
+            return max(minimum, min(value, maximum))
+
+        def _float_value(key: str, fallback: float, minimum: float, maximum: float) -> float:
+            raw = request.get(key) or os.environ.get(f"ASA_{key.upper()}")
+            try:
+                value = float(raw) if raw not in (None, "") else fallback
+            except (TypeError, ValueError):
+                value = fallback
+            return max(minimum, min(value, maximum))
+
+        fallback_limit = min(max(6, target), 12)
+        detail_limit = _int_value("liepin_detail_limit", fallback_limit, 0, 40)
+        min_delay = _float_value("liepin_detail_min_delay", float(defaults["min"]), 0.0, 30.0)
+        max_delay = _float_value("liepin_detail_max_delay", float(defaults["max"]), min_delay, 45.0)
+        burst_size = _int_value("liepin_detail_burst_size", int(defaults["burst"]), 1, 50)
+        cooldown = _float_value("liepin_detail_burst_cooldown", float(defaults["cooldown"]), 0.0, 120.0)
+        return detail_limit, [
+            "--detail-min-delay", str(min_delay),
+            "--detail-max-delay", str(max_delay),
+            "--detail-burst-size", str(burst_size),
+            "--detail-burst-cooldown", str(cooldown),
+            "--stop-on-risk-page",
+        ]
+
+    def _external_request_cancelled(self, request: dict[str, Any]) -> bool:
+        try:
+            step_id = int(request.get("_workflow_step_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        execution_token = str(request.get("_workflow_execution_token") or "")
+        return step_id > 0 and not self.service.workflow_engine.external_step_is_active(step_id, execution_token)
+
+    def _ensure_external_request_active(self, request: dict[str, Any]) -> None:
+        if self._external_request_cancelled(request):
+            raise ExternalExecutionCancelled("工作流已停止，当前渠道执行已终止")
+
     def execute_external(self, capability_id: str, request: dict[str, Any]) -> dict[str, Any]:
-        if capability_id != "multi_channel_sourcing":
-            raise ValueError(f"能力不支持后台渠道执行：{capability_id}")
+        if capability_id not in EXTERNAL_EXECUTION_CAPABILITY_IDS:
+            supported = "、".join(sorted(EXTERNAL_EXECUTION_CAPABILITY_IDS))
+            raise ValueError(f"能力不支持后台渠道执行：{capability_id}；仅支持：{supported}")
         client, job = str(request.get("client") or ""), str(request.get("job") or "")
         if not client or not job:
             raise ValueError("寻访任务缺少客户或岗位")
+        self._ensure_external_request_active(request)
+        cancel_check = (
+            (lambda: self._external_request_cancelled(request))
+            if request.get("_workflow_step_id")
+            else None
+        )
         audit_only_result = request.get("_audit_only_result")
         if isinstance(audit_only_result, dict):
             sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
-            sync = self._run(
+            sync = self._run_external(
                 [self.python, str(sync_script), "--client", client, "--job", job, "--no-open"],
                 300,
+                cancel_check=cancel_check,
             )
             return {
                 **audit_only_result,
@@ -470,18 +646,40 @@ class RecruitingCapabilityRuntime:
         xsaas_queries_path = candidates_path.with_name(candidates_path.stem + "-xsaas-queries.json")
         candidates_path.parent.mkdir(parents=True, exist_ok=True)
         strategy = request.get("strategy") if isinstance(request.get("strategy"), dict) else {}
+        query_groups = approved_snapshot.get("query_groups") if isinstance(approved_snapshot.get("query_groups"), list) else []
+        ability_terms = {
+            str(term).strip()
+            for group in query_groups
+            if isinstance(group, dict)
+            for term in (group.get("terms") or [])
+            if str(term).strip()
+        }
+        quality_min_score, quality_recommend_score = self._sourcing_score_thresholds(job, ability_terms)
+        page_budget = self._channel_page_budget(request)
         resume_requested = bool(request.get("resume_run_id"))
         all_runnable_cells = (
-            self._resume_query_cells(run_id, query_plan, max_retries=int(request.get("max_query_retries") or 3))
+            self._resume_query_cells(
+                run_id,
+                query_plan,
+                max_retries=int(request.get("max_query_retries") or 3),
+                max_platform_capped_retries=self._platform_capped_continuation_limit(request),
+            )
             if resume_requested
             else [cell for cell in query_plan.get("cells") or [] if isinstance(cell, dict)]
         )
-        if resume_requested and not all_runnable_cells:
-            raise ValueError("断点续跑没有 pending 或可重试的 failed 查询单元")
+        # Every approved cell may already be terminal when a paused workflow is
+        # resumed. In that case, run the normal empty-batch intake/audit path so
+        # the workflow can advance to assessment instead of failing at the cursor.
         try:
-            cell_batch_size = max(1, min(int(request.get("max_query_cells_per_batch") or 8), 20))
+            cell_batch_size = max(
+                1,
+                min(
+                    int(request.get("max_query_cells_per_batch") or DEFAULT_SOURCING_CELL_BATCH_SIZE),
+                    MAX_SOURCING_CELL_BATCH_SIZE,
+                ),
+            )
         except (TypeError, ValueError):
-            cell_batch_size = 8
+            cell_batch_size = DEFAULT_SOURCING_CELL_BATCH_SIZE
         runnable_cells = all_runnable_cells[:cell_batch_size]
         executed_cell_ids = {
             str(cell.get("cell_id") or "") for cell in runnable_cells if isinstance(cell, dict)
@@ -497,7 +695,7 @@ class RecruitingCapabilityRuntime:
         _oc1 = self._opencli_primary_enabled(request)
         _cdp = int(request.get("cdp_port") or 9223)
         _lim = max(12, target * 2)
-        _det = max(12, target * 2)
+        _det, _detail_args = self._liepin_detail_capture_options(request, target)
         _report: dict[str, Any] = {}
 
         def _run_liepin() -> tuple[str, dict[str, Any] | None]:
@@ -512,7 +710,9 @@ class RecruitingCapabilityRuntime:
                     channel="liepin", client=client, job=job, port=_cdp,
                     queries_path=liepin_queries_path, output_path=liepin_path,
                     raw_output_path=liepin_raw_path,
-                    limit=min(_lim, 24), detail_limit=_det, report=_report)
+                    limit=min(_lim, 24), detail_limit=_det, report=_report,
+                    detail_args=_detail_args,
+                    cancel_check=cancel_check)
                 if eng == "opencli":
                     res = {**_report.get("liepin", {}), "ok": True, "recall_engine": "opencli"}
                 elif eng == "opencli_partial":
@@ -534,17 +734,20 @@ class RecruitingCapabilityRuntime:
                         encoding="utf-8",
                     )
                     try:
-                        fallback_result = self._run_json([
+                        fallback_result = self._run_external_json([
                             self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
                             "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
                             "--port", str(_cdp), "--rounds", str(len(fallback_entries)),
-                            "--max-cards", str(min(_lim, 24)), "--min-score", "55", "--recommend-score", "65",
-                            "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                            "--max-cards", str(min(_lim, 24)), "--min-score", str(quality_min_score), "--recommend-score", str(quality_recommend_score),
+                            "--max-pages", str(page_budget),
                             "--capture-links", "--capture-details", "--detail-limit", str(_det),
+                            *_detail_args,
                             "--no-open-links", "--dry-run", "--json-output", str(fallback_path),
                             "--raw-json-output", str(fallback_raw_path),
                             "--queries-json", str(fallback_queries_path),
-                        ], 900)
+                        ], 900, cancel_check=cancel_check)
+                    except ExternalExecutionCancelled:
+                        raise
                     except Exception as exc:
                         fallback_result = {
                             "ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": [],
@@ -565,17 +768,20 @@ class RecruitingCapabilityRuntime:
                     eng = "opencli_paginated"
             if res is None:
                 try:
-                    res = self._run_json([
+                    res = self._run_external_json([
                         self.python, str(LIEPIN_SEARCH), "--client", client, "--position", job,
                         "--db", str(self.service.db_path), "--output-dir", str(candidates_path.parent),
                         "--port", str(_cdp), "--rounds", str(len(liepin_queries)),
-                        "--max-cards", str(min(_lim, 24)), "--min-score", "55", "--recommend-score", "65",
-                        "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
+                        "--max-cards", str(min(_lim, 24)), "--min-score", str(quality_min_score), "--recommend-score", str(quality_recommend_score),
+                        "--max-pages", str(page_budget),
                         "--capture-links", "--capture-details", "--detail-limit", str(_det),
+                        *_detail_args,
                         "--no-open-links", "--dry-run", "--json-output", str(liepin_path),
                         "--raw-json-output", str(liepin_raw_path),
                         "--queries-json", str(liepin_queries_path),
-                    ], 900)
+                    ], 900, cancel_check=cancel_check)
+                except ExternalExecutionCancelled:
+                    raise
                 except Exception as exc:
                     res = {"ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": []}
                     liepin_path.write_text("[]", encoding="utf-8")
@@ -594,7 +800,8 @@ class RecruitingCapabilityRuntime:
                     channel="xsaas", client=client, job=job, port=_cdp,
                     queries_path=xsaas_queries_path, output_path=xsaas_path,
                     raw_output_path=xsaas_raw_path,
-                    limit=min(_lim, 100), detail_limit=_det, report=_report)
+                    limit=min(_lim, 100), detail_limit=_det, report=_report,
+                    cancel_check=cancel_check)
                 if eng == "opencli":
                     res = {**_report.get("xsaas", {}), "ok": True, "recall_engine": "opencli"}
                 elif eng == "opencli_partial":
@@ -616,14 +823,16 @@ class RecruitingCapabilityRuntime:
                         encoding="utf-8",
                     )
                     try:
-                        fallback_result = self._run_json([
+                        fallback_result = self._run_external_json([
                             self.python, str(XSAAS_SEARCH), "--queries", str(fallback_queries_path),
                             "--output", str(fallback_path), "--port", str(_cdp),
                             "--raw-output", str(fallback_raw_path),
                             "--max-rows", str(min(_lim, 100)), "--db", str(self.service.db_path),
-                            "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
-                            "--client", client, "--job", job, "--min-score", "55",
-                        ], 300)
+                            "--max-pages", str(page_budget),
+                            "--client", client, "--job", job, "--min-score", str(quality_min_score),
+                        ], 300, cancel_check=cancel_check)
+                    except ExternalExecutionCancelled:
+                        raise
                     except Exception as exc:
                         fallback_result = {"ok": False, "status": "blocked", "error": _trim_error(exc), "rounds": []}
                         fallback_path.write_text("[]", encoding="utf-8")
@@ -642,23 +851,43 @@ class RecruitingCapabilityRuntime:
                     eng = "opencli_paginated"
             if res is None:
                 try:
-                    res = self._run_json([
+                    res = self._run_external_json([
                         self.python, str(XSAAS_SEARCH), "--queries", str(xsaas_queries_path),
                         "--output", str(xsaas_path), "--port", str(_cdp),
                         "--raw-output", str(xsaas_raw_path),
                         "--max-rows", str(min(_lim, 100)), "--db", str(self.service.db_path),
-                        "--max-pages", str(max(1, int(request.get("max_pages_per_query") or 50))),
-                        "--client", client, "--job", job, "--min-score", "55",
-                    ], 300)
+                        "--max-pages", str(page_budget),
+                        "--client", client, "--job", job, "--min-score", str(quality_min_score),
+                    ], 300, cancel_check=cancel_check)
+                except ExternalExecutionCancelled:
+                    raise
                 except Exception:
                     res = {"ok": False, "status": "blocked", "error": _trim_error(sys.exc_info()[1])}
                     xsaas_path.write_text("[]", encoding="utf-8")
             return eng, res
 
+        def _run_xsaas_guarded() -> tuple[str, dict[str, Any] | None]:
+            # X-SaaS runners use isolated tabs marked with asa_search_runner=1.
+            # A subprocess timeout cannot execute its own finally block, so the
+            # parent removes only those owned tabs both before and after the run.
+            from xsaas_candidate_search import close_runner_tabs
+
+            try:
+                close_runner_tabs(_cdp)
+            except Exception:
+                pass
+            try:
+                return _run_xsaas()
+            finally:
+                try:
+                    close_runner_tabs(_cdp)
+                except Exception:
+                    pass
+
         with ThreadPoolExecutor(max_workers=2) as _pool:
             _futures = {
                 _pool.submit(_run_liepin): "liepin",
-                _pool.submit(_run_xsaas): "xsaas",
+                _pool.submit(_run_xsaas_guarded): "xsaas",
             }
             _results: dict[str, tuple[str, dict[str, Any] | None]] = {}
             for _fut in as_completed(_futures):
@@ -666,25 +895,37 @@ class RecruitingCapabilityRuntime:
 
         liepin_engine, search = _results["liepin"]
         xsaas_engine, xsaas = _results["xsaas"]
+        self._ensure_external_request_active(request)
         primary_channels = _report
-        opencli_shadow = self._run_opencli_shadow(
-            request=request,
-            client=client,
-            job=job,
-            port=int(request.get("cdp_port") or 9223),
-            limit=max(12, target * 2),
-            liepin_queries=liepin_queries,
-            xsaas_queries=xsaas_queries,
-            liepin_path=liepin_path,
-            xsaas_path=xsaas_path,
-            artifact_path=candidates_path.with_name(candidates_path.stem + "-opencli-shadow.json"),
-            liepin_queries_path=liepin_queries_path,
-            xsaas_queries_path=xsaas_queries_path,
-            skip_channels={
-                channel
-                for channel, engine in (("liepin", liepin_engine), ("xsaas", xsaas_engine))
-                if engine.startswith("opencli")
-            },
+        risk_stop_reason = self._channel_risk_stop_reason(search)
+        opencli_shadow = (
+            {
+                "enabled": False,
+                "mode": "read_only_shadow",
+                "affects_intake": False,
+                "reason": "channel_risk_hard_stop",
+            }
+            if risk_stop_reason
+            else self._run_opencli_shadow(
+                request=request,
+                client=client,
+                job=job,
+                port=int(request.get("cdp_port") or 9223),
+                limit=max(12, target * 2),
+                liepin_queries=liepin_queries,
+                xsaas_queries=xsaas_queries,
+                liepin_path=liepin_path,
+                xsaas_path=xsaas_path,
+                artifact_path=candidates_path.with_name(candidates_path.stem + "-opencli-shadow.json"),
+                liepin_queries_path=liepin_queries_path,
+                xsaas_queries_path=xsaas_queries_path,
+                skip_channels={
+                    channel
+                    for channel, engine in (("liepin", liepin_engine), ("xsaas", xsaas_engine))
+                    if engine.startswith("opencli")
+                },
+                cancel_check=cancel_check,
+            )
         )
         liepin_candidates = _loads(liepin_path.read_text(encoding="utf-8"), [])
         xsaas_candidates = _loads(xsaas_path.read_text(encoding="utf-8"), [])
@@ -695,11 +936,38 @@ class RecruitingCapabilityRuntime:
         liepin_raw_candidates = _loads(liepin_raw_path.read_text(encoding="utf-8"), [])
         xsaas_raw_candidates = _loads(xsaas_raw_path.read_text(encoding="utf-8"), [])
         combined = liepin_candidates + xsaas_candidates
+        quality_rejected: list[dict[str, Any]] = []
+        if quality_min_score >= 70:
+            def candidate_score(item: dict[str, Any]) -> int:
+                try:
+                    return int(float(item.get("fit_score") or 0))
+                except (TypeError, ValueError):
+                    return 0
+
+            quality_rejected = [
+                item for item in combined
+                if candidate_score(item) < quality_min_score
+            ]
+            combined = [
+                item for item in combined
+                if candidate_score(item) >= quality_min_score
+            ]
         candidates_path.write_text(json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8")
         workflow_id = str(request.get("workflow_id") or "")
+
+        def _normalize_run_result(raw: dict[str, Any] | None) -> dict[str, Any]:
+            """把 runner 返回的 result.candidates 统一为数量，避免前端把列表当 0 处理。"""
+            if not isinstance(raw, dict):
+                return raw or {}
+            normalized = dict(raw)
+            candidates = normalized.get("candidates")
+            if isinstance(candidates, list):
+                normalized["candidates"] = len(candidates)
+            return normalized
+
         channel_runs = [
-            {"channel": "liepin", "status": "completed" if search.get("ok") else "blocked", "recall_engine": liepin_engine, "result": search},
-            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "recall_engine": xsaas_engine, "result": xsaas},
+            {"channel": "liepin", "status": "risk_stopped" if risk_stop_reason else "completed" if search.get("ok") else "blocked", "recall_engine": liepin_engine, "result": _normalize_run_result(search)},
+            {"channel": "xsaas", "status": "completed" if xsaas.get("ok") else "blocked", "recall_engine": xsaas_engine, "result": _normalize_run_result(xsaas)},
         ]
 
         # Persist raw channel evidence before any formal candidate intake. The later
@@ -713,7 +981,7 @@ class RecruitingCapabilityRuntime:
             query_plan=query_plan,
             raw_candidates=raw_candidates,
             applied={},
-            min_score=55,
+            min_score=quality_min_score,
         )
         query_cell_states = self._persist_query_cell_states(
             run_id=run_id,
@@ -732,7 +1000,8 @@ class RecruitingCapabilityRuntime:
             query_plan=query_plan,
         )
 
-        dry = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path)], 120)
+        self._ensure_external_request_active(request)
+        dry = self._run_external_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path)], 120, cancel_check=cancel_check)
         recall_ledger = self._persist_candidate_recalls(
             run_id=run_id,
             workflow_id=workflow_id,
@@ -741,9 +1010,10 @@ class RecruitingCapabilityRuntime:
             query_plan=query_plan,
             raw_candidates=raw_candidates,
             applied=dry,
-            min_score=55,
+            min_score=quality_min_score,
         )
-        applied = self._run_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180)
+        self._ensure_external_request_active(request)
+        applied = self._run_external_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180, cancel_check=cancel_check)
         attributions = self._persist_sourcing_attributions(
             applied, request.get("strategy") if isinstance(request.get("strategy"), dict) else {},
             workflow_id, client, job,
@@ -756,7 +1026,7 @@ class RecruitingCapabilityRuntime:
             query_plan=query_plan,
             raw_candidates=raw_candidates,
             applied=applied,
-            min_score=55,
+            min_score=quality_min_score,
         )
         coverage_certificate = self._build_coverage_certificate(
             run_id=run_id,
@@ -791,11 +1061,22 @@ class RecruitingCapabilityRuntime:
             "query_cell_states": query_cell_states,
             "coverage_certificate": coverage_certificate,
             "sourcing_funnel": funnel,
+            "quality_gate": {
+                "minimum_score": quality_min_score,
+                "rejected_before_intake": len(quality_rejected),
+                "policy": "specialized_power_minimum_score" if quality_min_score >= 70 else "channel_default",
+            },
+            "channel_risk_stop": {
+                "active": bool(risk_stop_reason),
+                "channel": "liepin" if risk_stop_reason else "",
+                "signal": risk_stop_reason,
+                "message": "猎聘命中安全风险提示，已停止猎聘及后续分页。" if risk_stop_reason else "",
+            },
             "audit": {"ok": False, "summary": "等待 A 系统收尾审计"},
         }
         sync_script = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_sync.py")
         try:
-            sync = self._run([self.python, str(sync_script), "--client", client, "--job", job, "--no-open"], 300)
+            sync = self._run_external([self.python, str(sync_script), "--client", client, "--job", job, "--no-open"], 300, cancel_check=cancel_check)
         except CommandExecutionError as exc:
             partial_result["audit"] = {
                 "ok": False,
@@ -810,10 +1091,18 @@ class RecruitingCapabilityRuntime:
                 detail=exc.detail,
             ) from exc
         learning = self._capture_search_learning(client, job, [*liepin_queries, *xsaas_queries])
-        continuation = self._sourcing_continuation(
-            request=request,
-            run_id=run_id,
-            query_plan=query_plan,
+        continuation = (
+            {
+                "summary": {
+                    "scheduled": False,
+                    "reason": "channel_risk_hard_stop",
+                    "risk_signal": risk_stop_reason,
+                    "remaining_cells": max(0, len(all_runnable_cells) - len(runnable_cells)),
+                },
+                "request": None,
+            }
+            if risk_stop_reason
+            else self._sourcing_continuation(request=request, run_id=run_id, query_plan=query_plan)
         )
         final_result = {
             **partial_result,
@@ -1013,6 +1302,8 @@ class RecruitingCapabilityRuntime:
         limit: int,
         detail_limit: int,
         report: dict[str, Any],
+        detail_args: list[str] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> str:
         """OpenCLI 主渠道召回；失败、被阻断或无完整合格行时回退生产 runner。"""
         query_payload = _loads(queries_path.read_text(encoding="utf-8"), {})
@@ -1032,7 +1323,7 @@ class RecruitingCapabilityRuntime:
             }
             return "production_fallback"
         try:
-            summary = self._run_json(
+            summary = self._run_external_json(
                 [
                     self.python, str(OPENCLI_SHADOW), "--mode", "primary",
                     "--channel", channel, "--queries-json", str(queries_path),
@@ -1041,10 +1332,14 @@ class RecruitingCapabilityRuntime:
                     "--client", client, "--job", job,
                     "--db", str(self.service.db_path), "--port", str(port),
                     "--limit", str(limit), "--detail-limit", str(detail_limit),
+                    *(detail_args or []),
                     "--max-queries", str(max(1, len(planned_queries) if isinstance(planned_queries, list) else 0)),
                 ],
                 600,
+                cancel_check=cancel_check,
             )
+        except ExternalExecutionCancelled:
+            raise
         except Exception as exc:
             summary = {
                 "ok": False, "mode": "opencli_primary_recall", "channel": channel,
@@ -1077,6 +1372,7 @@ class RecruitingCapabilityRuntime:
         liepin_queries_path: Path | None = None,
         xsaas_queries_path: Path | None = None,
         skip_channels: set[str] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         configured = request.get("opencli_shadow", os.environ.get("ASA_OPENCLI_SHADOW", "1"))
         enabled = str(configured).strip().lower() not in {"0", "false", "no", "off"}
@@ -1113,8 +1409,10 @@ class RecruitingCapabilityRuntime:
             if queries_file is not None:
                 command += ["--queries-json", str(queries_file)]
             try:
-                result = self._run_json(command, 600)
+                result = self._run_external_json(command, 600, cancel_check=cancel_check)
                 channels.append({"channel": channel, "status": "completed", **result})
+            except ExternalExecutionCancelled:
+                raise
             except Exception as exc:
                 channels.append({
                     "channel": channel,
@@ -1151,13 +1449,14 @@ class RecruitingCapabilityRuntime:
         query_plan: dict[str, Any],
         *,
         max_retries: int = 3,
+        max_platform_capped_retries: int = 0,
     ) -> list[dict[str, Any]]:
         """Select only unfinished/retryable cells for an explicitly resumed run."""
         conn = self.service._connect()
         try:
             rows = conn.execute(
                 "SELECT cell_id,plan_hash,status,retry_count,cursor_json,pages_fetched,terminal_reason,"
-                "extracted_count,unique_count FROM agent_sourcing_query_cells WHERE run_id=?",
+                "extracted_count,unique_count,updated_at FROM agent_sourcing_query_cells WHERE run_id=?",
                 (run_id,),
             ).fetchall()
             recall_rows = conn.execute(
@@ -1177,6 +1476,7 @@ class RecruitingCapabilityRuntime:
                 str(row["status"]), int(row["retry_count"] or 0), _loads(row["cursor_json"], {}),
                 int(row["pages_fetched"] or 0), int(row["extracted_count"] or 0),
                 int(row["unique_count"] or 0), str(row["terminal_reason"] or ""),
+                str(row["updated_at"] or ""),
             )
             for row in rows
         }
@@ -1186,16 +1486,52 @@ class RecruitingCapabilityRuntime:
             source_id = str(row["source_candidate_id"] or "").strip()
             if cell_id and source_id and not source_id.startswith("anon_"):
                 seen_keys_by_cell.setdefault(cell_id, []).append(source_id)
-        runnable: list[dict[str, Any]] = []
+        blocked_families_by_channel: dict[str, set[str]] = {"liepin": set(), "xsaas": set()}
         for cell in query_plan.get("cells") or []:
             if not isinstance(cell, dict):
                 continue
-            status, retries, cursor, pages_fetched, extracted_count, unique_count, terminal_reason = states.get(
-                str(cell.get("cell_id") or ""), ("pending", 0, {}, 0, 0, 0, ""),
+            cell_id = str(cell.get("cell_id") or "")
+            status, _retries, cursor, _pages, _extracted, _unique, terminal_reason, _updated = states.get(
+                cell_id, ("pending", 0, {}, 0, 0, 0, "", ""),
             )
-            if (
-                status == "pending"
-                or (status == "failed" and retries < max(1, max_retries))
+            if status not in {"failed", "blocked"}:
+                continue
+            if status == "blocked" and cursor:
+                continue
+            if status == "blocked" and terminal_reason not in {
+                "channel_blocked_before_query", "approved_cell_not_executed",
+            }:
+                continue
+            channel = str(cell.get("channel") or "")
+            blocked_families_by_channel.setdefault(channel, set()).update(
+                str(value) for value in cell.get("query_family_ids") or [] if str(value).strip()
+            )
+        pending: list[dict[str, Any]] = []
+        fallback_pending: list[dict[str, Any]] = []
+        retryable: list[tuple[str, int, dict[str, Any]]] = []
+        for plan_index, cell in enumerate(query_plan.get("cells") or []):
+            if not isinstance(cell, dict):
+                continue
+            status, retries, cursor, pages_fetched, extracted_count, unique_count, terminal_reason, updated_at = states.get(
+                str(cell.get("cell_id") or ""), ("pending", 0, {}, 0, 0, 0, "", ""),
+            )
+            if status == "pending":
+                channel = str(cell.get("channel") or "")
+                other_channel = "xsaas" if channel == "liepin" else "liepin"
+                families = {str(value) for value in cell.get("query_family_ids") or [] if str(value).strip()}
+                if families and families & blocked_families_by_channel.get(other_channel, set()):
+                    fallback_pending.append({
+                        **cell,
+                        "execution_fallback_relay": {
+                            "from_channel": other_channel,
+                            "reason": "same_query_family_blocked",
+                            "query_family_ids": sorted(families & blocked_families_by_channel[other_channel]),
+                        },
+                    })
+                else:
+                    pending.append(cell)
+            elif (
+                (status == "failed" and retries < max(1, max_retries))
                 or (
                     status == "blocked"
                     and retries < max(1, max_retries)
@@ -1203,24 +1539,32 @@ class RecruitingCapabilityRuntime:
                     and terminal_reason in {"channel_blocked_before_query", "approved_cell_not_executed"}
                 )
             ):
-                runnable.append(cell)
+                retryable.append((updated_at, plan_index, cell))
             elif (
                 status in {"platform_capped", "blocked"}
-                and retries < max(1, max_retries)
+                and (
+                    (status == "platform_capped" and retries < max(0, max_platform_capped_retries))
+                    or (status == "blocked" and retries < max(1, max_retries))
+                )
                 and isinstance(cursor, dict)
                 and int(cursor.get("page") or 0) > 1
             ):
-                runnable.append({
-                    **cell,
-                    "execution_cursor": {"page": int(cursor["page"])},
-                    "execution_progress": {
-                        "pages_fetched": pages_fetched,
-                        "extracted_count": extracted_count,
-                        "unique_count": unique_count,
-                        "seen_candidate_keys": list(dict.fromkeys(seen_keys_by_cell.get(str(cell.get("cell_id") or ""), []))),
+                retryable.append((
+                    updated_at,
+                    plan_index,
+                    {
+                        **cell,
+                        "execution_cursor": {"page": int(cursor["page"])},
+                        "execution_progress": {
+                            "pages_fetched": pages_fetched,
+                            "extracted_count": extracted_count,
+                            "unique_count": unique_count,
+                            "seen_candidate_keys": list(dict.fromkeys(seen_keys_by_cell.get(str(cell.get("cell_id") or ""), []))),
+                        },
                     },
-                })
-        return runnable
+                ))
+        retryable.sort(key=lambda item: (item[0], item[1]))
+        return [*fallback_pending, *pending, *(item[2] for item in retryable)]
 
     def _sourcing_continuation(
         self,
@@ -1235,13 +1579,45 @@ class RecruitingCapabilityRuntime:
         except (TypeError, ValueError):
             index = 0
         try:
-            max_batches = max(0, min(int(request.get("max_continuation_batches") or 20), 20))
+            cell_batch_size = max(
+                1,
+                min(
+                    int(request.get("max_query_cells_per_batch") or DEFAULT_SOURCING_CELL_BATCH_SIZE),
+                    MAX_SOURCING_CELL_BATCH_SIZE,
+                ),
+            )
         except (TypeError, ValueError):
-            max_batches = 20
+            cell_batch_size = DEFAULT_SOURCING_CELL_BATCH_SIZE
+        approved_cell_count = sum(
+            1 for cell in query_plan.get("cells") or [] if isinstance(cell, dict)
+        )
+        minimum_plan_continuations = max(
+            0,
+            (approved_cell_count + cell_batch_size - 1) // cell_batch_size - 1,
+        )
+        default_budget = min(
+            MAX_SOURCING_CONTINUATION_BATCHES,
+            minimum_plan_continuations + DEFAULT_PAGINATION_CONTINUATION_HEADROOM,
+        )
+        raw_budget = request.get("max_continuation_batches")
+        if raw_budget in (None, ""):
+            max_batches = default_budget
+        else:
+            try:
+                requested_budget = max(
+                    0,
+                    min(int(raw_budget), MAX_SOURCING_CONTINUATION_BATCHES),
+                )
+            except (TypeError, ValueError):
+                requested_budget = default_budget
+            # A legacy/manual cap must not prevent every approved cell from receiving
+            # its first execution attempt. Pagination still uses the bounded remainder.
+            max_batches = max(minimum_plan_continuations, requested_budget)
         runnable = self._resume_query_cells(
             run_id,
             query_plan,
             max_retries=int(request.get("max_query_retries") or 3),
+            max_platform_capped_retries=self._platform_capped_continuation_limit(request),
         )
         summary = {
             "scheduled": bool(runnable and index < max_batches),
@@ -1249,6 +1625,9 @@ class RecruitingCapabilityRuntime:
             "completed_batches": index + 1,
             "remaining_cells": len(runnable),
             "limit_reached": bool(runnable and index >= max_batches),
+            "continuation_budget": max_batches,
+            "minimum_plan_continuations": minimum_plan_continuations,
+            "pagination_headroom": max(0, max_batches - minimum_plan_continuations),
         }
         if not summary["scheduled"]:
             return {"request": None, "summary": summary}
@@ -1326,7 +1705,7 @@ class RecruitingCapabilityRuntime:
                 cell_id = str(cell.get("cell_id") or "")
                 match = rounds_by_query.get((channel, normalized(cell.get("query"))))
                 existing = conn.execute(
-                    "SELECT status,reported_total,pages_fetched,extracted_count,unique_count "
+                    "SELECT status,reported_total,pages_fetched,extracted_count,unique_count,cursor_json "
                     "FROM agent_sourcing_query_cells WHERE run_id=? AND cell_id=?",
                     (run_id, cell_id),
                 ).fetchone()
@@ -1334,9 +1713,6 @@ class RecruitingCapabilityRuntime:
                 if executed_cell_ids is not None and cell_id not in executed_cell_ids:
                     if existing_status in {"exhausted", "platform_capped", "blocked", "failed"}:
                         terminal_counts[existing_status] = terminal_counts.get(existing_status, 0) + 1
-                    continue
-                if not match and existing_status in {"exhausted", "platform_capped", "blocked"}:
-                    terminal_counts[existing_status] = terminal_counts.get(existing_status, 0) + 1
                     continue
                 reported_total: int | None = None
                 extracted = 0
@@ -1391,6 +1767,16 @@ class RecruitingCapabilityRuntime:
                         reason = "duplicate_candidates_before_reported_total"
                 else:
                     run_status, channel_result = channel_status.get(channel, ("", {}))
+                    if existing is not None:
+                        reported_total = (
+                            max(0, integer(existing["reported_total"]))
+                            if existing["reported_total"] is not None
+                            else None
+                        )
+                        pages_fetched = max(0, integer(existing["pages_fetched"]))
+                        extracted = max(0, integer(existing["extracted_count"]))
+                        unique_count = max(0, integer(existing["unique_count"]))
+                        cursor = _loads(existing["cursor_json"], {})
                     if run_status == "failed":
                         status, reason = "failed", "channel_failed_before_query"
                     elif run_status == "blocked":
@@ -1402,14 +1788,18 @@ class RecruitingCapabilityRuntime:
                     """
                     UPDATE agent_sourcing_query_cells
                        SET status=?,reported_total=?,pages_fetched=?,extracted_count=?,unique_count=?,
-                           cursor_json=?,retry_count=retry_count+CASE WHEN ? IN ('failed','blocked') THEN 1 ELSE 0 END,
+                           cursor_json=?,retry_count=retry_count+?,
                            terminal_reason=?,last_error=?,started_at=COALESCE(started_at,datetime('now','localtime')),
                            finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime')
                      WHERE run_id=? AND cell_id=?
                     """,
                     (
                         status, reported_total, pages_fetched, extracted, unique_count,
-                        json.dumps(cursor, ensure_ascii=False), status, reason, last_error,
+                        json.dumps(cursor, ensure_ascii=False),
+                        1 if status in {"failed", "blocked"} or (
+                            status == "platform_capped" and existing_status == "platform_capped"
+                        ) else 0,
+                        reason, last_error,
                         run_id, str(cell.get("cell_id") or ""),
                     ),
                 )
@@ -1435,9 +1825,18 @@ class RecruitingCapabilityRuntime:
         def normalized(value: Any) -> str:
             return re.sub(r"\s+", "", str(value or "")).casefold()
 
-        def identity(item: dict[str, Any], channel: str, query: str) -> tuple[str, str, str, str, str]:
+        def source_identifier(item: dict[str, Any]) -> str:
+            return str(
+                item.get("source_candidate_id") or item.get("candidate_id") or item.get("resume_id")
+                or item.get("res_id_encode") or item.get("xsaas_id") or ""
+            ).strip()
+
+        def identity(item: dict[str, Any], channel: str, query: str) -> tuple[str, ...]:
+            source_id = source_identifier(item)
+            if source_id:
+                return ("source", normalized(channel), normalized(query), normalized(source_id))
             return (
-                normalized(channel), normalized(query), normalized(item.get("name")),
+                "profile", normalized(channel), normalized(query), normalized(item.get("name")),
                 normalized(item.get("company") or item.get("current_company")),
                 normalized(item.get("title") or item.get("current_title")),
             )
@@ -1448,8 +1847,8 @@ class RecruitingCapabilityRuntime:
             if isinstance(cell, dict)
         }
         staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
-        disposition: dict[tuple[str, str, str, str, str], str] = {}
-        staged_by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        disposition: dict[tuple[str, ...], str] = {}
+        staged_by_identity: dict[tuple[str, ...], dict[str, Any]] = {}
         for key, state in (("accepted", "accepted"), ("existing", "existing"), ("batch_duplicates", "batch_duplicate")):
             for raw in staged.get(key) or []:
                 if not isinstance(raw, dict):
@@ -1473,17 +1872,13 @@ class RecruitingCapabilityRuntime:
             else []
         )
         accepted = [item for item in staged.get("accepted") or [] if isinstance(item, dict)]
-        receipt_by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
-        receipts_by_name: dict[str, list[dict[str, Any]]] = {}
+        receipt_by_identity: dict[tuple[str, ...], dict[str, Any]] = {}
         for accepted_item, receipt in zip(accepted, receipts, strict=False):
             if not isinstance(receipt, dict):
                 continue
             accepted_channel = str(accepted_item.get("channel") or accepted_item.get("source") or "").lower()
             accepted_query = str(accepted_item.get("source_query") or accepted_item.get("query") or "")
             receipt_by_identity[identity(accepted_item, accepted_channel, accepted_query)] = receipt
-            receipt_name = normalized(receipt.get("name"))
-            if receipt_name:
-                receipts_by_name.setdefault(receipt_name, []).append(receipt)
         job_id = self._job_id(client, job)
         stored = 0
         by_state: dict[str, int] = {}
@@ -1530,10 +1925,6 @@ class RecruitingCapabilityRuntime:
                             identity(raw, normalized_channel, source_query),
                             {},
                         )
-                        if not receipt:
-                            same_name = receipts_by_name.get(normalized(name), [])
-                            if len(same_name) == 1:
-                                receipt = same_name[0]
                     receipt_status = str(receipt.get("status") or "")
                     if receipt_status in {"existing", "existing_relation"}:
                         state = receipt_status
@@ -1849,9 +2240,10 @@ class RecruitingCapabilityRuntime:
         try:
             for index, candidate in enumerate(accepted):
                 item = candidate if isinstance(candidate, dict) else {}
-                receipt = next(
-                    (value for value in receipts if isinstance(value, dict) and value.get("name") == item.get("name") and value.get("status") == "inserted"),
-                    receipts[index] if index < len(receipts) and isinstance(receipts[index], dict) else {},
+                receipt = (
+                    receipts[index]
+                    if index < len(receipts) and isinstance(receipts[index], dict)
+                    else {}
                 )
                 job_candidate_id = int(receipt.get("job_candidate_id") or 0)
                 if not job_candidate_id:
@@ -2119,16 +2511,81 @@ class RecruitingCapabilityRuntime:
         except Exception:
             pass
 
-    def _run(self, command: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    @staticmethod
+    def _run_command(
+        command: list[str],
+        timeout: int = 300,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        poll_interval: float = 0.25,
+    ) -> subprocess.CompletedProcess[str]:
+        if cancel_check is None:
+            return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        try:
+            while True:
+                if cancel_check():
+                    raise ExternalExecutionCancelled("工作流已停止，当前渠道执行已终止")
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(max(0.01, poll_interval), remaining))
+                    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    continue
+        except (ExternalExecutionCancelled, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.communicate(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.communicate()
+            raise
+
+    def _run(
+        self,
+        command: list[str],
+        timeout: int = 300,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        proc = self._run_command(command, timeout, cancel_check=cancel_check)
         if proc.returncode != 0:
             message, detail = _command_failure_summary(proc.stdout, proc.stderr, proc.returncode)
             detail["command"] = command
             raise CommandExecutionError(message, detail)
         return proc
 
-    def _run_json(self, command: list[str], timeout: int = 300) -> dict[str, Any]:
-        proc = self._run(command, timeout)
+    def _run_external(
+        self,
+        command: list[str],
+        timeout: int,
+        *,
+        cancel_check: Callable[[], bool] | None,
+    ) -> subprocess.CompletedProcess[str]:
+        if cancel_check is None:
+            return self._run(command, timeout)
+        return self._run(command, timeout, cancel_check=cancel_check)
+
+    def _run_json(
+        self,
+        command: list[str],
+        timeout: int = 300,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        proc = self._run(command, timeout, cancel_check=cancel_check)
         try:
             payload = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
@@ -2136,6 +2593,17 @@ class RecruitingCapabilityRuntime:
         if not isinstance(payload, dict):
             raise RuntimeError("能力脚本必须返回 JSON 对象")
         return payload
+
+    def _run_external_json(
+        self,
+        command: list[str],
+        timeout: int,
+        *,
+        cancel_check: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        if cancel_check is None:
+            return self._run_json(command, timeout)
+        return self._run_json(command, timeout, cancel_check=cancel_check)
 
     def _job(self, context: dict[str, Any]) -> dict[str, Any]:
         if context.get("type") != "job" or not context.get("id"):
@@ -2697,6 +3165,7 @@ class RecruitingCapabilityRuntime:
             "generation": {
                 "mode": "llm" if model_used else "deterministic_fallback",
                 "model": self.service.llm.model,
+                "consultant_mode": "senior_consultant_v1",
                 "memory_mode": learning["memory_mode"],
                 "memory_hits": learning["memory_hits"],
                 "experiment_count": len(learning["historical_experiments"]),
@@ -2758,7 +3227,11 @@ class RecruitingCapabilityRuntime:
                 """
                 SELECT qc.channel,qc.query,COUNT(DISTINCT qc.run_id) AS runs,
                        COUNT(r.id) AS raw_occurrences,
-                       COUNT(DISTINCT r.channel || ':' || COALESCE(NULLIF(r.source_candidate_id,''),r.identity_key)) AS unique_identities
+                       COUNT(DISTINCT r.channel || ':' || COALESCE(NULLIF(r.source_candidate_id,''),r.identity_key)) AS unique_identities,
+                       COUNT(DISTINCT CASE WHEN r.detail_status='complete'
+                           THEN r.channel || ':' || COALESCE(NULLIF(r.source_candidate_id,''),r.identity_key) END) AS detail_complete,
+                       COUNT(DISTINCT CASE WHEN r.job_candidate_id IS NOT NULL
+                           THEN r.job_candidate_id END) AS intake_count
                 FROM agent_sourcing_query_cells qc
                 LEFT JOIN agent_candidate_recalls r
                   ON r.run_id=qc.run_id AND r.query_cell_id=qc.cell_id
@@ -2788,12 +3261,18 @@ class RecruitingCapabilityRuntime:
             runs = max(1, int(row["runs"] or 0))
             raw = max(0, int(row["raw_occurrences"] or 0))
             unique = max(0, int(row["unique_identities"] or 0))
+            complete = max(0, int(row["detail_complete"] or 0))
+            intake = max(0, int(row["intake_count"] or 0))
             channel = str(row["channel"] or "")
             query = str(row["query"] or "")
             metrics.append({
                 "channel": channel,
                 "query": query,
                 "runs": runs,
+                "raw_occurrences": raw,
+                "unique_identities": unique,
+                "detail_complete": complete,
+                "intake_count": intake,
                 "unique_yield_per_run": round(unique / runs, 4),
                 "overlap_rate": round(1 - unique / raw, 4) if raw else 0.0,
                 "business_score": feedback.get((channel, " ".join(query.split()).casefold()), 0.0),
@@ -2867,6 +3346,14 @@ class RecruitingCapabilityRuntime:
         profile_match, profile_trace = knowledge_base.match_client_profile(job.get("client"))
         restricted_info, restricted_trace = knowledge_base.load_restricted_constraints(job.get("client"))
         graph, graph_trace = knowledge_base.load_company_graph()
+        # 知识飞轮二期：公司校准覆盖层（company_calibrations 表，仅 status='calibrated'）
+        # 合并进图谱后再推导公司池；命中公司标注 source=consultant_calibrated 并留痕。
+        # 覆盖层每次运行直接读库（表很小，不做进程内缓存，校准提交即时生效）；
+        # 覆盖层为空/加载失败时不改图谱、不动 trace，输出与现状逐字节一致。
+        calibration_overlay, _overlay_load_trace = knowledge_base.load_calibration_overlay(self.service.db_path)
+        if calibration_overlay:
+            graph, overlay_trace = knowledge_base.apply_calibration_overlay(graph, calibration_overlay)
+            graph_trace = [*graph_trace, *overlay_trace]
         graph_query = " ".join(
             part
             for part in (
@@ -2899,6 +3386,14 @@ class RecruitingCapabilityRuntime:
         )
         classification["trace"] = [
             *classification["trace"], *profile_trace, *restricted_trace, *graph_trace, *graph_pool_trace, *checklist_trace,
+        ]
+        # 知识飞轮二期：技能本体（step4 别名归一/相关词提示，source=kb_skill）与
+        # 职级映射（step3 优先查 kb_level_mapping，source=kb_level，查不到走 LLM/原型路径）。
+        skill_ontology, skill_ontology_trace = knowledge_base.load_skill_ontology()
+        level_mapping, level_mapping_trace = knowledge_base.load_level_mapping()
+        level_hit, level_hit_trace = knowledge_base.map_level(job.get("title"), level_mapping)
+        classification["trace"] = [
+            *classification["trace"], *skill_ontology_trace, *level_mapping_trace, *level_hit_trace,
         ]
         client_profile_payload: dict[str, Any] = {"matched": False}
         if profile_match:
@@ -2953,8 +3448,17 @@ class RecruitingCapabilityRuntime:
             restricted_rules=knowledge_base.restricted_negative_rules(restricted_info),
             negative_checklist=negative_checklist,
             canonical_position=payload["canonical_position"],
+            skill_ontology=skill_ontology,
+            level_hit=level_hit,
+            profile_context=(
+                knowledge_base.profile_context(profile_match["profile"])
+                if profile_match and isinstance(profile_match.get("profile"), dict)
+                else {}
+            ),
+            learning=learning,
         )
         consultant_constraints = _lock_consultant_constraints(plan, v2, revision_evidence, locked_items)
+        strategy_v2.refresh_consultant_judgement(v2)
         v2_ok, v2_errors = strategy_v2.validate_strategy_v2(v2)
         constraint_errors = _locked_constraint_conflicts(plan, v2, consultant_constraints)
         if constraint_errors:
@@ -2977,7 +3481,7 @@ class RecruitingCapabilityRuntime:
                 ),
             ]
         result: dict[str, Any] = {
-            "summary": "已由大模型基于岗位事实、历史实验和长期记忆生成寻访策略，并完成无依据关键词校验。",
+            "summary": "已基于岗位事实、客户画像、岗位原型和历史反馈生成寻访策略，并补齐资深顾问判断简报。",
             "strategy": plan,
             "input_level": classification["input_level"],
             "knowledge_health": knowledge_health,
