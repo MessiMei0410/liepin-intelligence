@@ -116,6 +116,15 @@ def sync_launch_agent_extensions() -> bool:
         if not any(str(argument).startswith(prefix) for argument in arguments):
             arguments.insert(max(1, len(arguments) - 1), replacement)
             changed = True
+    # 当 Chrome 配置为“继续浏览上次打开的网页”时，LaunchAgent 也不应强开起始页，
+    # 否则每次 launchctl 重启都会多出一个重复标签。
+    has_start_url = START_URL in arguments
+    if profile_restore_on_startup_enabled() and has_start_url:
+        arguments = [arg for arg in arguments if arg != START_URL]
+        changed = True
+    elif not profile_restore_on_startup_enabled() and not has_start_url:
+        arguments.append(START_URL)
+        changed = True
     if changed:
         payload["ProgramArguments"] = arguments
         with LAUNCH_AGENT.open("wb") as handle:
@@ -162,6 +171,23 @@ def restart_launch_agent() -> None:
         raise RuntimeError(f"launchctl bootstrap 失败，退出码={code}")
 
 
+def profile_restore_on_startup_enabled() -> bool:
+    """Return True if the Chrome profile is set to restore the last session.
+
+    When restore-on-startup is enabled, passing an explicit start URL would
+    create a duplicate tab alongside the restored tabs.
+    """
+    prefs_path = PROFILE_DIR / "Default" / "Preferences"
+    if not prefs_path.exists():
+        return False
+    try:
+        with prefs_path.open("r", encoding="utf-8") as handle:
+            prefs = json.load(handle)
+        return bool(prefs.get("profile", {}).get("restore_on_startup") == 1)
+    except Exception:
+        return False
+
+
 def start_direct_chrome() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     cleanup_profile_locks()
@@ -172,17 +198,20 @@ def start_direct_chrome() -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("ab")
     load_ext = extension_argument()
+    args = [
+        str(chrome_path),
+        f"--remote-debugging-port={PORT}",
+        f"--user-data-dir={PROFILE_DIR}",
+        f"--load-extension={load_ext}",
+        f"--disable-extensions-except={load_ext}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    # 如果用户设置了“继续浏览上次打开的网页”，不要再强开起始页，否则重复。
+    if not profile_restore_on_startup_enabled():
+        args.append(START_URL)
     subprocess.Popen(
-        [
-            str(chrome_path),
-            f"--remote-debugging-port={PORT}",
-            f"--user-data-dir={PROFILE_DIR}",
-            f"--load-extension={load_ext}",
-            f"--disable-extensions-except={load_ext}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            START_URL,
-        ],
+        args,
         stdout=log_file,
         stderr=log_file,
         stdin=subprocess.DEVNULL,
