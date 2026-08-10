@@ -15,9 +15,9 @@ export function useDraggableOverlay() {
   const drag = useRef<{ startX: number; startY: number; origLeft: number; origTop: number } | null>(null)
   const resize = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null)
 
-  const HANDLE_SIZE = 20
-  const MIN_W = 280
-  const MIN_H = 200
+  const HANDLE_SIZE = 28
+  const MIN_W = 320
+  const MIN_H = 240
 
   // 注入右下角 resize 手柄：独立元素 + 独立事件，避免与 header 拖动相互干扰。
   useEffect(() => {
@@ -26,6 +26,7 @@ export function useDraggableOverlay() {
     const handle = document.createElement('div')
     handle.className = 'overlay-resize-handle'
     handle.setAttribute('aria-hidden', 'true')
+    handle.title = '拖动缩放'
     handle.style.cssText = `position:absolute;right:0;bottom:0;width:${HANDLE_SIZE}px;height:${HANDLE_SIZE}px;cursor:nwse-resize;touch-action:none;z-index:20;`
     panel.appendChild(handle)
 
@@ -77,9 +78,10 @@ export function useDraggableOverlay() {
     if (el.closest?.('button, a')) return true
     // 不拦截 resize 手柄（手柄有独立事件）。
     if (el.closest?.('.overlay-resize-handle')) return true
-    // 当有模态对话框打开时（action-dialog/patch-modal/candidate-dialog），
-    // 面板 header 不应再抢 pointer 事件，避免拖动导致模态框跟着移动、输入被打断。
-    if (document.querySelector('.action-dialog-backdrop, .patch-modal-backdrop, .candidate-dialog-float')) return true
+    // 当模态对话框打开时，面板 header 不应再抢 pointer 事件，
+    // 避免拖动导致模态框跟着移动、输入被打断。
+    // 注意：.candidate-dialog-float 是非模态名单弹窗，不应阻止面板拖动。
+    if (document.querySelector('.action-dialog-backdrop, .patch-modal-backdrop')) return true
     return false
   }
 

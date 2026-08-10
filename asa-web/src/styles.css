@@ -1068,7 +1068,7 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .insight-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:40px;color:var(--muted);font-size:11px}
 @media(max-width:900px){.sourcing-candidates-table th,.sourcing-candidates-table td{padding:7px 6px}.sourcing-candidates-table .candidate-intention{max-width:110px}}
 
-/* ---- Dialog resize handle visual + positioning anchors ---- */
+/* ---- Dialog/panel resize handle visual + positioning anchors ---- */
 /* ⚠️ .candidate-dialog 原本就是 position:fixed（居中弹窗），不能加 relative 覆盖它。
    fixed 本身就是 positioned 祖先，::after 手柄对它同样有效。 */
 .action-dialog,
@@ -1080,6 +1080,8 @@ button:disabled{cursor:not-allowed;opacity:.58}
   position: relative;
 }
 
+/* 详情面板/工作流面板使用独立的 .overlay-resize-handle 元素做事件捕获，
+   这里用 ::after 只做可视提示；手柄统一 28px 热区，避免太小点不到。 */
 .action-dialog::after,
 .patch-modal::after,
 .candidate-dialog::after,
@@ -1089,23 +1091,44 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .workflow-panel::after {
   content: '';
   position: absolute;
-  right: 2px;
-  bottom: 2px;
-  width: 12px;
-  height: 12px;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  height: 28px;
   pointer-events: none;
-  z-index: 10;
-  border-right: 2px solid var(--line, #dfe2dc);
-  border-bottom: 2px solid var(--line, #dfe2dc);
-  border-bottom-right-radius: 4px;
+  z-index: 19;
+  background: linear-gradient(135deg, transparent 55%, rgba(182, 194, 212, 0.35) 55%);
+  border-bottom-right-radius: inherit;
+  transition: background 120ms ease-out;
 }
-/* 名单弹窗手柄更大更醒目（列表滚动区右下角，需明显提示可缩放） */
+.action-dialog:hover::after,
+.patch-modal:hover::after,
+.sourcing-result-dialog:hover::after,
+.radar-dialog:hover::after,
+.detail-panel:hover::after,
+.workflow-panel:hover::after {
+  background: linear-gradient(135deg, transparent 55%, rgba(49, 92, 71, 0.28) 55%);
+}
+/* 名单弹窗已有 .candidate-dialog-resize-handle，::after 与之重叠作为提示 */
 .candidate-dialog::after {
-  width: 16px;
-  height: 16px;
-  border-right-width: 2.5px;
-  border-bottom-width: 2.5px;
-  border-color: #b6c2d4;
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, transparent 50%, rgba(182, 194, 212, 0.35) 50%);
+}
+.candidate-dialog:hover::after {
+  background: linear-gradient(135deg, transparent 50%, rgba(49, 92, 71, 0.28) 50%);
+}
+
+/* 独立 resize 手柄元素：覆盖 ::after 的可视区域，负责实际事件捕获 */
+.overlay-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 28px;
+  height: 28px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 20;
 }
 
 /* Once inline styles are set (drag/resize), let them override CSS max-width/max-height constraints. */
@@ -1113,7 +1136,9 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .patch-modal[style],
 .candidate-dialog[style],
 .sourcing-result-dialog[style],
-.radar-dialog[style] {
+.radar-dialog[style],
+.detail-panel[style],
+.workflow-panel[style] {
   max-width: none;
   max-height: none;
 }
