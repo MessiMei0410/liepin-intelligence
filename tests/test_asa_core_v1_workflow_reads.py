@@ -216,6 +216,7 @@ def test_workflow_candidates_pagination(env: dict) -> None:
             assert set(item) == {
                 "id", "person_id", "name", "company", "title", "fit_score", "fit_level",
                 "recommendation", "stage", "flow_bucket", "status", "assessed", "attribution", "updated_at",
+                "resume_source_type", "resume_capture_status", "resume_captured_at", "intention",
             }
             name = item["name"]
             assert name and ("*" in name or "某" in name or name.endswith(("先生", "女士", "老师")))

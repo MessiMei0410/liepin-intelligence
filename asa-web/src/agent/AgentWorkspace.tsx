@@ -1,11 +1,13 @@
 import { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, BookPlus, Building2, ClipboardCopy, FileText, History, LoaderCircle, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, Search, Send, Settings2, Square, Unlink, X } from 'lucide-react'
+import { Activity, Archive, BookPlus, Building2, ClipboardCopy, FileText, History, LoaderCircle, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, Dashboard, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
 import { AgentPageContextBar } from './AgentPageContextBar'
 import { ModelAuditPanel } from './ModelAuditPanel'
 import { SourcingResultCard, type SourcingResultCardData } from '../workflows/SourcingResultCard'
+import type { CandidateListCardData } from '../workflows/CandidateListCard'
+import { CandidateListDialog } from './CandidateListDialog'
 import { useDialogFocus } from '../shared/useDialogFocus'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
@@ -145,6 +147,7 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const [attachmentNotice, setAttachmentNotice] = useState('')
   const [attachmentDragActive, setAttachmentDragActive] = useState(false)
   const [lastTurn, setLastTurn] = useState<AgentTurn>()
+  const [candidateListDialog, setCandidateListDialog] = useState<CandidateListCardData | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [modelAuditOpen, setModelAuditOpen] = useState(false)
   const [taskRailCollapsed, setTaskRailCollapsed] = useState(false)
@@ -362,6 +365,10 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
           setSessionId(event.data.session_id); setFocus(event.data.business_focus || null)
           dispatch({ type: 'turn_done', requestId: turn.requestId, result: event.data })
           localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
+          // 查询型名单直答：自动弹出完整名单弹窗（非消息内嵌卡）。
+          if (event.data.action_card && (event.data.action_card as CandidateListCardData).type === 'candidate_list') {
+            setCandidateListDialog(event.data.action_card as CandidateListCardData)
+          }
         } else {
           setTurnProgress('')
           streamFailed = true
@@ -522,7 +529,13 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
               }}
             />
           )}
-          {message.role === 'assistant' && (message.action_card as SourcingResultCardData | undefined)?.type !== 'sourcing_result' && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
+          {message.role === 'assistant' && message.action_card && (message.action_card as CandidateListCardData).type === 'candidate_list' && (
+            <button className="candidate-list-trigger" onClick={() => setCandidateListDialog(message.action_card as CandidateListCardData)}>
+              <Users size={14} />
+              <span>查看完整名单（{(message.action_card as CandidateListCardData).summary?.total ?? ''} 人）</span>
+            </button>
+          )}
+          {message.role === 'assistant' && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
         </div>)}
         {(error || (phase === 'stopped' && lastTurn)) && <div className="agent-error"><span>{error || '已停止生成'}</span>{lastTurn && <button className="button" onClick={retry}>重试</button>}</div>}
         <div ref={endRef}/>
@@ -554,6 +567,17 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
       <div className="action-dialog-body"><dl><div><dt>范围</dt><dd>全部未归档任务</dd></div><div><dt>归档后</dt><dd>从右侧任务栏隐藏</dd></div><div><dt>保留内容</dt><dd>消息、业务焦点与审计记录</dd></div></dl><p>这是批量操作。归档后任务不会被删除，后端记录仍会完整保留。</p>{bulkArchiveError && <div className="action-dialog-error">{bulkArchiveError}</div>}</div>
       <footer><button className="button" disabled={bulkArchiveBusy} onClick={() => setBulkArchiveOpen(false)}>取消</button><button className="button danger-fill" disabled={bulkArchiveBusy} onClick={() => void archiveAllTasks()}>{bulkArchiveBusy ? '正在归档' : '确认全部归档'}</button></footer>
     </section></div>}
+    {candidateListDialog && (
+      <CandidateListDialog
+        data={candidateListDialog}
+        onOpenCandidate={jobCandidateId => {
+          const candidate = (candidateListDialog.groups || []).flatMap(group => group.candidates || []).find(item => item.id === jobCandidateId)
+          onOpenFullObject({ type: 'candidate', id: jobCandidateId, label: candidate?.name || '人选' })
+        }}
+        onOpenJob={jobId => onOpenFullObject({ type: 'job', id: jobId, label: candidateListDialog.title })}
+        onClose={() => setCandidateListDialog(null)}
+      />
+    )}
   </div>
 }
 

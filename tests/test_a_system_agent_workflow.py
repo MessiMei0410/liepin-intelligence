@@ -489,7 +489,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert confirmed["workflow"] is not None
         assert confirmed["workflow_id"] == proposed["workflow_id"]
         assert confirmed["workflow"]["status"] in {"queued", "running", "waiting_approval"}
-        assert "按确认计划开始准备" in confirmed["answer"]
+        assert "正在执行" in confirmed["answer"]
         assert "建立并启动新一轮" not in confirmed["answer"]
         waiting = self.wait_for(confirmed["workflow_id"], {"waiting_approval", "failed"})
         assert waiting["workflow"]["status"] == "waiting_approval"
@@ -1866,7 +1866,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert state["workflow"]["status"] == "waiting_approval"
         assert state["steps"][3]["capability_id"] == "multi_channel_sourcing"
         assert state["steps"][3]["status"] == "waiting_approval"
-        assert "开始准备" in confirmed["answer"]
+        assert "正在执行" in confirmed["answer"]
 
     def test_copilot_short_ack_starts_proposed_followup_sourcing(self) -> None:
         session_id = "followup_sourcing_short_ack_test"

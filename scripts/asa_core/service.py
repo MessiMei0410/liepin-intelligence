@@ -129,12 +129,25 @@ def _workflow_action_card(result: dict[str, Any]) -> dict[str, Any] | None:
     ]
     plan_ref = dict(result.get("plan_ref") or {})
     workflow_status = str((result.get("workflow") or {}).get("status") or "")
+    goal = result.get("goal") or {}
+    objective = str(understanding.get("objective") or goal.get("objective") or "本次任务").strip()
+    plan_items = [item for item in (result.get("plan_summary") or []) if isinstance(item, dict)]
+    completed_labels = [str(item.get("label") or "").strip() for item in plan_items if item.get("status") in {"completed", "skipped"} and str(item.get("label") or "").strip()]
+    current_label = str(step.get("label") or (result.get("workflow") or {}).get("current_stage") or "准备执行")
+    capabilities = {str(item.get("capability_id") or "") for item in plan_items}
+    if "candidate_batch_assessment" in capabilities or str(understanding.get("action") or "") == "candidate_review":
+        deliverable = "优先评估名单，以及每位候选人的命中依据"
+    elif "multi_channel_sourcing" in capabilities:
+        deliverable = "渠道结果、完整履历获取情况和可复核候选人名单"
+    else:
+        deliverable = "本次任务的可核验结果"
+    external_in_scope = "multi_channel_sourcing" in capabilities
     next_actions = [{"type": "open_workflow", "id": workflow_id, "label": "查看计划"}]
     if workflow_status == "planned" and plan_ref.get("plan_hash"):
         next_actions.append({
             "type": "start_workflow",
             "id": workflow_id,
-            "label": "确认计划并准备",
+            "label": "开始执行本次任务",
             "plan_ref": plan_ref,
         })
     if approval.get("approval_id"):
@@ -151,14 +164,19 @@ def _workflow_action_card(result: dict[str, Any]) -> dict[str, Any] | None:
         "context": {
             "type": "workflow",
             "id": workflow_id,
-            "title": (result.get("goal") or {}).get("title"),
+            "title": goal.get("title"),
             "plan_ref": plan_ref,
         },
+        "business_summary": {
+            "task": objective,
+            "completed": completed_labels,
+            "current": current_label,
+            "deliverable": deliverable,
+            "scope_note": "本次不触发外部寻访" if not external_in_scope else "外部寻访仍须单次 R3 授权",
+        },
         "evidence": [
-            {"label": "工作流", "value": workflow_id},
-            {"label": "当前步骤", "value": step.get("label") or (result.get("workflow") or {}).get("current_stage") or "准备执行"},
-            *([{"label": "理解目标", "value": understanding.get("objective")}] if understanding.get("objective") else []),
-            *([{"label": "原话约束", "value": "；".join(constraints)}] if constraints else []),
+            {"label": "当前步骤", "value": current_label},
+            *([{"label": "本轮范围", "value": "不触发外部寻访"}] if not external_in_scope else []),
         ],
         "blocked_reasons": ["外部动作仍需 R3 单次审批"] if risk_level == "R3" and approval else [],
         "next_actions": next_actions,

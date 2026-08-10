@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Archive, CheckCircle, MessageSquareText, Search, Trophy, UserRoundSearch, X, AlertTriangle } from 'lucide-react'
+import { Archive, CheckCircle, ExternalLink, MessageSquareText, Search, Trophy, UserRoundSearch, X, AlertTriangle } from 'lucide-react'
 
 export type SourcingResultCandidate = {
   job_candidate_id: number
@@ -72,12 +72,14 @@ export function SourcingResultCard({
   onAction,
   onClose,
   onOpenCandidate,
+  onOpenFullList,
   compact = false,
 }: {
   data: SourcingResultCardData
   onAction?: (action: string, context?: { type: string; id: string | number }) => void
   onClose?: () => void
   onOpenCandidate?: (jobCandidateId: number) => void
+  onOpenFullList?: () => void
   compact?: boolean
 }) {
   const summary = data.summary
@@ -189,6 +191,12 @@ export function SourcingResultCard({
       )}
 
       <div className="sourcing-result-actions" role="group" aria-label="下一步操作">
+        {onOpenFullList && (
+          <button className="button primary" onClick={onOpenFullList}>
+            <ExternalLink size={14} />
+            新标签页查看完整名单
+          </button>
+        )}
         {actionButtons}
       </div>
     </div>

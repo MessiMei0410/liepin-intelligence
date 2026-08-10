@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Activity, Archive, Ban, Check, ChevronLeft, CircleCheck, CircleDashed, Clock3, FileText, ListChecks, LoaderCircle, MessageSquareText, Pause, Play, ShieldCheck, TriangleAlert, UserRoundSearch } from 'lucide-react'
+import { Activity, Archive, Ban, Check, ChevronLeft, CircleCheck, CircleDashed, Clock3, ExternalLink, FileText, ListChecks, LoaderCircle, MessageSquareText, Pause, Play, ShieldCheck, TriangleAlert, UserRoundSearch } from 'lucide-react'
 import { api, Job, Workflow } from '../api'
 import { summarySignature, workflowDetailSignature } from '../workflow/workflowSummary'
 import { useWorkflowEventStream } from '../workflow/useWorkflowEventStream'
 import { mapWorkflowStatus, workflowStatusLabel } from '../workflow/statusMapping'
 import { date, elapsed } from '../shared/format'
 import { recordValue } from '../shared/records'
+import { useDraggableOverlay } from '../shared/useDraggableOverlay'
 import { humanizeActionError } from '../shared/errors'
 import { SectionHead } from '../shared/primitives'
 import { stepStatusLabel, activeWorkflowStatuses, stepTone, humanizeWorkflowError, humanizeWorkflowEvent, stepBusinessResult } from './utils'
@@ -29,6 +30,7 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
   const [actionError,setActionError]=useState('')
   const [now,setNow]=useState(Date.now())
   const [strategyOpen,setStrategyOpen]=useState(false)
+  const { overlayRef, panelRef, dragProps } = useDraggableOverlay()
   const [sourcingResultCard,setSourcingResultCard]=useState<SourcingResultCardData | null>(null)
   const candidatesRef=useRef<HTMLElement>(null)
   const status=value.workflow.status
@@ -173,17 +175,21 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
       openAgentWorkspace({type:'workflow',id:value.workflow.workflow_id,mode:'strategy_revision',client:target.client,job:target.job})
     }finally{setBusy('')}
   }
+  const openSourcingCandidatesNewTab=()=>{
+    const url=`${location.origin}${location.pathname}#sourcing_candidates=${encodeURIComponent(value.workflow.workflow_id)}`
+    window.open(url,'_blank','noopener,noreferrer')
+  }
   const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
   const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'审批失败，请重试。'))}finally{setBusy('')}}
   const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'重试失败，请稍后再试。'))}finally{setBusy('')}}
   const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待外部寻访授权` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='paused' ? '已暂停，渠道会在当前查询单元结束后停止。' : status==='planned' ? '计划已就绪，等待确认' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
-  return <div className="overlay"><article className="workflow-panel"><header className="detail-head"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'?<LoaderCircle className="spin"/>:<MessageSquareText/>}在 Agent 中讨论策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{live&&<button className="button" disabled={!!busy} onClick={()=>action('pause')}>{busy==='pause'?<LoaderCircle className="spin"/>:<Pause/>}暂停寻访</button>}{status==='paused'&&<button className="button primary" disabled={!!busy} onClick={()=>action('resume')}>{busy==='resume'?<LoaderCircle className="spin"/>:<Play/>}继续寻访</button>}{!['cancelled','completed'].includes(status)&&<button className="button danger" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'?<LoaderCircle className="spin"/>:<Ban/>}立即停止寻访</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}确认计划并准备</button>}</div></header><div className="workflow-body"><main>
+  return <div className="overlay" ref={overlayRef}><article ref={panelRef} className="workflow-panel"><header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动" {...dragProps}><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'?<LoaderCircle className="spin"/>:<MessageSquareText/>}在 Agent 中讨论策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{live&&<button className="button" disabled={!!busy} onClick={()=>action('pause')}>{busy==='pause'?<LoaderCircle className="spin"/>:<Pause/>}暂停寻访</button>}{status==='paused'&&<button className="button primary" disabled={!!busy} onClick={()=>action('resume')}>{busy==='resume'?<LoaderCircle className="spin"/>:<Play/>}继续寻访</button>}{!['cancelled','completed'].includes(status)&&<button className="button danger" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'?<LoaderCircle className="spin"/>:<Ban/>}立即停止寻访</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}确认计划并准备</button>}</div></header><div className="workflow-body"><main>
     <section className={`workflow-progress ${progressTone}`} aria-live="polite">
       <div className="progress-status"><span className="progress-icon"><WorkflowStatusIcon status={status}/></span><div><span>{mapped.label}</span><b>{headline}</b><small>{status==='waiting_approval'&&pendingApprovals[0]?.created_at?`已等待 ${elapsed(pendingApprovals[0].created_at,undefined,now)}`:live&&value.workflow.started_at?`已运行 ${elapsed(value.workflow.started_at,value.workflow.finished_at,now)}`:`更新于 ${date(value.workflow.updated_at)}`}</small></div><strong>{percent}%</strong></div>
       <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><i style={{width:`${percent}%`}}/></div>
       <div className="progress-meta"><span>{completed} 步完成</span><span>{Math.max(0,total-completed)} 步待处理</span><span>{pendingApprovals.length?`${pendingApprovals.length} 项待审批`:'无需审批'}</span></div>
     </section>
-    {mapped.showNextActions&&<div className="workflow-next-actions" role="group" aria-label="下一步操作"><button className="button" disabled={!!busy} onClick={reviewCandidates}><UserRoundSearch/>复核现有人选</button><button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'&&<LoaderCircle className="spin"/>}在 Agent 中调整策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}结束本轮</button>}</div>}
+    {mapped.showNextActions&&<div className="workflow-next-actions" role="group" aria-label="下一步操作"><button className="button" disabled={!!busy} onClick={reviewCandidates}><UserRoundSearch/>复核现有人选</button><button className="button" disabled={!!busy} onClick={openSourcingCandidatesNewTab}><ExternalLink/>新标签页打开寻访名单</button><button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'&&<LoaderCircle className="spin"/>}在 Agent 中调整策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}结束本轮</button>}</div>}
     <BusinessDeliverySummary workflow={value}/>
     <WorkflowTarget target={target} objective={value.goal.objective}/>
     <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} coverage={strategyCoverage} highlights={strategyHighlights} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)} strategyV2={strategyV2} workflowId={value.workflow.workflow_id} editable={strategyEditable} onEdited={reload}/>
@@ -196,6 +202,7 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived}:{
         <SourcingResultCard
           data={sourcingResultCard}
           onOpenCandidate={openCandidate}
+          onOpenFullList={openSourcingCandidatesNewTab}
           onClose={()=>{setSourcingResultCard(null);try{localStorage.setItem('asa_dismissed_sourcing_result',value.workflow.workflow_id)}catch{/* ignore */}}}
           onAction={(actionType)=>{
             if(actionType==='review_candidates')reviewCandidates()

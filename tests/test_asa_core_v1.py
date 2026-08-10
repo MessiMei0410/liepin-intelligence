@@ -453,6 +453,7 @@ def test_workflow_action_card_requires_a_real_workflow_and_preserves_r3_approval
         "type": "workflow_approval", "id": "approval_r3", "label": "批准本次外部寻访"
     }
     assert card["blocked_reasons"] == ["外部动作仍需 R3 单次审批"]
+    assert card["business_summary"]["deliverable"] == "渠道结果、完整履历获取情况和可复核候选人名单"
 
 
 def test_public_effective_strategy_excludes_restricted_rules_and_companies() -> None:

@@ -65,6 +65,10 @@ export const workflowCandidateItemSchema = z.looseObject({
     from_workflow: z.boolean().optional(),
   }).nullish(),
   updated_at: z.string().optional(),
+  resume_source_type: z.string().optional(),
+  resume_capture_status: z.string().optional(),
+  resume_captured_at: z.string().optional(),
+  intention: z.string().optional(),
 })
 export type WorkflowCandidateItem = z.infer<typeof workflowCandidateItemSchema>
 

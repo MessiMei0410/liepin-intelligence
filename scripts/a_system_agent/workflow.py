@@ -3206,6 +3206,11 @@ class WorkflowEngine:
                     SELECT sa2.id FROM agent_sourcing_attributions sa2
                     WHERE sa2.job_candidate_id=jc.id ORDER BY sa2.id DESC LIMIT 1
                 )
+                LEFT JOIN source_profiles sp ON sp.id=(
+                    SELECT sp2.id FROM source_profiles sp2
+                    WHERE sp2.person_id=jc.person_id AND sp2.source_type IN ('liepin','xsaas')
+                    ORDER BY sp2.source_date DESC,sp2.id DESC LIMIT 1
+                )
                 WHERE jc.job_id=? AND (a.id IS NOT NULL OR sa.id IS NOT NULL)
             """
             total = int(conn.execute(f"SELECT COUNT(*) {base}", (job_id,)).fetchone()[0])
@@ -3215,7 +3220,9 @@ class WorkflowEngine:
                        jc.clean_stage,jc.flow_bucket,jc.raw_status,jc.updated_at,
                        a.fit_score,a.fit_level,a.recommendation,
                        sa.channel AS attribution_channel,sa.source_query AS attribution_query,
-                       sa.source_round AS attribution_round,sa.workflow_id AS attribution_workflow_id
+                       sa.source_round AS attribution_round,sa.workflow_id AS attribution_workflow_id,
+                       sp.source_type AS resume_source_type,sp.source_date AS resume_source_date,
+                       sp.raw_json AS resume_raw_json
                 {base}
                 ORDER BY (a.fit_score IS NULL),a.fit_score DESC,jc.id DESC LIMIT ? OFFSET ?
                 """,
@@ -3232,6 +3239,16 @@ class WorkflowEngine:
                         "source_round": item["attribution_round"],
                         "from_workflow": bool(item["attribution_workflow_id"]) and item["attribution_workflow_id"] == workflow_id,
                     }
+                resume_payload = _loads(item.get("resume_raw_json"), {})
+                resume_captured_at = str(resume_payload.get("captured_at") or item.get("resume_source_date") or "")
+                resume_capture_status = "complete" if resume_captured_at else "not_requested"
+                full_text = str(resume_payload.get("full_text") or "")
+                intention = ""
+                if "求职意向" in full_text:
+                    section = full_text.split("求职意向", 1)[-1].strip()
+                    intention = section.splitlines()[0] if section.splitlines() else ""
+                if not intention:
+                    intention = str(item.get("raw_status") or "")
                 items.append({
                     "id": item["id"],
                     "person_id": item["person_id"],
@@ -3247,6 +3264,10 @@ class WorkflowEngine:
                     "assessed": item["fit_score"] is not None,
                     "attribution": attribution,
                     "updated_at": item["updated_at"],
+                    "resume_source_type": item.get("resume_source_type") or "",
+                    "resume_capture_status": resume_capture_status,
+                    "resume_captured_at": resume_captured_at,
+                    "intention": intention[:200],
                 })
             return {"ok": True, "workflow_id": workflow_id, "items": items, "total": total, "limit": limit, "offset": offset}
         finally:

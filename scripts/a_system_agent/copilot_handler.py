@@ -991,6 +991,231 @@ def _is_explicit_question(message: str) -> bool:
     )
 
 
+# 查询型名单请求：顾问直接要"名单/列表/筛出人选"，应当直答候选池，
+# 而不是建一个等待确认的执行计划（2026-08-10 长越机械人选名单卡在 create_plan）。
+_QUERY_LIST_MARKERS = (
+    "名单", "列表", "列一下", "列出", "列出来", "筛出", "筛一下", "筛选",
+    "有哪些人选", "有什么人选", "给一份", "整理一份", "排一下", "排个序",
+    "优先评估", "优先名单", "核验名单",
+)
+_QUERY_LIST_EXCLUSIONS = (
+    "寻访", "补池", "找人", "找候选人", "搜索", "搜人", "触达", "开聊",
+    "发送", "联系候选人", "更新", "拆分", "归档", "发布", "推荐给客户",
+    "提交客户", "谈薪", "复核进度", "计划", "执行", "启动", "开始",
+    "发给客户", "发给", "重新评估", "评估进度", "风险", "问题",
+)
+
+
+def _is_candidate_list_query(message: str) -> bool:
+    """判断消息是否为“直接要候选名单/筛选结果”的查询型请求。"""
+    text = " ".join(str(message or "").split())
+    if not any(marker in text for marker in _QUERY_LIST_MARKERS):
+        return False
+    if any(token in text for token in _QUERY_LIST_EXCLUSIONS):
+        return False
+    return True
+
+
+def _format_candidate_list_answer(db_path: str, job_id: int, message: str) -> str:
+    """从候选池生成岗位名单文本（含岗位上下文、阶段分组、固晶/共晶/键合优先）。"""
+    return _build_candidate_list_card(db_path, job_id, message)[0]
+
+
+def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple[str, dict[str, Any]]:
+    """生成名单文本 + 结构化卡片（action_card，前端渲染可点击名单弹窗）。
+
+    返回 (answer_text, card)。card 形如：
+    {
+      "type": "candidate_list",
+      "title": "长越科技｜机械高级工程师（岗位 137）候选名单",
+      "context": {"type": "job", "id": 137},
+      "summary": {"total": 329, "active": 321, "stopped": 8, "bonder_count": 37},
+      "groups": [
+        {"key": "bonder", "label": "固晶机/共晶机/键合机背景", "priority": true, "candidates": [...]},
+        {"key": "active", "label": "其余可推进候选", "priority": false, "candidates": [...]},
+        {"key": "stopped", "label": "已停止推进", "priority": false, "candidates": [...]},
+      ],
+    }
+    每个 candidate: {id, name, company, title, stage, flow_bucket}
+    """
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        job = conn.execute(
+            """
+            SELECT j.id, c.name AS client, j.title
+            FROM jobs j JOIN clients c ON c.id = j.client_id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not job:
+            return "", {}
+        rows = conn.execute(
+            """
+            SELECT jc.id AS jc_id, p.display_name, p.current_company, p.current_title,
+                   jc.clean_stage, jc.flow_bucket
+            FROM job_candidates jc
+            LEFT JOIN people p ON p.id = jc.person_id
+            WHERE jc.job_id = ?
+            ORDER BY jc.id DESC
+            """,
+            (job_id,),
+        ).fetchall()
+        if not rows:
+            empty_text = f"结论：岗位「{job['client']}｜{job['title']}」当前候选池为空。\n\n下一步：需要先启动一轮寻访补池。"
+            card = {
+                "type": "candidate_list",
+                "title": f"{job['client']}｜{job['title']}（岗位 {job['id']}）候选名单",
+                "context": {"type": "job", "id": job["id"]},
+                "summary": {"total": 0, "active": 0, "stopped": 0, "bonder_count": 0},
+                "groups": [],
+            }
+            return empty_text, card
+        # 固晶/共晶/键合 关键词优先标记：一次性 JOIN 避免 N+1，candidate_profiles
+        # 缺表时降级为普通名单（老库无此表，直接抛错会导致 copilot 500）。
+        bonder = any(token in message for token in ("固晶", "共晶", "键合"))
+        bonder_ids: set[int] = set()
+        if bonder and _table_exists(conn, "candidate_profiles"):
+            try:
+                prof_rows = conn.execute(
+                    """
+                    SELECT DISTINCT jc.id AS jc_id
+                    FROM candidate_profiles cp
+                    JOIN people p ON p.display_name = cp.candidate_name
+                                 AND p.current_company = cp.candidate_company
+                    JOIN job_candidates jc ON jc.person_id = p.id
+                    WHERE jc.job_id = ?
+                      AND (cp.profile_summary LIKE '%固晶%'
+                        OR cp.profile_summary LIKE '%共晶%'
+                        OR cp.profile_summary LIKE '%键合%')
+                      AND cp.profile_summary NOT LIKE '%补搜%'
+                    """,
+                    (job_id,),
+                ).fetchall()
+                bonder_ids = {int(r["jc_id"]) for r in prof_rows}
+            except sqlite3.Error:
+                bonder_ids = set()
+        stage_order = {
+            "待复核": 0, "新增寻访": 1, "已触达": 2, "已联系": 3,
+            "初筛不通过": 4, "停止": 4, "淘汰": 4, "关闭": 4, "最近寻访": 4,
+        }
+        def stage_rank(stage: str) -> int:
+            for key, rank in stage_order.items():
+                if key in (stage or ""):
+                    return rank
+            return 3
+        _STOP_TOKENS = ("初筛不通过", "停止", "淘汰", "关闭")
+        rows = sorted(rows, key=lambda r: (stage_rank(str(r["clean_stage"])), r["jc_id"]))
+        active = [r for r in rows if not any(k in (r["clean_stage"] or "") for k in _STOP_TOKENS)]
+        stopped = [r for r in rows if any(k in (r["clean_stage"] or "") for k in _STOP_TOKENS)]
+        # 优先名单：固晶/共晶/键合 命中者（未停止），按入库顺序排列
+        prioritized = [r for r in active if r["jc_id"] in bonder_ids]
+        prioritized.sort(key=lambda r: r["jc_id"])
+        other_active = [r for r in active if r["jc_id"] not in bonder_ids]
+
+        def to_candidate(r) -> dict[str, Any]:
+            return {
+                "id": int(r["jc_id"]),
+                "name": str(r["display_name"] or "未知"),
+                "company": str(r["current_company"] or ""),
+                "title": str(r["current_title"] or ""),
+                "stage": str(r["clean_stage"] or ""),
+                "flow_bucket": str(r["flow_bucket"] or ""),
+            }
+
+        groups: list[dict[str, Any]] = []
+        if prioritized:
+            groups.append({
+                "key": "bonder", "label": "固晶机/共晶机/键合机背景",
+                "priority": True, "candidates": [to_candidate(r) for r in prioritized],
+            })
+        if other_active:
+            groups.append({
+                "key": "active", "label": "其余可推进候选",
+                "priority": False, "candidates": [to_candidate(r) for r in other_active],
+            })
+        if stopped:
+            groups.append({
+                "key": "stopped", "label": "已停止推进",
+                "priority": False, "candidates": [to_candidate(r) for r in stopped],
+            })
+
+        def fmt(r) -> str:
+            stage = str(r["clean_stage"] or "")
+            parts = [str(r["display_name"] or "未知")]
+            if r["current_company"]:
+                parts.append(str(r["current_company"]))
+            if r["current_title"]:
+                parts.append(str(r["current_title"]))
+            label = " | ".join(dict.fromkeys(parts))
+            return f"- {label}（{stage}）" if stage else f"- {label}"
+
+        lines: list[str] = []
+        lines.append(f"## {job['client']}｜{job['title']}（岗位 {job['id']}）候选名单")
+        lines.append(f"共 {len(rows)} 人，其中可推进 {len(active)} 人、已停止 {len(stopped)} 人。\n")
+        # 固晶优先组的优先级标注：A 级=直接固晶机/键合机经验，B 级=封装/精密设备相关，C 级=其余命中
+        priority_notes: dict[int, tuple[str, str]] = {}
+        if prioritized and bonder:
+            try:
+                for pr in conn.execute(
+                    """
+                    SELECT jc.id AS jc_id, cp.profile_summary
+                    FROM job_candidates jc
+                    JOIN people p ON p.id = jc.person_id
+                    JOIN candidate_profiles cp ON cp.candidate_name = p.display_name
+                                            AND cp.candidate_company = p.current_company
+                    WHERE jc.job_id = ? AND jc.id IN (%s)
+                      AND cp.profile_summary NOT LIKE '%%补搜%%'
+                    """
+                    % ",".join("?" * len(prioritized)),
+                    (job_id, *[r["jc_id"] for r in prioritized]),
+                ).fetchall():
+                    summary = str(pr["profile_summary"] or "")
+                    jc_id = int(pr["jc_id"])
+                    if any(t in summary for t in ("固晶机", "固晶", "键合机", "die bond", "wire bond", "共晶机")):
+                        level = "A"
+                    elif any(t in summary for t in ("封装", "ASMPT", "先进微电子", "精密设备", "光刻", "刻蚀", "CVD", "PVD", "真空设备")):
+                        level = "B"
+                    else:
+                        level = "C"
+                    note = " ".join(summary.split())[:64]
+                    priority_notes[jc_id] = (level, note)
+            except sqlite3.Error:
+                priority_notes = {}
+        if prioritized:
+            lines.append(f"### ⭐ 固晶机/共晶机/键合机背景（优先评估，{len(prioritized)} 人）")
+            for r in prioritized[:12]:
+                level, note = priority_notes.get(int(r["jc_id"]), ("C", ""))
+                base = fmt(r)
+                if level in ("A", "B"):
+                    lines.append(f"- **【{level}级】** {base[2:]} — {note}")
+                else:
+                    lines.append(base)
+            lines.append("")
+        if other_active:
+            lines.append(f"### 其余可推进候选（{len(other_active)} 人，列前 15）")
+            lines.extend(fmt(r) for r in other_active[:15])
+            lines.append("")
+        if stopped:
+            lines.append(f"### 已停止推进（{len(stopped)} 人，列前 5）")
+            lines.extend(fmt(r) for r in stopped[:5])
+        card = {
+            "type": "candidate_list",
+            "title": f"{job['client']}｜{job['title']}（岗位 {job['id']}）候选名单",
+            "context": {"type": "job", "id": job["id"]},
+            "summary": {
+                "total": len(rows), "active": len(active), "stopped": len(stopped),
+                "bonder_count": len(prioritized),
+            },
+            "groups": groups,
+        }
+        return "\n".join(lines), card
+    finally:
+        conn.close()
+
+
 def _verbatim_constraint_candidates(messages: list[str]) -> list[dict[str, str]]:
     """Extract auditable clauses without normalizing the consultant's terminology."""
     rows: list[dict[str, str]] = []
@@ -2911,6 +3136,47 @@ def _copilot_impl(
         "recommendation": ({"candidate"}, "请先选择要生成报告或推荐给客户的具体候选人。"),
         "salary": ({"candidate"}, "请先选择要处理谈薪的具体候选人。"),
     }
+    # 查询型名单请求直答：顾问要“名单/筛出/列表”时直接返回候选池，不建
+    # 等待确认的执行计划（2026-08-10 长越机械人选名单卡在 create_plan）。
+    # 必须放在 action_context_rule 之前，否则“请先选择要核验的岗位”会先抢答，
+    # 名单拦截永远执行不到（kimi review #5）。
+    candidate_list_answer = ""
+    candidate_list_card: dict[str, Any] = {}
+    if (
+        forced_answer is None
+        and not suppress_goal_intent
+        and _is_candidate_list_query(message)
+    ):
+        list_job_id = 0
+        if selected.get("type") == "job" and selected.get("id"):
+            list_job_id = int(selected["id"])
+        elif isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
+            list_job_id = int(focus_context["id"])
+        if not list_job_id:
+            # 消息里显式提到岗位（如“岗位 137 的名单”）优先于选中/焦点，避免答错对象。
+            mentioned = self._mentioned_jobs_for_copilot(message)
+            if len(mentioned) == 1:
+                list_job_id = int(mentioned[0]["id"])
+        if not list_job_id and mentioned_clients:
+            conn = self._connect()
+            try:
+                job_row = conn.execute(
+                    """
+                    SELECT j.id FROM jobs j
+                    JOIN clients c ON c.id = j.client_id
+                    WHERE c.name LIKE ? AND j.status NOT IN ('closed','archived')
+                    ORDER BY j.id LIMIT 1
+                    """,
+                    (f"%{mentioned_clients[0]}%",),
+                ).fetchone()
+                if job_row:
+                    list_job_id = int(job_row["id"])
+            finally:
+                conn.close()
+        if list_job_id:
+            candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
+            if candidate_list_answer:
+                forced_answer = candidate_list_answer
     action_context_rule = action_context_prompts.get(semantic_action)
     if (
         forced_answer is None
@@ -2918,6 +3184,7 @@ def _copilot_impl(
         and turn_decision.get("effect") == "create_plan"
         and action_context_rule
         and selected.get("type") not in action_context_rule[0]
+        and not candidate_list_answer
     ):
         # 语义动作需要岗位/候选人上下文但 selected 缺失时，先从会话焦点/历史证据
         # 补全目标岗位，避免有明确主线的会话被"请先选择"卡死（2026-08-07 郭杨评估指令被吞）。
@@ -3548,8 +3815,8 @@ def _copilot_impl(
             )
         elif start_pending_plan or started_new_plan:
             answer = (
-                f"已按确认计划开始准备：{goal_workflow['goal']['title']}。\n\n"
-                "内部步骤会继续运行；遇到外部动作仍会单独请求 R3 授权。"
+                f"正在执行：{goal_workflow['goal']['title']}。\n\n"
+                "当前步骤完成后会给出可核验结果；涉及外部寻访时再单独请求 R3 授权。"
             )
         elif floating_compact:
             answer = (
@@ -3558,9 +3825,8 @@ def _copilot_impl(
             )
         else:
             answer = (
-                f"已建立目标：{goal_workflow['goal']['title']}\n\n"
-                f"ASA 已生成 {len(plan_steps)} 步执行计划，其中 {len(risk_steps)} 步需要单次人工确认。"
-                "当前尚未执行，你可以开始、修改或取消这个目标。"
+                f"已整理好本次任务：{goal_workflow['goal']['title']}。\n\n"
+                f"当前尚未开始，共 {len(plan_steps)} 步；开始后会交付本轮可核验结果。"
             )
         references.extend(
             [
@@ -3573,7 +3839,7 @@ def _copilot_impl(
                 {
                     "type": "start_workflow",
                     "id": goal_workflow["workflow"]["workflow_id"],
-                    "label": "确认新计划" if strategy_revision else "确认计划并准备",
+                    "label": "确认新计划" if strategy_revision else "开始执行本次任务",
                     "plan_ref": goal_workflow.get("plan_ref") or {},
                 }
             )
@@ -3731,6 +3997,9 @@ def _copilot_impl(
         }
     conn = self._connect()
     try:
+        # 查询型名单直答：附带结构化名单卡（前端渲染可点击名单弹窗）。
+        if candidate_list_card:
+            assistant_structured["action_card"] = candidate_list_card
         # 寻访结果卡：已完成/阻塞的寻访工作流在对话中附带可展示的结果卡。
         if goal_workflow or current_workflow_context:
             workflow_state = goal_workflow or current_workflow_context

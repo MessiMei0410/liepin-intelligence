@@ -508,7 +508,9 @@ def enqueue_floating_command(data: dict[str, Any]) -> dict[str, Any]:
 def drain_floating_commands(surface: str, instance_id: str = "") -> dict[str, Any]:
     surface = normalize_bridge_surface(surface)
     if surface == "unknown":
-        raise ValueError("未知命令 surface")
+        # 页面桥轮询时常不带 surface（或值不规范）：不抛异常，返回空命令列表，
+        # 避免 /api/asa/floating/commands 空参请求变成 500。
+        return {"ok": True, "surface": "unknown", "commands": []}
     instance_id = clean(instance_id)
     with ASA_FLOATING_LOCK:
         commands = ASA_FLOATING_COMMANDS.setdefault(surface, [])
@@ -1439,13 +1441,13 @@ def asa_floating_html() -> str:
       color-scheme: light;
       --bg:#f7f8fb; --panel:#ffffff; --panel-soft:#f9fafc; --line:#d8dee8;
       --text:#171d26; --muted:#667085; --soft:#eef2f7; --blue:#1f5eff;
-      --green:#087443; --amber:#b54708; --red:#b42318; --shadow:0 10px 30px rgba(15,23,42,.10);
+      --green:#087443; --amber:#b54708; --red:#b42318; --shadow:0 10px 30px rgba(15,23,42,.10); --shadow-1:0 1px 2px rgba(15,23,42,.05); --shadow-2:0 8px 24px rgba(15,23,42,.14); --shadow-3:0 1px 2px rgba(15,23,42,.05),0 12px 32px rgba(15,23,42,.12); --shadow-4:0 24px 70px rgba(15,23,42,.26); --r-panel:12px; --r-dialog:8px; --r-control:6px; --scrim:rgba(15,23,42,.40); --z-sticky:10; --z-overlay:50; --z-float:60; --z-modal:80; --z-menu:120; --z-toast:200;
     }
     * { box-sizing:border-box; }
     html, body { width:100%; height:100%; min-height:100%; overflow:hidden; }
     body { margin:0; background:#fff; color:var(--text); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     .app { height:100vh; max-height:100vh; min-height:0; min-width:320px; display:flex; flex-direction:column; overflow:hidden; }
-    header { flex:0 0 auto; height:78px; overflow:hidden; padding:9px 12px 8px; border-bottom:1px solid #edf1f7; background:rgba(255,255,255,.98); position:relative; z-index:5; }
+    header { flex:0 0 auto; height:78px; overflow:hidden; padding:9px 12px 8px; border-bottom:1px solid rgba(237,241,247,.85); background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%); position:relative; z-index:5; }
     .brand-row { height:32px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
     .brand { display:flex; align-items:center; gap:8px; min-width:0; flex:0 1 auto; }
     .mark { width:26px; height:26px; border-radius:8px; background:#111827; color:#fff; display:grid; place-items:center; font-weight:760; font-size:13px; }
@@ -1563,8 +1565,8 @@ def asa_floating_html() -> str:
     .analysis-card-metrics b { font-size:13px; color:#1d2939; }
     .analysis-card button { width:max-content; border-radius:6px; padding:5px 9px; font-size:11px; }
     .strategy-patch-done { margin:8px 2px 0; font-size:12px; color:#15803d; }
-    .patch-modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,.38); display:flex; align-items:center; justify-content:center; z-index:80; }
-    .patch-modal { width:min(340px, calc(100vw - 32px)); max-height:76vh; overflow:auto; background:#fff; border-radius:12px; box-shadow:0 18px 44px rgba(15,23,42,.22); padding:12px 14px; display:grid; gap:10px; }
+    .patch-modal-backdrop { position:fixed; inset:0; background:var(--scrim); display:flex; align-items:center; justify-content:center; z-index:var(--z-modal); }
+    .patch-modal { width:min(340px, calc(100vw - 32px)); max-height:76vh; overflow:auto; background:#fff; border-radius:var(--r-panel); box-shadow:var(--shadow-4); padding:12px 14px; display:grid; gap:10px; }
     .patch-modal-head { display:flex; align-items:center; gap:8px; }
     .patch-modal-head b { font-size:14px; }
     .patch-modal-head span { flex:1; font-size:11px; color:var(--muted,#6b7280); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -1587,7 +1589,7 @@ def asa_floating_html() -> str:
     .intent-card-state { margin:0; font-size:12px; color:#667085; }
     .intent-card.drift .intent-card-state { color:var(--red); }
     .goal-card { border:1px solid #d6e3ff; background:#f5f8ff; border-radius:12px; padding:10px; display:grid; gap:6px; }
-    .composer { flex:0 0 auto; min-height:0; padding:10px 12px 12px; background:#fff; border-top:1px solid #edf1f7; display:grid; gap:7px; }
+    .composer { flex:0 0 auto; min-height:0; padding:10px 12px 12px; background:rgba(255,255,255,.78); backdrop-filter:blur(16px) saturate(160%); -webkit-backdrop-filter:blur(16px) saturate(160%); border-top:1px solid rgba(237,241,247,.9); display:grid; gap:7px; }
     .attachment-list { display:flex; gap:6px; flex-wrap:wrap; min-height:0; }
     .attachment-list.empty { display:none; }
     .attachment-chip { max-width:100%; min-height:30px; display:grid; grid-template-columns:18px minmax(0,1fr) 24px; align-items:center; gap:6px; border:1px solid #d9e1eb; border-radius:8px; padding:4px 4px 4px 7px; background:#f8fafc; color:#344054; font-size:12px; }
@@ -1614,7 +1616,7 @@ def asa_floating_html() -> str:
     .drawer-body { border:1px solid var(--line); border-top:0; background:#fff; border-radius:0 0 12px 12px; padding:10px; display:grid; gap:10px; max-height:310px; overflow:auto; }
     .approval pre { white-space:pre-wrap; word-break:break-word; max-height:140px; overflow:auto; background:#f8fafc; border:1px solid #edf1f7; border-radius:8px; padding:8px; font-size:12px; }
     .statusline { min-height:18px; color:var(--muted); font-size:12px; }
-    .history-panel { position:absolute; left:10px; right:10px; top:10px; max-height:68%; overflow:auto; z-index:8; display:none; background:#fff; border:1px solid var(--line); border-radius:13px; box-shadow:var(--shadow); padding:10px; }
+    .history-panel { position:absolute; left:10px; right:10px; top:10px; max-height:68%; overflow:auto; z-index:var(--z-overlay); display:none; background:#fff; border:1px solid var(--line); border-radius:var(--r-panel); box-shadow:var(--shadow-2); padding:10px; }
     .history-panel.open { display:grid; gap:8px; }
     .history-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 2px 7px; border-bottom:1px solid var(--line); }
     .history-list { display:grid; gap:7px; }
@@ -1666,6 +1668,74 @@ def asa_floating_html() -> str:
     .proactive-suggestion.medium { border-left-color:#dc6803; }
     .proactive-suggestion b { display:block; font-size:12px; color:#1d2939; }
     .proactive-suggestion span { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+    /* ---- Candidate list card (copilot 查询型名单直答) ---- */
+    .candidate-list-card { display:grid; gap:8px; border:1px solid #d6e3ff; border-radius:12px; background:#f5f8ff; padding:10px 11px; }
+    .candidate-list-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+    .candidate-list-head b { font-size:12px; color:#1d2939; }
+    .candidate-list-meta { display:block; margin-top:2px; color:var(--muted); font-size:11px; }
+    .candidate-list-group { display:grid; gap:6px; }
+    .candidate-list-group h4 { display:flex; align-items:center; gap:5px; margin:0; color:#334155; font-size:11.5px; font-weight:760; }
+    .candidate-list-group h4 em { margin-left:auto; font-style:normal; font-size:10px; font-weight:650; color:var(--muted); background:#eceef3; padding:1px 7px; border-radius:99px; }
+    .candidate-list-group.priority h4 em { background:#ecfdf3; color:var(--green); }
+    .candidate-list-group ul { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+    .candidate-list-row { width:100%; display:flex; align-items:center; gap:9px; padding:8px 9px; border:1px solid #e3e8ef; border-radius:10px; background:#fff; text-align:left; font:inherit; color:inherit; cursor:pointer; }
+    .candidate-list-row:hover { background:#f8fafc; border-color:#d0d7e2; }
+    .candidate-list-row-main { min-width:0; flex:1; display:grid; gap:1px; }
+    .candidate-list-row-main b { font-size:12px; color:#1d2939; }
+    .candidate-list-row-main small { font-size:10.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .candidate-list-stage { flex:0 0 auto; max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; font-weight:650; color:#475467; background:#f2f4f7; padding:2px 7px; border-radius:99px; }
+    .candidate-list-group.priority .candidate-list-stage { background:#ecfdf3; color:var(--green); }
+    .candidate-list-more { margin:0; font-size:10.5px; color:var(--muted); }
+    .candidate-list-foot { display:flex; justify-content:flex-end; }
+    .candidate-list-foot button { border-radius:999px; padding:5px 10px; font-size:11px; }
+    .candidate-list-trigger-row { margin:8px 2px 0; }
+    .candidate-list-trigger-row .candidate-list-open { width:100%; display:flex; align-items:center; justify-content:center; gap:7px; padding:9px 11px; border:1px solid #bfd3ff; border-radius:11px; background:#f5f8ff; color:#1d2939; font-size:12px; font-weight:680; }
+    .candidate-list-trigger-row .candidate-list-open:hover { background:#edf2fb; border-color:#a9c2f0; }
+    .candidate-list-trigger-row .candidate-list-open:active { transform:scale(.98); }
+    /* ---- Candidate list dialog (完整名单弹窗，可拖动非模态浮动窗) ---- */
+    .candidate-dialog-float { position:fixed; inset:0; z-index:var(--z-float); pointer-events:none; }
+    .candidate-dialog-float .candidate-dialog { pointer-events:auto; }
+    .candidate-dialog { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); width:min(440px, calc(100vw - 24px)); max-height:76vh; overflow:auto; display:grid; gap:10px; background:#fff; border-radius:var(--r-panel); box-shadow:var(--shadow-4); padding:0; animation:asaSheetIn .22s cubic-bezier(.32,.72,0,1); transform-origin:center; margin:0; }
+    .candidate-dialog[style] { transform:none; }
+    .candidate-dialog-head { position:sticky; top:0; z-index:1; display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:13px 15px; background:rgba(255,255,255,.9); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border-bottom:1px solid #edf1f7; cursor:grab; user-select:none; -webkit-user-select:none; touch-action:none; }
+    .candidate-dialog-title { display:grid; gap:2px; min-width:0; }
+    .candidate-dialog-title b { font-size:13.5px; color:#1d2939; }
+    .candidate-dialog-title span { font-size:11px; color:var(--muted); }
+    .candidate-dialog-actions { display:flex; gap:5px; flex:0 0 auto; }
+    .candidate-dialog-detach { color:#1f5eff; font-size:14px; }
+    .candidate-dialog-detach:hover { background:#eef2ff; }
+    .candidate-dialog-close { flex:0 0 auto; }
+    .candidate-dialog-body { padding:12px 15px 14px; display:grid; gap:12px; }
+    .candidate-dialog .candidate-list-group { display:grid; gap:6px; }
+    .candidate-dialog .candidate-list-group h4 { display:flex; align-items:center; gap:5px; margin:0; color:#334155; font-size:12px; font-weight:760; }
+    .candidate-dialog .candidate-list-group h4 em { margin-left:auto; font-style:normal; font-size:10px; font-weight:650; color:var(--muted); background:#eceef3; padding:1px 7px; border-radius:99px; }
+    .candidate-dialog .candidate-list-group.priority h4 em { background:#ecfdf3; color:var(--green); }
+    .candidate-dialog .candidate-list-group ul { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+    .candidate-dialog .candidate-list-row { width:100%; display:flex; align-items:center; gap:9px; padding:8px 9px; border:1px solid #e3e8ef; border-radius:10px; background:#fff; text-align:left; font:inherit; color:inherit; cursor:pointer; }
+    .candidate-dialog .candidate-list-row:hover { background:#f8fafc; border-color:#d0d7e2; }
+    .candidate-dialog .candidate-list-row-main { min-width:0; flex:1; display:grid; gap:1px; }
+    .candidate-dialog .candidate-list-row-main b { font-size:12px; color:#1d2939; }
+    .candidate-dialog .candidate-list-row-main small { font-size:10.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .candidate-dialog .candidate-list-stage { flex:0 0 auto; max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; font-weight:650; color:#475467; background:#f2f4f7; padding:2px 7px; border-radius:99px; }
+    .candidate-dialog .candidate-list-group.priority .candidate-list-stage { background:#ecfdf3; color:var(--green); }
+    .candidate-dialog .candidate-list-foot { padding:0 15px 13px; display:flex; justify-content:flex-end; }
+    .candidate-dialog .candidate-list-foot button { border-radius:999px; padding:5px 10px; font-size:11px; }
+    /* ---- Apple 手感：按压反馈 / 弹层动效 / 材质 ---- */
+    .icon-btn:active, .send:active, .attach:active, .msg-action:active, .context-action:active, .candidate-list-row:active, button:active { transform:scale(.96); transition:transform 90ms ease-out; }
+    .patch-modal { animation:asaSheetIn .22s cubic-bezier(.32,.72,0,1); transform-origin:center; }
+    .patch-modal-backdrop { animation:asaDimIn .18s ease-out; }
+    .history-panel.open { animation:asaPanelIn .2s cubic-bezier(.32,.72,0,1); transform-origin:top center; }
+    .msg { animation:asaMsgIn .18s ease-out; }
+    @keyframes asaSheetIn { from { opacity:0; transform:scale(.96) translateY(6px); } }
+    @keyframes asaDimIn { from { opacity:0; } }
+    @keyframes asaPanelIn { from { opacity:0; transform:scale(.98) translateY(-4px); } }
+    @keyframes asaMsgIn { from { opacity:0; transform:translateY(3px); } }
+    button:focus-visible, .icon-btn:focus-visible, .msg-action:focus-visible, .candidate-list-row:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+    @media (prefers-reduced-motion:reduce){
+      .patch-modal,.patch-modal-backdrop,.history-panel.open,.msg { animation:none!important; }
+      .thinking-dots i { animation:none; opacity:.6; }
+      button:active, .icon-btn:active, .send:active, .attach:active, .msg-action:active, .context-action:active, .candidate-list-row:active { transform:none; transition:none; }
+    }
   </style>
 </head>
 <body>
@@ -1797,6 +1867,163 @@ function renderAnalysisCard(message, index){
   const dataTime = String(card.data_as_of || '').replace('T', ' ').slice(0, 16);
   return `<section class="analysis-card"><div class="analysis-card-head"><b>ASA 分析</b><span>${esc(dataTime)}</span></div><p>${esc(card.headline || '分析已完成')}</p>${metricHtml ? `<div class="analysis-card-metrics">${metricHtml}</div>` : ''}<button class="primary" type="button" data-analysis-open="${index}">查看完整分析</button></section>`;
 }
+function renderCandidateListCard(message, index){
+  const card = message?.action_card;
+  if (!card || card.type !== 'candidate_list') return '';
+  const summary = card.summary || {};
+  const total = Number(summary.total ?? 0);
+  return `<div class="candidate-list-trigger-row"><button class="msg-action candidate-list-open" type="button" data-candidate-list-open="${index}" title="打开完整名单弹窗">👥 查看完整名单（${total} 人）</button></div>`;
+}
+function renderCandidateListDialog(message, index){
+  const card = state.messages[index]?.action_card;
+  if (!card || card.type !== 'candidate_list') return '';
+  const summary = card.summary || {};
+  const groups = Array.isArray(card.groups) ? card.groups : [];
+  const total = Number(summary.total ?? groups.reduce((sum, group) => sum + (Array.isArray(group.candidates) ? group.candidates.length : 0), 0));
+  const active = Number(summary.active ?? total);
+  const stopped = Number(summary.stopped ?? 0);
+  const bonderCount = Number(summary.bonder_count ?? 0);
+  const groupHtml = groups.map(group => {
+    const candidates = Array.isArray(group.candidates) ? group.candidates : [];
+    if (!candidates.length) return '';
+    const rows = candidates.map(c => `<button class="candidate-list-row" type="button" data-candidate-open="${esc(c.id)}" title="打开人选详情：${esc(c.name)}"><span class="candidate-list-row-main"><b>${esc(c.name || '未知')}</b><small>${esc([c.company, c.title].filter(Boolean).join(' · '))}</small></span><em class="candidate-list-stage">${esc(c.stage || '—')}</em></button>`).join('');
+    return `<div class="candidate-list-group ${group.priority ? 'priority' : ''}"><h4>${group.priority ? '⭐ ' : ''}${esc(group.label)}<em>${candidates.length} 人</em></h4><ul>${rows}</ul></div>`;
+  }).join('');
+  const jobId = card.context && card.context.type === 'job' ? Number(card.context.id) : 0;
+  const foot = jobId ? `<div class="candidate-list-foot"><button type="button" class="ghost" data-job-open="${jobId}">打开岗位查看完整名单</button></div>` : '';
+  return `<div class="candidate-dialog-float"><div class="candidate-dialog" role="dialog" aria-modal="false" aria-label="${esc(card.title || '候选名单')}"><div class="candidate-dialog-head" data-candidate-drag><div class="candidate-dialog-title"><b>${esc(card.title || '候选名单')}</b><span>共 ${total} 人${bonderCount > 0 ? ` · 固晶/共晶/键合背景 ${bonderCount} 人` : ''} · 可推进 ${active} 人 · 已停止 ${stopped} 人</span></div><div class="candidate-dialog-actions"><button class="icon-btn candidate-dialog-detach" type="button" data-candidate-detach="${index}" aria-label="弹出为独立窗口" title="弹出为独立窗口（可拖出屏幕）">↗</button><button class="icon-btn candidate-dialog-close" type="button" data-candidate-dialog-close aria-label="关闭名单" title="关闭 (Esc)">×</button></div></div><div class="candidate-dialog-body">${groupHtml || '<p class="empty">当前候选池为空。</p>'}</div>${foot}</div></div>`;
+}
+function openCandidateListDialog(index){
+  closeCandidateListDialog();
+  document.body.insertAdjacentHTML('beforeend', renderCandidateListDialog(state.messages[index], index));
+  const dialog = document.querySelector('[data-candidate-drag]')?.closest('.candidate-dialog');
+  if (!dialog) return;
+  const wrapper = document.querySelector('.candidate-dialog-float');
+  dialog.querySelectorAll('[data-candidate-open]').forEach(button => {
+    button.addEventListener('click', () => { const id = String(button.dataset.candidateOpen || ''); if (id) runMessageAction('open_candidate', id); });
+  });
+  dialog.querySelectorAll('[data-job-open]').forEach(button => {
+    button.addEventListener('click', () => { const id = String(button.dataset.jobOpen || ''); if (id) runMessageAction('open_job', id); });
+  });
+  dialog.querySelector('[data-candidate-dialog-close]')?.addEventListener('click', closeCandidateListDialog);
+  dialog.querySelector('[data-candidate-dialog-close]')?.focus();
+  dialog.querySelectorAll('[data-candidate-detach]').forEach(button => {
+    button.addEventListener('click', () => detachCandidateListDialog(Number(button.dataset.candidateDetach)));
+  });
+  dialog.addEventListener('keydown', event => { if (event.key === 'Escape') closeCandidateListDialog(); });
+  // 拖动：pointer events，仅 header 区域，增量平移。
+  const head = dialog.querySelector('[data-candidate-drag]');
+  if (head) {
+    let drag = null;
+    head.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      if (event.target && event.target.closest && event.target.closest('button, a')) return; // 不拦截按钮/链接点击
+      const rect = dialog.getBoundingClientRect();
+      drag = { startX: event.clientX, startY: event.clientY, origX: rect.left, origY: rect.top };
+      try { head.setPointerCapture(event.pointerId); } catch (_) {}
+      event.preventDefault();
+    });
+    head.addEventListener('pointermove', event => {
+      if (!drag) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const panelW = dialog.offsetWidth, panelH = dialog.offsetHeight;
+      const nextX = drag.origX + dx;
+      const nextY = drag.origY + dy;
+      // 拖出任意边界外侧（几乎完全移出视口）→ 弹出为独立窗口，且定位到拖出方向
+      const outLeft = nextX < -panelW + 24;
+      const outTop = nextY < -panelH + 24;
+      const outRight = nextX > vw - 24;
+      const outBottom = nextY > vh - 24;
+      if (outLeft || outTop || outRight || outBottom) {
+        const card = state.messages[index]?.action_card || {};
+        const url = card.context && card.context.type === 'job'
+          ? `/asa-app#job=${encodeURIComponent(card.context.id)}`
+          : '';
+        const anchor = { x: nextX, y: nextY, edge: outRight ? 'right' : outLeft ? 'left' : outTop ? 'top' : 'bottom' };
+        if (url && native('openDetachedDialog', {title: card.title || '候选名单', url, anchor})) {
+          drag = null;
+          closeCandidateListDialog();
+          document.getElementById('chatStatus').textContent = '已弹出为独立窗口，可自由拖动到屏幕任意位置。';
+          return;
+        }
+        // native 不可用（浏览器预览等）：不卡住，退回钳制移动
+      }
+      dialog.style.left = `${Math.min(vw - 48, Math.max(-panelW + 48, nextX))}px`;
+      dialog.style.top = `${Math.min(vh - 48, Math.max(-panelH + 48, nextY))}px`;
+      dialog.style.transform = 'none';
+      dialog.style.margin = '0';
+    });
+    head.addEventListener('pointerup', () => { drag = null; });
+    head.addEventListener('pointercancel', () => { drag = null; });
+  }
+}
+function closeCandidateListDialog(){
+  document.querySelector('.candidate-dialog-float')?.remove();
+}
+function detachCandidateListDialog(index){
+  const message = state.messages[index];
+  const card = message?.action_card || {};
+  const candidates = (Array.isArray(card.groups) ? card.groups : []).flatMap(g => Array.isArray(g.candidates) ? g.candidates : []).slice(0, 200);
+  const url = card.context && card.context.type === 'job'
+    ? `/asa-app#job=${encodeURIComponent(card.context.id)}`
+    : '';
+  if (!candidates.length && !url) {
+    document.getElementById('chatStatus').textContent = '当前名单无可弹出的内容。';
+    return;
+  }
+  const payload = {title: card.title || '候选名单'};
+  if (candidates.length) payload.candidates = candidates;
+  if (url) payload.url = url;
+  // 附带当前弹窗在浮窗视口内的位置作为锚点
+  const dialog = document.querySelector('.candidate-dialog');
+  if (dialog) {
+    const rect = dialog.getBoundingClientRect();
+    payload.anchor = { x: rect.left, y: rect.top, edge: 'center' };
+  }
+  if (native('openDetachedDialog', payload)) {
+    closeCandidateListDialog();
+    document.getElementById('chatStatus').textContent = '已弹出为独立窗口，可自由拖动到屏幕任意位置。';
+  } else {
+    document.getElementById('chatStatus').textContent = '弹出独立窗口需要 ASA 桌面端。';
+  }
+}
+// 全局弹窗拖动委托：patch-modal 等其他模态弹窗 header 可拖动。
+(function(){
+  // 排除已有专属拖动的名单弹窗；.patch-modal 本身就是要拖的对象，不能排除
+  const excluded = el => !!(el && el.closest && el.closest('.candidate-dialog'));
+  document.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    const target = event.target;
+    const modal = target.closest ? target.closest('.patch-modal') : null;
+    if (!modal || excluded(modal)) return;
+    if (target.closest && target.closest('button, a')) return;
+    const head = modal.querySelector('.patch-modal-head, .modal-head, header');
+    if (!head || !head.contains(target)) return;
+    const startX = event.clientX, startY = event.clientY;
+    const rect = modal.getBoundingClientRect();
+    const origLeft = rect.left, origTop = rect.top;
+    const onMove = moveEvent => {
+      const dx = moveEvent.clientX - startX, dy = moveEvent.clientY - startY;
+      const panelW = modal.offsetWidth, panelH = modal.offsetHeight;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const nextX = origLeft + dx, nextY = origTop + dy;
+      modal.style.left = `${Math.min(vw - 48, Math.max(-panelW + 48, nextX))}px`;
+      modal.style.top = `${Math.min(vh - 48, Math.max(-panelH + 48, nextY))}px`;
+      modal.style.transform = 'none';
+      modal.style.margin = '0';
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  }, true);
+})();
 function renderFloatingMessage(message, index){
   const role = message?.role === 'user' ? 'user' : 'assistant';
   if (role === 'user') return `<div class="msg user">${esc(message?.content || '')}</div>`;
@@ -1823,9 +2050,10 @@ function renderFloatingMessage(message, index){
   const intentCard = renderFloatingIntentCard(message, index);
   const patchBar = renderStrategyPatchBar(message, index);
   const analysisCard = renderAnalysisCard(message, index);
+  const candidateListCard = renderCandidateListCard(message, index);
   // 流式响应会先写入空壳消息；在首段文本到达前只显示思考状态，不显示伪回复。
-  if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard) return '';
-  return `<div class="msg assistant">${body}${analysisCard}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${toolSummary}${toolDetails}${workflowCard}${intentCard}${patchBar}</div>`;
+  if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard && !candidateListCard) return '';
+  return `<div class="msg assistant">${body}${candidateListCard}${analysisCard}${actions ? `<div class="msg-actions">${actions}</div>` : ''}${toolSummary}${toolDetails}${workflowCard}${intentCard}${patchBar}</div>`;
 }
 function renderThinkingMessage(){
   return '<div class="msg assistant"><div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span><span>ASA 正在分析当前上下文</span></div></div>';
@@ -1885,6 +2113,8 @@ function openStrategyPatchModal(index){
   overlay.querySelector('[data-patch-all]').addEventListener('click', () => overlay.querySelectorAll('[data-patch-change]').forEach(box => { box.checked = true; }));
   overlay.querySelector('[data-patch-confirm]').addEventListener('click', () => void applyStrategyPatch(index));
   overlay.addEventListener('click', event => { if (event.target === overlay) closeStrategyPatchModal(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') closeStrategyPatchModal(); });
+  overlay.querySelector('[data-patch-close]')?.focus();
 }
 function closeStrategyPatchModal(){
   document.getElementById('strategyPatchModal')?.remove();
@@ -2054,6 +2284,12 @@ async function sendMessageStream(text, readyAttachments){
   const streamed = {role:'assistant', content:'', suggested_actions:[], pending_intent:null, proactive_suggestions:[]};
   state.messages.push(streamed);
   renderMessages();
+  const messagesNode = document.getElementById('messages');
+  let streamedNode = null;
+  const nearBottom = () => {
+    if (!messagesNode) return true;
+    return messagesNode.scrollHeight - messagesNode.scrollTop - messagesNode.clientHeight < 120;
+  };
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -2067,8 +2303,18 @@ async function sendMessageStream(text, readyAttachments){
       state.sessionId = data.session_id;
       saveCurrentSession();
     } else if (event === 'text') {
+      // 增量渲染：仅更新当前流式消息的文本节点，避免每次 chunk 全量重建列表。
       streamed.content += String(data.content || '');
-      renderMessages();
+      const shouldFollow = nearBottom();
+      if (!streamedNode || !document.body.contains(streamedNode)) {
+        renderMessages();
+        streamedNode = messagesNode?.lastElementChild || null;
+      } else {
+        const bodyNode = streamedNode.querySelector('.msg-body');
+        if (bodyNode) bodyNode.innerHTML = renderFloatingMarkdown(streamed.content);
+        else streamedNode.innerHTML = renderFloatingMarkdown(streamed.content);
+      }
+      if (shouldFollow && messagesNode) messagesNode.scrollTop = messagesNode.scrollHeight;
     } else if (event === 'done') {
       done = data;
     } else if (event === 'error') {
@@ -2712,6 +2958,17 @@ function renderMessages(){
   document.querySelectorAll('[data-analysis-open]').forEach(button => {
     button.addEventListener('click', () => { const card = state.messages[Number(button.dataset.analysisOpen)]?.analysis_card; if (card?.run_id) runMessageAction('open_analysis', card.run_id); });
   });
+  document.querySelectorAll('[data-candidate-list-open]').forEach(button => {
+    button.addEventListener('click', () => openCandidateListDialog(Number(button.dataset.candidateListOpen)));
+  });
+  document.querySelectorAll('[data-candidate-open]').forEach(button => {
+    if (button.closest('.candidate-dialog')) return; // 弹窗内按钮由 openCandidateListDialog 绑定，避免叠加
+    button.addEventListener('click', () => { const id = String(button.dataset.candidateOpen || ''); if (id) runMessageAction('open_candidate', id); });
+  });
+  document.querySelectorAll('[data-job-open]').forEach(button => {
+    if (button.closest('.candidate-dialog')) return;
+    button.addEventListener('click', () => { const id = String(button.dataset.jobOpen || ''); if (id) runMessageAction('open_job', id); });
+  });
   document.querySelectorAll('[data-workflow-approval]').forEach(button => {
     button.addEventListener('click', () => { const [messageIndex, approvalIndex] = String(button.dataset.workflowApproval).split(':').map(Number); void decideWorkflowApproval(messageIndex, approvalIndex, 'approve'); });
   });
@@ -3103,11 +3360,15 @@ async function sendMessage(){
     state.sessionId = result.session_id || state.sessionId;
     saveCurrentSession();
     let answerText = result.answer || result.message || '已处理。';
-    const workflowText = result.workflow_id ? '\\n\\n已生成目标计划：' + result.workflow_id : '';
+    const workflowText = result.workflow_id ? '\n\n已生成目标计划：' + result.workflow_id : '';
     const assistantMessage = {role:'assistant', content: answerText + workflowText, suggested_actions: result.suggested_actions || [], pending_intent: result.pending_intent && result.pending_intent.intent_hash ? result.pending_intent : null, action_card: result.action_card || null, action_cards: result.action_cards || [], analysis_card: result.analysis_card || null, proactive_suggestions: result.proactive_suggestions || [], strategy_patch: result.strategy_patch && Array.isArray(result.strategy_patch.changes) && result.strategy_patch.changes.length ? result.strategy_patch : null, workflow_progress: result.workflow_id ? {workflow_id:result.workflow_id, status:result.workflow?.status || 'queued', completed:result.progress?.completed || 0, total:result.progress?.total || result.plan_summary?.length || 0, label:result.workflow?.current_stage || '准备执行', pending_approvals:result.approvals || []} : null};
     if (result._streamed) Object.assign(state.messages[state.messages.length - 1], assistantMessage);
     else state.messages.push(assistantMessage);
     if (result.workflow_id) void monitorWorkflow(result.workflow_id, 120000, state.messages.length - 1);
+    // 查询型名单直答：自动弹出完整名单弹窗（非消息内嵌卡）。
+    if (result.action_card && result.action_card.type === 'candidate_list') {
+      openCandidateListDialog(state.messages.length - 1);
+    }
     state.attachments = [];
     document.getElementById('chatStatus').textContent = '';
     loadState();
@@ -7464,7 +7725,7 @@ def inject_asa_navigation_hash(html_text: str) -> str:
     if (!node) {
       node = document.createElement('div');
       node.id = id;
-      node.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:260;max-width:min(320px,calc(100vw - 32px));padding:8px 10px;border:1px solid #cfd8d3;background:#fff;color:#24352f;box-shadow:0 8px 22px rgba(15,23,42,.16);font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+      node.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:var(--z-toast);max-width:min(320px,calc(100vw - 32px));padding:8px 10px;border:1px solid #cfd8d3;background:#fff;color:#24352f;box-shadow:0 8px 22px rgba(15,23,42,.16);font:12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
       document.body.appendChild(node);
     }
     node.textContent = label || '已定位到 A 系统对象';

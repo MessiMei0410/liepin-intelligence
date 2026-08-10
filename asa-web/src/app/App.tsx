@@ -8,6 +8,7 @@ import { Progress } from '../pages/Progress'
 import { JobPanel } from '../panels/JobPanel'
 import { CandidatePanel } from '../panels/CandidatePanel'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
+import { SourcingCandidatesPage } from '../pages/SourcingCandidatesPage'
 import { resolveWorkflowRevision } from '../workflow/workflowRevision'
 import { Diagnostics } from './Diagnostics'
 import { AnalysisWorkspace } from '../pages/AnalysisWorkspace'
@@ -15,6 +16,7 @@ import { AnalysisTemplateDialog } from '../components/AnalysisTemplateDialog'
 import { AgentWorkspace } from '../agent/AgentWorkspace'
 import { AGENT_NAVIGATE_EVENT } from '../agent/navigation'
 import type { AgentContext, AgentReference } from '../agent/transport'
+import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
@@ -47,6 +49,7 @@ export function App() {
   const [job, setJob] = useState<JobDetail>()
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
+  const [sourcingCandidatesWorkflowId, setSourcingCandidatesWorkflowId] = useState('')
   const [workbench, setWorkbench] = useState<Workbench>()
   const [templates, setTemplates] = useState<AnalysisTemplate[]>([])
   const [analysisCatalog, setAnalysisCatalog] = useState<AnalysisCatalogItem[]>([])
@@ -63,6 +66,7 @@ export function App() {
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
   const coreFailuresRef = useRef(0)
   const workbenchRefreshRef = useRef(0)
+  useGlobalDialogDrag()
 
   // Core 健康探测：连续 2 次失败才判定离线；成功一次即复位，不重复打搅。
   const probeCore = async () => {
@@ -216,7 +220,7 @@ export function App() {
   }
   const openWorkflow = async (id: string) => {
     try {
-      setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+      setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
       const resolved = await resolveWorkflowRevision(id, api.workflow)
       setWorkflow(resolved.value)
       const nextHash = `workflow=${encodeURIComponent(resolved.id)}`
@@ -224,9 +228,15 @@ export function App() {
       else location.hash = nextHash
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
+  const openSourcingCandidates = (workflowId: string) => {
+    setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    setSourcingCandidatesWorkflowId(workflowId)
+    const nextHash = `sourcing_candidates=${encodeURIComponent(workflowId)}`
+    if (location.hash.slice(1) !== nextHash) history.pushState(null, '', `${location.pathname}${location.search}#${nextHash}`)
+  }
   const openAnalysis = async (id: string, templateId = '') => {
     try {
-      setJob(undefined); setCandidate(undefined); setWorkflow(undefined)
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setSourcingCandidatesWorkflowId('')
       const run = await api.analysisRun(id)
       const resolvedTemplateId = templateId || run.template_id || ''
       const trend = resolvedTemplateId ? await api.analyticsTemplateTrend(resolvedTemplateId).catch(() => undefined) : undefined
@@ -242,11 +252,13 @@ export function App() {
       const candidateId = Number(hash.get('candidate'))
       const workflowId = hash.get('workflow')
       const jobId = Number(hash.get('job'))
+      const sourcingCandidatesId = hash.get('sourcing_candidates')
+      if (sourcingCandidatesId) { openSourcingCandidates(sourcingCandidatesId); return }
       if (analysisId) { void openAnalysis(analysisId); return }
       if (candidateId) { void openCandidate(candidateId); return }
       if (workflowId) { void openWorkflow(workflowId); return }
       if (jobId) { void openJob(jobId); return }
-      setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     }
     queueMicrotask(openHash)
     addEventListener('hashchange', openHash)
@@ -312,7 +324,7 @@ export function App() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setAnalysisBusy('') }
   }
-  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); history.replaceState(null, '', `${location.pathname}${location.search}`) }
+  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); history.replaceState(null, '', `${location.pathname}${location.search}`) }
   const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
   const workflowJobId = Number(workflowContext?.id || 0)
   const workflowJob = jobs.find(item => item.id === workflowJobId)
@@ -330,9 +342,11 @@ export function App() {
             mode: String(workflowContext?.mode || 'workflow_review'),
             page: tab,
           }
-        : { type: 'page', page: tab, mode: 'page_review' }
+        : sourcingCandidatesWorkflowId
+          ? { type: 'page', page: tab, mode: 'page_review' }
+          : { type: 'page', page: tab, mode: 'page_review' }
   const showAgent = useCallback((context: AgentContext) => {
-    setAgentContext(context); setTab('agent'); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    setAgentContext(context); setTab('agent'); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)
   }, [])
   const openAgent = (context: AgentContext = activeContext) => showAgent(context)
@@ -344,9 +358,9 @@ export function App() {
 
   if (error && !boot) return <Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} />
 
-  const pageTitle = analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
+  const pageTitle = sourcingCandidatesWorkflowId ? '寻访候选人名单' : analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
   const navigateTab = (id: Tab) => {
-    setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
+    setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)
   }
 
@@ -377,11 +391,12 @@ export function App() {
       </header>
       {coreOffline && <div className="core-offline-banner" role="alert"><span>ASA Core 连接中断，检查本机服务后可点击重连</span><button className="button" onClick={() => void probeCore()}>重连</button></div>}
       <div className="content">
-        {analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
-        {!analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
-        {!analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
-        {!analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
-        {!analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}
+        {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
+        {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}
       </div>
     </main>
     {(tab !== 'agent' || analysis) && <aside className="context-rail">
