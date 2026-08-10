@@ -23,7 +23,8 @@ export function useGlobalDialogDrag() {
       if (event.button !== 0) return
       const dialog = target.closest(DIALOG_SELECTOR) as HTMLElement | null
       if (!dialog || isExcluded(dialog)) return
-      if (target.closest('button, a')) return // 不拦截按钮/链接点击
+      // 不拦截表单输入、按钮/链接点击；保持对话框内可正常输入。
+      if (target.closest('input, textarea, select, button, a')) return
 
       const rect = dialog.getBoundingClientRect()
       const inResize =
