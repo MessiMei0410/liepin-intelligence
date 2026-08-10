@@ -9,6 +9,8 @@ import { SourcingResultCard, type SourcingResultCardData } from '../workflows/So
 import type { CandidateListCardData } from '../workflows/CandidateListCard'
 import { CandidateListDialog } from './CandidateListDialog'
 import { useDialogFocus } from '../shared/useDialogFocus'
+import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
+import { updateCandidateListDialogData } from './candidateListDialogUpdate'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
@@ -172,6 +174,18 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const generationRef = useRef(0)
   const searchedRef = useRef(false)
+
+  // 名单弹窗打开时，监听候选人变更事件并就地刷新列表状态。
+  useEffect(() => {
+    if (!candidateListDialog) return undefined
+    const onUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<CandidateUpdatedDetail>).detail
+      if (!detail) return
+      setCandidateListDialog(prev => (prev ? updateCandidateListDialogData(prev, detail) : prev))
+    }
+    window.addEventListener(CANDIDATE_UPDATED_EVENT, onUpdate)
+    return () => window.removeEventListener(CANDIDATE_UPDATED_EVENT, onUpdate)
+  }, [candidateListDialog])
   const searchSeqRef = useRef(0)
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)

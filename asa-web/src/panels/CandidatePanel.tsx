@@ -16,6 +16,7 @@ import type { RecommendationDecisionRecord } from './RecommendationDecision'
 import { RecommendationPackagesSection } from './RecommendationPackages'
 import { LifecycleEventForm } from './LifecycleEventForm'
 import { useDialogFocus } from '../shared/useDialogFocus'
+import { dispatchCandidateUpdated } from '../shared/candidateEvents'
 
 export type CandidateAction = 'advance' | 'review' | 'contact' | 'recommend' | 'stop'
 export type CandidateActionPreflight = { action: CandidateAction; token: string; consultant_token?: string; impact: string; expires_at?: string }
@@ -55,7 +56,42 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
   // stop 动作附 R10 原因枚举（默认 other）；其余动作保持原四参提交，契约字面量锚定不变。
   // 推荐：候选动作与顾问确认分别完成预检；动作 commit 成功后写入理由与确认时间。记录失败时保持对话框
   // 打开可重试——commit 走既有幂等重放，不回退、不误报成功；确认卡只在决定记录成功后出现。
-  const commitAction=async()=>{ if(!pendingAction||busy)return; const {action,token}=pendingAction; const reason=actionNote.trim(); if(action==='recommend'&&!reason){setFeedback({tone:'error',text:'请先填写推荐理由，再确认推荐。'});return;} setBusy(`commit:${action}`); setFeedback(undefined); try { const result=action==='stop'?await api.commit(value.id, action, token, actionNote.trim(), actionReason):await api.commit(value.id,action,token,actionNote.trim()); if(action==='recommend'){ try { const decision=await recordRecommendationDecision(value.id,reason); setRecommendDecision({reason,decided_at:decision.decided_at||new Date().toISOString()}); setPendingAction(undefined); const repeated=result.already_applied||result.receipt?.idempotent_replay||decision.already_applied; setFeedback({tone:'success',text:repeated?`${candidateActionLabels[action]}此前已完成，已同步当前候选人状态${result.stage?`（${result.stage}）`:''}，推荐理由已确认记录。${recommendationPackageNote(decision.package)}`:`已推荐已完成，候选人状态已更新，推荐理由与确认时间已记录。${recommendationPackageNote(decision.package)}`}) } catch(e) { setFeedback({tone:'error',text:`已推荐状态已更新，但推荐理由确认记录失败：${copilotText(e)||'请稍后重试'}。对话框可重试，重复确认不会重复推荐。`}) } finally { await Promise.resolve(changed()).catch(()=>undefined) } } else { setPendingAction(undefined); await changed(); const repeated=result.already_applied||result.receipt?.idempotent_replay; setFeedback({tone:'success',text:repeated?`${candidateActionLabels[action]}此前已完成，已同步当前候选人状态${result.stage?`（${result.stage}）`:''}。`:action==='review'?'评分复核结论已记录到候选人事件。':`${candidateActionLabels[action]}已完成，候选人状态已更新。`}) } } catch(e) { await Promise.resolve(changed()).catch(()=>undefined); setFeedback({tone:'error',text:`${copilotText(e)||'操作提交失败，请重试。'} 已重新读取候选人状态。`}) } finally { setBusy('') } }
+  const commitAction=async()=>{
+    if(!pendingAction||busy)return
+    const {action,token}=pendingAction
+    const reason=actionNote.trim()
+    if(action==='recommend'&&!reason){setFeedback({tone:'error',text:'请先填写推荐理由，再确认推荐。'});return}
+    setBusy(`commit:${action}`)
+    setFeedback(undefined)
+    try {
+      const result=action==='stop'?await api.commit(value.id, action, token, actionNote.trim(), actionReason):await api.commit(value.id,action,token,actionNote.trim())
+      // 通知名单弹窗等跨组件视图实时刷新，避免操作后列表状态滞后。
+      dispatchCandidateUpdated({ id: value.id, stage: result.stage, isStopped: action==='stop' })
+      if(action==='recommend'){
+        try {
+          const decision=await recordRecommendationDecision(value.id,reason)
+          setRecommendDecision({reason,decided_at:decision.decided_at||new Date().toISOString()})
+          setPendingAction(undefined)
+          const repeated=result.already_applied||result.receipt?.idempotent_replay||decision.already_applied
+          setFeedback({tone:'success',text:repeated?`${candidateActionLabels[action]}此前已完成，已同步当前候选人状态${result.stage?`（${result.stage}）`:''}，推荐理由已确认记录。${recommendationPackageNote(decision.package)}`:`已推荐已完成，候选人状态已更新，推荐理由与确认时间已记录。${recommendationPackageNote(decision.package)}`})
+        } catch(e) {
+          setFeedback({tone:'error',text:`已推荐状态已更新，但推荐理由确认记录失败：${copilotText(e)||'请稍后重试'}。对话框可重试，重复确认不会重复推荐。`})
+        } finally {
+          await Promise.resolve(changed()).catch(()=>undefined)
+        }
+      } else {
+        setPendingAction(undefined)
+        await changed()
+        const repeated=result.already_applied||result.receipt?.idempotent_replay
+        setFeedback({tone:'success',text:repeated?`${candidateActionLabels[action]}此前已完成，已同步当前候选人状态${result.stage?`（${result.stage}）`:''}。`:action==='review'?'评分复核结论已记录到候选人事件。':`${candidateActionLabels[action]}已完成，候选人状态已更新。`})
+      }
+    } catch(e) {
+      await Promise.resolve(changed()).catch(()=>undefined)
+      setFeedback({tone:'error',text:`${copilotText(e)||'操作提交失败，请重试。'} 已重新读取候选人状态。`})
+    } finally {
+      setBusy('')
+    }
+  }
   const resume=value.resume||{summary:'',full_text:'',work_text:'',project_text:'',education_text:'',raw:{}}
   const links=[...new Map((value.source_links||[]).filter(x=>x.source_url).map(link=>[sourceLinkLabel(link.source_system),link])).values()]
   const relations=value.job_relations||[]
