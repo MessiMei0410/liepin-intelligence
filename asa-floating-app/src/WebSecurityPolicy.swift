@@ -48,11 +48,11 @@ struct ASAWebSecurityPolicy {
         switch surface {
         case .agent:
             return [
-                "openWorkbench", "retryServiceConnection", "startWorkbenchService",
+                "openDetachedDialog", "openWorkbench", "retryServiceConnection", "startWorkbenchService",
             ].contains(action)
         case .copilot:
             return [
-                "analyzePastedImage", "hideFloating", "openExternal", "openWorkbench", "recognizeWeChatImage",
+                "analyzePastedImage", "hideFloating", "openDetachedDialog", "openExternal", "openWorkbench", "recognizeWeChatImage",
                 "reload", "retryServiceConnection", "screenshot", "showFloating", "startWorkbenchService",
             ].contains(action)
         }

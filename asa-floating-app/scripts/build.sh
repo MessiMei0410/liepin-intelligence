@@ -23,6 +23,7 @@ swiftc \
   src/NativeContextPrivacy.swift \
   src/HotKeyRouting.swift \
   src/DiagnosticsPage.swift \
+  src/DetachedCandidateList.swift \
   src/AppDelegate.swift \
   -framework Cocoa \
   -framework Vision \
