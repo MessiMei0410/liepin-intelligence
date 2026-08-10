@@ -35,3 +35,15 @@ def opencli_extension_dir() -> Path:
         or os.environ.get("OPENCLI_EXTENSION_DIR")
     )
     return Path(configured).expanduser() if configured else DEFAULT_OPENCLI_EXTENSION_DIR
+
+
+def assistant_extension_dirs() -> list[Path]:
+    """页面桥扩展目录列表：猎聘回复助手 + X-SaaS 人选推进助手。
+    这两个扩展的 content script 会把当前猎聘/X-SaaS 页面状态上报到
+    /api/asa/floating/context，是浮窗"刷新页面识别"的数据来源。"""
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        repo_root / "liepin-reply-assistant-extension",
+        repo_root / "xsaas-candidate-assistant-extension",
+    ]
+    return [path for path in candidates if (path / "manifest.json").exists()]

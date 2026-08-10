@@ -30,6 +30,15 @@ class LiepinCdpConfigTest(unittest.TestCase):
         with patch.dict(os.environ, {"A_SYSTEM_OPENCLI_EXTENSION_DIR": "/tmp/opencli-extension"}, clear=False):
             self.assertEqual(liepin_cdp_config.opencli_extension_dir(), Path("/tmp/opencli-extension"))
 
+    def test_assistant_extension_dirs_include_both_page_bridges(self) -> None:
+        import liepin_cdp_config
+
+        paths = liepin_cdp_config.assistant_extension_dirs()
+        self.assertEqual(
+            [path.name for path in paths],
+            ["liepin-reply-assistant-extension", "xsaas-candidate-assistant-extension"],
+        )
+
     def test_liepin_login_probe_rejects_login_page(self) -> None:
         import opencli_sourcing_shadow as shadow
 

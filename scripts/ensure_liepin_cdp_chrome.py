@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import time
@@ -13,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from liepin_cdp_config import (
+    assistant_extension_dirs,
     cdp_launch_agent_label,
     cdp_launch_agent_path,
     cdp_profile_dir,
@@ -79,6 +81,60 @@ def cleanup_profile_locks() -> None:
             pass
 
 
+def required_extension_dirs() -> list[Path]:
+    """Return every extension required by the shared CDP browser."""
+    ordered = [OPENCLI_EXTENSION_DIR, *assistant_extension_dirs()]
+    return list(dict.fromkeys(path.resolve() for path in ordered if path.exists()))
+
+
+def extension_argument() -> str:
+    return ",".join(str(path) for path in required_extension_dirs())
+
+
+def sync_launch_agent_extensions() -> bool:
+    """Keep the installed LaunchAgent aligned with the required page bridges."""
+    if not LAUNCH_AGENT.exists():
+        return False
+    with LAUNCH_AGENT.open("rb") as handle:
+        payload = plistlib.load(handle)
+    arguments = list(payload.get("ProgramArguments") or [])
+    value = extension_argument()
+    if not value:
+        raise RuntimeError("没有找到可加载的 CDP Chrome 扩展")
+    replacements = {
+        "--load-extension=": f"--load-extension={value}",
+        "--disable-extensions-except=": f"--disable-extensions-except={value}",
+    }
+    changed = False
+    for index, argument in enumerate(arguments):
+        for prefix, replacement in replacements.items():
+            if str(argument).startswith(prefix) and argument != replacement:
+                arguments[index] = replacement
+                changed = True
+    for prefix, replacement in replacements.items():
+        if not any(str(argument).startswith(prefix) for argument in arguments):
+            arguments.insert(max(1, len(arguments) - 1), replacement)
+            changed = True
+    if changed:
+        payload["ProgramArguments"] = arguments
+        with LAUNCH_AGENT.open("wb") as handle:
+            plistlib.dump(payload, handle, fmt=plistlib.FMT_XML, sort_keys=False)
+    return changed
+
+
+def running_cdp_has_required_extensions() -> bool:
+    try:
+        output = subprocess.check_output(
+            ["ps", "-ax", "-o", "command="],
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return False
+    matching = [line for line in output.splitlines() if f"--remote-debugging-port={PORT}" in line]
+    return any(all(str(path) in line for path in required_extension_dirs()) for line in matching)
+
+
 def wait_for_cdp(seconds: float = 12) -> tuple[bool, dict[str, object]]:
     deadline = time.time() + seconds
     last: dict[str, object] = {}
@@ -94,6 +150,7 @@ def wait_for_cdp(seconds: float = 12) -> tuple[bool, dict[str, object]]:
 def restart_launch_agent() -> None:
     uid = str(os.getuid())
     label = f"gui/{uid}/{cdp_launch_agent_label()}"
+    sync_launch_agent_extensions()
     run_quiet("launchctl", "enable", label)
     run_quiet("launchctl", "bootout", label)
     cleanup_profile_locks()
@@ -113,13 +170,14 @@ def start_direct_chrome() -> None:
     log_path = Path.home() / ".hermes" / "chrome_cdp_manual.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("ab")
+    load_ext = extension_argument()
     subprocess.Popen(
         [
             str(chrome_path),
             f"--remote-debugging-port={PORT}",
             f"--user-data-dir={PROFILE_DIR}",
-            f"--load-extension={OPENCLI_EXTENSION_DIR}",
-            f"--disable-extensions-except={OPENCLI_EXTENSION_DIR}",
+            f"--load-extension={load_ext}",
+            f"--disable-extensions-except={load_ext}",
             "--no-first-run",
             "--no-default-browser-check",
             START_URL,
@@ -151,16 +209,26 @@ def summarize_tabs(tabs: object) -> list[dict[str, str]]:
 def main() -> int:
     print(f"检查 Chrome CDP：{CDP_BASE}")
     ok, detail = cdp_probe()
-    if ok:
+    if ok and running_cdp_has_required_extensions():
         tabs = summarize_tabs(detail.get("tabs"))
         write_status(ok=True, action="already_available", tabs=tabs)
         print("OK：CDP Chrome 已可连接。")
         print(json.dumps({"tabs": tabs[:5]}, ensure_ascii=False, indent=2))
         return 0
 
-    print(f"当前不可连接，开始按原链路恢复：{detail.get('error')}")
+    if ok:
+        print("CDP 可连接，但页面桥扩展未完整加载，开始修复启动配置。")
+    else:
+        print(f"当前不可连接，开始按原链路恢复：{detail.get('error')}")
+
     try:
-        restart_launch_agent()
+        try:
+            restart_launch_agent()
+        except RuntimeError as exc:
+            # launchctl occasionally returns EIO for a stale GUI-domain job;
+            # the same arguments are still safe to launch directly.
+            print(f"LaunchAgent 恢复失败（{exc}），改用直接启动 Chrome。")
+            start_direct_chrome()
         ok, detail = wait_for_cdp()
         if not ok:
             print("LaunchAgent 恢复后仍未连上，尝试直接启动 Chrome。")
