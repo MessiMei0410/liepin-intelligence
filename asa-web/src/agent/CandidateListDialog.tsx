@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { ExternalLink, Users, X } from 'lucide-react'
 import type { CandidateListCardData } from '../workflows/CandidateListCard'
 
+const MIN_DIALOG_W = 320
+const MIN_DIALOG_H = 240
+
 function nativeBridge(type: string, payload: Record<string, unknown>): boolean {
   const handler = (window as unknown as { webkit?: { messageHandlers?: { asaNative?: { postMessage: (msg: unknown) => void } } } }).webkit?.messageHandlers?.asaNative
   if (!handler) return false
@@ -23,6 +26,7 @@ export function CandidateListDialog({
   const dialogRef = useRef<HTMLElement>(null)
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null)
   const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
+  const resizeState = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null)
   const summary = data.summary || {}
   const groups = Array.isArray(data.groups) ? data.groups : []
   const total = Number(summary.total ?? groups.reduce((sum, group) => sum + (group.candidates?.length || 0), 0))
@@ -40,27 +44,49 @@ export function CandidateListDialog({
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onCloseRef.current() }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown); previous?.focus() }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onClose])
 
-  // 拖拽移动弹窗：记录起始指针位置与弹窗原始位置，拖动时增量平移（钳制在视口内）。
+  const ensurePositioned = (rect: DOMRect) => {
+    setPosition(prev => {
+      if (prev) return prev
+      return { x: rect.left, y: rect.top }
+    })
+  }
+
+  // 拖拽弹窗：header 区域拖动。
+  // 缩放由独立的 .candidate-dialog-resize-handle 元素处理，避免与 body 滚动条/按钮冲突。
   const onPointerDown = (event: React.PointerEvent) => {
     if (event.button !== 0) return
     if ((event.target as HTMLElement).closest?.('button, a')) return // 不拦截按钮/链接点击
     const el = dialogRef.current
     if (!el) return
+    // 只允许从 header 区域开始拖动（body 是滚动列表，不能误触）。
+    const head = el.querySelector('.candidate-dialog-head')
+    if (!head?.contains(event.target as Node)) return
     const rect = el.getBoundingClientRect()
     dragState.current = { startX: event.clientX, startY: event.clientY, origX: rect.left, origY: rect.top }
-    try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch { /* jsdom/旧浏览器 */ }
+    // move/up 挂到 window，避免 setPointerCapture 的兼容问题
+    const onMove = (moveEvent: PointerEvent) => handleDragMove(moveEvent.clientX, moveEvent.clientY)
+    const onUp = () => {
+      dragState.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
   }
-  const onPointerMove = (event: React.PointerEvent) => {
+
+  const handleDragMove = (clientX: number, clientY: number) => {
     const state = dragState.current
     if (!state) return
-    const dx = event.clientX - state.startX
-    const dy = event.clientY - state.startY
     const el = dialogRef.current
-    const panelW = el?.offsetWidth || 0
-    const panelH = el?.offsetHeight || 0
+    if (!el) return
+    const dx = clientX - state.startX
+    const dy = clientY - state.startY
+    const panelW = el.offsetWidth
+    const panelH = el.offsetHeight
     const vw = window.innerWidth, vh = window.innerHeight
     const nextX = state.origX + dx
     const nextY = state.origY + dy
@@ -82,7 +108,53 @@ export function CandidateListDialog({
       y: Math.min(vh - 48, Math.max(-panelH + 48, nextY)),
     })
   }
-  const onPointerUp = () => { dragState.current = null }
+
+  // 独立 resize 手柄：挂载到 window 的 move/up，避免 setPointerCapture 在 WKWebView 下不稳定。
+  useEffect(() => {
+    const el = dialogRef.current
+    if (!el) return
+    const handle = document.createElement('div')
+    handle.className = 'candidate-dialog-resize-handle'
+    handle.setAttribute('aria-hidden', 'true')
+    handle.title = '拖动缩放'
+    el.appendChild(handle)
+
+    const onDown = (event: PointerEvent) => {
+      if (event.button !== 0) return
+      const rect = el.getBoundingClientRect()
+      resizeState.current = { startX: event.clientX, startY: event.clientY, origW: rect.width, origH: rect.height }
+      ensurePositioned(rect)
+      el.style.position = 'fixed'
+      el.style.left = `${rect.left}px`
+      el.style.top = `${rect.top}px`
+      el.style.transform = 'none'
+      el.style.margin = '0'
+      el.style.maxWidth = 'none'
+      el.style.maxHeight = 'none'
+      event.stopPropagation()
+      event.preventDefault()
+    }
+    const onMove = (event: PointerEvent) => {
+      const state = resizeState.current
+      if (!state) return
+      const dx = event.clientX - state.startX
+      const dy = event.clientY - state.startY
+      el.style.width = `${Math.max(MIN_DIALOG_W, state.origW + dx)}px`
+      el.style.height = `${Math.max(MIN_DIALOG_H, state.origH + dy)}px`
+    }
+    const onUp = () => { resizeState.current = null }
+    handle.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      handle.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      handle.remove()
+    }
+  }, [])
 
   const detachDialog = (anchor?: { x: number; y: number; edge: string }): boolean => {
     const candidates = (groups || []).flatMap(group => group.candidates || []).slice(0, 200)
@@ -114,15 +186,12 @@ export function CandidateListDialog({
         aria-label={data.title}
         tabIndex={-1}
         style={position ? { left: position.x, top: position.y, position: 'fixed', margin: 0 } : undefined}
+        onPointerDown={onPointerDown}
       >
         <header
           className="candidate-dialog-head"
           style={{ cursor: 'grab', touchAction: 'none' }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-          title="按住拖动"
+          title="按住拖动；右下角可缩放"
         >
           <span className="candidate-dialog-icon"><Users size={18} /></span>
           <div>
@@ -166,6 +235,7 @@ export function CandidateListDialog({
             <button className="button" onClick={() => onOpenJob(jobId)}>打开岗位查看完整名单</button>
           </footer>
         )}
+        {/* resize handle 由 useEffect 注入到此处，保持 JSX 简洁 */}
       </section>
     </div>
   )

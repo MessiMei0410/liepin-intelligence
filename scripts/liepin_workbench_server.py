@@ -1736,6 +1736,33 @@ def asa_floating_html() -> str:
       .thinking-dots i { animation:none; opacity:.6; }
       button:active, .icon-btn:active, .send:active, .attach:active, .msg-action:active, .context-action:active, .candidate-list-row:active { transform:none; transition:none; }
     }
+    /* ---- Dialog resize handle visual + positioning anchors ---- */
+    /* ⚠️ .candidate-dialog 原本就是 position:fixed（居中弹窗），不能加 relative 覆盖它。
+       fixed 本身就是 positioned 祖先，::after 手柄对它同样有效。 */
+    .patch-modal { position: relative; }
+    .candidate-dialog::after, .patch-modal::after {
+      content: '';
+      position: absolute;
+      right: 2px;
+      bottom: 2px;
+      width: 12px;
+      height: 12px;
+      pointer-events: none;
+      z-index: 10;
+      border-right: 2px solid var(--line,#dfe2dc);
+      border-bottom: 2px solid var(--line,#dfe2dc);
+      border-bottom-right-radius: 4px;
+    }
+    /* 名单弹窗手柄更大更醒目（列表滚动区右下角，需明显提示可缩放） */
+    .candidate-dialog::after {
+      width: 16px;
+      height: 16px;
+      border-right-width: 2.5px;
+      border-bottom-width: 2.5px;
+      border-color: #b6c2d4;
+    }
+    .candidate-dialog[style] { max-height: none; }
+    .patch-modal[style] { max-height: none; }
   </style>
 </head>
 <body>
@@ -1911,20 +1938,39 @@ function openCandidateListDialog(index){
     button.addEventListener('click', () => detachCandidateListDialog(Number(button.dataset.candidateDetach)));
   });
   dialog.addEventListener('keydown', event => { if (event.key === 'Escape') closeCandidateListDialog(); });
-  // 拖动：pointer events，仅 header 区域，增量平移。
+  // 拖动/缩放：pointer events。事件绑在整个 dialog 上（header 在顶部点不到右下角，
+  // 绑 head 上 resize 永不触发）；header 区域拖动，右下角 20px 缩放，body 不误触。
   const head = dialog.querySelector('[data-candidate-drag]');
   if (head) {
     let drag = null;
-    head.addEventListener('pointerdown', event => {
+    dialog.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
       if (event.target && event.target.closest && event.target.closest('button, a')) return; // 不拦截按钮/链接点击
       const rect = dialog.getBoundingClientRect();
-      drag = { startX: event.clientX, startY: event.clientY, origX: rect.left, origY: rect.top };
-      try { head.setPointerCapture(event.pointerId); } catch (_) {}
+      const inResize = rect.width > 0 && rect.height > 0 && event.clientX >= rect.right - 24 && event.clientY >= rect.bottom - 24;
+      if (inResize) {
+        drag = { mode: 'resize', startX: event.clientX, startY: event.clientY, origW: rect.width, origH: rect.height };
+        dialog.style.maxWidth = 'none';
+        dialog.style.maxHeight = 'none';
+        try { dialog.setPointerCapture(event.pointerId); } catch (_) {}
+        return;
+      }
+      // 非 resize：只允许从 header 区域开始拖动（body 是滚动列表，不能误触）。
+      if (!head.contains(event.target)) return;
+      drag = { mode: 'drag', startX: event.clientX, startY: event.clientY, origX: rect.left, origY: rect.top };
+      try { dialog.setPointerCapture(event.pointerId); } catch (_) {}
       event.preventDefault();
     });
-    head.addEventListener('pointermove', event => {
+    dialog.addEventListener('pointermove', event => {
       if (!drag) return;
+      if (drag.mode === 'resize') {
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        dialog.style.width = Math.max(280, drag.origW + dx) + 'px';
+        dialog.style.height = Math.max(200, drag.origH + dy) + 'px';
+        dialog.style.maxHeight = 'none';
+        return;
+      }
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
       const vw = window.innerWidth, vh = window.innerHeight;
@@ -1955,8 +2001,8 @@ function openCandidateListDialog(index){
       dialog.style.transform = 'none';
       dialog.style.margin = '0';
     });
-    head.addEventListener('pointerup', () => { drag = null; });
-    head.addEventListener('pointercancel', () => { drag = null; });
+    dialog.addEventListener('pointerup', () => { drag = null; });
+    dialog.addEventListener('pointercancel', () => { drag = null; });
   }
 }
 function closeCandidateListDialog(){
@@ -1989,7 +2035,7 @@ function detachCandidateListDialog(index){
     document.getElementById('chatStatus').textContent = '弹出独立窗口需要 ASA 桌面端。';
   }
 }
-// 全局弹窗拖动委托：patch-modal 等其他模态弹窗 header 可拖动。
+// 全局弹窗拖动/缩放委托：patch-modal 等其他模态弹窗 header 可拖动，右下角可缩放。
 (function(){
   // 排除已有专属拖动的名单弹窗；.patch-modal 本身就是要拖的对象，不能排除
   const excluded = el => !!(el && el.closest && el.closest('.candidate-dialog'));
@@ -1999,18 +2045,32 @@ function detachCandidateListDialog(index){
     const modal = target.closest ? target.closest('.patch-modal') : null;
     if (!modal || excluded(modal)) return;
     if (target.closest && target.closest('button, a')) return;
-    const head = modal.querySelector('.patch-modal-head, .modal-head, header');
-    if (!head || !head.contains(target)) return;
-    const startX = event.clientX, startY = event.clientY;
     const rect = modal.getBoundingClientRect();
+    const inResize = rect.width > 0 && rect.height > 0 && event.clientX >= rect.right - 20 && event.clientY >= rect.bottom - 20;
+    let mode = inResize ? 'resize' : null;
+    if (!inResize) {
+      const head = modal.querySelector('.patch-modal-head, .modal-head, header');
+      if (!head || !head.contains(target)) return;
+      mode = 'drag';
+    }
+    const startX = event.clientX, startY = event.clientY;
     const origLeft = rect.left, origTop = rect.top;
+    const origW = rect.width, origH = rect.height;
     const onMove = moveEvent => {
       const dx = moveEvent.clientX - startX, dy = moveEvent.clientY - startY;
+      if (mode === 'resize') {
+        modal.style.width = Math.max(280, origW + dx) + 'px';
+        modal.style.height = Math.max(200, origH + dy) + 'px';
+        modal.style.maxWidth = 'none';
+        modal.style.maxHeight = 'none';
+        return;
+      }
       const panelW = modal.offsetWidth, panelH = modal.offsetHeight;
       const vw = window.innerWidth, vh = window.innerHeight;
       const nextX = origLeft + dx, nextY = origTop + dy;
       modal.style.left = `${Math.min(vw - 48, Math.max(-panelW + 48, nextX))}px`;
       modal.style.top = `${Math.min(vh - 48, Math.max(-panelH + 48, nextY))}px`;
+      modal.style.position = 'fixed';
       modal.style.transform = 'none';
       modal.style.margin = '0';
     };
@@ -2022,6 +2082,7 @@ function detachCandidateListDialog(index){
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', finish);
     window.addEventListener('pointercancel', finish);
+    try { modal.setPointerCapture?.(event.pointerId); } catch (_) {}
   }, true);
 })();
 function renderFloatingMessage(message, index){

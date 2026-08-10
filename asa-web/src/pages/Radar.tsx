@@ -43,6 +43,16 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
   const requestSequence = useRef(0)
   const activateRequestSequence = useRef(0)
   const activateDialogRef = useDialogFocus<HTMLDivElement>(Boolean(activateCompany))
+  const radarDialogRef = useRef<HTMLDivElement>(null)
+  const radarDrag = useRef<{
+    mode: 'drag' | 'resize'
+    startX: number
+    startY: number
+    origX: number
+    origY: number
+    origW: number
+    origH: number
+  } | null>(null)
 
   const load = useCallback(async () => {
     setLoadState('loading'); setLoadError('')
@@ -109,6 +119,70 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [activateCompany, closeActivate])
 
+  const onRadarPointerDown = (event: React.PointerEvent) => {
+    if (event.button !== 0) return
+    if ((event.target as HTMLElement).closest?.('button, a')) return
+    const el = radarDialogRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const inResize =
+      rect.width > 0 &&
+      rect.height > 0 &&
+      event.clientX >= rect.right - 20 &&
+      event.clientY >= rect.bottom - 20
+    if (inResize) {
+      radarDrag.current = {
+        mode: 'resize',
+        startX: event.clientX,
+        startY: event.clientY,
+        origX: rect.left,
+        origY: rect.top,
+        origW: rect.width,
+        origH: rect.height,
+      }
+      el.style.maxWidth = 'none'
+      el.style.maxHeight = 'none'
+      return
+    }
+    // 非 resize：只允许从 header 区域开始拖动（body 是滚动列表，不能误触）。
+    const head = el.querySelector('header')
+    if (!head?.contains(event.target as Node)) return
+    radarDrag.current = {
+      mode: 'drag',
+      startX: event.clientX,
+      startY: event.clientY,
+      origX: rect.left,
+      origY: rect.top,
+      origW: 0,
+      origH: 0,
+    }
+    el.style.position = 'fixed'
+    el.style.margin = '0'
+    el.style.transform = 'none'
+    try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch { /* jsdom/旧浏览器 */ }
+  }
+  const onRadarPointerMove = (event: React.PointerEvent) => {
+    const state = radarDrag.current
+    if (!state) return
+    const el = radarDialogRef.current
+    if (!el) return
+    const dx = event.clientX - state.startX
+    const dy = event.clientY - state.startY
+    if (state.mode === 'resize') {
+      el.style.width = `${Math.max(280, state.origW + dx)}px`
+      el.style.height = `${Math.max(200, state.origH + dy)}px`
+      el.style.maxWidth = 'none'
+      el.style.maxHeight = 'none'
+      return
+    }
+    const vw = window.innerWidth, vh = window.innerHeight
+    const nextX = state.origX + dx
+    const nextY = state.origY + dy
+    el.style.left = `${Math.min(vw - 48, Math.max(-el.offsetWidth + 48, nextX))}px`
+    el.style.top = `${Math.min(vh - 48, Math.max(-el.offsetHeight + 48, nextY))}px`
+  }
+  const onRadarPointerUp = () => { radarDrag.current = null }
+
   if (!scan && loadState === 'error') return <div className="empty" role="alert">
     <p>{loadError || '人才雷达加载失败，请稍后重试。'}</p>
     <button className="button" onClick={() => void load()}>重新加载人才雷达</button>
@@ -164,8 +238,8 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
       onClick={closeActivate}
     >
-      <div className="card radar-dialog" style={{ width: 'min(720px, calc(100vw - 24px))', maxHeight: '70vh', overflow: 'auto', padding: 16 }} onClick={e => e.stopPropagation()}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div ref={radarDialogRef} className="card radar-dialog" style={{ width: 'min(720px, calc(100vw - 24px))', maxHeight: '70vh', overflow: 'auto', padding: 16 }} onClick={e => e.stopPropagation()} onPointerDown={onRadarPointerDown} onPointerMove={onRadarPointerMove} onPointerUp={onRadarPointerUp} onPointerCancel={onRadarPointerUp}>
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；右下角可缩放">
           <strong>库里有这些人 · {activateCompany}</strong>
           <button className="button" onClick={closeActivate}>关闭</button>
         </header>

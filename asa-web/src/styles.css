@@ -1022,6 +1022,8 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .candidate-dialog-row:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
 .candidate-dialog-empty{padding:40px 0;text-align:center;color:var(--muted);font-size:12px}
 .candidate-dialog-foot{min-height:58px;padding:11px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;align-items:center;background:#fafbf9}
+.candidate-dialog-resize-handle{position:absolute;right:0;bottom:0;width:32px;height:32px;cursor:nwse-resize;touch-action:none;z-index:20;background:linear-gradient(135deg,transparent 50%,rgba(182,194,212,.35) 50%);border-bottom-right-radius:11px;transition:background 120ms ease-out}
+.candidate-dialog-resize-handle:hover{background:linear-gradient(135deg,transparent 50%,rgba(49,92,71,.28) 50%)}
 @keyframes candidateDialogIn{from{opacity:0;transform:scale(.97) translateY(6px)}}
 @media (prefers-reduced-motion:reduce){.candidate-dialog{animation:none!important}}
 .candidate-tag.green{background:var(--green-soft);color:var(--green)}
@@ -1065,3 +1067,57 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .error-banner{background:var(--red-soft);color:var(--red);padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:11px}
 .insight-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:40px;color:var(--muted);font-size:11px}
 @media(max-width:900px){.sourcing-candidates-table th,.sourcing-candidates-table td{padding:7px 6px}.sourcing-candidates-table .candidate-intention{max-width:110px}}
+
+/* ---- Dialog resize handle visual + positioning anchors ---- */
+/* ⚠️ .candidate-dialog 原本就是 position:fixed（居中弹窗），不能加 relative 覆盖它。
+   fixed 本身就是 positioned 祖先，::after 手柄对它同样有效。 */
+.action-dialog,
+.patch-modal,
+.sourcing-result-dialog,
+.radar-dialog,
+.detail-panel,
+.workflow-panel {
+  position: relative;
+}
+
+.action-dialog::after,
+.patch-modal::after,
+.candidate-dialog::after,
+.sourcing-result-dialog::after,
+.radar-dialog::after,
+.detail-panel::after,
+.workflow-panel::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  z-index: 10;
+  border-right: 2px solid var(--line, #dfe2dc);
+  border-bottom: 2px solid var(--line, #dfe2dc);
+  border-bottom-right-radius: 4px;
+}
+/* 名单弹窗手柄更大更醒目（列表滚动区右下角，需明显提示可缩放） */
+.candidate-dialog::after {
+  width: 16px;
+  height: 16px;
+  border-right-width: 2.5px;
+  border-bottom-width: 2.5px;
+  border-color: #b6c2d4;
+}
+
+/* Once inline styles are set (drag/resize), let them override CSS max-width/max-height constraints. */
+.action-dialog[style],
+.patch-modal[style],
+.candidate-dialog[style],
+.sourcing-result-dialog[style],
+.radar-dialog[style] {
+  max-width: none;
+  max-height: none;
+}
+
+.candidate-dialog[style] {
+  transform: none;
+}
