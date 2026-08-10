@@ -47,3 +47,17 @@ def assistant_extension_dirs() -> list[Path]:
         repo_root / "xsaas-candidate-assistant-extension",
     ]
     return [path for path in candidates if (path / "manifest.json").exists()]
+
+
+def user_extension_dirs() -> list[Path]:
+    """用户自行放置的扩展目录列表。
+
+    把任意 unpacked Chrome 扩展（含 .crx 解压后的目录）放到
+    ~/.hermes/chrome_extensions/<extension_id>/ 下即可被 9223 的 CDP Chrome
+    自动加载，无需修改项目源码。"""
+    configured = os.environ.get("A_SYSTEM_USER_EXTENSION_DIR")
+    user_dir = Path(configured).expanduser() if configured else Path.home() / ".hermes" / "chrome_extensions"
+    if not user_dir.exists():
+        return []
+    candidates = sorted(user_dir.iterdir())
+    return [path for path in candidates if path.is_dir() and (path / "manifest.json").exists()]

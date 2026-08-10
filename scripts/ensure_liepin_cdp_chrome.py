@@ -19,6 +19,7 @@ from liepin_cdp_config import (
     cdp_launch_agent_path,
     cdp_profile_dir,
     opencli_extension_dir,
+    user_extension_dirs,
 )
 
 
@@ -83,7 +84,7 @@ def cleanup_profile_locks() -> None:
 
 def required_extension_dirs() -> list[Path]:
     """Return every extension required by the shared CDP browser."""
-    ordered = [OPENCLI_EXTENSION_DIR, *assistant_extension_dirs()]
+    ordered = [OPENCLI_EXTENSION_DIR, *assistant_extension_dirs(), *user_extension_dirs()]
     return list(dict.fromkeys(path.resolve() for path in ordered if path.exists()))
 
 

@@ -39,6 +39,21 @@ class LiepinCdpConfigTest(unittest.TestCase):
             ["liepin-reply-assistant-extension", "xsaas-candidate-assistant-extension"],
         )
 
+    def test_user_extension_dirs_scan_configured_directory(self) -> None:
+        import tempfile
+
+        import liepin_cdp_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ext_dir = Path(tmp) / "ext1"
+            ext_dir.mkdir()
+            (ext_dir / "manifest.json").write_text("{}")
+            # 没有 manifest 的目录应被忽略
+            (Path(tmp) / "not-an-ext").mkdir()
+            with patch.dict(os.environ, {"A_SYSTEM_USER_EXTENSION_DIR": tmp}, clear=False):
+                paths = liepin_cdp_config.user_extension_dirs()
+                self.assertEqual([path.name for path in paths], ["ext1"])
+
     def test_liepin_login_probe_rejects_login_page(self) -> None:
         import opencli_sourcing_shadow as shadow
 
