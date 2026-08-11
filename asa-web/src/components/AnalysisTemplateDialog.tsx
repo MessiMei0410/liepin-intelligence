@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CalendarClock, History, LoaderCircle, Pin, Save, Trash2, X } from 'lucide-react'
+import { CalendarClock, History, LoaderCircle, Pin, Save, Trash2 } from 'lucide-react'
 import { api } from '../api'
 import type { AnalysisCatalogItem, AnalysisTemplate, AnalysisTemplateInput, AnalysisTemplateRun } from '../api'
-import { useDialogFocus } from '../shared/useDialogFocus'
+import { DialogModal } from '../shared/Dialog'
 
 const fieldLabels: Record<string, string> = {
   days: '统计周期（天）', job_id: '岗位 ID', company: '公司', title: '职位', city: '城市',
@@ -48,7 +48,6 @@ export function AnalysisTemplateDialog({ catalogs, template, busy, onCancel, onS
   const [runs, setRuns] = useState<AnalysisTemplateRun[]>([])
   const [runsState, setRunsState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [deleteArmed, setDeleteArmed] = useState(false)
-  const dialogRef = useDialogFocus<HTMLElement>(true)
   const selectedCatalog = useMemo(
     () => catalogs.find(item => item.catalog_id === catalogId), [catalogId, catalogs],
   )
@@ -72,12 +71,6 @@ export function AnalysisTemplateDialog({ catalogs, template, busy, onCancel, onS
       .catch(() => { setRuns([]); setRunsState('error') })
   }
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onCancel() }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [busy, onCancel])
-
   const submit = () => {
     if (!valid || busy) return
     void onSave({
@@ -88,59 +81,59 @@ export function AnalysisTemplateDialog({ catalogs, template, busy, onCancel, onS
     })
   }
 
-  return <div className="action-dialog-backdrop" role="presentation" onClick={() => { if (!busy) onCancel() }}>
-    <section ref={dialogRef} className="action-dialog analysis-template-dialog" role="dialog" aria-modal="true" aria-labelledby="analysis-template-title" onClick={event => event.stopPropagation()}>
-      <header>
-        <span className="action-dialog-icon"><Pin /></span>
-        <div><small>固定分析</small><h3 id="analysis-template-title">{template ? '管理固定分析' : '新建固定分析'}</h3></div>
-        <button className="icon-btn" disabled={busy} onClick={onCancel} title="关闭" aria-label="关闭"><X /></button>
-      </header>
-      <div className="action-dialog-body template-dialog-body">
-        <div className="template-form-grid">
-          <label><span>名称</span><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：每日经营概览" /></label>
-          <label><span>分析类型</span><select value={catalogId} onChange={event => { setCatalogId(event.target.value); setScopeValues({}) }}>
-            {catalogs.map(item => <option key={item.catalog_id} value={item.catalog_id}>{item.label}</option>)}
-          </select></label>
-        </div>
-        <label><span>关注问题（选填）</span><textarea value={question} onChange={event => setQuestion(event.target.value)} placeholder="这份分析需要回答什么？" rows={2} /></label>
-        {!!scopeFields.length && <fieldset className="template-scope"><legend>分析范围</legend><div className="template-form-grid">
-          {scopeFields.map(field => <label key={field}><span>{fieldLabels[field] || field}</span><input
-            type={numberFields.has(field) ? 'number' : 'text'} min={numberFields.has(field) ? 1 : undefined}
-            value={scopeValues[field] || ''} onChange={event => setScopeValues(values => ({ ...values, [field]: event.target.value }))}
-            placeholder={field === 'candidate_ids' ? '多个 ID 用逗号分隔' : undefined}
-          /></label>)}
-        </div></fieldset>}
-        <fieldset className="template-schedule"><legend>执行计划</legend>
-          <div className="segmented schedule-segments" aria-label="执行频率">
-            {(['manual', 'daily', 'weekly'] as const).map(kind => <button type="button" key={kind} className={scheduleKind === kind ? 'active' : ''} aria-pressed={scheduleKind === kind} onClick={() => { setScheduleKind(kind); if (kind === 'manual') setScheduleEnabled(false) }}>
-              {kind === 'manual' ? '手动' : kind === 'daily' ? '每天' : '每周'}
-            </button>)}
-          </div>
-          {scheduleKind !== 'manual' && <div className="schedule-controls">
-            <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={event => setScheduleEnabled(event.target.checked)} /><span>启用自动执行</span></label>
-            {scheduleKind === 'weekly' && <label><span>执行日</span><select value={scheduleWeekday} onChange={event => setScheduleWeekday(Number(event.target.value))}>{weekdayLabels.map((label, index) => <option key={label} value={index}>{label}</option>)}</select></label>}
-            <label><span>执行时间</span><input type="time" value={scheduleTime} onChange={event => setScheduleTime(event.target.value)} /></label>
-            <span className="schedule-zone"><CalendarClock />北京时间</span>
-          </div>}
-        </fieldset>
-        {template && <section className="template-run-history" aria-label="运行记录">
-          <header><History /><b>运行记录</b><span>{runsState === 'ready' ? `最近 ${runs.length} 次` : ''}</span></header>
-          {runsState === 'loading' && <p role="status">正在读取运行记录…</p>}
-          {runsState === 'error' && <div className="run-history-error"><span>运行记录加载失败，可稍后重试。</span><button className="button" onClick={retryRuns}>重新加载运行记录</button></div>}
-          {runsState === 'ready' && runs.map(run => <div key={run.template_run_id}>
-            <span className={`run-status ${run.status}`}>{statusLabels[run.status]}</span>
-            <div><b>{run.headline || (run.trigger === 'schedule' ? '自动执行' : '手动执行')}</b><small>{displayTime(run.started_at)} · {run.trigger === 'schedule' ? '自动' : '手动'}</small>{run.error && <small className="run-error">{run.error}</small>}</div>
-          </div>)}
-          {runsState === 'ready' && !runs.length && <p>尚无运行记录</p>}
-        </section>}
-        {deleteArmed && <div className="action-dialog-error"><Trash2 />删除后不会影响已生成的历史分析结果。请再次确认。</div>}
+  return <DialogModal
+    onClose={onCancel}
+    title={template ? '管理固定分析' : '新建固定分析'}
+    titleId="analysis-template-title"
+    icon={<Pin />}
+    eyebrow="固定分析"
+    className="analysis-template-dialog"
+    bodyClassName="template-dialog-body"
+    closeDisabled={busy}
+    footer={<>
+      {template && onDelete && <button className={`button ${deleteArmed ? 'danger-fill' : ''}`} disabled={busy} onClick={() => deleteArmed ? void onDelete() : setDeleteArmed(true)}><Trash2 />{deleteArmed ? '确认删除' : '删除'}</button>}
+      <span className="dialog-footer-spacer" />
+      <button className="button" disabled={busy} onClick={onCancel}>取消</button>
+      <button className="button primary" disabled={!valid || busy} onClick={submit}>{busy ? <LoaderCircle className="spin" /> : <Save />}{template ? '保存' : '创建'}</button>
+    </>}
+  >
+    <div className="template-form-grid">
+      <label><span>名称</span><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：每日经营概览" /></label>
+      <label><span>分析类型</span><select value={catalogId} onChange={event => { setCatalogId(event.target.value); setScopeValues({}) }}>
+        {catalogs.map(item => <option key={item.catalog_id} value={item.catalog_id}>{item.label}</option>)}
+      </select></label>
+    </div>
+    <label><span>关注问题（选填）</span><textarea value={question} onChange={event => setQuestion(event.target.value)} placeholder="这份分析需要回答什么？" rows={2} /></label>
+    {!!scopeFields.length && <fieldset className="template-scope"><legend>分析范围</legend><div className="template-form-grid">
+      {scopeFields.map(field => <label key={field}><span>{fieldLabels[field] || field}</span><input
+        type={numberFields.has(field) ? 'number' : 'text'} min={numberFields.has(field) ? 1 : undefined}
+        value={scopeValues[field] || ''} onChange={event => setScopeValues(values => ({ ...values, [field]: event.target.value }))}
+        placeholder={field === 'candidate_ids' ? '多个 ID 用逗号分隔' : undefined}
+      /></label>)}
+    </div></fieldset>}
+    <fieldset className="template-schedule"><legend>执行计划</legend>
+      <div className="segmented schedule-segments" aria-label="执行频率">
+        {(['manual', 'daily', 'weekly'] as const).map(kind => <button type="button" key={kind} className={scheduleKind === kind ? 'active' : ''} aria-pressed={scheduleKind === kind} onClick={() => { setScheduleKind(kind); if (kind === 'manual') setScheduleEnabled(false) }}>
+          {kind === 'manual' ? '手动' : kind === 'daily' ? '每天' : '每周'}
+        </button>)}
       </div>
-      <footer>
-        {template && onDelete && <button className={`button ${deleteArmed ? 'danger-fill' : ''}`} disabled={busy} onClick={() => deleteArmed ? void onDelete() : setDeleteArmed(true)}><Trash2 />{deleteArmed ? '确认删除' : '删除'}</button>}
-        <span className="dialog-footer-spacer" />
-        <button className="button" disabled={busy} onClick={onCancel}>取消</button>
-        <button className="button primary" disabled={!valid || busy} onClick={submit}>{busy ? <LoaderCircle className="spin" /> : <Save />}{template ? '保存' : '创建'}</button>
-      </footer>
-    </section>
-  </div>
+      {scheduleKind !== 'manual' && <div className="schedule-controls">
+        <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={event => setScheduleEnabled(event.target.checked)} /><span>启用自动执行</span></label>
+        {scheduleKind === 'weekly' && <label><span>执行日</span><select value={scheduleWeekday} onChange={event => setScheduleWeekday(Number(event.target.value))}>{weekdayLabels.map((label, index) => <option key={label} value={index}>{label}</option>)}</select></label>}
+        <label><span>执行时间</span><input type="time" value={scheduleTime} onChange={event => setScheduleTime(event.target.value)} /></label>
+        <span className="schedule-zone"><CalendarClock />北京时间</span>
+      </div>}
+    </fieldset>
+    {template && <section className="template-run-history" aria-label="运行记录">
+      <header><History /><b>运行记录</b><span>{runsState === 'ready' ? `最近 ${runs.length} 次` : ''}</span></header>
+      {runsState === 'loading' && <p role="status">正在读取运行记录…</p>}
+      {runsState === 'error' && <div className="run-history-error"><span>运行记录加载失败，可稍后重试。</span><button className="button" onClick={retryRuns}>重新加载运行记录</button></div>}
+      {runsState === 'ready' && runs.map(run => <div key={run.template_run_id}>
+        <span className={`run-status ${run.status}`}>{statusLabels[run.status]}</span>
+        <div><b>{run.headline || (run.trigger === 'schedule' ? '自动执行' : '手动执行')}</b><small>{displayTime(run.started_at)} · {run.trigger === 'schedule' ? '自动' : '手动'}</small>{run.error && <small className="run-error">{run.error}</small>}</div>
+      </div>)}
+      {runsState === 'ready' && !runs.length && <p>尚无运行记录</p>}
+    </section>}
+    {deleteArmed && <div className="action-dialog-error"><Trash2 />删除后不会影响已生成的历史分析结果。请再次确认。</div>}
+  </DialogModal>
 }

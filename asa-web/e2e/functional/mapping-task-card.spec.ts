@@ -1,5 +1,5 @@
 import { expect, skipIfNoBackend, test } from '../support/fixtures'
-import { MAPPING_WORKFLOW_ID, openWorkflow } from '../support/nav'
+import { MAPPING_WORKFLOW_ID, openWorkflowDetail } from '../support/nav'
 
 skipIfNoBackend()
 
@@ -12,7 +12,7 @@ skipIfNoBackend()
 // 破冰内容质量随真实数据波动，结构断言只到「开场白要点」区块，内容词由 Vitest mock 覆盖。
 
 test('Mapping 任务卡：团队树渲染 + 确认破冰 + 状态持久 + 入库入口', async ({ page }) => {
-  const panel = await openWorkflow(page, MAPPING_WORKFLOW_ID)
+  const panel = await openWorkflowDetail(page, MAPPING_WORKFLOW_ID)
   // 决策树 escalate_mapping 步旁入口：已有任务卡 → 按钮直接打开（不重复发起采集）
   const review = panel.getByRole('region', { name: '没成的原因' })
   await review.getByRole('button', { name: '打开 Mapping 任务卡' }).click()
@@ -50,9 +50,12 @@ test('Mapping 任务卡：团队树渲染 + 确认破冰 + 状态持久 + 入库
 
   // 刷新后状态持久：重开任务卡，第 1 人已接触、第 2 人已确认且入库按钮存在
   await page.reload()
+  const compact = page.locator('.compact-workflow-dialog')
+  await expect(compact).toBeVisible()
+  await compact.getByRole('button', { name: '查看' }).click()
+  await compact.getByRole('menuitem', { name: '完整详情' }).click()
   const reopened = page.locator('.workflow-panel')
   await expect(reopened).toBeVisible()
-  await expect(reopened.locator('.detail-head h2')).toContainText('士兰微')
   await reopened.getByRole('region', { name: '没成的原因' }).getByRole('button', { name: '打开 Mapping 任务卡' }).click()
   const card2 = reopened.getByRole('region', { name: 'Mapping 任务卡' })
   await expect(card2.locator('.mapping-team')).toHaveCount(17)

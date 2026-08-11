@@ -12,8 +12,19 @@ const FOCUSABLE_SELECTOR = [
 const focusableElements = (root: HTMLElement): HTMLElement[] =>
   Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
 
+export interface UseDialogFocusOptions {
+  /** CSS selector for the element to receive initial focus. Falls back to `[data-dialog-initial-focus]`, `[autofocus]`, then the first focusable element. */
+  initialFocus?: string
+  /** Whether to restore focus to the opener when the dialog unmounts. Defaults to `true`. */
+  restoreFocus?: boolean
+}
+
 /** Keeps keyboard focus inside a mounted dialog and returns it to the opener. */
-export function useDialogFocus<T extends HTMLElement>(active: boolean) {
+export function useDialogFocus<T extends HTMLElement>(
+  active: boolean,
+  options: UseDialogFocusOptions = {},
+) {
+  const { initialFocus: initialFocusSelector, restoreFocus = true } = options
   const dialogRef = useRef<T>(null)
 
   useEffect(() => {
@@ -22,14 +33,16 @@ export function useDialogFocus<T extends HTMLElement>(active: boolean) {
     if (!dialog) return undefined
     const activeElement = document.activeElement
     const opener = activeElement instanceof HTMLElement && !dialog.contains(activeElement) ? activeElement : null
-    const initialFocus = () => {
+
+    const applyInitialFocus = () => {
       const current = document.activeElement
       if (current instanceof HTMLElement && dialog.contains(current)) return
-      const target = dialog.querySelector<HTMLElement>('[data-dialog-initial-focus], [autofocus]')
+      const target = (initialFocusSelector ? dialog.querySelector<HTMLElement>(initialFocusSelector) : null)
+        || dialog.querySelector<HTMLElement>('[data-dialog-initial-focus], [autofocus]')
         || focusableElements(dialog)[0]
       target?.focus()
     }
-    queueMicrotask(initialFocus)
+    queueMicrotask(applyInitialFocus)
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return
@@ -49,9 +62,9 @@ export function useDialogFocus<T extends HTMLElement>(active: boolean) {
     dialog.addEventListener('keydown', onKeyDown)
     return () => {
       dialog.removeEventListener('keydown', onKeyDown)
-      if (opener?.isConnected) opener.focus()
+      if (restoreFocus && opener?.isConnected) opener.focus()
     }
-  }, [active])
+  }, [active, initialFocusSelector, restoreFocus])
 
   return dialogRef
 }

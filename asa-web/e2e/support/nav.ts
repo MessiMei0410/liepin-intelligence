@@ -36,6 +36,16 @@ export async function openCandidateFromJob(page: Page, candidateName = CANDIDATE
 
 export async function openWorkflow(page: Page, workflowId = WORKFLOW_ID): Promise<Locator> {
   await page.goto(`/asa-app#workflow=${workflowId}`)
+  const panel = page.locator('.compact-workflow-dialog')
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('.compact-workflow-head h2')).toContainText('士兰微')
+  return panel
+}
+
+export async function openWorkflowDetail(page: Page, workflowId = WORKFLOW_ID): Promise<Locator> {
+  const compact = await openWorkflow(page, workflowId)
+  await compact.getByRole('button', { name: '查看' }).click()
+  await compact.getByRole('menuitem', { name: '完整详情' }).click()
   const panel = page.locator('.workflow-panel')
   await expect(panel).toBeVisible()
   await expect(panel.locator('.detail-head h2')).toContainText('士兰微')

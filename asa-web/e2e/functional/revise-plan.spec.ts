@@ -1,5 +1,5 @@
 import { expect, skipIfNoBackend, test } from '../support/fixtures'
-import { WORKFLOW_ID, openWorkflow } from '../support/nav'
+import { WORKFLOW_ID, openWorkflowDetail } from '../support/nav'
 
 skipIfNoBackend()
 
@@ -28,7 +28,7 @@ test('策略调整：终态入口将工作流上下文附着到 Agent', async ({
   page.on('request', request => {
     if (request.url().includes('/api/asa/floating/context')) floatingContextCalls += 1
   })
-  const panel = await openWorkflow(page)
+  const panel = await openWorkflowDetail(page)
   await panel.getByRole('group', { name: '下一步操作' }).getByRole('button', { name: '在 Agent 中调整策略' }).click()
   await expectAgentContext(page)
   expect(floatingContextCalls).toBe(0)
@@ -38,7 +38,7 @@ test('策略讨论：头部入口进入 Agent，不触发旧 revise 接口', asy
   await installNativeProbe(page)
   let reviseCalls = 0
   await page.route(`**/api/v1/workflows/${WORKFLOW_ID}/revise`, route => { reviseCalls += 1; void route.continue() })
-  const panel = await openWorkflow(page)
+  const panel = await openWorkflowDetail(page)
   await panel.locator('header.detail-head').getByRole('button', { name: '在 Agent 中讨论策略' }).click()
   await expectAgentContext(page)
   expect(reviseCalls).toBe(0)

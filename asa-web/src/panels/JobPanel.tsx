@@ -3,7 +3,7 @@ import { ChevronLeft, MessageSquareText, X, ShieldAlert, Route, UserRoundSearch,
 import { JobDetail } from '../api'
 import { JobProfileInsights } from './JobProfileInsights'
 import { JobBrief } from './JobBrief'
-import { useDraggableOverlay } from '../shared/useDraggableOverlay'
+import { DialogPanel } from '../shared/Dialog'
 import { RecommendationMetricsCard } from './RecommendationMetricsCard'
 import { JobWeeklyReport } from './JobWeeklyReport'
 import { SourcingAdjustments } from './SourcingAdjustments'
@@ -40,7 +40,6 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
   const [followupExpanded, setFollowupExpanded] = useState(false)
   const [eventExpanded, setEventExpanded] = useState(false)
   const [experimentExpanded, setExperimentExpanded] = useState(false)
-  const { overlayRef, panelRef, dragProps } = useDraggableOverlay()
   const position = recordValue(value.position)
   const profile = recordValue(value.profile)
   const hard = textList(profile.hard_requirements, position.hard_requirements, value.hard_requirements)
@@ -65,9 +64,8 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
     ['学历', position.education || profile.education_requirement || '待确认'], ['经验', position.experience || profile.experience_requirement || '待确认'],
   ]
   return (
-    <div className="overlay" ref={overlayRef}>
-      <article ref={panelRef} className="detail-panel job-detail-panel">
-        <header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动" {...dragProps}>
+    <DialogPanel panelClassName="detail-panel job-detail-panel" onEscape={close}>
+        <header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动">
           <button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft /></button>
           <div><h2>{value.title}</h2><p>{value.client} · {String(position.department || position.team || value.location || '岗位详情')} · 岗位 #{value.id}</p></div>
           <div className="detail-actions">
@@ -193,8 +191,7 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
                 </div>}
           </aside>
         </div>
-      </article>
-    </div>
+    </DialogPanel>
   )
 }
 

@@ -153,6 +153,7 @@ const stubReviewFetch = (payload: unknown = reviewPayload) => {
 afterEach(() => {
   vi.unstubAllGlobals()
   window.localStorage.clear()
+  window.sessionStorage.clear()
   clearStrategyReviewCache()
 })
 

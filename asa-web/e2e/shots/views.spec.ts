@@ -153,11 +153,38 @@ test('岗位 #154 详情', async ({ page }) => {
 
 test('工作流详情（blocked + completed_needs_review）', async ({ page }) => {
   const panel = await openWorkflow(page)
-  await expect(panel.getByRole('group', { name: '下一步操作' })).toBeVisible()
-  // 人选结果加载完成（岗位级口径，人数随轮次增长）+ 执行步骤 5 步全部渲染
-  await expect(panel.locator('.workflow-candidates')).toContainText(/岗位已评估 \d+ 人/)
-  await expect(panel.locator('.workflow-step')).toHaveCount(5)
-  // 渠道漏斗加载完成（第 7 轮有真实漏斗行：猎聘渠道行 + X-SaaS 0 召回归因）
-  await expect(panel.locator('.workflow-funnel')).toContainText('猎聘')
+  await expect(panel.locator('.compact-workflow-steps li')).toHaveCount(5)
+  await expect(panel.getByRole('button', { name: '查看' })).toBeVisible()
+  await expect(page.locator('.workflow-strategy')).toHaveCount(0)
+  await expect(page.locator('.workflow-candidates')).toHaveCount(0)
+  await expectStableViewport(page)
   await expect(page).toHaveScreenshot('workflow.png')
+})
+
+// 模块二级界面：策略/人选各一屏，390×700 浮窗形态重点防溢出与文字截断。
+test('工作流策略二级界面', async ({ page }) => {
+  const compact = await openWorkflow(page)
+  await compact.getByRole('button', { name: '查看' }).click()
+  await compact.getByRole('menuitem', { name: '寻访策略' }).click()
+  const view = page.locator('.workflow-section-dialog')
+  await expect(view.locator('.workflow-strategy')).toBeVisible()
+  // 目标卡的地点/状态/P0 来自 App 岗位列表（异步），等其落盘再拍，避免基线抖动。
+  await expect(view.locator('.workflow-target')).toContainText('待启动')
+  await expect(view.getByRole('button', { name: '返回' })).toBeVisible()
+  await expect(view.getByRole('button', { name: '关闭' })).toBeVisible()
+  await expectStableViewport(page)
+  await expect(page).toHaveScreenshot('workflow-section-strategy.png')
+})
+
+test('工作流人选二级界面', async ({ page }) => {
+  const compact = await openWorkflow(page)
+  await compact.getByRole('button', { name: '查看' }).click()
+  await compact.getByRole('menuitem', { name: '人选名单' }).click()
+  const view = page.locator('.workflow-section-dialog')
+  await expect(view.locator('.workflow-candidates')).toBeVisible()
+  // 人选分页异步拉取：等列表或空态落盘再拍，避免基线抖动。
+  await expect(view.locator('.workflow-candidates .candidate-result-list, .workflow-candidates .insight-empty').first()).toBeVisible()
+  await expect(view.locator('.workflow-strategy')).toHaveCount(0)
+  await expectStableViewport(page)
+  await expect(page).toHaveScreenshot('workflow-section-candidates.png')
 })

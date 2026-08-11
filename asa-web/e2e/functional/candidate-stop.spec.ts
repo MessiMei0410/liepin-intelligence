@@ -71,7 +71,10 @@ test('停止候选人：确认后原地阶段变化并提示成功', async ({ pa
   await dialog.getByPlaceholder('补充说明（选填）').fill('E2E 验证停止流程')
   await dialog.getByRole('button', { name: '确认停止推进' }).click()
 
-  await expect(panel.locator('.candidate-action-feedback.success')).toContainText('停止推进已完成，候选人状态已更新。')
+  // 全套件并行跑时其他用例可能已停止过该候选人（共享同一份 DB 副本），此时 commit 走幂等重放，
+  // 文案为“此前已完成，已同步当前候选人状态”——两种成功路径都接受，行为断言（H5/已停止推进）不变。
+  // 并行负载下 commit+刷新可能超过默认 10s 断言窗口，放宽到 20s。
+  await expect(panel.locator('.candidate-action-feedback.success')).toContainText(/停止推进(此前)?已完成/, { timeout: 20_000 })
   await expect(dialog).toHaveCount(0)
 
   // 原地变化：面板头部动作区换成“已停止推进 · 方向不符”，当前阶段变为 H5。

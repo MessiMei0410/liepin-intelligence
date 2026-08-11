@@ -1,4 +1,4 @@
-import type { CandidateListCardData, CandidateListCandidate, CandidateListGroup } from '../workflows/CandidateListCard'
+import type { CandidateListCardData } from '../workflows/CandidateListCard'
 
 export type CandidateChange = {
   id: number

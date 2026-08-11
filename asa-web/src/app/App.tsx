@@ -7,7 +7,7 @@ import { Candidates } from '../pages/Candidates'
 import { Progress } from '../pages/Progress'
 import { JobPanel } from '../panels/JobPanel'
 import { CandidatePanel } from '../panels/CandidatePanel'
-import { WorkflowPanel } from '../workflows/WorkflowPanel'
+import { WorkflowSurface } from '../workflows/WorkflowSurface'
 import { SourcingCandidatesPage } from '../pages/SourcingCandidatesPage'
 import { resolveWorkflowRevision } from '../workflow/workflowRevision'
 import { Diagnostics } from './Diagnostics'
@@ -413,7 +413,7 @@ export function App() {
     </aside>}
     {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
     {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
-    {workflow && <WorkflowPanel value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
+    {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
     {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}

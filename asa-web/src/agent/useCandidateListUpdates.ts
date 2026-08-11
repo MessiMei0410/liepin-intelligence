@@ -46,7 +46,7 @@ export function useCandidateListUpdates(
         onUpdate(prev => changes.reduce((acc, change) => updateCandidateListDialogData(acc, change), prev))
         const newest = (result.changes || []).map(change => change.updated_at).filter(Boolean).sort().pop()
         if (newest) sinceRef.current = newest
-      } catch (_) {
+      } catch {
         // 轮询失败静默，下次继续
       }
     }
