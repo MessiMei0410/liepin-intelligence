@@ -72,6 +72,7 @@ def test_confirmation_is_bound_to_the_pending_plan_identity() -> None:
         "workflow_id": "workflow_1",
         "version": 3,
         "plan_hash": "hash_3",
+        "evidence": ["可以"],
     }
 
 

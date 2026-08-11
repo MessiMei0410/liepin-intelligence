@@ -4,6 +4,8 @@ import hashlib
 import re
 from typing import Any
 
+from .conversation_state import action_evidence_for_turn
+
 
 ACTION_SPEECH_ACTS = {"propose", "confirm", "execute", "correct", "cancel"}
 PLAN_EFFECTS = {"create_plan", "revise_plan", "start_plan", "cancel_plan"}
@@ -209,19 +211,32 @@ def build_turn_decision(
         raw_constraint_changes,
     )
     effective = apply_constraint_changes(previous_constraints, changes)
+    action_evidence = [
+        str(item).strip()
+        for item in (understanding.get("action_evidence") or [])
+        if str(item).strip() and str(item).strip() in message
+    ]
+    if not action_evidence:
+        evidence_understanding = dict(understanding)
+        evidence_understanding["constraint_changes"] = changes
+        action_evidence = action_evidence_for_turn(
+            evidence_understanding,
+            message=message,
+            pending_plan_ref=pending_ref,
+        )
 
     effect = "answer"
     authorization = "none"
     if needs_clarification:
         effect = "clarify"
-    elif speech_act in {"ask", "discuss", "other"}:
+    elif speech_act in {"ask", "inform", "discuss", "other"}:
         effect = "answer"
     elif speech_act == "cancel":
         effect = "cancel_plan" if pending_ref.get("workflow_id") else "answer"
     elif action == "strategy_revision" and speech_act in {"propose", "execute", "correct"}:
-        effect = "revise_plan" if pending_ref.get("workflow_id") else "clarify"
+        effect = "revise_plan" if pending_ref.get("workflow_id") and action_evidence else "clarify"
     elif speech_act == "correct":
-        effect = "revise_plan" if pending_ref.get("workflow_id") and changes else "answer"
+        effect = "revise_plan" if pending_ref.get("workflow_id") and changes and action_evidence else "answer"
     elif speech_act == "confirm":
         if pending_ref.get("workflow_id"):
             effect = "start_plan"
@@ -233,7 +248,7 @@ def build_turn_decision(
         explicit_execute = bool(re.search(r"(?:立即|马上|现在|直接)?(?:开始|执行|启动|马上搜|直接搜)", message))
         authorization = "confirm_exact_plan" if effect == "start_plan" else "explicit_execute" if explicit_execute else "none"
     elif speech_act == "propose":
-        effect = "create_plan"
+        effect = "create_plan" if action_evidence else "answer"
 
     safe_for_action = bool(
         effect in PLAN_EFFECTS
@@ -241,6 +256,7 @@ def build_turn_decision(
         and action != "none"
         and confidence >= 0.72
         and not needs_clarification
+        and bool(action_evidence)
         and (effect not in {"start_plan", "cancel_plan", "revise_plan"} or pending_ref.get("workflow_id"))
     )
     if not safe_for_action and effect in PLAN_EFFECTS:
@@ -253,6 +269,16 @@ def build_turn_decision(
     ]
     if understanding.get("refers_to_previous"):
         observations.append({"type": "reference", "value": "previous_turn"})
+    if action_evidence:
+        observations.append({"type": "action_evidence", "value": action_evidence})
+    blocked_reason = ""
+    if (
+        action != "none"
+        and speech_act in ACTION_SPEECH_ACTS
+        and not action_evidence
+        and not needs_clarification
+    ):
+        blocked_reason = "missing_explicit_action_evidence"
     return {
         "version": "turn_decision_v2",
         "observations": observations,
@@ -270,6 +296,8 @@ def build_turn_decision(
             "workflow_id": pending_ref.get("workflow_id"),
             "version": pending_ref.get("version"),
             "plan_hash": pending_ref.get("plan_hash"),
+            "evidence": action_evidence,
         },
+        "blocked_reason": blocked_reason,
         "safe_for_action": safe_for_action,
     }

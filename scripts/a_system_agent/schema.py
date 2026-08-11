@@ -211,6 +211,17 @@ CREATE TABLE IF NOT EXISTS agent_copilot_focus (
 CREATE INDEX IF NOT EXISTS idx_agent_copilot_focus_updated
 ON agent_copilot_focus(updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS agent_copilot_state (
+    session_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL DEFAULT 1,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_copilot_state_updated
+ON agent_copilot_state(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_actions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT,

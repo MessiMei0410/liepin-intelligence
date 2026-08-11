@@ -235,6 +235,20 @@ class StrategyV2SchemaTest(unittest.TestCase):
         for key in strategy_v2.STRATEGY_V2_REQUIRED_KEYS:
             assert key in v2
 
+        legacy_profile_pool = dict(
+            v2,
+            step2_target_pool=[
+                {
+                    "path": "same_layer",
+                    "tier": "T2",
+                    "companies": [{"name": "旧画像推荐公司", "source": "legacy_profile_suggestions", "confidence": "medium"}],
+                    "rationale": "来自岗位旧画像推荐目标公司，保留可审计来源",
+                }
+            ],
+        )
+        ok, errors = strategy_v2.validate_strategy_v2(legacy_profile_pool)
+        assert ok, errors
+
         broken = {key: value for key, value in v2.items() if key != "step2_target_pool"}
         ok, errors = strategy_v2.validate_strategy_v2(broken)
         assert not ok
@@ -639,7 +653,7 @@ class StrategyV2StorageTest(AgentDbCase):
         assert metadata["schema_version"] == "strategy_v2"
         assert "strategy_v2" in row[1]
 
-    def test_invalid_v2_is_not_stored_and_records_error(self) -> None:
+    def test_invalid_v2_returns_failed_diagnostic_without_valid_strategy(self) -> None:
         original = strategy_v2.build_strategy_v2
         try:
             strategy_v2.build_strategy_v2 = lambda *args, **kwargs: {"schema_version": "strategy_v2"}  # type: ignore[assignment]
@@ -647,9 +661,77 @@ class StrategyV2StorageTest(AgentDbCase):
         finally:
             strategy_v2.build_strategy_v2 = original  # type: ignore[assignment]
         assert "strategy_v2" not in result
-        assert "artifacts" not in result, "校验失败的 strategy_v2 不得写库"
+        assert result["artifacts"]
+        diagnostic = result["artifacts"][0]
+        assert diagnostic["type"] == "search_strategy"
+        assert diagnostic["validation_status"] == "failed"
+        assert diagnostic["metadata"]["diagnostic"] is True
+        assert "strategy_v2" not in diagnostic["metadata"]
         assert any("缺少必备键" in error for error in result["strategy_v2_error"]["errors"])
         assert result["strategy_v2_error"]["trace"]
+        assert result["postcondition"] == {
+            "verified": False,
+            "recoverable": True,
+            "reason": result["postcondition"]["reason"],
+        }
+
+    def test_strategy_learning_context_reads_pending_adjustments_before_close(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE agent_sourcing_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                candidate_id INTEGER,
+                adjust_type TEXT NOT NULL,
+                value TEXT NOT NULL,
+                rationale TEXT,
+                confidence REAL DEFAULT 0.5,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT,
+                applied_at TEXT,
+                applied_round INTEGER,
+                dedupe_key TEXT UNIQUE
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_sourcing_adjustments
+                (job_id,candidate_id,adjust_type,value,rationale,status)
+            VALUES (10,30,'exclude_company','ASM','候选人明确停止','pending')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        job = self.service.capability_runtime._job({"type": "job", "id": 10})
+        learning = self.service.capability_runtime._strategy_learning_context(job)
+        assert learning["stop_note_adjustments"]
+        assert learning["stop_note_adjustments"][0]["value"] == "ASM"
+
+    def test_workflow_surfaces_strategy_validation_error_instead_of_adapter_contract_error(self) -> None:
+        original = strategy_v2.build_strategy_v2
+        try:
+            strategy_v2.build_strategy_v2 = lambda *args, **kwargs: {"schema_version": "strategy_v2"}  # type: ignore[assignment]
+            goal = self.service.create_goal("给长越科技机械高级工程师补充10位合适人选", {"type": "job", "id": 10})
+            workflow_id = goal["workflow"]["workflow_id"]
+            self.service.start_workflow(workflow_id)
+            state = self.wait_for(workflow_id, {"failed"}, timeout=12)
+        finally:
+            strategy_v2.build_strategy_v2 = original  # type: ignore[assignment]
+
+        assert state["workflow"]["status"] == "failed", state["workflow"]
+        strategy_step = next(item for item in state["steps"] if item["capability_id"] == "search_strategy")
+        assert "strategy_v2 校验" in strategy_step["error"]
+        assert "缺少必备键" in strategy_step["error"]
+        assert "必须返回可审计产物" not in strategy_step["error"]
+        diagnostic = strategy_step["output"]["artifacts"][0]
+        assert diagnostic["validation_status"] == "failed"
+        assert strategy_step["output"]["artifact_ids"]
+        assert len(state["artifacts"]) == 1
+        assert state["artifacts"][0]["artifact_type"] == "search_strategy"
+        assert state["artifacts"][0]["validation_status"] == "failed"
 
     def test_v1_step_output_read_compat(self) -> None:
         goal = self.service.create_goal("给长越科技机械高级工程师补充10位合适人选", {"type": "job", "id": 10})

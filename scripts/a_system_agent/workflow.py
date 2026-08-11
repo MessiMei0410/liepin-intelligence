@@ -1492,6 +1492,23 @@ class WorkflowEngine:
                             )
                             conn.commit()
                             continue
+                        # 最终后置校验失败时，只落库能力明确标记为非通过的诊断产物。
+                        # 正常业务产物仍必须等校验通过后再落库，避免把未验证结果冒充交付物。
+                        diagnostic_artifacts = [
+                            artifact
+                            for artifact in (result.get("artifacts") or [])
+                            if isinstance(artifact, dict)
+                            and str(artifact.get("validation_status") or "").lower()
+                            in {"failed", "blocked", "warning", "needs_input"}
+                        ]
+                        diagnostic_ids = self._store_artifacts(
+                            conn,
+                            workflow["goal_id"],
+                            workflow_id,
+                            step_data["id"],
+                            diagnostic_artifacts,
+                        )
+                        output["artifact_ids"] = diagnostic_ids
                         conn.execute(
                             """
                             UPDATE agent_workflow_steps

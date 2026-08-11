@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 MULTICHANNEL = Path("/Users/messi/.codex/skills/multi-channel-search/scripts/a_system_multichannel.py")
 LIEPIN_SEARCH = Path(__file__).resolve().parents[1] / "run_published_position_search.py"
+RESUME_BACKFILL = Path(__file__).resolve().parents[1] / "backfill_pooled_resume_details.py"
 XSAAS_SEARCH = Path(__file__).resolve().parents[1] / "xsaas_candidate_search.py"
 OPENCLI_SHADOW = Path(__file__).resolve().parents[1] / "opencli_sourcing_shadow.py"
 LIEPIN_OUTREACH = Path("/Users/messi/.codex/skills/liepin-cdp-search/scripts/liepin_im_followup.py")
@@ -1018,6 +1019,38 @@ class RecruitingCapabilityRuntime:
             applied, request.get("strategy") if isinstance(request.get("strategy"), dict) else {},
             workflow_id, client, job,
         )
+        # 入池后补抓：对已入池但还没有完整猎聘履历的人选自动补抓一轮，写入 source_profiles，
+        # 使人选详情页与后续 candidate_batch_assessment 能直接拿到完整履历。失败不阻断寻访。
+        resume_backfill: dict[str, Any] = {"status": "skipped", "reason": ""}
+        if risk_stop_reason:
+            resume_backfill["reason"] = "channel_risk_stop"
+        elif str(os.environ.get("ASA_RESUME_BACKFILL", "on")).strip().lower() in {"0", "off", "false"}:
+            resume_backfill["reason"] = "disabled"
+        else:
+            self._ensure_external_request_active(request)
+            _, detail_flags = self._liepin_detail_capture_options(request, target)
+            try:
+                backfill_limit = int(os.environ.get("ASA_RESUME_BACKFILL_LIMIT", "40") or 40)
+            except (TypeError, ValueError):
+                backfill_limit = 40
+            backfill_limit = max(1, min(backfill_limit, 100))
+            try:
+                resume_backfill = self._run_external_json(
+                    [
+                        self.python, str(RESUME_BACKFILL),
+                        "--db", str(self.service.db_path),
+                        "--client", client, "--job", job,
+                        "--port", str(int(request.get("cdp_port") or 9223)),
+                        "--limit", str(backfill_limit),
+                        *detail_flags,
+                    ],
+                    120 + 25 * backfill_limit,
+                    cancel_check=cancel_check,
+                )
+            except ExternalExecutionCancelled:
+                raise
+            except Exception as exc:
+                resume_backfill = {"status": "failed", "error": str(exc)[:300]}
         recall_ledger = self._persist_candidate_recalls(
             run_id=run_id,
             workflow_id=workflow_id,
@@ -1057,6 +1090,7 @@ class RecruitingCapabilityRuntime:
             "opencli_primary": {"enabled": _oc1, "channels": primary_channels},
             "intake": {"dry_run": dry, "applied": applied, "source_file": str(candidates_path)},
             "attributions": attributions,
+            "resume_backfill": resume_backfill,
             "candidate_recall_ledger": recall_ledger,
             "query_cell_states": query_cell_states,
             "coverage_certificate": coverage_certificate,
@@ -3065,28 +3099,28 @@ class RecruitingCapabilityRuntime:
                     (job["id"],),
                 ).fetchall()
             ] if self._table(conn, "agent_sourcing_attributions") and self._table(conn, "agent_sourcing_feedback") else []
+            pending_adjustments: list[dict[str, Any]] = []
+            if self._table(conn, "agent_sourcing_adjustments"):
+                pending_adjustments = [
+                    _row(row)
+                    for row in conn.execute(
+                        """
+                        SELECT a.*, p.display_name AS candidate_name
+                        FROM agent_sourcing_adjustments a
+                        LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
+                        LEFT JOIN people p ON p.id=jc.person_id
+                        WHERE a.job_id=? AND a.status='pending'
+                        ORDER BY a.id
+                        """,
+                        (job["id"],),
+                    ).fetchall()
+                ]
         finally:
             conn.close()
         memories = self.service.search_memories(
             f"{job['client']} {job['title']} 寻访关键词 搜索效果",
             context_type="job", context_id=job["id"], client=str(job["client"]), job=str(job["title"]), limit=8,
         )
-        pending_adjustments: list[dict[str, Any]] = []
-        if self._table(conn, "agent_sourcing_adjustments"):
-            pending_adjustments = [
-                _row(row)
-                for row in conn.execute(
-                    """
-                    SELECT a.*, p.display_name AS candidate_name
-                    FROM agent_sourcing_adjustments a
-                    LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
-                    LEFT JOIN people p ON p.id=jc.person_id
-                    WHERE a.job_id=? AND a.status='pending'
-                    ORDER BY a.id
-                    """,
-                    (job["id"],),
-                ).fetchall()
-            ]
         return {
             "historical_experiments": experiments,
             "explicit_corrections": correction,
@@ -3614,8 +3648,52 @@ class RecruitingCapabilityRuntime:
                 )
             ]
         else:
-            # 硬性约束：缺必备键/版本号错误时不写库，留 error 供排查。
-            result["strategy_v2_error"] = {"errors": v2_errors, "trace": classification["trace"][-12:]}
+            # 即使策略未通过 schema 校验，脚本能力也必须返回一个可审计的结果。
+            # 这个产物是诊断记录，不是可执行策略；后置条件保持失败，避免无效策略
+            # 被工作流误判为完成，同时把真实校验错误传给工作流和前端。
+            error_payload = {
+                "errors": v2_errors,
+                "trace": classification["trace"][-12:],
+                "input_level": classification["input_level"],
+                "schema_version": strategy_v2.STRATEGY_V2_VERSION,
+                "client": str(job.get("client") or ""),
+                "job": str(job.get("title") or ""),
+            }
+            result["strategy_v2_error"] = error_payload
+            readable_errors = v2_errors or ["未提供具体校验错误"]
+            diagnostic_lines = [
+                "# 多渠道寻访策略校验诊断",
+                "",
+                f"岗位：{job.get('client') or ''}｜{job.get('title') or ''}",
+                f"输入分级：{classification['input_level']}",
+                "",
+                "## 校验错误",
+                *[f"- {error}" for error in readable_errors],
+                "",
+                "## 执行追踪",
+                *[f"- {item}" for item in error_payload["trace"]],
+                "",
+                "该记录仅用于审计和定位问题，未生成可执行寻访策略。",
+            ]
+            result["summary"] = "寻访策略未通过 strategy_v2 校验，已生成诊断记录。"
+            result["artifacts"] = [
+                self._artifact(
+                    "search_strategy",
+                    "寻访策略校验诊断",
+                    content="\n".join(diagnostic_lines),
+                    validation="failed",
+                    metadata={
+                        "diagnostic": True,
+                        "schema_version": strategy_v2.STRATEGY_V2_VERSION,
+                        "strategy_v2_error": error_payload,
+                    },
+                )
+            ]
+            result["postcondition"] = {
+                "verified": False,
+                "recoverable": True,
+                "reason": "寻访策略未通过 strategy_v2 校验：" + "；".join(readable_errors[:4]),
+            }
         return result
 
     def run_multi_channel_sourcing(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:

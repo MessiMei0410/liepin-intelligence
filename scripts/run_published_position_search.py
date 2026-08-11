@@ -367,6 +367,10 @@ def merge_resume_detail(card: dict[str, Any], resume: dict[str, Any]) -> dict[st
             "resume_capture_missing": missing,
             "resume_capture_error": "" if not missing else f"缺少：{'、'.join(missing)}",
             "resume_captured_at": str(resume.get("captured_at") or datetime.now().isoformat(timespec="seconds")),
+            "resume_id": str(resume.get("resume_id") or "").strip(),
+            "city": str(resume.get("city") or card.get("city") or "").strip(),
+            "education": str(resume.get("education") or card.get("education") or "").strip(),
+            "experience": str(resume.get("experience") or card.get("experience") or "").strip(),
         }
     )
     return card

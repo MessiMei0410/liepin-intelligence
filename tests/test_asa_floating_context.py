@@ -221,3 +221,4 @@ def test_continuation_still_restores_focus_when_selected_is_global(
     assert conflicts == []
     assert context.get("type") == "candidate"
     assert int(context.get("id") or 0) == candidate_a
+

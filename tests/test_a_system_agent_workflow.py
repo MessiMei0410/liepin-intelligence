@@ -58,6 +58,29 @@ class CapturingCopilotLLM(FakeLLM):
         return self._chat_text
 
 
+class MisclassifiesBudgetAsSalaryLLM(FakeLLM):
+    def __init__(self) -> None:
+        super().__init__(fake_assessment(), chat_text="模型误判回答", intent_understanding=self._intent)
+
+    def _intent(self, payload: dict) -> dict | None:
+        message = str(payload.get("current_message") or "")
+        if "预算" not in message:
+            return None
+        return {
+            "speech_act": "propose",
+            "action": "salary",
+            "objective": "为长越科技的机械高级工程师岗位整理谈薪材料",
+            "target": {"type": "job", "id": 10, "client": "长越科技", "label": "机械高级工程师"},
+            "constraints": [{"quote": message, "kind": "must"}],
+            "constraint_changes": [{"operation": "add", "quote": message, "kind": "must"}],
+            "refers_to_previous": False,
+            "confidence": 0.9,
+            "needs_clarification": False,
+            "missing_fields": [],
+            "clarification_question": "",
+        }
+
+
 class CapturingToolCopilotLLM(CapturingCopilotLLM):
     def __init__(self) -> None:
         super().__init__()
@@ -68,6 +91,23 @@ class CapturingToolCopilotLLM(CapturingCopilotLLM):
         self.tool_payloads.append(payload)
         self.tool_messages.append(messages or [])
         return {"content": self._chat_text, "tool_calls": []}
+
+
+class ScriptedReadToolCopilotLLM(CapturingToolCopilotLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rounds = 0
+
+    def copilot_with_tools(self, payload, tools, messages=None, allow_tools=True):
+        self.tool_payloads.append(payload)
+        self.tool_messages.append(messages or [])
+        self.rounds += 1
+        if self.rounds == 1 and allow_tools:
+            return {
+                "content": "",
+                "tool_calls": [{"id": "dashboard_1", "name": "get_dashboard", "arguments": {}}],
+            }
+        return {"content": "当前驾驶舱数据已核验。", "tool_calls": []}
 
 
 class BlockingCopilotLLM(CapturingCopilotLLM):
@@ -179,7 +219,7 @@ class WorkflowEngineTest(AgentDbCase):
         try:
             service.submit_assessment(30, wait=True)
             service.copilot_agent(
-                "请深入解释为什么匹配",
+                "请深入说明当前状态",
                 session_id="tool_candidate_explanation",
                 context={"type": "candidate", "id": 30, "display_mode": "workspace"},
             )
@@ -189,6 +229,36 @@ class WorkflowEngineTest(AgentDbCase):
             assert payload["response_detail"] == "expanded"
             assert message_payload["response_detail"] == "expanded"
             assert message_payload["selected_context"]["assessment"]["criteria"]["hard_requirements"]
+        finally:
+            service.close()
+
+    def test_canonical_copilot_uses_read_only_tools_without_creating_workflow(self) -> None:
+        llm = ScriptedReadToolCopilotLLM()
+        service = AgentService(self.db_path, llm)
+        try:
+            result = service.copilot(
+                "今天驾驶舱是什么情况？",
+                session_id="canonical_read_tool_loop",
+                context={"type": "global", "display_mode": "workspace"},
+            )
+            assert result["answer"] == "当前驾驶舱数据已核验。"
+            assert result["workflow_id"] is None
+            assert result["tool_calls"][0]["tool"] == "get_dashboard"
+            assert result["tool_calls"][0]["result"]["success"] is True
+            assert result["model_participation"]["mode"] == "model_tools"
+            conn = service._connect()
+            try:
+                structured = json.loads(
+                    conn.execute(
+                        """SELECT structured_json FROM agent_copilot_messages
+                           WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1""",
+                        ("canonical_read_tool_loop",),
+                    ).fetchone()[0]
+                )
+                assert conn.execute("SELECT COUNT(*) FROM agent_workflows").fetchone()[0] == 0
+            finally:
+                conn.close()
+            assert structured["tool_calls"][0]["tool"] == "get_dashboard"
         finally:
             service.close()
 
@@ -1568,6 +1638,56 @@ class WorkflowEngineTest(AgentDbCase):
         assert history["messages"][-1]["goal"]["goal_id"] == result["goal_id"]
         assert history["messages"][-1]["plan_summary"]
 
+    def test_copilot_job_budget_fact_does_not_create_salary_workflow(self) -> None:
+        service = AgentService(self.db_path, MisclassifiesBudgetAsSalaryLLM())
+        session_id = "budget_fact_no_salary_workflow"
+        try:
+            service.copilot(
+                "这个人选完美匹配长越科技这个岗位",
+                session_id=session_id,
+                context={"type": "candidate", "id": 30, "page": "candidates"},
+            )
+            result = service.copilot(
+                "长越科技这个岗位预算 120w",
+                session_id=session_id,
+                context={"type": "candidate", "id": 30, "page": "candidates"},
+            )
+
+            assert result["goal_id"] is None
+            assert result["workflow_id"] is None
+            assert "不创建谈薪任务" in result["answer"]
+            assert not any(action["type"] == "start_workflow" for action in result["suggested_actions"])
+
+            conn = service._connect()
+            try:
+                assert conn.execute("SELECT COUNT(*) FROM agent_workflows").fetchone()[0] == 0
+                structured = json.loads(
+                    conn.execute(
+                        """
+                        SELECT structured_json
+                        FROM agent_copilot_messages
+                        WHERE session_id=? AND role='assistant'
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+                focus = json.loads(
+                    conn.execute(
+                        "SELECT focus_json FROM agent_copilot_focus WHERE session_id=?",
+                        (session_id,),
+                    ).fetchone()[0]
+                )
+            finally:
+                conn.close()
+            assert structured["intent_understanding"]["action"] == "none"
+            assert structured["turn_decision"]["effect"] == "answer"
+            assert structured["turn_decision"]["safe_for_action"] is False
+            assert focus["action"] != "salary"
+            assert "长越科技这个岗位预算 120w" in focus["constraints"]
+        finally:
+            service.close()
+
     def test_copilot_focus_survives_message_trim_and_inherits_job(self) -> None:
         session_id = "persistent_focus_test"
         first = self.service.copilot(
@@ -1833,6 +1953,27 @@ class WorkflowEngineTest(AgentDbCase):
         mentioned = self.service._mentioned_jobs_for_copilot("长越的机械岗位")
         assert len(mentioned) == 1
         assert mentioned[0]["job"] == "机械高级工程师"
+
+    def test_copilot_client_only_question_preserves_job_ambiguity(self) -> None:
+        conn = self.service._connect()
+        try:
+            conn.execute("INSERT INTO clients(id,name) VALUES (3,'测试客户')")
+            conn.executemany(
+                """
+                INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at)
+                VALUES (?,?,?,'杭州','已发布','',datetime('now','localtime'))
+                """,
+                [
+                    (301, 3, "测试客户岗位甲"),
+                    (302, 3, "测试客户岗位乙"),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        mentioned = self.service._mentioned_jobs_for_copilot("测试客户最近怎么样？")
+        assert {item["id"] for item in mentioned} == {301, 302}
 
     def test_copilot_starts_followup_sourcing_after_contextual_confirmation(self) -> None:
         session_id = "followup_sourcing_confirmation_test"

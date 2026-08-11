@@ -28,7 +28,9 @@ SCRIPTS_DIR = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from a_system_agent.copilot_handler import (  # noqa: E402
+    _build_candidate_list_composition_answer,
     _format_candidate_list_answer,
+    _is_candidate_list_composition_question,
     _is_candidate_list_query,
 )
 from asa_core.service import CoreService  # noqa: E402
@@ -100,6 +102,22 @@ class CandidateListQueryTest(unittest.TestCase):
         self.assertFalse(_is_candidate_list_query("把名单发给客户"))
         self.assertFalse(_is_candidate_list_query("重新评估这批名单"))
         self.assertFalse(_is_candidate_list_query("把名单整理成推荐报告发给客户"))
+        self.assertFalse(_is_candidate_list_query("客户的客户：新能源车企；目标友商：ABC公司；有禁挖名单"))
+        self.assertFalse(_is_candidate_list_query("目标公司名单：ABC公司、DEF公司"))
+
+    def test_list_composition_questions_do_not_repeat_the_list(self) -> None:
+        questions = (
+            "这个名单上怎么都是做光刻机的",
+            "名单里为什么没有做固晶机的",
+            "为什么名单里全是半导体设备背景的？",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertFalse(_is_candidate_list_query(question))
+                self.assertTrue(_is_candidate_list_composition_question(question))
+
+        self.assertFalse(_is_candidate_list_composition_question("怎么筛出机械候选人"))
+        self.assertFalse(_is_candidate_list_composition_question("把名单里的人都列出来"))
 
     def test_execution_requests_excluded(self) -> None:
         self.assertFalse(_is_candidate_list_query("为长越科技机械高级工程师启动一轮多渠道寻访，猎聘和 X-SaaS 都要跑，目标 10 人"))
@@ -131,6 +149,20 @@ class CandidateListQueryTest(unittest.TestCase):
             answer = _format_candidate_list_answer(str(db), 137, "把名单给我")
             self.assertIn("长越科技｜机械高级工程师", answer)
             self.assertNotIn("固晶机/共晶机/键合机背景", answer)
+        finally:
+            db.unlink()
+
+    def test_composition_answer_uses_current_pool_distribution(self) -> None:
+        db = _make_db()
+        try:
+            answer = _build_candidate_list_composition_answer(
+                str(db), 137, "这个名单上怎么都是做光刻机的"
+            )
+            self.assertIn("长越科技｜机械高级工程师（岗位 137）名单构成分析", answer)
+            self.assertIn("共 5 人", answer)
+            self.assertIn("上海泽丰半导体科技有限公司：1 人", answer)
+            self.assertIn("1/5 人（20%）", answer)
+            self.assertNotIn("候选名单\n", answer)
         finally:
             db.unlink()
 

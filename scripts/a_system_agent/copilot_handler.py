@@ -24,6 +24,12 @@ from . import strategy_v2
 from .native_attachments import attachment_read_requested, image_analysis_requested
 from .capability_runtime import ZERO_RESULT_ATTRIBUTION_LABELS
 from .turn_decision import build_turn_decision
+from .conversation_state import (
+    TERMINAL_WORKFLOW_STATUSES,
+    build_context_state,
+    deterministic_context_summary,
+    enrich_turn_understanding,
+)
 
 
 _EXPANDED_EXPLANATION_MARKERS = (
@@ -455,18 +461,20 @@ def _mentioned_jobs_for_copilot(self, message: str, limit: int = 5) -> list[dict
     # 岗位状态过滤（2026-07-22）：黑名单状态（待启动/暂停/只读快照/已拆分等）
     # 的岗位不作为可推荐/可定位结果返回；名单见 a_system_agent/job_status.py。
     rows = [row for row in rows if job_status_intake_allowed(row["status"])]
-    scored: list[tuple[int, dict[str, Any]]] = []
+    scored: list[tuple[int, bool, dict[str, Any]]] = []
     for row in rows:
         item = _row(row)
         client = str(item.get("client") or "")
         job = str(item.get("job") or "")
         score = 0
         job_id = int(item.get("id") or 0)
+        specific_evidence = False
         client_matched = any(alias in cleaned for alias in _client_aliases(client))
         id_matched = bool(job_id and re.search(rf"(?:#\s*|岗位\s*#?\s*){job_id}(?!\d)", cleaned, re.I))
         title_matched = bool(job and job in cleaned)
         if id_matched:
             score += 100
+            specific_evidence = True
         if client_matched:
             score += 12
         # 没有客户名、也不是精确岗位名/ID 时，不拿岗位标题里的零散词去碰全文，
@@ -477,6 +485,7 @@ def _mentioned_jobs_for_copilot(self, message: str, limit: int = 5) -> list[dict
             token = token.strip()
             if len(token) >= 2 and token in cleaned:
                 score += min(8, len(token))
+                specific_evidence = True
         # Match the business core of a title, not only its full formal wording.
         # E.g. 自动化软件岗位 -> 自动化软件高级工程师, 技术市场岗 -> 技术市场经理/总监.
         core_parts = re.split(r"[\s/（）()、,，｜|]+", job)
@@ -487,23 +496,109 @@ def _mentioned_jobs_for_copilot(self, message: str, limit: int = 5) -> list[dict
                 core = core.replace(role_word, "")
             if len(core) >= 2 and core in cleaned:
                 score += min(18, len(core) * 3)
+                specific_evidence = True
             # A two-character domain keyword is enough when the client is explicit
             # and only one open job contains it (软件/机械/电气 etc.).
             for size in range(min(6, len(core)), 1, -1):
                 match = next((core[i:i + size] for i in range(len(core) - size + 1) if core[i:i + size] in cleaned), "")
                 if match:
                     score += min(12, size * 2)
+                    specific_evidence = True
                     break
         if score:
             item["summary"] = str(item.get("summary") or "")[:900]
-            scored.append((score, item))
-    scored.sort(key=lambda pair: (pair[0], int(pair[1].get("id") or 0)), reverse=True)
+            scored.append((score, specific_evidence, item))
+    scored.sort(key=lambda pair: (pair[0], int(pair[2].get("id") or 0)), reverse=True)
     # "长越的机械岗位" often matches every 长越岗位 through the client name,
     # while "机械" identifies one of them. Return that clear winner as a real
     # reference; only similarly scored jobs remain ambiguous for clarification.
-    if len(scored) > 1 and scored[0][0] > scored[1][0]:
-        return [scored[0][1]]
-    return [item for _, item in scored[: max(1, min(int(limit or 5), 10))]]
+    if len(scored) > 1 and scored[0][0] > scored[1][0] and scored[0][1]:
+        return [scored[0][2]]
+    return [item for _, _, item in scored[: max(1, min(int(limit or 5), 10))]]
+
+
+def _reconcile_copilot_runtime_state(
+    conn: sqlite3.Connection,
+    focus: dict[str, Any],
+    state: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Remove terminal workflow references before they can steer a later turn."""
+    focus = dict(focus or {})
+    state = dict(state or {})
+    refs: list[str] = []
+    for key in ("pending_workflow", "current_workflow"):
+        value = focus.get(key) if isinstance(focus.get(key), dict) else {}
+        if value.get("workflow_id"):
+            refs.append(str(value["workflow_id"]))
+    pending_plan = state.get("pending_plan") if isinstance(state.get("pending_plan"), dict) else {}
+    active_goal = state.get("active_goal") if isinstance(state.get("active_goal"), dict) else {}
+    for value in (pending_plan, active_goal):
+        if value.get("workflow_id"):
+            refs.append(str(value["workflow_id"]))
+    statuses: dict[str, str] = {}
+    if refs and _table_exists(conn, "agent_workflows"):
+        placeholders = ",".join("?" for _ in set(refs))
+        rows = conn.execute(
+            f"SELECT workflow_id,status FROM agent_workflows WHERE workflow_id IN ({placeholders})",
+            tuple(dict.fromkeys(refs)),
+        ).fetchall()
+        statuses = {str(row["workflow_id"]): str(row["status"] or "") for row in rows}
+
+    active_refs: list[dict[str, Any]] = []
+    terminal_actions: set[str] = set()
+    for key in ("pending_workflow", "current_workflow"):
+        value = focus.get(key) if isinstance(focus.get(key), dict) else {}
+        workflow_id = str(value.get("workflow_id") or "")
+        status = statuses.get(workflow_id, str(value.get("status") or ""))
+        if workflow_id and status in TERMINAL_WORKFLOW_STATUSES:
+            terminal_actions.add(str(value.get("action") or ""))
+            focus[key] = {}
+        elif workflow_id:
+            value = dict(value)
+            value["status"] = status or value.get("status")
+            focus[key] = value
+            active_refs.append(value)
+
+    pending_workflow_id = str(pending_plan.get("workflow_id") or "")
+    pending_status = statuses.get(pending_workflow_id, str(pending_plan.get("status") or ""))
+    if pending_workflow_id and pending_status in TERMINAL_WORKFLOW_STATUSES:
+        terminal_actions.add(str(pending_plan.get("action") or ""))
+        state["pending_plan"] = {}
+    elif pending_workflow_id:
+        pending_plan = dict(pending_plan)
+        pending_plan["status"] = pending_status or pending_plan.get("status")
+        state["pending_plan"] = pending_plan
+        active_refs.append(pending_plan)
+
+    goal_workflow_id = str(active_goal.get("workflow_id") or "")
+    goal_status = statuses.get(goal_workflow_id, str(active_goal.get("status") or ""))
+    if goal_workflow_id and goal_status in TERMINAL_WORKFLOW_STATUSES:
+        terminal_actions.add(str(active_goal.get("action") or ""))
+        active_goal = dict(active_goal)
+        active_goal["status"] = goal_status
+        state["active_goal"] = active_goal
+    if not active_refs and str(focus.get("action") or "") in terminal_actions:
+        focus["action"] = ""
+        focus["objective"] = ""
+    focus["conversation_state"] = state
+    return focus, state
+
+
+def get_copilot_context_state(self, session_id: str) -> dict[str, Any]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {}
+    conn = self._connect()
+    try:
+        row = conn.execute(
+            "SELECT state_json FROM agent_copilot_state WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        state = _loads(row["state_json"], {}) if row else {}
+        _, state = _reconcile_copilot_runtime_state(conn, {}, state)
+        return state
+    finally:
+        conn.close()
 
 
 def get_copilot_focus(self, session_id: str) -> dict[str, Any] | None:
@@ -514,35 +609,41 @@ def get_copilot_focus(self, session_id: str) -> dict[str, Any] | None:
     try:
         row = conn.execute(
             """
-            SELECT revision,context_type,context_id,client,job_id,candidate_id,action,
-                   confidence,focus_json,evidence_json,conflicts_json,updated_at
-            FROM agent_copilot_focus WHERE session_id=?
+            SELECT focus.revision,focus.context_type,focus.context_id,focus.client,
+                   focus.job_id,focus.candidate_id,focus.action,focus.confidence,
+                   focus.focus_json,focus.evidence_json,focus.conflicts_json,focus.updated_at,
+                   state.state_json
+            FROM agent_copilot_focus focus
+            LEFT JOIN agent_copilot_state state ON state.session_id=focus.session_id
+            WHERE focus.session_id=?
             """,
             (session_id,),
         ).fetchone()
+        if row is None:
+            return None
+        focus = _loads(row["focus_json"], {})
+        focus.update(
+            {
+                "session_id": session_id,
+                "revision": int(row["revision"] or 1),
+                "context": focus.get("context") or {
+                    "type": row["context_type"] or "global",
+                    "id": row["context_id"],
+                },
+                "client": focus.get("client") or row["client"] or "",
+                "action": focus.get("action") or row["action"] or "",
+                "confidence": float(row["confidence"] or 0),
+                "evidence": _loads(row["evidence_json"], []),
+                "conflicts": _loads(row["conflicts_json"], []),
+                "updated_at": row["updated_at"],
+            }
+        )
+        state = _loads(row["state_json"], {})
+        focus, _ = _reconcile_copilot_runtime_state(conn, focus, state)
+        focus["needs_clarification"] = bool(focus.get("conflicts"))
+        return focus
     finally:
         conn.close()
-    if row is None:
-        return None
-    focus = _loads(row["focus_json"], {})
-    focus.update(
-        {
-            "session_id": session_id,
-            "revision": int(row["revision"] or 1),
-            "context": focus.get("context") or {
-                "type": row["context_type"] or "global",
-                "id": row["context_id"],
-            },
-            "client": focus.get("client") or row["client"] or "",
-            "action": focus.get("action") or row["action"] or "",
-            "confidence": float(row["confidence"] or 0),
-            "evidence": _loads(row["evidence_json"], []),
-            "conflicts": _loads(row["conflicts_json"], []),
-            "updated_at": row["updated_at"],
-        }
-    )
-    focus["needs_clarification"] = bool(focus.get("conflicts"))
-    return focus
 
 
 def _copilot_focus_from_joined_row(row: sqlite3.Row) -> dict[str, Any] | None:
@@ -567,6 +668,114 @@ def _copilot_focus_from_joined_row(row: sqlite3.Row) -> dict[str, Any] | None:
     )
     focus["needs_clarification"] = bool(focus.get("conflicts"))
     return focus
+
+@staticmethod
+def _is_job_budget_fact_update(message: str) -> bool:
+    """A standalone job-budget fact is context, not a salary workflow request."""
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return False
+    if any(
+        token in text
+        for token in (
+            "谈薪", "薪资谈判", "谈薪方案", "薪资核验", "薪资报告", "谈薪风险",
+            "怎么谈", "如何谈", "帮我谈", "整理", "生成", "制作", "处理",
+            "开始", "执行", "启动",
+        )
+    ):
+        return False
+    budget_marker = bool(
+        "预算" in text
+        or any(token in text for token in ("薪资范围", "薪酬范围", "年薪范围", "总包范围", "总包上限"))
+    )
+    if not budget_marker:
+        return False
+    has_amount = bool(
+        re.search(r"\d+(?:\.\d+)?\s*(?:w|W|万|k|K)", text)
+        or re.search(r"\d+(?:\.\d+)?\s*[-~至到]\s*\d+(?:\.\d+)?\s*(?:w|W|万|k|K)", text)
+    )
+    return has_amount and any(token in text for token in ("岗位", "职位", "这个岗", "这个机会", "客户"))
+
+
+def _format_job_budget_fact_answer(message: str, selected_facts: dict[str, Any]) -> str:
+    quote = " ".join(str(message or "").split())
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    client = str(selected_facts.get("client") or job.get("client") or "").strip()
+    title = str(job.get("title") or job.get("job") or "").strip()
+    scope = " / ".join(part for part in (client, title) if part) or "当前岗位"
+    return (
+        f"结论：我把「{quote}」理解为{scope}的岗位预算补充，不创建谈薪任务。\n\n"
+        "下一步：我会在本轮对话里按这个预算判断匹配度和沟通口径；"
+        "如果要写入岗位库，请明确说“更新岗位库预算”。"
+    )
+
+
+_CANDIDATE_RESULT_OBSERVATION_RE = re.compile(
+    r"(?:这轮|本轮|目前|现在|截至现在).{0,30}"
+    r"(?:找到|找出|筛出|筛到|召回|入库).{0,16}"
+    r"(?:\d+|[一二两三四五六七八九十]+)\s*(?:位|个|名|人)?(?:人选|候选人)"
+)
+
+
+def _is_candidate_result_observation(
+    message: str,
+    understanding: dict[str, Any],
+) -> bool:
+    if (
+        str(understanding.get("speech_act") or "") != "inform"
+        or str(understanding.get("action") or "none") != "none"
+        or _is_explicit_question(message)
+    ):
+        return False
+    fact_updates = understanding.get("fact_updates")
+    return bool(
+        isinstance(fact_updates, list)
+        and any(
+            isinstance(item, dict) and item.get("kind") == "workflow_observation"
+            for item in fact_updates
+        )
+        and _CANDIDATE_RESULT_OBSERVATION_RE.search(message)
+    )
+
+
+def _format_candidate_result_observation_answer(
+    message: str,
+    selected_facts: dict[str, Any],
+    existing_focus: dict[str, Any] | None,
+    *,
+    floating_compact: bool,
+) -> str:
+    quote = " ".join(str(message or "").split())
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    client = str(selected_facts.get("client") or job.get("client") or "").strip()
+    title = str(job.get("title") or job.get("job") or "").strip()
+    scope = " / ".join(part for part in (client, title) if part) or "当前岗位"
+    if floating_compact:
+        return (
+            f"结论：我把“{quote}”作为{scope}的结果反馈，不会新建寻访任务。\n\n"
+            "下一步：需要扩池时再明确说“继续寻访”。"
+        )
+
+    state = (
+        existing_focus.get("conversation_state")
+        if isinstance(existing_focus, dict)
+        and isinstance(existing_focus.get("conversation_state"), dict)
+        else {}
+    )
+    active_goal = state.get("active_goal") if isinstance(state.get("active_goal"), dict) else {}
+    objective = str(active_goal.get("objective") or "").strip()
+    status = str(active_goal.get("status") or "").strip()
+    goal_line = (
+        f"当前主线仍是“{objective}”；这条反馈只更新结果，不替换目标。\n\n"
+        if objective and status not in TERMINAL_WORKFLOW_STATUSES
+        else ""
+    )
+    return (
+        f"结论：我把“{quote}”理解为{scope}的本轮结果反馈，不会自动新建寻访任务。\n\n"
+        f"{goal_line}"
+        "下一步：先判断这批结果是否值得推进；需要继续扩池时，再明确说“继续寻访”。"
+    )
+
 
 @staticmethod
 def _new_candidate_outreach_requested(message: str) -> bool:
@@ -916,6 +1125,8 @@ def _build_strategy_patch(
 
 @staticmethod
 def _copilot_action_kind(message: str) -> str:
+    if _is_job_budget_fact_update(message):
+        return ""
     if _strategy_revision_requested(message):
         return "strategy_revision"
     if _new_candidate_outreach_requested(message):
@@ -956,7 +1167,7 @@ def _is_job_requirement_message(message: str) -> bool:
 
 
 _COPILOT_SPEECH_ACTS = {
-    "ask", "discuss", "propose", "confirm", "execute", "correct", "cancel", "other",
+    "ask", "inform", "discuss", "propose", "confirm", "execute", "correct", "cancel", "other",
 }
 _COPILOT_SEMANTIC_ACTIONS = {
     "none", "candidate_sourcing", "strategy_revision", "candidate_outreach",
@@ -1007,11 +1218,26 @@ _QUERY_LIST_EXCLUSIONS = (
 
 
 def _is_candidate_list_query(message: str) -> bool:
-    """判断消息是否为“直接要候选名单/筛选结果”的查询型请求。"""
+    """判断消息是否为“直接要候选名单/筛选结果”的查询型请求。
+
+    疑问句（“这个名单上怎么都是做光刻机的”“名单里为什么没有XX”）
+    不是“再给一份名单”的指令，必须排除，避免名单直答把质疑吞掉。
+    """
     text = " ".join(str(message or "").split())
-    if not any(marker in text for marker in _QUERY_LIST_MARKERS):
+    if _is_explicit_question(text):
         return False
-    if any(token in text for token in _QUERY_LIST_EXCLUSIONS):
+    # “禁挖名单/目标公司名单/排除名单”是岗位策略事实，不是候选人名单请求。
+    # 先移除这些政策语境，再判断是否仍有明确的候选池列表动作，避免把锚点
+    # 回答提前拦截成“候选池为空”。
+    candidate_list_text = re.sub(
+        r"(?:禁挖|排除|竞业|目标公司|目标企业|客户|黑|白)名单",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not any(marker in candidate_list_text for marker in _QUERY_LIST_MARKERS):
+        return False
+    if any(token in candidate_list_text for token in _QUERY_LIST_EXCLUSIONS):
         return False
     return True
 
@@ -1216,6 +1442,94 @@ def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple
         conn.close()
 
 
+def _is_candidate_list_composition_question(message: str) -> bool:
+    """判断消息是否为“质疑名单构成/来源”的提问（如“怎么都是做光刻机的”）。
+
+    这类提问应回答构成分析与原因，而不是再次输出名单。
+    """
+    text = " ".join(str(message or "").split())
+    if not _is_explicit_question(text):
+        return False
+    if not any(marker in text for marker in ("名单", "列表", "这些", "这批", "候选")):
+        return False
+    # 质疑/惊讶语气的核心特征：怎么/为什么/为何 + 都是/全是/都做/没有/找不到
+    if not re.search(r"(?:怎么|为什么|为何).*(?:都是|全是|都做|都是做|都来自|都集中|没有|没看到|看不到|找不到)", text):
+        return False
+    return True
+
+
+def _build_candidate_list_composition_answer(db_path: str, job_id: int, message: str) -> str:
+    """生成“名单构成分析”回答：按公司/行业统计分布，解释为什么名单偏某类背景。"""
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        job = conn.execute(
+            """
+            SELECT j.id, c.name AS client, j.title
+            FROM jobs j JOIN clients c ON c.id = j.client_id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if not job:
+            return ""
+        rows = conn.execute(
+            """
+            SELECT p.current_company AS company, p.current_title AS title
+            FROM job_candidates jc
+            LEFT JOIN people p ON p.id = jc.person_id
+            WHERE jc.job_id = ?
+            """,
+            (job_id,),
+        ).fetchall()
+        if not rows:
+            return ""
+        # 按公司聚合
+        company_counts: dict[str, int] = {}
+        for r in rows:
+            company = str(r["company"] or "未知公司").strip()
+            if not company or company in ("候选人目前没有工作", "我还不知道候选人在哪家公司工作"):
+                company = "（未标注公司）"
+            company_counts[company] = company_counts.get(company, 0) + 1
+        top_companies = sorted(company_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+        total = len(rows)
+        # 半导体/光刻机相关关键词
+        semicon_keywords = (
+            "光刻", "微电子", "半导体", "精科", "北方华创", "中微", "华海清科",
+            "上海微电子", "晶盛", "长川", "天准", "华兴源创", "精测", "第四十五",
+            "芯", "纳", "宏", "AMAT", "ASML", "SMEE", "NAURA", "屹唐", "拓荆",
+        )
+        semicon_hits = sum(
+            1 for r in rows if str(r["company"] or "") and any(k in str(r["company"]) for k in semicon_keywords)
+        )
+        semicon_ratio = semicon_hits / total * 100 if total else 0
+        lines: list[str] = []
+        lines.append(f"## {job['client']}｜{job['title']}（岗位 {job['id']}）名单构成分析")
+        lines.append(f"共 {total} 人。这不是巧合——名单构成主要来自当前岗位的寻访策略。\n")
+        lines.append(f"### 公司分布（前 {len(top_companies)}）")
+        for name, count in top_companies:
+            lines.append(f"- {name}：{count} 人")
+        lines.append("")
+        if semicon_hits:
+            lines.append(
+                f"### 原因\n"
+                f"名单中约 {semicon_hits}/{total} 人（{semicon_ratio:.0f}%）来自半导体/光刻设备相关公司。"
+                f"原因是岗位「{job['title']}」的寻访策略把目标公司池和关键词集中在了半导体设备厂商"
+                f"（光刻机、量测、刻蚀、CVD 等），机械工程师背景的候选人也因此以这些公司为主。"
+            )
+        else:
+            lines.append("### 原因\n当前名单没有明显行业集中，以上是公司分布参考。")
+        lines.append(
+            "\n### 下一步\n"
+            "如果你想看到更分散的行业构成（例如通用机械、3C 自动化、光伏设备等），"
+            "告诉我目标方向，我可以按新方向重新筛名单。"
+        )
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
 def _verbatim_constraint_candidates(messages: list[str]) -> list[dict[str, str]]:
     """Extract auditable clauses without normalizing the consultant's terminology."""
     rows: list[dict[str, str]] = []
@@ -1300,6 +1614,7 @@ def _interpret_copilot_message(
             ),
             "pending_plan": dict((existing_focus or {}).get("pending_workflow") or {}),
         },
+        "conversation_state": dict((existing_focus or {}).get("conversation_state") or {}),
         "deterministic_hint": deterministic_action,
     }
     raw: dict[str, Any] = {}
@@ -1334,6 +1649,13 @@ def _interpret_copilot_message(
         action = "none"
     if action == "none" and deterministic_action != "none":
         action = deterministic_action
+    if action == "new_candidate_outreach":
+        action = "candidate_sourcing"
+    job_budget_fact_update = _is_job_budget_fact_update(message)
+    if job_budget_fact_update and action == "salary":
+        action = "none"
+        if speech_act in {"propose", "confirm", "execute", "correct"}:
+            speech_act = "inform"
     if action == "none" and speech_act in {"confirm", "correct", "cancel"} and (existing_focus or {}).get("action"):
         previous_action = str((existing_focus or {}).get("action") or "none")
         action = previous_action if previous_action in _COPILOT_SEMANTIC_ACTIONS else "none"
@@ -1387,13 +1709,16 @@ def _interpret_copilot_message(
         if isinstance(item, dict)
         and not _is_plan_control_instruction(item.get("quote") or item.get("value"))
     ]
-    return {
+    understanding = {
         "version": "copilot_understanding_v1",
         "speech_act": speech_act,
         "action": action,
+        "topic": str(raw.get("topic") or "").strip()[:48],
         "objective": str(raw.get("objective") or ((existing_focus or {}).get("objective") if speech_act == "confirm" else "") or "").strip()[:500],
         "target": target,
         "constraints": constraints[-12:],
+        "fact_updates": list(raw.get("fact_updates") or [])[:8],
+        "action_evidence": list(raw.get("action_evidence") or [])[:4],
         "refers_to_previous": bool(raw.get("refers_to_previous")) or speech_act == "confirm",
         "confidence": round(confidence, 3),
         "needs_clarification": needs_clarification,
@@ -1408,6 +1733,11 @@ def _interpret_copilot_message(
             and not needs_clarification
         ),
     }
+    return enrich_turn_understanding(
+        understanding,
+        message=message,
+        pending_plan_ref=dict((existing_focus or {}).get("pending_workflow") or {}),
+    )
 
 
 def _copilot_pending_plan(
@@ -1430,7 +1760,7 @@ def _copilot_pending_plan(
         except ValueError:
             continue
         status = str((state.get("workflow") or {}).get("status") or "")
-        if status in {"completed", "cancelled", "superseded", "archived"}:
+        if status in TERMINAL_WORKFLOW_STATUSES:
             continue
         plan_ref = dict(state.get("plan_ref") or {})
         if plan_ref.get("workflow_id") and plan_ref.get("plan_hash"):
@@ -1675,6 +2005,32 @@ def _format_workflow_strategy_answer(workflow_context: dict[str, Any], *, expand
     return "\n\n".join(lines)
 
 
+def _format_context_mismatch_answer(
+    conflicts: list[dict[str, Any]], *, floating_compact: bool = False
+) -> str:
+    """Ask before answering when the visible/focused object conflicts with the user's explicit client."""
+    mismatch = next((item for item in conflicts if item.get("type") == "context_client_mismatch"), None)
+    if not mismatch:
+        return ""
+    selected_client = str(mismatch.get("selected_client") or "当前上下文").strip()
+    mentioned = [
+        str(item or "").strip()
+        for item in (mismatch.get("mentioned_clients") or [])
+        if str(item or "").strip()
+    ]
+    mentioned_label = "、".join(mentioned) or "你提到的客户"
+    if floating_compact:
+        return (
+            f"对象不一致：当前是{selected_client}，你提到{mentioned_label}。\n\n"
+            "下一步：先确认要问哪个客户/岗位。"
+        )
+    return (
+        f"我这里的上下文对象不一致：当前页面/会话焦点是「{selected_client}」，"
+        f"但你这句提到「{mentioned_label}」。\n\n"
+        "请先确认要问哪个客户或岗位，我再按对应上下文回答。"
+    )
+
+
 def _copilot_context_facts(self, context: dict[str, Any]) -> dict[str, Any]:
     if str(context.get("type") or "") == "workflow":
         return self._copilot_workflow_context_facts(context)
@@ -1705,7 +2061,12 @@ def _copilot_context_from_focus(
 
     selected_facts = self._copilot_context_facts(selected)
     if selected_facts and current_clients and selected_facts.get("client") not in current_clients:
-        return {"type": "global", "id": None, "page": selected.get("page") or "overview", "filters": {}}, []
+        conflicts.append({
+            "type": "context_client_mismatch",
+            "selected_client": selected_facts.get("client"),
+            "mentioned_clients": current_clients[:5],
+        })
+        return {"type": "global", "id": None, "page": selected.get("page") or "overview", "filters": {}}, conflicts
     # 模糊结果追问（"寻访结果呢"类，未提及岗位/客户名）优先会话焦点岗位，
     # 避免前端残留页面 context 把主线串到其他岗位（2026-08-07 长越→电源专家串台）。
     if (
@@ -2042,10 +2403,6 @@ def _persist_copilot_focus(
         evidence.append({"source": "session_attachment", "files": attachments[-3:], "at": stamp})
 
     semantic_action = str(understanding.get("action") or "")
-    action = semantic_action if semantic_action in _COPILOT_SEMANTIC_ACTIONS and semantic_action != "none" else self._copilot_action_kind(message)
-    if not action and _is_short_ack(message):
-        action = str(previous.get("action") or "")
-    semantic_objective = str(understanding.get("objective") or "").strip()
     pending_workflow = (
         dict(previous.get("pending_workflow") or {})
         if isinstance(previous.get("pending_workflow"), dict)
@@ -2065,19 +2422,29 @@ def _persist_copilot_focus(
         pending_workflow = dict(workflow_intent) if workflow_intent.get("status") == "planned" else {}
         current_workflow = (
             dict(workflow_intent)
-            if workflow_intent.get("status") not in {"completed", "cancelled", "superseded", "archived"}
+            if workflow_intent.get("status") not in TERMINAL_WORKFLOW_STATUSES
             else {}
         )
     elif turn_decision.get("effect") == "cancel_plan" or str(understanding.get("speech_act") or "") == "cancel":
         pending_workflow = {}
         current_workflow = {}
+    active_workflow = pending_workflow or current_workflow
+    action = semantic_action if semantic_action in _COPILOT_SEMANTIC_ACTIONS and semantic_action != "none" else ""
+    if not action and active_workflow:
+        action = str(active_workflow.get("action") or previous.get("action") or "")
+    elif not action and _is_short_ack(message):
+        action = str(previous.get("action") or "") if active_workflow else ""
+    semantic_objective = str(understanding.get("objective") or "").strip()
+    objective = semantic_objective if action else ""
+    if active_workflow and not objective:
+        objective = str(active_workflow.get("objective") or previous.get("objective") or "")
     focus = {
         "context": context_value,
         "client": client,
         "job": job,
         "candidate": candidate,
-        "objective": semantic_objective or (message if action else str(previous.get("objective") or "")),
-        "action": action or str(previous.get("action") or ""),
+        "objective": objective,
+        "action": action,
         "directions": directions[-6:],
         "attachments": attachments[-8:],
         "constraints": constraints[-8:],
@@ -2088,6 +2455,29 @@ def _persist_copilot_focus(
         "current_workflow": current_workflow,
         "confidence": round(confidence, 3),
     }
+    previous_state = previous.get("conversation_state") if isinstance(previous.get("conversation_state"), dict) else {}
+    if not previous_state and active_workflow:
+        previous_state = {
+            "active_goal": {
+                "action": str(active_workflow.get("action") or action),
+                "objective": str(active_workflow.get("objective") or objective),
+                "status": str(active_workflow.get("status") or "active"),
+                "workflow_id": str(active_workflow.get("workflow_id") or ""),
+            },
+            "pending_plan": dict(pending_workflow),
+            "constraints": list(constraint_ledger),
+        }
+    conversation_state = build_context_state(
+        previous_state,
+        message=message,
+        context=selected,
+        business_focus=focus,
+        understanding=understanding,
+        decision=turn_decision,
+        workflow_intent=workflow_intent,
+        now=stamp,
+    )
+    focus["conversation_state"] = conversation_state
     revision = int(previous.get("revision") or 0) + 1
     conn = self._connect()
     try:
@@ -2109,6 +2499,16 @@ def _persist_copilot_focus(
                 client, job.get("id"), candidate.get("id"), focus["action"], focus["confidence"],
                 _dumps(focus), _dumps(evidence[-16:]), _dumps(conflicts[-8:]),
             ),
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_copilot_state(session_id,revision,state_json,updated_at)
+            VALUES (?,?,?,datetime('now','localtime'))
+            ON CONFLICT(session_id) DO UPDATE SET
+                revision=excluded.revision,state_json=excluded.state_json,
+                updated_at=datetime('now','localtime')
+            """,
+            (session_id, int(conversation_state.get("revision") or 1), _dumps(conversation_state)),
         )
         conn.commit()
     finally:
@@ -2301,6 +2701,7 @@ def update_copilot_session(
         )
         if clear_focus:
             conn.execute("DELETE FROM agent_copilot_focus WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM agent_copilot_state WHERE session_id=?", (session_id,))
         conn.commit()
         row = conn.execute(
             """SELECT metadata.session_id,
@@ -2746,6 +3147,94 @@ def _route_copilot_skills(self, message: str, context: dict[str, Any]) -> list[s
     return routes[: max(1, int(self.config["runtime"]["copilot_max_skills"]))]
 
 
+def _generate_copilot_model_answer(
+    self,
+    payload: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run the canonical answer model with read-only tools on the same turn state."""
+    if not bool(self.config.get("runtime", {}).get("copilot_tools_enabled", True)):
+        return self.llm.copilot(payload), [], []
+
+    from .copilot_tools import COPILOT_TOOLS, TOOL_EXECUTORS
+
+    max_rounds = max(1, min(int(self.config.get("runtime", {}).get("copilot_tool_rounds", 3)), 5))
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
+    ]
+    executed_calls: set[tuple[str, str]] = set()
+    tool_results: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
+
+    for round_num in range(max_rounds):
+        response = self.llm.copilot_with_tools(payload, COPILOT_TOOLS, messages=messages)
+        if not isinstance(response, dict):
+            return str(response or "").strip(), tool_results, references
+        calls = response.get("tool_calls") if isinstance(response.get("tool_calls"), list) else []
+        if not calls:
+            return str(response.get("content") or "").strip(), tool_results, references
+
+        assistant_calls: list[dict[str, Any]] = []
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict):
+                continue
+            call_id = str(call.get("id") or f"tool_{round_num}_{index}")
+            name = str(call.get("name") or "").strip()
+            arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+            assistant_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+            })
+        messages.append({
+            "role": "assistant",
+            "content": response.get("content") or None,
+            "tool_calls": assistant_calls,
+        })
+
+        new_call_executed = False
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = str(call.get("id") or "")
+            name = str(call.get("name") or "").strip()
+            arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+            call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+            executor = TOOL_EXECUTORS.get(name)
+            if executor is None:
+                result = {"success": False, "error": f"不允许的只读工具: {name or 'unknown'}"}
+            elif call_key in executed_calls:
+                result = {"success": False, "error": "本轮已返回相同查询，请直接使用已有结果作答。"}
+            else:
+                executed_calls.add(call_key)
+                new_call_executed = True
+                try:
+                    result = executor(str(self.db_path), **arguments)
+                except Exception as exc:
+                    result = {"success": False, "error": str(exc)[:300]}
+            tool_results.append({"tool": name, "args": arguments, "result": result})
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": json.dumps(result, ensure_ascii=False),
+            })
+            references.append({
+                "type": "tool_result",
+                "id": call_id,
+                "label": name or "只读查询",
+                "subtitle": "查询成功" if result.get("success") else str(result.get("error") or "查询失败")[:80],
+            })
+
+        if not new_call_executed or round_num == max_rounds - 1:
+            final = self.llm.copilot_with_tools(
+                payload,
+                COPILOT_TOOLS,
+                messages=messages,
+                allow_tools=False,
+            )
+            return str(final.get("content") or "").strip(), tool_results, references
+    return "", tool_results, references
+
+
 def copilot(
     self,
     message: str,
@@ -3019,6 +3508,22 @@ def _copilot_impl(
         or workflow_outcome_question
         or workflow_strategy_question
     )
+    if forced_answer is None and not suppress_goal_intent:
+        context_mismatch_answer = _format_context_mismatch_answer(
+            focus_conflicts,
+            floating_compact=floating_compact,
+        )
+        if context_mismatch_answer:
+            forced_answer = context_mismatch_answer
+    if forced_answer is None and _is_job_budget_fact_update(message):
+        forced_answer = _format_job_budget_fact_answer(message, selected_facts)
+    if forced_answer is None and _is_candidate_result_observation(message, intent_understanding):
+        forced_answer = _format_candidate_result_observation_answer(
+            message,
+            selected_facts,
+            existing_focus,
+            floating_compact=floating_compact,
+        )
     strategy_revision: dict[str, Any] | None = None
     strategy_revision_requested = bool(
         not suppress_goal_intent
@@ -3177,6 +3682,38 @@ def _copilot_impl(
             candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
             if candidate_list_answer:
                 forced_answer = candidate_list_answer
+    # 名单构成质疑直答：用户问“怎么都是做光刻机的”时给出构成分析，
+    # 而不是再输出一遍名单（2026-08-11 copilot_ad7e7086917d 答非所问修复）。
+    if forced_answer is None and not suppress_goal_intent and _is_candidate_list_composition_question(message):
+        comp_job_id = 0
+        if selected.get("type") == "job" and selected.get("id"):
+            comp_job_id = int(selected["id"])
+        elif isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
+            comp_job_id = int(focus_context["id"])
+        if not comp_job_id:
+            mentioned = self._mentioned_jobs_for_copilot(message)
+            if len(mentioned) == 1:
+                comp_job_id = int(mentioned[0]["id"])
+        if not comp_job_id and mentioned_clients:
+            conn = self._connect()
+            try:
+                job_row = conn.execute(
+                    """
+                    SELECT j.id FROM jobs j
+                    JOIN clients c ON c.id = j.client_id
+                    WHERE c.name LIKE ? AND j.status NOT IN ('closed','archived')
+                    ORDER BY j.id LIMIT 1
+                    """,
+                    (f"%{mentioned_clients[0]}%",),
+                ).fetchone()
+                if job_row:
+                    comp_job_id = int(job_row["id"])
+            finally:
+                conn.close()
+        if comp_job_id:
+            composition_answer = _build_candidate_list_composition_answer(self.db_path, comp_job_id, message)
+            if composition_answer:
+                forced_answer = composition_answer
     action_context_rule = action_context_prompts.get(semantic_action)
     if (
         forced_answer is None
@@ -3798,6 +4335,7 @@ def _copilot_impl(
         None,
     )
     answer_source = "rules"
+    model_tool_calls: list[dict[str, Any]] = []
     if goal_workflow:
         plan_steps = goal_workflow.get("steps") or []
         risk_steps = [step for step in plan_steps if step.get("risk_level") in {"R2", "R3"}]
@@ -3917,8 +4455,14 @@ def _copilot_impl(
     elif forced_answer is not None:
         answer = forced_answer
     else:
-        answer = self.llm.copilot(sanitize_payload(payload))
-        answer_source = "model"
+        answer, model_tool_calls, tool_references = _generate_copilot_model_answer(
+            self,
+            sanitize_payload(payload),
+        )
+        references.extend(tool_references)
+        if not answer:
+            answer = "当前查询已完成，但暂时没有生成可用结论。"
+        answer_source = "model_tools" if model_tool_calls else "model"
     persisted_payload = _persistable_attachment_payload(selected_payload)
     focus_context = (
         (goal_workflow.get("goal") or {}).get("context")
@@ -3957,10 +4501,22 @@ def _copilot_impl(
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
         "turn_decision": turn_decision,
+        "tool_calls": model_tool_calls,
         "model_participation": {
             "mode": answer_source,
-            "label": "模型生成 + 上下文约束" if answer_source == "model" else "规则生成",
-            "model": self.llm.model if answer_source == "model" else None,
+            "label": (
+                "模型生成 + 只读工具证据" if answer_source == "model_tools"
+                else "模型生成 + 上下文约束" if answer_source == "model"
+                else "规则生成"
+            ),
+            "model": (
+                self.llm.copilot_runtime_metadata().get("model")
+                if answer_source in {"model", "model_tools"} else None
+            ),
+            "routing": (
+                self.llm.copilot_runtime_metadata()
+                if answer_source in {"model", "model_tools"} else None
+            ),
         },
     }
     if strategy_revision:
@@ -4009,7 +4565,7 @@ def _copilot_impl(
                 or (workflow_state.get("goal") or {}).get("status")
                 or ""
             )
-            if workflow_id and workflow_status in {"completed", "blocked"}:
+            if workflow_id and workflow_status in {"completed", "blocked", "failed"}:
                 try:
                     from . import sourcing_result_card
 
@@ -4103,6 +4659,7 @@ def _copilot_impl(
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
         "turn_decision": turn_decision,
+        "tool_calls": model_tool_calls,
         "proactive_suggestions": generate_proactive_suggestions(str(self.db_path)),
         "action_card": assistant_structured.get("action_card"),
         "action_cards": [assistant_structured["action_card"]] if assistant_structured.get("action_card") else [],
@@ -4278,24 +4835,38 @@ def _maybe_summarize_copilot_conversation(self, session_id: str) -> dict[str, An
             f"{'顾问' if row[0]=='user' else 'ASA'}: {row[1][:300]}"
             for row in messages[-20:]  # 最多取最近20条
         )
-        # 调用 LLM 生成摘要
+        context_state = self.get_copilot_context_state(session_id)
+        deterministic_summary = deterministic_context_summary(context_state)
+        # 调用 LLM 生成摘要；结构化状态始终作为保底事实，模型只补充表达。
         try:
             summary_text = self.llm._request(
                 _SUMMARY_SYSTEM_PROMPT,
-                {"conversation": conversation_text},
+                {"conversation": conversation_text, "context_state": context_state},
                 temperature=0.05,
                 operation="copilot_summary",
             )
-            summary = json.loads(summary_text.strip())
+            model_summary = json.loads(summary_text.strip())
+            if not isinstance(model_summary, dict):
+                raise ValueError("summary must be an object")
+            summary = dict(deterministic_summary)
+            if str(model_summary.get("stage") or "").strip():
+                summary["stage"] = str(model_summary["stage"]).strip()[:120]
+            for key in ("entities", "decisions", "pending", "key_facts"):
+                model_values = model_summary.get(key) if isinstance(model_summary.get(key), list) else []
+                base_values = summary.get(key) if isinstance(summary.get(key), list) else []
+                if key == "entities":
+                    combined = [*base_values, *[item for item in model_values if isinstance(item, dict)]]
+                    seen_entities: set[tuple[str, str, str]] = set()
+                    summary[key] = []
+                    for item in combined:
+                        marker = (str(item.get("type") or ""), str(item.get("id") or ""), str(item.get("name_or_title") or ""))
+                        if marker not in seen_entities:
+                            seen_entities.add(marker)
+                            summary[key].append(item)
+                else:
+                    summary[key] = list(dict.fromkeys(str(item) for item in [*base_values, *model_values] if str(item).strip()))[-16:]
         except Exception:
-            # 摘要失败不阻断主流程，返回简单摘要
-            summary = {
-                "stage": "对话中",
-                "entities": [],
-                "decisions": [],
-                "pending": [],
-                "key_facts": [],
-            }
+            summary = deterministic_summary
         # 持久化
         max_id = conn.execute(
             "SELECT MAX(id) FROM agent_copilot_messages WHERE session_id=?",
@@ -4329,6 +4900,7 @@ def _copilot_conversation_context(self, session_id: str, conversation_history: l
             json.loads(row[0]) if isinstance(row[0], str) else row[0]
             for row in summaries
         ] if summaries else [],
+        "state": self.get_copilot_context_state(session_id),
     }
 
 
@@ -4364,19 +4936,21 @@ def copilot_stream_generator(
     yield _sse("done", result)
     return
 
-# ---- Phase 2: 工具调用 Agent 循环 ----
+# RETIRED: this pre-canonical tool loop is intentionally unbound. It remains
+# temporarily for rollback archaeology; AgentService.copilot_agent is bound to
+# copilot(), and all production traffic uses _generate_copilot_model_answer().
 
 _MAX_TOOL_ROUNDS = 5  # 最多 5 轮工具调用
 
 
-def copilot_agent(
+def _retired_legacy_copilot_agent(
     self,
     message: str,
     *,
     session_id: str = "",
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Phase 2: 带工具调用的 Agent 模式 copilot。
+    """Retired pre-canonical tool loop; never bind this method in AgentService.
     
     与普通 copilot 的区别：LLM 可以主动调用工具（查DB、搜知识库等），
     工具结果注入对话后 LLM 综合给出最终回答。

@@ -1,6 +1,8 @@
 [runtime]
 max_workers = 3
 copilot_max_skills = 3
+copilot_tools_enabled = true
+copilot_tool_rounds = 3
 
 [model]
 base_url = "https://api.deepseek.com/v1"
@@ -9,6 +11,16 @@ timeout_seconds = 60
 retry_attempts = 3
 keychain_service = "a-system-agent-deepseek"
 keychain_account = "api.deepseek.com"
+
+[copilot_routing]
+enabled = true
+strong_base_url = "https://max.jojocode.com/v1"
+strong_model = "gpt-5.5"
+strong_timeout_seconds = 45
+strong_retry_attempts = 1
+strong_cooldown_seconds = 300
+strong_keychain_service = "cognee-codex-llm"
+strong_keychain_account = "max.jojocode.com"
 
 [automation]
 high_score = 75

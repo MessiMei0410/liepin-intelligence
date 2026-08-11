@@ -42,7 +42,14 @@ STRATEGY_V2_REQUIRED_KEYS = (
     "consultant_edits",
 )
 
-_POOL_SOURCES = {"client_doc", "kb_graph", "kb_profile", "llm_inferred", "consultant_calibrated"}
+_POOL_SOURCES = {
+    "client_doc",
+    "kb_graph",
+    "kb_profile",
+    "legacy_profile_suggestions",
+    "llm_inferred",
+    "consultant_calibrated",
+}
 _POOL_PATHS = {"same_layer", "reverse", "adjacent"}
 _POOL_TIERS = {"T1", "T2", "T3"}
 _CONFIDENCES = {"high", "medium", "low"}

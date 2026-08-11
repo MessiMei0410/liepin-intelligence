@@ -168,13 +168,13 @@ def test_apply_item_edits_company_ops_by_tier() -> None:
     v2, applied = apply_item_edits(_strategy_v2(), [
         {"op": "delete_company", "tier": "T1", "name": "台达"},
         {"op": "update_company", "tier": "T1", "name": "日立", "confidence": "medium"},
-        {"op": "add_company", "tier": "T3", "name": "维谛"},
+        {"op": "add_company", "tier": "T3", "name": "维谛", "source": "legacy_profile_suggestions"},
     ])
     pools = {pool["tier"]: pool for pool in v2["step2_target_pool"]}
     assert [c["name"] for c in pools["T1"]["companies"]] == ["日立"]
     assert pools["T1"]["companies"][0]["confidence"] == "medium"
     assert pools["T3"]["companies"][0]["name"] == "维谛"
-    assert pools["T3"]["companies"][0]["source"] == "client_doc"
+    assert pools["T3"]["companies"][0]["source"] == "legacy_profile_suggestions"
     assert len(applied) == 3
     with pytest.raises(ValueError, match="不在 T2 池内"):
         apply_item_edits(_strategy_v2(), [{"op": "delete_company", "tier": "T2", "name": "台达"}])

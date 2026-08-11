@@ -8,7 +8,12 @@ from typing import Any
 
 
 DEFAULTS: dict[str, Any] = {
-    "runtime": {"max_workers": 3, "copilot_max_skills": 3},
+    "runtime": {
+        "max_workers": 3,
+        "copilot_max_skills": 3,
+        "copilot_tools_enabled": True,
+        "copilot_tool_rounds": 3,
+    },
     "model": {
         "base_url": "https://api.deepseek.com/v1",
         "model": "deepseek-v4-flash",
@@ -16,6 +21,16 @@ DEFAULTS: dict[str, Any] = {
         "retry_attempts": 3,
         "keychain_service": "a-system-agent-deepseek",
         "keychain_account": "api.deepseek.com",
+    },
+    "copilot_routing": {
+        "enabled": True,
+        "strong_base_url": "https://max.jojocode.com/v1",
+        "strong_model": "gpt-5.5",
+        "strong_timeout_seconds": 45,
+        "strong_retry_attempts": 1,
+        "strong_cooldown_seconds": 300,
+        "strong_keychain_service": "cognee-codex-llm",
+        "strong_keychain_account": "max.jojocode.com",
     },
     "automation": {
         "high_score": 75,
@@ -56,6 +71,13 @@ ENV_OVERRIDES = {
     "A_SYSTEM_AGENT_MODEL": ("model", "model", str),
     "A_SYSTEM_AGENT_TIMEOUT": ("model", "timeout_seconds", int),
     "A_SYSTEM_AGENT_RETRY_ATTEMPTS": ("model", "retry_attempts", int),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_ENABLED": ("copilot_routing", "enabled", lambda value: value.lower() in {"1", "true", "yes", "on"}),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_BASE_URL": ("copilot_routing", "strong_base_url", str),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_MODEL": ("copilot_routing", "strong_model", str),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_TIMEOUT": ("copilot_routing", "strong_timeout_seconds", int),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_RETRY_ATTEMPTS": ("copilot_routing", "strong_retry_attempts", int),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_KEYCHAIN_SERVICE": ("copilot_routing", "strong_keychain_service", str),
+    "A_SYSTEM_AGENT_COPILOT_STRONG_KEYCHAIN_ACCOUNT": ("copilot_routing", "strong_keychain_account", str),
     "A_SYSTEM_AGENT_MAX_WORKERS": ("runtime", "max_workers", int),
     "A_SYSTEM_AGENT_MEMORY_MODE": ("memory", "mode", str),
 }
@@ -92,7 +114,12 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     return config
 
 
-def public_config(config: dict[str, Any], *, model_available: bool) -> dict[str, Any]:
+def public_config(
+    config: dict[str, Any],
+    *,
+    model_available: bool,
+    strong_model_available: bool = False,
+) -> dict[str, Any]:
     return {
         "runtime": dict(config["runtime"]),
         "model": {
@@ -100,6 +127,11 @@ def public_config(config: dict[str, Any], *, model_available: bool) -> dict[str,
             "model": config["model"]["model"],
             "timeout_seconds": config["model"]["timeout_seconds"],
             "configured": bool(model_available),
+        },
+        "copilot_routing": {
+            "enabled": bool(config.get("copilot_routing", {}).get("enabled")),
+            "strong_model": str(config.get("copilot_routing", {}).get("strong_model") or ""),
+            "strong_model_configured": bool(strong_model_available),
         },
         "automation": dict(config["automation"]),
         "skills": {"enabled": list(config["skills"].get("enabled") or [])},

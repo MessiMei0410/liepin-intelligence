@@ -165,6 +165,7 @@ from .copilot_handler import (
     _uploaded_attachment_evidence as _h_uploaded_attachment_evidence,
     _mentioned_jobs_for_copilot as _h_mentioned_jobs_for_copilot,
     get_copilot_focus as _h_get_copilot_focus,
+    get_copilot_context_state as _h_get_copilot_context_state,
     _copilot_action_kind as _h_copilot_action_kind,
     _resolve_strategy_revision_workflow as _h_resolve_strategy_revision_workflow,
     _copilot_focus_context_facts as _h_copilot_focus_context_facts,
@@ -185,7 +186,6 @@ from .copilot_handler import (
     _mentioned_client_names as _h_mentioned_client_names,
     _route_copilot_skills as _h_route_copilot_skills,
     copilot_stream_generator as _h_copilot_stream_generator,
-    copilot_agent as _h_copilot_agent,
     _copilot_conversation_context as _h_copilot_conversation_context,
     _maybe_summarize_copilot_conversation as _h_maybe_summarize_copilot_conversation,
     _ensure_copilot_summaries_table as _h_ensure_copilot_summaries_table,
@@ -360,7 +360,11 @@ class AgentService:
     def get_public_config(self) -> dict[str, Any]:
         return {
             "ok": True,
-            "config": public_config(self.config, model_available=self.llm.model != "unavailable"),
+            "config": public_config(
+                self.config,
+                model_available=self.llm.model != "unavailable",
+                strong_model_available=self.llm.has_strong_copilot_model(),
+            ),
         }
 
     def _register_builtin_skills(self) -> None:
@@ -1685,6 +1689,7 @@ AgentService._floating_bridge_evidence = _h_floating_bridge_evidence
 AgentService._uploaded_attachment_evidence = _h_uploaded_attachment_evidence
 AgentService._mentioned_jobs_for_copilot = _h_mentioned_jobs_for_copilot
 AgentService.get_copilot_focus = _h_get_copilot_focus
+AgentService.get_copilot_context_state = _h_get_copilot_context_state
 AgentService._copilot_action_kind = staticmethod(_h_copilot_action_kind)
 AgentService._resolve_strategy_revision_workflow = _h_resolve_strategy_revision_workflow
 AgentService._copilot_focus_context_facts = _h_copilot_focus_context_facts
@@ -1705,7 +1710,9 @@ AgentService._sourcing_strategy_gate = _h_sourcing_strategy_gate
 AgentService._mentioned_client_names = _h_mentioned_client_names
 AgentService._route_copilot_skills = _h_route_copilot_skills
 AgentService.copilot_stream_generator = _h_copilot_stream_generator
-AgentService.copilot_agent = _h_copilot_agent
+# Agent mode and streaming mode share the same turn compiler, context state,
+# read-only tool loop, and action authorization boundary.
+AgentService.copilot_agent = _h_copilot
 AgentService._copilot_conversation_context = _h_copilot_conversation_context
 AgentService._maybe_summarize_copilot_conversation = _h_maybe_summarize_copilot_conversation
 AgentService._ensure_copilot_summaries_table = _h_ensure_copilot_summaries_table

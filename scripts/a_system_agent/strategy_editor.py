@@ -36,7 +36,14 @@ MAX_TERMS_PER_GROUP = 20
 MAX_TOKENS_PER_TERM = 2
 MAX_EDITS_PER_REQUEST = 20
 
-_POOL_SOURCES = {"client_doc", "kb_graph", "kb_profile", "llm_inferred"}
+_POOL_SOURCES = {
+    "client_doc",
+    "kb_graph",
+    "kb_profile",
+    "legacy_profile_suggestions",
+    "llm_inferred",
+    "consultant_calibrated",
+}
 _CONFIDENCES = {"high", "medium", "low"}
 _CONSTRAINT_TYPES = {"hard_requirement", "preference", "conditional_acceptance", "exclusion", "target_count", "consultant_wording"}
 
