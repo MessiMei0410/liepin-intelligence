@@ -726,3 +726,10 @@ def record_sourcing_business_signal(
     finally:
         conn.close()
 
+
+def analyze_stop_note(self, payload: dict[str, Any]) -> dict[str, Any]:
+    """调用 LLM 分析停止备注，返回结构化寻访调整指令。"""
+    if not self.llm:
+        raise RuntimeError("LLM not available")
+    return self.llm.analyze_stop_note(payload)
+

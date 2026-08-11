@@ -372,6 +372,40 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON agent_copilot_attachments(expires_at);
         """,
     ),
+    (
+        9,
+        "stop_note_sourcing_adjustments",
+        # 停止备注 → 寻访调整指令闭环：LLM 分析停止备注生成结构化调整，
+        # 下一轮寻访策略自动注入；dedupe_key 保证同岗位同类型同词条不重复。
+        """
+        CREATE TABLE IF NOT EXISTS agent_sourcing_adjustments (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id        INTEGER NOT NULL,
+            candidate_id  INTEGER,
+            adjust_type   TEXT NOT NULL,
+            value         TEXT NOT NULL,
+            rationale     TEXT,
+            confidence    REAL DEFAULT 0.5,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            applied_at    TEXT,
+            applied_round INTEGER,
+            dedupe_key    TEXT UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS idx_adjustments_job_status
+            ON agent_sourcing_adjustments(job_id, status);
+        """,
+    ),
+    (
+        10,
+        "adjustment_baseline_snapshot",
+        # 调整效果追踪：应用调整时记录候选池基线快照（总池/待复核/已触达/已停止），
+        # 列表查询时与当前值对比，展示"调整前后候选池质量变化"。
+        """
+        ALTER TABLE agent_sourcing_adjustments
+            ADD COLUMN baseline_json TEXT;
+        """,
+    ),
 ]
 
 

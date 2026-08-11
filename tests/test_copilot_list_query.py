@@ -31,6 +31,7 @@ from a_system_agent.copilot_handler import (  # noqa: E402
     _format_candidate_list_answer,
     _is_candidate_list_query,
 )
+from asa_core.service import CoreService  # noqa: E402
 
 
 def _make_db() -> Path:
@@ -258,6 +259,48 @@ class CandidateListQueryTest(unittest.TestCase):
             self.assertEqual(_format_candidate_list_answer(path, 999, "把名单给我"), "")
         finally:
             Path(path).unlink()
+
+    def test_candidate_list_card_refresh_reflects_latest_stage(self) -> None:
+        """名单卡刷新 API（CoreService.candidate_list_card）：重建快照反映库内最新状态。
+
+        场景（2026-08-11）：薛傲复核通过（S1 待复核 → S2 复核通过/待联系），
+        原名单卡是生成时的静态快照仍显示 S1；刷新后必须读到 S2。
+        """
+        db = _make_db()
+        try:
+            service = CoreService(db_path=db)
+            # 初始：张航（id=522）已触达
+            result = service.candidate_list_card(137)
+            card = result["card"]
+            by_id = {c["id"]: c for g in card["groups"] for c in g["candidates"]}
+            self.assertEqual(by_id[522]["stage"], "已触达")
+            self.assertEqual(by_id[519]["stage"], "S1 新增寻访/待复核")
+            # 模拟复核通过：S1 → S2
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "UPDATE job_candidates SET clean_stage='S2 复核通过/待联系', flow_bucket='待联系', updated_at=datetime('now','localtime') WHERE id=519"
+            )
+            conn.commit()
+            conn.close()
+            refreshed = service.candidate_list_card(137)
+            refreshed_by_id = {c["id"]: c for g in refreshed["card"]["groups"] for c in g["candidates"]}
+            self.assertEqual(refreshed_by_id[519]["stage"], "S2 复核通过/待联系")
+            self.assertEqual(refreshed_by_id[519]["flow_bucket"], "待联系")
+            # bonder=True 时固晶优先组出现
+            bonder = service.candidate_list_card(137, bonder=True)
+            keys = [g["key"] for g in bonder["card"]["groups"]]
+            self.assertIn("bonder", keys)
+        finally:
+            db.unlink()
+
+    def test_candidate_list_card_refresh_job_not_found(self) -> None:
+        db = _make_db()
+        try:
+            service = CoreService(db_path=db)
+            with self.assertRaises(LookupError):
+                service.candidate_list_card(999)
+        finally:
+            db.unlink()
 
 
 if __name__ == "__main__":

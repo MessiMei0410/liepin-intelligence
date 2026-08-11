@@ -202,7 +202,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
     def test_streaming_empty_message_does_not_render_a_placeholder_reply(self) -> None:
         source = (ROOT / "scripts" / "liepin_workbench_server.py").read_text(encoding="utf-8")
         self.assertNotIn("<p>暂无回复。</p>", source)
-        self.assertIn("if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard) return '';", source)
+        self.assertIn("if (!body && !actions && !toolSummary && !toolDetails && !workflowCard && !intentCard && !patchBar && !analysisCard && !candidateListCard) return '';", source)
         self.assertIn("renderThinkingMessage()", source)
 
     def test_floating_r3_card_requires_a_complete_snapshot_and_shows_verbatim_constraints(self) -> None:

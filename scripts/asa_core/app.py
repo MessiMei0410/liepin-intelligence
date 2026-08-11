@@ -93,6 +93,11 @@ class CopilotMessage(WriteEnvelope):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class CandidateListRefreshBody(BaseModel):
+    """名单卡刷新：仅需 job_id（路径）+ 可选 bonder 标记（原卡有固晶优先组时传 true 保持分组）。"""
+    bonder: bool = False
+
+
 class CopilotAttachmentUpload(WriteEnvelope):
     file_name: str = Field(min_length=1, max_length=240)
     mime_type: str = Field(default="", max_length=160)
@@ -275,6 +280,10 @@ class CandidateAction(BaseModel):
     note: str = ""
     reason: str = ""
     preflight_token: str = ""
+
+
+class SourcingAdjustmentDecision(WriteEnvelope):
+    pass
 
 
 class ConsultantRecommendationPreflight(WriteEnvelope):
@@ -529,6 +538,12 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/jobs/{job_id}")
     def job(job_id: int) -> dict[str, Any]: return core.job(job_id)
+
+    @app.post("/api/v1/jobs/{job_id}/candidate-list/refresh")
+    def job_candidate_list_refresh(job_id: int, body: CandidateListRefreshBody) -> dict[str, Any]:
+        # 名单卡静态快照刷新：重新按库内最新状态生成 candidate_list 卡片。
+        # 不写库、不建工作流、不走 LLM——纯查询重建；404=岗位不存在。
+        return core.candidate_list_card(job_id, bonder=body.bonder)
 
     @app.get("/api/v1/jobs/{job_id}/profile-insights")
     def job_profile_insights_get(job_id: int) -> dict[str, Any]:
@@ -1181,6 +1196,23 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 顾问确认推荐岗位指标：confirmed_recommendations / assessed_candidates / rate。
         # 岗位不存在 → 404（LookupError 全局映射）；无评估 → rate=None。
         return core.consultant_recommendation_metrics(job_id)
+
+    @app.get("/api/v1/jobs/{job_id}/sourcing-adjustments")
+    def job_sourcing_adjustments(job_id: int) -> dict[str, Any]:
+        # 停止备注 → 寻访调整指令列表；岗位不存在时返回空列表（不抛 404）。
+        return core.list_sourcing_adjustments(job_id)
+
+    @app.post("/api/v1/sourcing-adjustments/{adjustment_id}/confirm")
+    def sourcing_adjustment_confirm(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 顾问手动确认调整：pending → applied。
+        return idem("sourcing_adjustment.confirm", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
+                    lambda: core.confirm_sourcing_adjustment(adjustment_id))
+
+    @app.post("/api/v1/sourcing-adjustments/{adjustment_id}/ignore")
+    def sourcing_adjustment_ignore(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 顾问忽略调整：pending → ignored。
+        return idem("sourcing_adjustment.ignore", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
+                    lambda: core.ignore_sourcing_adjustment(adjustment_id))
 
     @app.get("/api/v1/candidates/{candidate_id}/recommendation-packages")
     def candidate_recommendation_packages(candidate_id: int) -> dict[str, Any]:

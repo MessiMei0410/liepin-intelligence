@@ -24,7 +24,8 @@ export function useGlobalDialogDrag() {
       const dialog = target.closest(DIALOG_SELECTOR) as HTMLElement | null
       if (!dialog || isExcluded(dialog)) return
       // 不拦截表单输入、按钮/链接点击；保持对话框内可正常输入。
-      if (target.closest('input, textarea, select, button, a')) return
+      // label 包裹的控件点击时 target 是 label，需一并排除，否则 setPointerCapture 会抢走焦点。
+      if (target.closest('input, textarea, select, button, a, label')) return
 
       const rect = dialog.getBoundingClientRect()
       const inResize =

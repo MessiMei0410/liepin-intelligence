@@ -6,6 +6,7 @@ import type { WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflo
 import { parseSourcingFunnel } from './workflow/sourcingFunnel'
 import type { SourcingFunnel } from './workflow/sourcingFunnel'
 import { parseAgentSession, parseAgentSessionList, parseAgentSessionUpdate } from './agent/sessionModel'
+import type { CandidateListCardData } from './workflows/CandidateListCard'
 
 export type { Workflow } from './workflow/workflowModel'
 export type { WorkflowCandidateItem, WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
@@ -112,6 +113,10 @@ export type ContractAnchor = [
   // S8 增补：岗位画像读取/顾问纠正路由入锚（generated/api.d.ts 已 regenerate）。
   paths['/api/v1/jobs/{job_id}/profile-insights']['get'],
   paths['/api/v1/jobs/{job_id}/profile-insights/feedback']['post'],
+  // 停止备注 → 寻访调整：三态列表读取 + 确认/忽略写回路由入锚（generated/api.d.ts 已 regenerate）。
+  paths['/api/v1/jobs/{job_id}/sourcing-adjustments']['get'],
+  paths['/api/v1/sourcing-adjustments/{adjustment_id}/confirm']['post'],
+  paths['/api/v1/sourcing-adjustments/{adjustment_id}/ignore']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -290,6 +295,27 @@ export type ConsultantRecommendationResult = WriteAck & {
 export type RecommendationMetrics = {
   ok?: boolean; job_id?: number; confirmed_recommendations: number;
   assessed_candidates: number; rate: number | null;
+}
+// 停止备注 → 寻访调整：停止候选人时填写的备注经 LLM 分析成下一轮寻访调整指令。
+// Core 返回动态 dict（openapi 只描述为 object），按 agent_sourcing_adjustments 实际 payload 收窄声明。
+export type SourcingAdjustmentType = 'add_keyword' | 'remove_keyword' | 'exclude_company' | 'add_company' | 'add_filter' | 'adjust_salary_range'
+export type SourcingAdjustmentStatus = 'pending' | 'applied' | 'ignored'
+export type SourcingAdjustment = {
+  id: number; job_id: number; candidate_id?: number | null;
+  adjust_type: SourcingAdjustmentType; value: string; rationale?: string;
+  confidence?: number; status: SourcingAdjustmentStatus;
+  created_at?: string; applied_at?: string | null; applied_round?: number | null;
+  candidate_name?: string | null;
+  effect?: SourcingAdjustmentEffect | null;
+}
+export type SourcingAdjustmentSummary = { pending: number; applied: number; ignored: number }
+export type SourcingAdjustmentEffect = {
+  baseline: { total: number; pending_review: number; contacted: number; stopped: number }
+  current: { total: number; pending_review: number; contacted: number; stopped: number }
+  diff: { total: number; pending_review: number; contacted: number; stopped: number }
+}
+export type SourcingAdjustmentListPayload = {
+  ok?: boolean; items: SourcingAdjustment[]; summary: SourcingAdjustmentSummary;
 }
 export type WorkflowArtifactDetail = {
   artifact_id: string; workflow_id?: string; step_id?: number | null;
@@ -698,6 +724,11 @@ export const api = {
     return { items, total: first.total }
   },
   job: (id: number) => json<{job: JobDetail}>(`/api/v1/jobs/${id}`),
+  candidateListRefresh: (jobId: number, bonder = false) =>
+    write<{ ok: boolean; answer: string; card: CandidateListCardData }>(
+      `/api/v1/jobs/${jobId}/candidate-list/refresh`,
+      { bonder },
+    ),
   candidates: (q = '', jobId?: number, limit = 200, offset = 0) =>
     json<{items: Candidate[]; total: number; limit?: number; offset?: number}>(
       `/api/v1/candidates?limit=${limit}&offset=${offset}&q=${encodeURIComponent(q)}${jobId ? `&job_id=${jobId}` : ''}`,
@@ -805,6 +836,12 @@ export const api = {
     const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}) }
     return write<CandidateActionResult>('/api/v1/candidate-actions/commit', body)
   },
+  notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
+    fetch('/api/asa/floating/candidate-update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id, change }),
+    }).catch(() => undefined),
   consultantRecommendationPreflight: (candidate_id: number) => {
     const body = { request_id: requestId(), candidate_id }
     return json<ConsultantRecommendationPreflight>('/api/v1/consultant-recommendations/preflight', { method: 'POST', body: JSON.stringify(body) })
@@ -813,6 +850,15 @@ export const api = {
     write<ConsultantRecommendationResult>('/api/v1/consultant-recommendations/commit', { candidate_id, reason, preflight_token }),
   recommendationMetrics: (job_id: number) =>
     json<RecommendationMetrics>(`/api/v1/jobs/${job_id}/recommendation-metrics`),
+  // 停止备注 → 寻访调整：待应用/已应用/已忽略 三态列表只读；
+  // 确认/忽略走 write 幂等封装（pending → applied / ignored，确认等同已应用，人工干预下一轮寻访）。
+  // 已入 ContractAnchor（generated/api.d.ts 已 regenerate）。
+  sourcingAdjustments: (jobId: number) =>
+    json<SourcingAdjustmentListPayload>(`/api/v1/jobs/${jobId}/sourcing-adjustments`),
+  confirmSourcingAdjustment: (id: number) =>
+    write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/confirm`, {}),
+  ignoreSourcingAdjustment: (id: number) =>
+    write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/ignore`, {}),
   // 寻访策略按项编辑（本期新上，generated/api.d.ts 尚无此路由，主控 regenerate 后可补锚）。
   // 走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应）；
   // 404=工作流/策略不存在，409=外部寻访已开始/目标项缺失/质量校验不过（中文 detail 透出）。

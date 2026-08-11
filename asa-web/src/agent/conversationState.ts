@@ -24,6 +24,7 @@ export type AgentConversationAction =
   | { type: 'turn_done'; requestId: string; result: AgentTurnResult }
   | { type: 'turn_failed'; requestId: string; error: string }
   | { type: 'turn_stopped'; requestId: string }
+  | { type: 'card_refreshed'; jobId: number; content: string; action_card: Record<string, unknown> | null }
 
 export const agentConversationReducer = (
   state: AgentConversationState,
@@ -45,6 +46,22 @@ export const agentConversationReducer = (
         { role: 'assistant', content: '', turnRequestId: action.requestId },
       ],
     }
+  }
+  // 名单卡刷新：按 jobId 更新所有 candidate_list 消息的 action_card + 回答文本（不依赖 requestId）
+  if (action.type === 'card_refreshed') return {
+    ...state,
+    messages: state.messages.map(message => {
+      const card = message.action_card && typeof message.action_card === 'object' ? message.action_card as { type?: unknown; context?: { type?: unknown; id?: unknown } } : null
+      const isTarget = Boolean(
+        message.role === 'assistant'
+        && card?.type === 'candidate_list'
+        && card.context?.type === 'job'
+        && Number(card.context.id) === action.jobId,
+      )
+      return isTarget
+        ? { ...message, content: action.content, action_card: action.action_card }
+        : message
+    }),
   }
   if (action.requestId !== state.activeRequestId) return state
   if (action.type === 'turn_text') return {

@@ -67,6 +67,18 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
       const result=action==='stop'?await api.commit(value.id, action, token, actionNote.trim(), actionReason):await api.commit(value.id,action,token,actionNote.trim())
       // 通知名单弹窗等跨组件视图实时刷新，避免操作后列表状态滞后。
       dispatchCandidateUpdated({ id: value.id, stage: result.stage, isStopped: action==='stop' })
+      // 同步通知 ASA 名单弹窗（/asa-floating 与 /asa-app 均通过同一服务端轮询刷新）。
+      if (value.job_id) {
+        try {
+          await api.notifyFloatingCandidateUpdate(value.job_id, {
+            job_candidate_id: value.id,
+            stage: result.stage,
+            is_stopped: action === 'stop',
+          })
+        } catch (_) {
+          // 通知失败不影响本地反馈，名单弹窗可依赖自身刷新兜底
+        }
+      }
       if(action==='recommend'){
         try {
           const decision=await recordRecommendationDecision(value.id,reason)

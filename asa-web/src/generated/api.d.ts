@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/candidate-list/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Candidate List Refresh */
+        post: operations["job_candidate_list_refresh_api_v1_jobs__job_id__candidate_list_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{job_id}/profile-insights": {
         parameters: {
             query?: never;
@@ -1329,6 +1346,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/sourcing-adjustments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Sourcing Adjustments */
+        get: operations["job_sourcing_adjustments_api_v1_jobs__job_id__sourcing_adjustments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sourcing-adjustments/{adjustment_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sourcing Adjustment Confirm */
+        post: operations["sourcing_adjustment_confirm_api_v1_sourcing_adjustments__adjustment_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sourcing-adjustments/{adjustment_id}/ignore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sourcing Adjustment Ignore */
+        post: operations["sourcing_adjustment_ignore_api_v1_sourcing_adjustments__adjustment_id__ignore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/{candidate_id}/recommendation-packages": {
         parameters: {
             query?: never;
@@ -1708,6 +1776,17 @@ export interface components {
              * @default
              */
             preflight_token: string;
+        };
+        /**
+         * CandidateListRefreshBody
+         * @description 名单卡刷新：仅需 job_id（路径）+ 可选 bonder 标记（原卡有固晶优先组时传 true 保持分组）。
+         */
+        CandidateListRefreshBody: {
+            /**
+             * Bonder
+             * @default false
+             */
+            bonder: boolean;
         };
         /** CompanyCalibrationSubmit */
         CompanyCalibrationSubmit: {
@@ -2218,6 +2297,11 @@ export interface components {
             /** Request Id */
             request_id: string;
         };
+        /** SourcingAdjustmentDecision */
+        SourcingAdjustmentDecision: {
+            /** Request Id */
+            request_id: string;
+        };
         /** StrategyItemEdits */
         StrategyItemEdits: {
             /** Request Id */
@@ -2628,6 +2712,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_candidate_list_refresh_api_v1_jobs__job_id__candidate_list_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CandidateListRefreshBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -5003,6 +5124,113 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_sourcing_adjustments_api_v1_jobs__job_id__sourcing_adjustments_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sourcing_adjustment_confirm_api_v1_sourcing_adjustments__adjustment_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                adjustment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourcingAdjustmentDecision"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sourcing_adjustment_ignore_api_v1_sourcing_adjustments__adjustment_id__ignore_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                adjustment_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourcingAdjustmentDecision"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

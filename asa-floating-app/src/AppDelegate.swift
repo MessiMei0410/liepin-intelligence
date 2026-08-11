@@ -619,7 +619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         components?.port = serviceBaseURL.port
         components?.path = "/asa-app"
         components?.query = nil
-        components?.fragment = ["job=", "candidate=", "workflow=", "sourcing_candidates="].contains { fragment.hasPrefix($0) } ? fragment : nil
+        components?.fragment = ["job=", "workflow=", "sourcing_candidates="].contains { fragment.hasPrefix($0) } ? fragment : nil
         return components?.url ?? workbenchURL
     }
 

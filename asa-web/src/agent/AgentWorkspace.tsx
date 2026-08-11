@@ -1,5 +1,5 @@
 import { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, BookPlus, Building2, ClipboardCopy, FileText, History, LoaderCircle, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
+import { Activity, Archive, BookPlus, Building2, ClipboardCopy, FileText, History, LoaderCircle, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, Dashboard, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
@@ -11,6 +11,7 @@ import { CandidateListDialog } from './CandidateListDialog'
 import { useDialogFocus } from '../shared/useDialogFocus'
 import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { updateCandidateListDialogData } from './candidateListDialogUpdate'
+import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
@@ -150,6 +151,8 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const [attachmentDragActive, setAttachmentDragActive] = useState(false)
   const [lastTurn, setLastTurn] = useState<AgentTurn>()
   const [candidateListDialog, setCandidateListDialog] = useState<CandidateListCardData | null>(null)
+  const [refreshingCardJob, setRefreshingCardJob] = useState<number | null>(null)
+  const [cardRefreshError, setCardRefreshError] = useState('')
   const [historyOpen, setHistoryOpen] = useState(false)
   const [modelAuditOpen, setModelAuditOpen] = useState(false)
   const [taskRailCollapsed, setTaskRailCollapsed] = useState(false)
@@ -186,6 +189,10 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     window.addEventListener(CANDIDATE_UPDATED_EVENT, onUpdate)
     return () => window.removeEventListener(CANDIDATE_UPDATED_EVENT, onUpdate)
   }, [candidateListDialog])
+
+  // 名单弹窗打开时，轮询服务端候选人变更（跨窗口/跨 webview 兜底）。
+  useCandidateListUpdates(candidateListDialog, updater => setCandidateListDialog(prev => (prev ? updater(prev) : prev)))
+
   const searchSeqRef = useRef(0)
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)
@@ -497,6 +504,22 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     } catch (value) { setBulkArchiveError(value instanceof Error ? value.message : String(value)) }
     finally { setBulkArchiveBusy(false) }
   }
+  // 名单卡刷新：重新按库内最新状态生成 candidate_list 卡片，同步更新消息流 + 弹窗。
+  const refreshCandidateList = async (card: CandidateListCardData) => {
+    const jobId = card.context?.type === 'job' ? Number(card.context.id) : 0
+    if (!jobId || !Number.isFinite(jobId) || refreshingCardJob === jobId) return
+    const bonder = Array.isArray(card.groups) && card.groups.some(group => group.key === 'bonder')
+    setRefreshingCardJob(jobId); setCardRefreshError('')
+    try {
+      const result = await api.candidateListRefresh(jobId, bonder)
+      dispatch({ type: 'card_refreshed', jobId, content: result.answer, action_card: result.card as Record<string, unknown> })
+      setCandidateListDialog(prev => prev && prev.context?.type === 'job' && Number(prev.context.id) === jobId ? result.card : prev)
+    } catch (value) {
+      setCardRefreshError(value instanceof Error ? value.message : String(value))
+    } finally {
+      setRefreshingCardJob(null)
+    }
+  }
   // 焦点以服务端 business_focus 为准；仅服务端无焦点时才回落到本地附着上下文文案。
   const serverFocusLabel = focusLabel(focus)
   const currentFocus = serverFocusLabel
@@ -544,10 +567,21 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
             />
           )}
           {message.role === 'assistant' && message.action_card && (message.action_card as CandidateListCardData).type === 'candidate_list' && (
-            <button className="candidate-list-trigger" onClick={() => setCandidateListDialog(message.action_card as CandidateListCardData)}>
-              <Users size={14} />
-              <span>查看完整名单（{(message.action_card as CandidateListCardData).summary?.total ?? ''} 人）</span>
-            </button>
+            <div className="candidate-list-trigger-row">
+              <button className="candidate-list-trigger" onClick={() => setCandidateListDialog(message.action_card as CandidateListCardData)}>
+                <Users size={14} />
+                <span>查看完整名单（{(message.action_card as CandidateListCardData).summary?.total ?? ''} 人）</span>
+              </button>
+              <button
+                className="candidate-list-refresh"
+                onClick={() => void refreshCandidateList(message.action_card as CandidateListCardData)}
+                disabled={refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id)}
+                title="重新按库内最新状态生成名单"
+              >
+                {refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id) ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}
+                <span>{refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id) ? '刷新中' : '刷新'}</span>
+              </button>
+            </div>
           )}
           {message.role === 'assistant' && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
         </div>)}
@@ -590,8 +624,11 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
         }}
         onOpenJob={jobId => onOpenFullObject({ type: 'job', id: jobId, label: candidateListDialog.title })}
         onClose={() => setCandidateListDialog(null)}
+        onRefresh={() => void refreshCandidateList(candidateListDialog)}
+        refreshing={refreshingCardJob === Number(candidateListDialog.context?.id)}
       />
     )}
+    {cardRefreshError && <div className="agent-error" role="alert"><span>名单刷新失败：{cardRefreshError}</span><button className="button" onClick={() => setCardRefreshError('')}>关闭</button></div>}
   </div>
 }
 

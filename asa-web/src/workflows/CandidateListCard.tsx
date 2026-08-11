@@ -1,4 +1,4 @@
-import { Users } from 'lucide-react'
+import { LoaderCircle, RefreshCw, Users } from 'lucide-react'
 
 export type CandidateListCandidate = {
   id: number
@@ -35,16 +35,31 @@ const GROUP_LIMIT: Record<string, number> = {
   stopped: 5,
 }
 
+/** 阶段标签配色：按 clean_stage 关键词归类到 5 档色板，返回 CSS class 后缀。 */
+export function candidateStageTone(stage?: string): string {
+  const s = stage || ''
+  if (/(初筛不通过|停止|淘汰|关闭|拒绝|不推进)/.test(s)) return 'stopped'
+  if (/(复核通过|待联系|已推荐|推荐)/.test(s)) return 'passed'
+  if (/(已联系|加微信|已申请)/.test(s)) return 'contacted'
+  if (/(已触达|触达)/.test(s)) return 'reached'
+  if (/(待复核|新增寻访|待筛|最近寻访|X-SaaS)/.test(s)) return 'review'
+  return 'default'
+}
+
 export function CandidateListCard({
   data,
   onOpenCandidate,
   onOpenJob,
   compact = false,
+  onRefresh,
+  refreshing = false,
 }: {
   data: CandidateListCardData
   onOpenCandidate: (jobCandidateId: number) => void
   onOpenJob?: (jobId: number) => void
   compact?: boolean
+  onRefresh?: () => void
+  refreshing?: boolean
 }) {
   const summary = data.summary || {}
   const groups = Array.isArray(data.groups) ? data.groups : []
@@ -63,7 +78,10 @@ export function CandidateListCard({
             共 {total} 人{bonderCount > 0 ? ` · 固晶/共晶/键合背景 ${bonderCount} 人` : ''} · 可推进 {active} 人 · 已停止 {stopped} 人
           </span>
         </div>
-        <span className="candidate-list-icon"><Users size={16} /></span>
+        <span className="candidate-list-head-actions">
+          {onRefresh && <button className="candidate-list-refresh" onClick={onRefresh} disabled={refreshing} title="重新按库内最新状态生成名单">{refreshing ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}<span>{refreshing ? '刷新中' : '刷新'}</span></button>}
+          <span className="candidate-list-icon"><Users size={16} /></span>
+        </span>
       </div>
       {groups.map(group => {
         const candidates = group.candidates || []
@@ -86,7 +104,7 @@ export function CandidateListCard({
                       <b>{candidate.name}</b>
                       <small>{[candidate.company, candidate.title].filter(Boolean).join(' · ')}</small>
                     </span>
-                    <em className="candidate-list-stage">{candidate.stage || '—'}</em>
+                    <em className={`candidate-list-stage tone-${candidateStageTone(candidate.stage)}`}>{candidate.stage || '—'}</em>
                   </button>
                 </li>
               ))}

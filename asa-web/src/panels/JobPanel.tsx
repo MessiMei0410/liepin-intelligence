@@ -6,6 +6,7 @@ import { JobBrief } from './JobBrief'
 import { useDraggableOverlay } from '../shared/useDraggableOverlay'
 import { RecommendationMetricsCard } from './RecommendationMetricsCard'
 import { JobWeeklyReport } from './JobWeeklyReport'
+import { SourcingAdjustments } from './SourcingAdjustments'
 import { recordValue, textList } from '../shared/records'
 import { date, sourceLabel, eventStatusLabel, lifecycleEventLabel, lifecycleEventTone, stageTone } from '../shared/format'
 import { SectionHead } from '../shared/primitives'
@@ -86,6 +87,7 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
             </section>
             <RecommendationMetricsCard jobId={value.id} />
             <JobWeeklyReport jobId={value.id} />
+            <SourcingAdjustments jobId={value.id} />
             <section className="job-detail-section">
               <h3>岗位概况</h3>
               <div className="job-facts">{facts.map(([label, content]) => <div key={label}><span>{label}</span><b>{String(content)}</b></div>)}</div>

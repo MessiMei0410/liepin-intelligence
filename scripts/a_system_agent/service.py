@@ -194,6 +194,7 @@ from .copilot_handler import (
 from .sourcing_handler import (
     _ensure_sourcing_attribution as _h_ensure_sourcing_attribution,
     record_sourcing_business_signal as _h_record_sourcing_business_signal,
+    analyze_stop_note as _h_analyze_stop_note,
     _channel_analytics as _h_channel_analytics,
     get_dashboard as _h_get_dashboard,
 )
@@ -1713,6 +1714,7 @@ AgentService.record_copilot_event = _h_record_copilot_event
 # Sourcing
 AgentService._ensure_sourcing_attribution = _h_ensure_sourcing_attribution
 AgentService.record_sourcing_business_signal = _h_record_sourcing_business_signal
+AgentService.analyze_stop_note = _h_analyze_stop_note
 AgentService._channel_analytics = _h_channel_analytics
 AgentService.get_dashboard = _h_get_dashboard
 

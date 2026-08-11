@@ -127,6 +127,10 @@ ASA_FLOATING_CONTEXTS: dict[str, dict[str, Any]] = {}
 ASA_FLOATING_COMMANDS: dict[str, list[dict[str, Any]]] = {"liepin": [], "xsaas": [], "a_system": [], "native": []}
 ASA_FLOATING_COMMAND_HISTORY: list[dict[str, Any]] = []
 ASA_FLOATING_COMMAND_RESULTS: list[dict[str, Any]] = []
+# 候选人名单弹窗跨窗口同步：React 端操作成功后写入，浮窗端轮询读取。
+# 以 job_id 为键，保存最近变更（含时间戳），超期自动清理。
+ASA_FLOATING_CANDIDATE_UPDATES: dict[int, list[dict[str, Any]]] = {}
+ASA_FLOATING_CANDIDATE_UPDATE_TTL_SECONDS = 300
 ASA_UPLOAD_ROOT = Path.home() / "Library/Application Support/ASA/uploads"
 ASA_UPLOAD_MAX_BASE64_CHARS = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
 ASA_FLOATING_APP_CANDIDATES = [
@@ -576,6 +580,90 @@ def show_asa_floating_app() -> dict[str, Any]:
         return {"ok": False, "error": f"ASA Copilot App 不存在：{paths}"}
     subprocess.Popen(["open", str(app)])
     return {"ok": True, "message": "已唤起 ASA Copilot", "app": str(app)}
+
+
+def _clean_candidate_change(change: dict[str, Any]) -> dict[str, Any]:
+    """校验并规整化候选人变更条目。"""
+    job_candidate_id = change.get("job_candidate_id") or change.get("id")
+    try:
+        job_candidate_id = int(job_candidate_id)
+    except (TypeError, ValueError):
+        raise ValueError("job_candidate_id/id 必须是整数")
+    stage = clean(change.get("stage"))
+    is_stopped = bool(change.get("is_stopped"))
+    result: dict[str, Any] = {
+        "job_candidate_id": job_candidate_id,
+        "is_stopped": is_stopped,
+        "updated_at": datetime.now().isoformat(),
+    }
+    if stage:
+        result["stage"] = stage
+    return result
+
+
+def record_floating_candidate_update(job_id: int, change: dict[str, Any]) -> dict[str, Any]:
+    """记录一次候选人状态变更，供浮窗名单弹窗轮询刷新。"""
+    try:
+        job_id = int(job_id)
+    except (TypeError, ValueError):
+        raise ValueError("job_id 必须是整数")
+    cleaned = _clean_candidate_change(change)
+    now = datetime.now()
+    cutoff = now.timestamp() - ASA_FLOATING_CANDIDATE_UPDATE_TTL_SECONDS
+    with ASA_FLOATING_LOCK:
+        queue = ASA_FLOATING_CANDIDATE_UPDATES.setdefault(job_id, [])
+        queue.append(cleaned)
+        # 去重：同一候选人在同一方向只保留最近一条
+        seen: dict[int, dict[str, Any]] = {}
+        for item in queue:
+            ts = datetime.fromisoformat(item["updated_at"]).timestamp()
+            if ts < cutoff:
+                continue
+            cid = int(item["job_candidate_id"])
+            key = (cid, bool(item["is_stopped"]))
+            seen[key] = item
+        ASA_FLOATING_CANDIDATE_UPDATES[job_id] = list(seen.values())
+    return {"ok": True, "job_id": job_id, "change": cleaned}
+
+
+def drain_floating_candidate_updates(job_id: int, since: str = "") -> dict[str, Any]:
+    """读取某岗位下自 since 时间以来的候选人变更，并清理过期数据。"""
+    try:
+        job_id = int(job_id)
+    except (TypeError, ValueError):
+        raise ValueError("job_id 必须是整数")
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+        except ValueError:
+            pass
+    now = datetime.now()
+    cutoff = now.timestamp() - ASA_FLOATING_CANDIDATE_UPDATE_TTL_SECONDS
+    with ASA_FLOATING_LOCK:
+        # 全局清理过期数据，避免内存无限增长
+        empty_keys: list[int] = []
+        for key, queue in ASA_FLOATING_CANDIDATE_UPDATES.items():
+            fresh = [
+                item
+                for item in queue
+                if datetime.fromisoformat(item["updated_at"]).timestamp() >= cutoff
+            ]
+            if fresh:
+                ASA_FLOATING_CANDIDATE_UPDATES[key] = fresh
+            else:
+                empty_keys.append(key)
+        for key in empty_keys:
+            ASA_FLOATING_CANDIDATE_UPDATES.pop(key, None)
+        queue = ASA_FLOATING_CANDIDATE_UPDATES.get(job_id, [])
+        if since_dt is None:
+            return {"ok": True, "job_id": job_id, "changes": list(queue)}
+        changes = [
+            item
+            for item in queue
+            if datetime.fromisoformat(item["updated_at"]) > since_dt
+        ]
+        return {"ok": True, "job_id": job_id, "changes": changes}
 
 
 def floating_db_rows(db_path: Path) -> dict[str, Any]:
@@ -1813,7 +1901,7 @@ def asa_floating_html() -> str:
   </div>
 </div>
 <script>
-const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, contextKey:'', messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null, intentConfirmBusy:false, proposals:[], proposalCards:{}, proposalReceipts:[] };
+const state = { data:null, sessionId: localStorage.getItem('asaFloatingSession') || `floating_${Math.random().toString(16).slice(2)}`, contextKey:'', messages: [], sessions:[], attachments:[], historyOpen:false, historyLoading:false, restored:false, loading:false, requestStartedAt:0, pendingNativeContext:null, businessFocus:null, intentConfirmBusy:false, proposals:[], proposalCards:{}, proposalReceipts:[], candidateUpdateJobId:null, candidateUpdateSince:'' };
 localStorage.setItem('asaFloatingSession', state.sessionId);
 function esc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function floatingInline(value){
@@ -1918,10 +2006,14 @@ function renderCandidateListDialog(message, index){
   }).join('');
   const jobId = card.context && card.context.type === 'job' ? Number(card.context.id) : 0;
   const foot = jobId ? `<div class="candidate-list-foot"><button type="button" class="ghost" data-job-open="${jobId}">打开岗位查看完整名单</button></div>` : '';
-  return `<div class="candidate-dialog-float"><div class="candidate-dialog" role="dialog" aria-modal="false" aria-label="${esc(card.title || '候选名单')}"><div class="candidate-dialog-head" data-candidate-drag><div class="candidate-dialog-title"><b>${esc(card.title || '候选名单')}</b><span>共 ${total} 人${bonderCount > 0 ? ` · 固晶/共晶/键合背景 ${bonderCount} 人` : ''} · 可推进 ${active} 人 · 已停止 ${stopped} 人</span></div><div class="candidate-dialog-actions"><button class="icon-btn candidate-dialog-detach" type="button" data-candidate-detach="${index}" aria-label="弹出为独立窗口" title="弹出为独立窗口（可拖出屏幕）">↗</button><button class="icon-btn candidate-dialog-close" type="button" data-candidate-dialog-close aria-label="关闭名单" title="关闭 (Esc)">×</button></div></div><div class="candidate-dialog-body">${groupHtml || '<p class="empty">当前候选池为空。</p>'}</div>${foot}</div></div>`;
+  return `<div class="candidate-dialog-float"><div class="candidate-dialog" data-candidate-list-index="${index}" role="dialog" aria-modal="false" aria-label="${esc(card.title || '候选名单')}"><div class="candidate-dialog-head" data-candidate-drag><div class="candidate-dialog-title"><b>${esc(card.title || '候选名单')}</b><span>共 ${total} 人${bonderCount > 0 ? ` · 固晶/共晶/键合背景 ${bonderCount} 人` : ''} · 可推进 ${active} 人 · 已停止 ${stopped} 人</span></div><div class="candidate-dialog-actions"><button class="icon-btn candidate-dialog-detach" type="button" data-candidate-detach="${index}" aria-label="弹出为独立窗口" title="弹出为独立窗口（可拖出屏幕）">↗</button><button class="icon-btn candidate-dialog-close" type="button" data-candidate-dialog-close aria-label="关闭名单" title="关闭 (Esc)">×</button></div></div><div class="candidate-dialog-body">${groupHtml || '<p class="empty">当前候选池为空。</p>'}</div>${foot}</div></div>`;
 }
 function openCandidateListDialog(index){
   closeCandidateListDialog();
+  const card = state.messages[index]?.action_card;
+  const jobId = card && card.context && card.context.type === 'job' ? Number(card.context.id) : 0;
+  state.candidateUpdateJobId = jobId || null;
+  state.candidateUpdateSince = '';
   document.body.insertAdjacentHTML('beforeend', renderCandidateListDialog(state.messages[index], index));
   const dialog = document.querySelector('[data-candidate-drag]')?.closest('.candidate-dialog');
   if (!dialog) return;
@@ -2007,6 +2099,110 @@ function openCandidateListDialog(index){
 }
 function closeCandidateListDialog(){
   document.querySelector('.candidate-dialog-float')?.remove();
+}
+function applyCandidateListUpdates(card, changes){
+  if (!card || card.type !== 'candidate_list' || !Array.isArray(changes) || !changes.length) return false;
+  const groups = Array.isArray(card.groups) ? card.groups.map(g => ({...g, candidates: (g.candidates || []).map(c => ({...c}))})) : [];
+  const summary = card.summary ? {...card.summary} : {};
+  let dirty = false;
+  for (const change of changes) {
+    const candidateId = Number(change.job_candidate_id || change.id);
+    if (!Number.isFinite(candidateId)) continue;
+    const isStopped = !!change.is_stopped;
+    let fromGroup = null, fromIndex = -1;
+    for (const g of groups) {
+      const idx = (g.candidates || []).findIndex(c => Number(c.id) === candidateId);
+      if (idx >= 0) { fromGroup = g; fromIndex = idx; break; }
+    }
+    if (!fromGroup) continue;
+    dirty = true;
+    const candidate = fromGroup.candidates[fromIndex];
+    if (change.stage) candidate.stage = String(change.stage);
+    const alreadyStopped = fromGroup.key === 'stopped';
+    if (isStopped && !alreadyStopped) {
+      fromGroup.candidates.splice(fromIndex, 1);
+      let stoppedGroup = groups.find(g => g.key === 'stopped');
+      if (!stoppedGroup) {
+        stoppedGroup = { key: 'stopped', label: '已停止推进', candidates: [] };
+        groups.push(stoppedGroup);
+      }
+      stoppedGroup.candidates.push(candidate);
+      summary.active = Math.max(0, (summary.active ?? 0) - 1);
+      summary.stopped = (summary.stopped ?? 0) + 1;
+    } else if (!isStopped && alreadyStopped) {
+      fromGroup.candidates.splice(fromIndex, 1);
+      let activeGroup = groups.find(g => g.key === 'active');
+      if (!activeGroup) {
+        activeGroup = { key: 'active', label: '其余可推进候选', candidates: [] };
+        groups.push(activeGroup);
+      }
+      activeGroup.candidates.push(candidate);
+      summary.active = (summary.active ?? 0) + 1;
+      summary.stopped = Math.max(0, (summary.stopped ?? 0) - 1);
+    }
+  }
+  if (!dirty) return false;
+  card.groups = groups;
+  card.summary = summary;
+  return true;
+}
+function updateFloatingCandidateList(changes){
+  const wrapper = document.querySelector('.candidate-dialog-float');
+  if (!wrapper) return false;
+  const dialog = wrapper.querySelector('.candidate-dialog');
+  if (!dialog) return false;
+  const index = Number(dialog.dataset.candidateListIndex);
+  if (!Number.isFinite(index) || index < 0 || index >= state.messages.length) return false;
+  const card = state.messages[index]?.action_card;
+  if (!card || card.type !== 'candidate_list') return false;
+  // 保存位置、尺寸与滚动，避免重绘后弹窗跳动
+  const body = dialog.querySelector('.candidate-dialog-body');
+  const saved = {
+    left: dialog.style.left, top: dialog.style.top,
+    width: dialog.style.width, height: dialog.style.height,
+    transform: dialog.style.transform, margin: dialog.style.margin,
+    maxWidth: dialog.style.maxWidth, maxHeight: dialog.style.maxHeight,
+    scrollTop: body ? body.scrollTop : 0,
+  };
+  if (!applyCandidateListUpdates(card, changes)) return false;
+  openCandidateListDialog(index);
+  const newDialog = document.querySelector('.candidate-dialog-float .candidate-dialog');
+  const newBody = newDialog?.querySelector('.candidate-dialog-body');
+  if (newDialog) {
+    if (saved.left) newDialog.style.left = saved.left;
+    if (saved.top) newDialog.style.top = saved.top;
+    if (saved.width) newDialog.style.width = saved.width;
+    if (saved.height) newDialog.style.height = saved.height;
+    if (saved.transform) newDialog.style.transform = saved.transform;
+    if (saved.margin) newDialog.style.margin = saved.margin;
+    if (saved.maxWidth) newDialog.style.maxWidth = saved.maxWidth;
+    if (saved.maxHeight) newDialog.style.maxHeight = saved.maxHeight;
+  }
+  if (newBody && saved.scrollTop) newBody.scrollTop = saved.scrollTop;
+  return true;
+}
+async function pollCandidateListUpdates(){
+  const wrapper = document.querySelector('.candidate-dialog-float .candidate-dialog');
+  if (!wrapper) { state.candidateUpdateJobId = null; state.candidateUpdateSince = ''; return; }
+  const index = Number(wrapper.dataset.candidateListIndex);
+  const card = state.messages[index]?.action_card;
+  const jobId = card && card.context && card.context.type === 'job' ? Number(card.context.id) : 0;
+  if (!jobId) return;
+  if (state.candidateUpdateJobId !== jobId) {
+    state.candidateUpdateJobId = jobId;
+    state.candidateUpdateSince = '';
+  }
+  try {
+    const sinceParam = state.candidateUpdateSince ? `&since=${encodeURIComponent(state.candidateUpdateSince)}` : '';
+    const result = await api(`/api/asa/floating/candidate-updates?job_id=${jobId}${sinceParam}`);
+    const changes = Array.isArray(result.changes) ? result.changes : [];
+    if (changes.length) {
+      updateFloatingCandidateList(changes);
+      // 以本次 newest 更新时间作为下一次 since；没有则沿用旧值
+      const newest = changes.map(c => c.updated_at).filter(Boolean).sort().pop();
+      if (newest) state.candidateUpdateSince = newest;
+    }
+  } catch (_) { /* 轮询失败静默，下次继续 */ }
 }
 function detachCandidateListDialog(index){
   const message = state.messages[index];
@@ -2674,7 +2870,7 @@ window.addEventListener('asa-native-attachment-analysis', event => {
 async function loadState(){
   try{
     state.data = await api('/api/asa/floating/state');
-    await Promise.all([syncWorkflowSession(), loadActionCards()]);
+    await Promise.all([syncWorkflowSession(), loadActionCards(), pollCandidateListUpdates()]);
     render();
   }catch(err){
     renderConnectionError(err);
@@ -7942,6 +8138,17 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 surface = clean((query.get("surface") or [""])[-1])
                 instance_id = clean((query.get("instance_id") or [""])[-1])
                 json_response(self, drain_floating_commands(surface, instance_id))
+            elif parsed.path == "/api/asa/floating/candidate-updates":
+                if not agent_origin_allowed(self):
+                    json_response(self, {"ok": False, "error": "拒绝非本地页面读取候选人名单更新"}, HTTPStatus.FORBIDDEN)
+                    return
+                query = urllib.parse.parse_qs(parsed.query)
+                job_id_raw = clean((query.get("job_id") or [""])[-1])
+                since = clean((query.get("since") or [""])[-1])
+                try:
+                    json_response(self, drain_floating_candidate_updates(job_id_raw, since))
+                except ValueError as exc:
+                    json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif parsed.path == "/api/agent/run":
                 if not agent_origin_allowed(self):
                     json_response(self, {"ok": False, "error": "拒绝非本地 A 系统页面读取 Agent 运行"}, HTTPStatus.FORBIDDEN)
@@ -8189,6 +8396,15 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     result["snapshot_error"] = str(exc)[:300]
                 json_response(self, result)
+            elif parsed.path == "/api/asa/floating/candidate-update":
+                if not agent_origin_allowed(self):
+                    json_response(self, {"ok": False, "error": "拒绝非本地页面写入候选人名单更新"}, HTTPStatus.FORBIDDEN)
+                    return
+                job_id_raw = data.get("job_id") or data.get("context", {}).get("id")
+                try:
+                    json_response(self, record_floating_candidate_update(job_id_raw, data.get("change") or data))
+                except ValueError as exc:
+                    json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif parsed.path == "/api/asa/floating/command-result":
                 if not bridge_origin_allowed(self):
                     json_response(self, {"ok": False, "error": "拒绝非本地或候选人页面上报 ASA 浮窗命令结果"}, HTTPStatus.FORBIDDEN)

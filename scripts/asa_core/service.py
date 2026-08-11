@@ -1046,6 +1046,19 @@ class CoreService:
         finally:
             conn.close()
 
+    def candidate_list_card(self, job_id: int, *, bonder: bool = False) -> dict[str, Any]:
+        """重新生成岗位候选名单卡片（刷新静态快照，供前端名单卡\"刷新\"按钮调用）。
+
+        - job 不存在 → 404（LookupError 全局映射）
+        - bonder=True 时按固晶/共晶/键合关键词重建优先分组（原卡有该组时前端应传回）
+        """
+        from a_system_agent.copilot_handler import _build_candidate_list_card
+
+        answer, card = _build_candidate_list_card(str(self.db_path), int(job_id), "固晶" if bonder else "")
+        if not card:
+            raise LookupError("job not found")
+        return {"ok": True, "answer": answer, "card": card}
+
     def job(self, job_id: int) -> dict[str, Any]:
         conn = connect(self.db_path)
         try:
@@ -2417,6 +2430,12 @@ class CoreService:
             source_type="candidate_event",
             source_id=int(cursor.lastrowid),
         )
+        if action == "stop":
+            # 停止备注 → 寻访调整指令（失败静默，不阻断主流程）。
+            try:
+                self._analyze_and_store_stop_note_adjustments(candidate_id, stop_reason, note)
+            except Exception:
+                pass
         return {
             "ok": True,
             "candidate_id": candidate_id,
@@ -2427,6 +2446,261 @@ class CoreService:
             "business_event_id": cursor.lastrowid,
             "sourcing_learning": learning,
         }
+
+    @staticmethod
+    def _fallback_stop_note_adjustments(note: str) -> list[dict[str, Any]]:
+        """LLM 失败/返回空时的规则兜底：薪资、公司、城市。"""
+        if not note:
+            return []
+        adjustments: list[dict[str, Any]] = []
+        # 薪资数字 → adjust_salary_range
+        salary_match = re.search(r"(\d+[\s]*[kwKW万])", note)
+        if salary_match:
+            adjustments.append({
+                "type": "adjust_salary_range",
+                "value": f"≤{salary_match.group(1).replace(' ', '')}",
+                "rationale": note[:120],
+                "confidence": 0.5,
+            })
+        # 明确公司名（含"公司/厂"）→ exclude_company
+        company_match = re.search(r"([^，。；\n]{2,20}?(?:公司|厂))", note)
+        if company_match:
+            adjustments.append({
+                "type": "exclude_company",
+                "value": company_match.group(1).strip(),
+                "rationale": note[:120],
+                "confidence": 0.5,
+            })
+        # "只考虑/家在/期望"+城市 → add_filter
+        city_match = re.search(r"(?:只考虑|家在|期望)\s*([^，。；\n]{1,10})", note)
+        if city_match:
+            adjustments.append({
+                "type": "add_filter",
+                "value": f"地点：{city_match.group(1).strip()}",
+                "rationale": note[:120],
+                "confidence": 0.5,
+            })
+        return adjustments
+
+    def _analyze_and_store_stop_note_adjustments(
+        self, candidate_id: int, stop_reason_code: str, note: str
+    ) -> dict[str, Any]:
+        """分析停止备注并写入 agent_sourcing_adjustments；失败返回空结果不抛异常。"""
+        if not self.agent_service:
+            return {"stored": 0, "error": "agent service unavailable"}
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT jc.job_id, jc.person_id,
+                       p.display_name, p.current_company, p.current_title, p.city,
+                       j.title AS job_title, c.name AS client_name
+                FROM job_candidates jc
+                JOIN people p ON p.id=jc.person_id
+                JOIN jobs j ON j.id=jc.job_id
+                JOIN clients c ON c.id=j.client_id
+                WHERE jc.id=?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if not row:
+                return {"stored": 0, "error": "candidate not found"}
+            payload = {
+                "note": note or "",
+                "stop_reason_code": stop_reason_code or "",
+                "stop_reason_label": STOP_REASON_LABELS.get(stop_reason_code, ""),
+                "candidate": {
+                    "display_name": row["display_name"] or "",
+                    "current_company": row["current_company"] or "",
+                    "current_title": row["current_title"] or "",
+                    "city": row["city"] or "",
+                },
+                "job": {
+                    "job_id": int(row["job_id"]) if row["job_id"] else 0,
+                    "title": row["job_title"] or "",
+                    "client": row["client_name"] or "",
+                },
+            }
+            try:
+                result = self.agent_service.analyze_stop_note(payload)
+                adjustments = result.get("adjustments") if isinstance(result, dict) else None
+            except Exception:
+                adjustments = None
+            if not isinstance(adjustments, list) or not adjustments:
+                adjustments = self._fallback_stop_note_adjustments(note or "")
+            stored = self._persist_stop_note_adjustments(
+                conn, int(row["job_id"]) if row["job_id"] else 0, candidate_id, note or "", adjustments
+            )
+            return {"stored": stored}
+        except Exception as exc:
+            return {"stored": 0, "error": str(exc)}
+        finally:
+            conn.close()
+
+    def _persist_stop_note_adjustments(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        candidate_id: int,
+        note: str,
+        adjustments: list[dict[str, Any]],
+    ) -> int:
+        """幂等写入调整指令，返回实际插入条数。"""
+        if not job_id or not adjustments:
+            return 0
+        valid_types = {"add_keyword", "remove_keyword", "exclude_company", "add_company", "add_filter", "adjust_salary_range"}
+        stored = 0
+        rationale = (note or "")[:120]
+        for item in adjustments:
+            if not isinstance(item, dict):
+                continue
+            adjust_type = str(item.get("type") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if adjust_type not in valid_types or not value:
+                continue
+            dedupe_value = value.lower()
+            dedupe_key = f"{job_id}|{adjust_type}|{dedupe_value}"
+            confidence = float(item.get("confidence") or 0.5)
+            if not 0.0 <= confidence <= 1.0:
+                confidence = 0.5
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO agent_sourcing_adjustments
+                    (job_id, candidate_id, adjust_type, value, rationale, confidence, dedupe_key)
+                    VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (job_id, candidate_id, adjust_type, value, rationale, confidence, dedupe_key),
+                )
+                if cur.rowcount > 0:
+                    stored += 1
+            except Exception:
+                continue
+        conn.commit()
+        return stored
+
+    def list_sourcing_adjustments(self, job_id: int) -> dict[str, Any]:
+        """岗位的停止备注寻访调整列表（含来源候选人姓名）与状态汇总。"""
+        conn = connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT a.*, p.display_name AS candidate_name
+                FROM agent_sourcing_adjustments a
+                LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
+                LEFT JOIN people p ON p.id=jc.person_id
+                WHERE a.job_id=?
+                ORDER BY CASE a.status WHEN 'pending' THEN 0 WHEN 'applied' THEN 1 ELSE 2 END, a.id DESC
+                """,
+                (job_id,),
+            ).fetchall()
+            summary = {"pending": 0, "applied": 0, "ignored": 0}
+            items: list[dict[str, Any]] = []
+            current_pool: dict[str, int] | None = None
+            for row in rows:
+                status = str(row["status"] or "")
+                if status in summary:
+                    summary[status] += 1
+                baseline_raw = row["baseline_json"] or ""
+                baseline: dict[str, Any] = {}
+                if baseline_raw:
+                    try:
+                        baseline = json.loads(baseline_raw)
+                    except Exception:
+                        baseline = {}
+                # 已应用的调整：附带当前候选池值，供"调整前后效果对比"追踪。
+                delta: dict[str, Any] | None = None
+                if status == "applied" and baseline:
+                    if current_pool is None:
+                        current_pool = self._candidate_pool_snapshot(job_id)
+                    delta = {
+                        "baseline": baseline,
+                        "current": current_pool,
+                        "diff": {
+                            key: int(current_pool.get(key, 0)) - int(baseline.get(key, 0))
+                            for key in ("total", "pending_review", "contacted", "stopped")
+                        },
+                    }
+                items.append({
+                    "id": int(row["id"]),
+                    "job_id": int(row["job_id"]),
+                    "candidate_id": int(row["candidate_id"]) if row["candidate_id"] else None,
+                    "candidate_display_name": row["candidate_name"] or "",
+                    "adjust_type": row["adjust_type"],
+                    "value": row["value"],
+                    "rationale": row["rationale"] or "",
+                    "confidence": float(row["confidence"] or 0.5),
+                    "status": status,
+                    "created_at": row["created_at"] or "",
+                    "applied_at": row["applied_at"] or "",
+                    "applied_round": int(row["applied_round"]) if row["applied_round"] else None,
+                    "effect": delta,
+                })
+            return {"ok": True, "items": items, "summary": summary}
+        finally:
+            conn.close()
+
+    def _candidate_pool_snapshot(self, job_id: int) -> dict[str, int]:
+        """候选池当前快照（总池 / 待复核 / 已触达 / 已停止），口径与 capability_runtime 基线一致。"""
+        conn = connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS total,
+                  SUM(clean_stage LIKE 'S1%' OR clean_stage LIKE 'X1%' OR clean_stage LIKE 'H1%' OR clean_stage LIKE 'H5%' OR clean_stage LIKE 'S2%') AS pending_review,
+                  SUM(clean_stage LIKE 'S3%' OR clean_stage LIKE 'S4%' OR clean_stage LIKE 'S5%' OR clean_stage LIKE 'S6%' OR clean_stage LIKE 'S7%' OR clean_stage LIKE 'S8%' OR clean_stage LIKE 'S9%' OR clean_stage LIKE 'S10%' OR clean_stage LIKE 'S11%' OR clean_stage LIKE 'S12%' OR clean_stage LIKE 'S13%' OR clean_stage LIKE 'X2%' OR clean_stage LIKE 'X3%' OR clean_stage LIKE 'X4%' OR clean_stage LIKE 'X5%') AS contacted,
+                  SUM(clean_stage LIKE '%停止%' OR clean_stage LIKE '%淘汰%' OR clean_stage LIKE '%不通过%') AS stopped
+                FROM job_candidates WHERE job_id=?
+                """,
+                (job_id,),
+            ).fetchone()
+            return {
+                "total": int(rows["total"] or 0),
+                "pending_review": int(rows["pending_review"] or 0),
+                "contacted": int(rows["contacted"] or 0),
+                "stopped": int(rows["stopped"] or 0),
+            }
+        finally:
+            conn.close()
+
+    def confirm_sourcing_adjustment(self, adjustment_id: int) -> dict[str, Any]:
+        """顾问手动确认：pending → applied（与自动应用语义相同）。"""
+        conn = connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE agent_sourcing_adjustments
+                   SET status='applied', applied_at=datetime('now','localtime')
+                 WHERE id=? AND status='pending'
+                """,
+                (adjustment_id,),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise LookupError("调整指令不存在或已不是待确认状态")
+            return {"ok": True, "id": adjustment_id, "status": "applied"}
+        finally:
+            conn.close()
+
+    def ignore_sourcing_adjustment(self, adjustment_id: int) -> dict[str, Any]:
+        """顾问忽略：pending → ignored。"""
+        conn = connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE agent_sourcing_adjustments
+                   SET status='ignored'
+                 WHERE id=? AND status='pending'
+                """,
+                (adjustment_id,),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise LookupError("调整指令不存在或已不是待确认状态")
+            return {"ok": True, "id": adjustment_id, "status": "ignored"}
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # 顾问确认推荐事实链：preflight/commit + 岗位指标

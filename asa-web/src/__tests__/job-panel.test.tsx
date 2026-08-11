@@ -6,6 +6,7 @@ import type { Candidate, JobDetail } from '../api'
 vi.mock('../panels/JobProfileInsights', () => ({ JobProfileInsights: () => null }))
 vi.mock('../panels/RecommendationMetricsCard', () => ({ RecommendationMetricsCard: () => null }))
 vi.mock('../panels/JobWeeklyReport', () => ({ JobWeeklyReport: () => null }))
+vi.mock('../panels/SourcingAdjustments', () => ({ SourcingAdjustments: () => null }))
 
 const makeCandidate = (id: number, extra: Partial<Candidate> = {}): Candidate => ({
   id,
