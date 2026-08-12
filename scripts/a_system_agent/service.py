@@ -161,6 +161,7 @@ from .copilot_handler import (
     _copilot_impl as _h_copilot_impl,
     chat as _h_chat,
     _normalize_copilot_context as _h_normalize_copilot_context,
+    _default_outreach_queue_inputs as _h_default_outreach_queue_inputs,
     _floating_bridge_evidence as _h_floating_bridge_evidence,
     _uploaded_attachment_evidence as _h_uploaded_attachment_evidence,
     _mentioned_jobs_for_copilot as _h_mentioned_jobs_for_copilot,
@@ -1687,6 +1688,7 @@ class AgentService:
 # Copilot
 AgentService.copilot = _h_copilot
 AgentService._copilot_impl = _h_copilot_impl
+AgentService._default_outreach_queue_inputs = _h_default_outreach_queue_inputs
 AgentService.chat = _h_chat
 AgentService._normalize_copilot_context = _h_normalize_copilot_context
 AgentService._floating_bridge_evidence = _h_floating_bridge_evidence

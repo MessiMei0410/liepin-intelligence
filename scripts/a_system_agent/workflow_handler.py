@@ -106,6 +106,44 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
                 for i, item in enumerate(candidates[:10])
             ],
         }
+    if capability_id == "outreach_queue":
+        # 触达队列：把分级名单的 job_candidate_ids 转成带 P0/P1/P2 优先级的触达提案
+        from .strategy_handler import execute_outreach_queue
+        jc_ids = inputs.get("job_candidate_ids") or []
+        priorities = inputs.get("priorities") or {}
+        if not jc_ids and context_type in ("job", "candidate", "queue") and context_id:
+            jc_ids = [int(context_id)]
+        result = execute_outreach_queue(self.db_path, job_candidate_ids=jc_ids, priorities=priorities)
+        proposals = (result.get("proposals") or []) if result.get("ok") else []
+        if result.get("ok"):
+            summary_text = f"触达队列已生成：{len(proposals)} 个触达提案。"
+        else:
+            summary_text = f"触达队列生成失败：{result.get('error') or '未知错误'}"
+        return {
+            "summary": summary_text,
+            "outreach_queue_result": result,
+            "proposals": proposals,
+            "references": [
+                {"type": "proposal", "id": p.get("proposal_id", ""), "label": p.get("candidate", ""), "subtitle": p.get("rationale", "")}
+                for p in proposals[:10]
+            ],
+        }
+    if capability_id == "pool_gap_advice":
+        from .pool_gap_advice import suggest_pool_gap
+        from .candidate_pool_filter import filter_job_candidates
+        if context_type != "job" or not context_id:
+            return {"summary": "缺口补池建议需要 job 上下文。", "suggestions": [], "references": []}
+        banned = [b for b in (inputs.get("banned") or [])] or ["长川", "长越"]
+        filtered = filter_job_candidates(self.db_path, context_id, client=str(facts.get("client") or ""))
+        suggestions = suggest_pool_gap(filtered, banned=banned)
+        return {
+            "summary": f"补池建议 {len(suggestions)} 条：{'; '.join(s.get('company') or s.get('reason','')[:12] for s in suggestions[:4])}",
+            "suggestions": suggestions,
+            "references": [
+                {"type": "company", "id": "", "label": s.get("company") or "总结建议", "subtitle": s.get("reason", "")[:40]}
+                for s in suggestions[:10]
+            ],
+        }
     if capability_id == "candidate_batch_assessment":
         def assessment_stats() -> tuple[dict[str, int], list[dict[str, Any]]]:
             if context_type != "job" or not context_id:

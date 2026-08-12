@@ -1817,6 +1817,42 @@ def _requests_grade_filter(message: str) -> bool:
     )
 
 
+def _default_outreach_queue_inputs(self, message: str, selected: dict[str, Any]) -> tuple[list[int], dict[int, str]]:
+    """触达队列 skill 的默认输入：取当前岗位 A 级候选人的 jc_id，优先级按消息关键词。"""
+    job_id = 0
+    if selected.get("type") == "job" and selected.get("id"):
+        job_id = int(selected["id"])
+    elif selected.get("job") and isinstance(selected.get("job"), dict):
+        job_id = int((selected.get("job") or {}).get("id") or 0)
+    if not job_id:
+        return [], {}
+    from .candidate_pool_filter import filter_job_candidates
+    import sqlite3 as _sqlite3
+    _client_name = ""
+    try:
+        _conn = _sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        _conn.row_factory = _sqlite3.Row
+        try:
+            _jrow = _conn.execute("SELECT c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?", (job_id,)).fetchone()
+            _client_name = str(_jrow["client"]) if _jrow is not None else ""
+        finally:
+            _conn.close()
+    except Exception:
+        _client_name = ""
+    try:
+        result = filter_job_candidates(self.db_path, job_id, client=_client_name)
+    except Exception:
+        try:
+            result = filter_job_candidates(self.db_path, job_id)
+        except Exception:
+            return [], {}
+    candidates = result.get("candidates") or []
+    a_ids = [int(c["id"]) for c in candidates if c.get("grade", "").startswith("A") and c.get("id")]
+    text = " ".join(str(message or "").split())
+    default_prio = "P0" if any(t in text for t in ("优先", "P0", "最急")) else "P1" if "P1" in text else "P1"
+    return a_ids[:30], {jc_id: default_prio for jc_id in a_ids[:30]}
+
+
 def _format_candidate_list_answer(db_path: str, job_id: int, message: str) -> str:
     """从候选池生成岗位名单文本（含岗位上下文、阶段分组、固晶/共晶/键合优先）。"""
     return _build_candidate_list_card(db_path, job_id, message)[0]
@@ -5080,9 +5116,15 @@ def _copilot_impl(
             "target": {"type": str(selected.get("type") or "global"), "id": selected.get("id")},
             "source_message": message,
         }
+    # 触达队列/排优先级属于内部整理动作（生成 P0/P1/P2 提案），
+    # 不应进入 create_goal 建立对外工作流；改走 outreach_queue skill 路由。
+    internal_queue_requested = any(
+        token in message
+        for token in ("转成触达队列", "触达队列", "排触达", "触达优先级", "P0队列", "P1队列", "按P0", "按P1", "按P2")
+    )
     if goal_workflow is None and forced_answer is None and not suppress_goal_intent and (
         create_plan_requested or scope_clarification_resolved or strategy_gate_force_goal
-    ) and not stopped_candidate_action_blocked:
+    ) and not stopped_candidate_action_blocked and not internal_queue_requested:
         ground_base = selected
         if strategy_gate_force_goal and pending_clarification.get("job_id"):
             ground_base = {"type": "job", "id": int(pending_clarification["job_id"]), "page": "positions", "filters": {}}
@@ -5578,6 +5620,10 @@ def _copilot_impl(
                 skill_inputs["command"] = "browser" if any(token in message for token in ("浏览器", "网页", "Chrome", "chrome", "页面")) else "list"
             elif skill_id == "opencli_browser_read":
                 skill_inputs = {"args": "asa state", "timeout_seconds": 20}
+            elif skill_id == "outreach_queue":
+                # 自动取当前岗位 A 级候选人的 jc_id 作为触达队列；优先级按消息中关键词或默认 P1
+                _jc_ids, _prios = self._default_outreach_queue_inputs(message, selected)
+                skill_inputs = {"job_candidate_ids": _jc_ids, "priorities": _prios}
             skill_run = self.execute_skill(skill_id, context=selected, inputs=skill_inputs)
             skill_runs.append(skill_run)
             result = skill_run.get("result") or {}
