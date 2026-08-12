@@ -158,6 +158,11 @@ def test_floating_execution_cards_recover_and_explain_approval_scope() -> None:
     ]:
         assert marker in source, marker
     handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
+    # copilot_handler.py 已于 2026-08-12 拆分，实现字符串在拆分后的模块中搜索。
+    handler += "".join(
+        (ROOT / "scripts" / "a_system_agent" / f"copilot_{m}.py").read_text(encoding="utf-8")
+        for m in ("evidence", "intent", "sessions", "routing", "api")
+    )
     assert '"workflow_progress": structured.get("workflow_progress"),' in handler
 
 
@@ -410,6 +415,11 @@ def test_floating_intent_card_data_wiring_contract() -> None:
     # 恢复链：get_copilot_session 透传持久化的 pending_intent，
     # restoreCurrentSession/loadSession 经统一 renderMessages 重渲染出卡
     copilot_handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
+    # copilot_handler.py 已于 2026-08-12 拆分，实现字符串在拆分后的模块中搜索。
+    copilot_handler += "".join(
+        (ROOT / "scripts" / "a_system_agent" / f"copilot_{m}.py").read_text(encoding="utf-8")
+        for m in ("evidence", "intent", "sessions", "routing", "api")
+    )
     assert '"pending_intent": structured.get("pending_intent"),' in copilot_handler
 
 

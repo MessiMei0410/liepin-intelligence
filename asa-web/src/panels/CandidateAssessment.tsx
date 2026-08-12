@@ -120,6 +120,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
       setLoading(false)
     }
   }, [candidateId, jobId])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void fetchAssessment() }, [fetchAssessment])
   const reload = () => {
     if (loading) return

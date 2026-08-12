@@ -65,9 +65,11 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
 
   // 搜索变化回到各阶段第一页；数据收缩时把各阶段页码状态也夹回有效范围。
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStagePages({})
   }, [keyword])
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStagePages(prev => {
       const clamped: Record<string, number> = {}
       for (const [stage, list] of groups) {

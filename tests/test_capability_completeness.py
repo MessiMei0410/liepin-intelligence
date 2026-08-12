@@ -99,7 +99,7 @@ class CapabilityCompletenessTest(unittest.TestCase):
     def test_registered_workflow_capabilities_all_resolve(self) -> None:
         runner_ids = RecruitingCapabilityRuntime.deterministic_runner_ids()
         workflow_ids = self._workflow_capability_ids()
-        self.assertEqual(len(workflow_ids), 26)
+        self.assertEqual(len(workflow_ids), 29)
         # 注册能力 = 确定性 Runner ∪ 服务层处理器，集合互斥且无遗漏。
         self.assertEqual(workflow_ids - runner_ids, set(SERVICE_HANDLED_CAPABILITY_IDS))
         self.assertEqual(runner_ids & set(SERVICE_HANDLED_CAPABILITY_IDS), set())

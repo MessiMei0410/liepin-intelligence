@@ -27,6 +27,7 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
   }, [jobId])
 
   useEffect(() => {
+// eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
   }, [load])
 

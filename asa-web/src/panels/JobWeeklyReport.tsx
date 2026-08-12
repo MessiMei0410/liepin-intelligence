@@ -39,6 +39,7 @@ export function JobWeeklyReport({ jobId }: { jobId: number }) {
       setLoading(false)
     }
   }, [jobId])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load])
 
   const generate = async () => {

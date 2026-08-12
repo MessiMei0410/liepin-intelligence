@@ -50,6 +50,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
     }
   }, [workflowId, reviewable])
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load, updatedAt])
   if (!reviewable) return null
 

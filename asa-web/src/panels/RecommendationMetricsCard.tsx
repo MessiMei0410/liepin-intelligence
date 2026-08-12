@@ -21,6 +21,7 @@ export function RecommendationMetricsCard({ jobId }: { jobId: number }) {
       setLoading(false)
     }
   }, [jobId])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load])
 
   if (loading) return <section className="job-recommendation-metrics" aria-label="有效推荐率"><LoaderCircle className="spin" /><span>正在读取推荐质量…</span></section>

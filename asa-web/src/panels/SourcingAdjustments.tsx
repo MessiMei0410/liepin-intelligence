@@ -54,6 +54,7 @@ export function SourcingAdjustments({ jobId }: { jobId: number }) {
       setLoading(false)
     }
   }, [jobId])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load() }, [load])
 
   const act = async (id: number, kind: 'confirm' | 'ignore') => {

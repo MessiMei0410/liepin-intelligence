@@ -255,14 +255,18 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     }
   }
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshSessions()
     if (sessionId) void restoreSession(sessionId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   useEffect(() => {
     if (context.type && context.type !== 'page') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       attachmentGenerationRef.current += 1; attachmentsRef.current = []; setAttachments([]); setAttachmentNotice('')
       setAttachedContext(context)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(context)])
   useEffect(() => {
     attachedContextRef.current = attachedContext

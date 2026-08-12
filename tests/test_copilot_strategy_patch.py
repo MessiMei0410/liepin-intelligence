@@ -440,10 +440,20 @@ def test_floating_strategy_patch_css_contract() -> None:
 
 
 def test_session_restore_passes_strategy_patch() -> None:
-    handler_source = (SCRIPTS_DIR / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
-    assert '"strategy_patch": structured.get("strategy_patch")' in handler_source
-    assert '"strategy_patch": strategy_patch' in handler_source
-    assert 'assistant_structured["strategy_patch"] = strategy_patch' in handler_source
+    # copilot_handler.py 已于 2026-08-12 拆分为 5 个域模块（facade 转发），
+    # 断言在拆分后的实现模块中搜索。
+    modules = [
+        SCRIPTS_DIR / "a_system_agent" / "copilot_handler.py",
+        SCRIPTS_DIR / "a_system_agent" / "copilot_evidence.py",
+        SCRIPTS_DIR / "a_system_agent" / "copilot_intent.py",
+        SCRIPTS_DIR / "a_system_agent" / "copilot_sessions.py",
+        SCRIPTS_DIR / "a_system_agent" / "copilot_routing.py",
+        SCRIPTS_DIR / "a_system_agent" / "copilot_api.py",
+    ]
+    all_sources = "\n".join(m.read_text(encoding="utf-8") for m in modules if m.exists())
+    assert '"strategy_patch": structured.get("strategy_patch")' in all_sources
+    assert '"strategy_patch": strategy_patch' in all_sources
+    assert 'assistant_structured["strategy_patch"] = strategy_patch' in all_sources
 
 
 # ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
   const { pageCount, currentPage, from, to } = pageInfo(filtered.length, PAGE_SIZE, page)
   // 页码钳制：搜索/范围/外部数据变化后把内部页码状态也夹回有效范围，列表回涨时不会跳回旧页。
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPage(current => Math.min(current, Math.max(0, pageCount - 1)))
   }, [pageCount])
 

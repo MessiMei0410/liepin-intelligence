@@ -368,6 +368,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert [step["capability_id"] for step in result["steps"]] == [
             "job_diagnosis",
             "talent_pool_search",
+            "candidate_pool_filter",
             "candidate_batch_assessment",
         ]
         assert all(step["capability_id"] != "opencli_browser_read" for step in result["steps"])

@@ -422,7 +422,13 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         llm = (ROOT / "scripts" / "a_system_agent" / "llm.py").read_text(encoding="utf-8")
         service = (ROOT / "scripts" / "a_system_agent" / "service.py").read_text(encoding="utf-8")
         copilot_handler = (ROOT / "scripts" / "a_system_agent" / "copilot_handler.py").read_text(encoding="utf-8")
-        copilot_runtime = service + copilot_handler
+        # copilot_handler.py 已于 2026-08-12 拆分为 5 个域模块（facade 转发），
+        # 实现字符串在拆分后的模块中搜索。
+        copilot_impl = "".join(
+            (ROOT / "scripts" / "a_system_agent" / f"copilot_{m}.py").read_text(encoding="utf-8")
+            for m in ("evidence", "intent", "sessions", "routing", "api")
+        )
+        copilot_runtime = service + copilot_handler + copilot_impl
         self.assertIn("COPILOT_FLOATING_SYSTEM_PROMPT", llm)
         self.assertIn("payload.get(\"response_mode\") == \"floating_compact\"", llm)
         self.assertIn("浮窗空间很小", llm)
