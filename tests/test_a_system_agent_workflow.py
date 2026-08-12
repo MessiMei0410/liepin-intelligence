@@ -1684,7 +1684,13 @@ class WorkflowEngineTest(AgentDbCase):
             assert structured["turn_decision"]["effect"] == "answer"
             assert structured["turn_decision"]["safe_for_action"] is False
             assert focus["action"] != "salary"
-            assert "长越科技这个岗位预算 120w" in focus["constraints"]
+            # 事实/约束分层语义：独立的岗位预算只进 facts（scope 绑定到关联岗位），
+            # 不再作为寻访约束保留在 focus.constraints。
+            facts = (focus.get("conversation_state") or {}).get("facts") or []
+            budget_facts = [item for item in facts if item.get("kind") == "job_budget"]
+            assert len(budget_facts) == 1
+            assert budget_facts[0]["quote"] == "长越科技这个岗位预算 120w"
+            assert budget_facts[0]["scope"] == {"type": "job", "id": 10}
         finally:
             service.close()
 
@@ -1840,7 +1846,9 @@ class WorkflowEngineTest(AgentDbCase):
             context={"type": "global", "source": "asa_floating", "display_mode": "floating_compact"},
         )
         assert first["workflow"] is None
-        assert first["answer"] == "你要为哪个岗位补充并触达新候选人？"
+        # 多岗位歧义守卫文案（有意变更）；澄清唯一岗位后必须能恢复原动作。
+        assert "还不能唯一确定目标岗位" in first["answer"]
+        assert "请补充唯一的岗位名称或岗位编号" in first["answer"]
 
         resolved = self.service.copilot(
             "长越的自动化软件岗位",
@@ -2040,8 +2048,10 @@ class WorkflowEngineTest(AgentDbCase):
         assert confirmed["workflow"] is not None
         assert confirmed["workflow_id"] != first["workflow_id"]
         assert "补充10位合适人选" in confirmed["goal"]["objective"]
-        assert "5年以上" in confirmed["goal"]["objective"]
-        assert "资深工程师/主管" in confirmed["goal"]["objective"]
+        # 条件调整账本新格式（revise_workflow 有意设计，避免误路由岗位库写入）：
+        # 顾问自己的调整逐字进入“本轮寻访条件调整/本轮有效约束”。
+        assert "放宽年限和职级" in confirmed["goal"]["objective"]
+        assert "行业先不放宽" in confirmed["goal"]["objective"]
         state = self.wait_for(confirmed["workflow_id"], {"waiting_approval", "failed"})
         assert state["workflow"]["status"] == "waiting_approval"
 

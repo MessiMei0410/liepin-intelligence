@@ -26,9 +26,16 @@ from .capability_runtime import ZERO_RESULT_ATTRIBUTION_LABELS
 from .turn_decision import build_turn_decision
 from .conversation_state import (
     TERMINAL_WORKFLOW_STATUSES,
+    _FACT_LABELS,
+    _fact_scope,
     build_context_state,
     deterministic_context_summary,
     enrich_turn_understanding,
+    fact_retract_requested,
+    fact_scope_correction_request,
+    latest_correctable_fact,
+    stale_reason_text,
+    undo_task_requested,
 )
 
 
@@ -509,12 +516,195 @@ def _mentioned_jobs_for_copilot(self, message: str, limit: int = 5) -> list[dict
             item["summary"] = str(item.get("summary") or "")[:900]
             scored.append((score, specific_evidence, item))
     scored.sort(key=lambda pair: (pair[0], int(pair[2].get("id") or 0)), reverse=True)
+    explicit = [
+        item
+        for _, _, item in scored
+        if _job_is_explicitly_mentioned(cleaned, item)
+    ]
+    # Preserve every explicitly named job. A top-score winner is useful for a
+    # client-only phrase, but it must not erase a second named job from a
+    # sentence such as "机械岗位和软件岗位预算 120w".
+    if len(explicit) >= 2:
+        return explicit[: max(1, min(int(limit or 5), 10))]
+    if len(explicit) == 1:
+        return explicit
     # "长越的机械岗位" often matches every 长越岗位 through the client name,
     # while "机械" identifies one of them. Return that clear winner as a real
     # reference; only similarly scored jobs remain ambiguous for clarification.
     if len(scored) > 1 and scored[0][0] > scored[1][0] and scored[0][1]:
         return [scored[0][2]]
     return [item for _, _, item in scored[: max(1, min(int(limit or 5), 10))]]
+
+
+_JOB_TITLE_ROLE_WORDS = (
+    "高级", "资深", "初级", "中级", "首席", "工程师", "经理", "总监", "专家", "主管",
+    "岗位", "职位",
+)
+
+
+def _job_title_cores(title: str) -> list[str]:
+    cores: list[str] = []
+    for part in re.split(r"[\s/（）()、,，｜|]+", str(title or "")):
+        core = part.strip()
+        for role_word in _JOB_TITLE_ROLE_WORDS:
+            core = core.replace(role_word, "")
+        core = core.strip()
+        if len(core) >= 2 and core not in cores:
+            cores.append(core)
+    return cores
+
+
+def _job_is_explicitly_mentioned(message: str, job: dict[str, Any]) -> bool:
+    """Detect a concrete job mention without treating a client name as one."""
+    text = " ".join(str(message or "").split())
+    if not text or not isinstance(job, dict):
+        return False
+    try:
+        job_id = int(job.get("id") or 0)
+    except (TypeError, ValueError):
+        job_id = 0
+    if job_id and re.search(rf"(?:#\s*|岗位\s*#?\s*){job_id}(?!\d)", text, re.I):
+        return True
+    title = str(job.get("job") or job.get("title") or "").strip()
+    if title and title in text:
+        return True
+    for core in _job_title_cores(title):
+        if not re.search(re.escape(core), text, re.I):
+            continue
+        # A core followed/preceded by a job noun is an explicit role mention;
+        # this avoids treating shared words in a long JD as a target selector.
+        if re.search(
+            rf"{re.escape(core)}.{{0,5}}(?:岗|岗位|职位|方向|职缺)|"
+            rf"(?:岗|岗位|职位|方向|职缺).{{0,5}}{re.escape(core)}",
+            text,
+            re.I,
+        ):
+            return True
+    return False
+
+
+def _explicitly_mentioned_job_ids(message: str, jobs: list[dict[str, Any]]) -> set[int]:
+    ids: set[int] = set()
+    for item in jobs:
+        if not _job_is_explicitly_mentioned(message, item):
+            continue
+        try:
+            job_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            job_id = 0
+        if job_id > 0:
+            ids.add(job_id)
+    return ids
+
+
+def _jobs_relevant_to_selected_context(
+    mentioned_jobs: list[dict[str, Any]],
+    selected: dict[str, Any],
+    selected_facts: dict[str, Any],
+    message: str = "",
+) -> list[dict[str, Any]]:
+    """Resolve client-only mentions without hiding explicitly named jobs."""
+    jobs = [item for item in mentioned_jobs if isinstance(item, dict)]
+    explicit_ids = _explicitly_mentioned_job_ids(message, jobs)
+    if explicit_ids:
+        explicit_jobs = []
+        for item in jobs:
+            try:
+                item_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                item_id = 0
+            if item_id in explicit_ids:
+                explicit_jobs.append(item)
+        if explicit_jobs:
+            return explicit_jobs
+    if len(jobs) <= 1:
+        return jobs
+
+    selected_job_id = _copilot_context_job_id(selected, selected_facts)
+    if selected_job_id is None:
+        return jobs
+
+    matched = []
+    for item in jobs:
+        try:
+            item_job_id = int(item.get("id") or 0) or None
+        except (TypeError, ValueError):
+            item_job_id = None
+        if item_job_id == selected_job_id:
+            matched.append(item)
+    # An explicit mention of another job must remain visible instead of being
+    # silently rewritten to the selected page object.
+    return matched or jobs
+
+
+def _copilot_context_job_id(
+    selected: dict[str, Any], selected_facts: dict[str, Any]
+) -> int | None:
+    """Return the canonical job attached to a job, candidate, or workflow context."""
+    candidates: list[Any] = []
+    if str(selected.get("type") or "") == "job":
+        candidates.append(selected.get("id"))
+    job_facts = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    candidates.append(job_facts.get("id"))
+    for value in candidates:
+        try:
+            job_id = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if job_id > 0:
+            return job_id
+    return None
+
+
+def _copilot_context_job_record(selected_facts: dict[str, Any]) -> dict[str, Any]:
+    """Convert context facts into the compact job shape used by goal grounding."""
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    job_id = _copilot_context_job_id({}, selected_facts)
+    title = str(job.get("title") or job.get("job") or "").strip()
+    client = str(selected_facts.get("client") or job.get("client") or "").strip()
+    if not job_id or not title:
+        return {}
+    return {
+        "id": job_id,
+        "client": client,
+        "job": title,
+        "status": str(job.get("status") or ""),
+    }
+
+
+def _format_ambiguous_job_scope(client: str, jobs: list[dict[str, Any]]) -> str:
+    labels = []
+    for item in jobs[:4]:
+        title = str(item.get("job") or "").strip()
+        job_id = item.get("id")
+        if title:
+            labels.append(f"{title}（岗位 {job_id}）")
+    options = "、".join(labels)
+    scope = f"{client}" if client else "当前客户"
+    detail = f"当前可见岗位包括：{options}。" if options else "当前识别到多个岗位。"
+    return (
+        f"结论：还不能唯一确定{scope}的目标岗位，暂不读取或创建任务。\n\n"
+        f"依据：{detail}\n\n"
+        "下一步：请补充岗位名称或岗位编号。"
+    )
+
+
+def _dedupe_copilot_references(references: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in references:
+        if not isinstance(item, dict):
+            continue
+        reference_type = str(item.get("type") or "")
+        reference_id = str(item.get("id") if item.get("id") is not None else "")
+        # Some attachment references have no stable id; retain distinct files.
+        fallback = "" if reference_id else str(item.get("label") or "")
+        key = (reference_type, reference_id, fallback)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def _reconcile_copilot_runtime_state(
@@ -690,6 +880,13 @@ def _is_job_budget_fact_update(message: str) -> bool:
     )
     if not budget_marker:
         return False
+    # "这个人选的预算/薪资" is compensation evidence for the candidate,
+    # not the budget of the job linked to that candidate.
+    if (
+        re.search(r"(?:这个|该|当前|这位)?(?:人选|候选人|候选|人儿).{0,12}(?:预算|薪资|薪酬|总包|期望|预期|目前|现在|当前)", text)
+        or re.search(r"(?:预算|薪资|薪酬|总包|期望|预期|目前|现在|当前).{0,12}(?:人选|候选人|候选)", text)
+    ):
+        return False
     has_amount = bool(
         re.search(r"\d+(?:\.\d+)?\s*(?:w|W|万|k|K)", text)
         or re.search(r"\d+(?:\.\d+)?\s*[-~至到]\s*\d+(?:\.\d+)?\s*(?:w|W|万|k|K)", text)
@@ -708,6 +905,194 @@ def _format_job_budget_fact_answer(message: str, selected_facts: dict[str, Any])
         "下一步：我会在本轮对话里按这个预算判断匹配度和沟通口径；"
         "如果要写入岗位库，请明确说“更新岗位库预算”。"
     )
+
+
+def _format_non_action_fact_answer(
+    message: str,
+    understanding: dict[str, Any],
+    selected_facts: dict[str, Any],
+) -> str:
+    """Acknowledge contextual facts without turning them into workflow requests."""
+    if str(understanding.get("action") or "none") != "none":
+        return ""
+    fact_updates = [
+        item
+        for item in (understanding.get("fact_updates") or [])
+        if isinstance(item, dict)
+    ]
+    kinds = {str(item.get("kind") or "") for item in fact_updates}
+    quote = " ".join(str(message or "").split())
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+    client = str(selected_facts.get("client") or job.get("client") or "").strip()
+    title = str(job.get("title") or job.get("job") or "").strip()
+    if "job_budget" in kinds:
+        return _format_job_budget_fact_answer(message, selected_facts)
+    if "candidate_compensation" in kinds:
+        candidate_name = str(candidate.get("name") or "当前人选").strip()
+        return (
+            f"结论：已把「{quote}」记录为{candidate_name}的薪资事实，不创建谈薪任务。\n\n"
+            "下一步：后续讨论匹配度或沟通口径时会沿用这组数据；需要整理谈薪方案时再明确下达任务。"
+        )
+    if "candidate_availability" in kinds or "candidate_preference" in kinds:
+        candidate_name = str(candidate.get("name") or "当前人选").strip()
+        fact_label = "到岗/意向事实" if "candidate_availability" in kinds and "candidate_preference" in kinds else (
+            "到岗事实" if "candidate_availability" in kinds else "意向事实"
+        )
+        return (
+            f"结论：已把「{quote}」记录为{candidate_name}的{fact_label}，不自动创建推进或触达任务。\n\n"
+            "下一步：后续匹配和沟通判断会沿用这条信息；需要实际推进时请明确下达动作。"
+        )
+    if "job_requirement" in kinds:
+        scope = " / ".join(part for part in (client, title) if part) or "当前岗位"
+        return (
+            f"结论：已把「{quote}」作为{scope}的岗位细节补充，不自动新建或启动任务。\n\n"
+            "下一步：后续判断和策略讨论会沿用这些信息；需要写入岗位库时再明确说“更新岗位库”。"
+        )
+    if (
+        str(understanding.get("topic") or "") == "candidate_match"
+        and str(understanding.get("speech_act") or "") != "ask"
+        and not _is_explicit_question(message)
+        and any(token in quote for token in ("匹配", "完美", "适合", "符合", "不合适"))
+    ):
+        # 只把陈述句当作“匹配度看法”记录；疑问/请求解释（以及“补充简历”等仅因
+        # topic 命中 candidate_match 的动作请求）让位给证据回答/技能路径。
+        candidate_name = str(candidate.get("name") or "当前人选").strip()
+        scope = " / ".join(part for part in (client, title) if part) or "当前岗位"
+        return (
+            f"结论：已记录你对{candidate_name}与{scope}匹配度的判断，不自动复核或生成推荐材料。\n\n"
+            "下一步：如果要形成可核验的匹配结论，请明确说“复核这个人选”或“生成推荐报告”。"
+        )
+    if "client_preference" in kinds:
+        scope = client or "当前客户"
+        return (
+            f"结论：已把「{quote}」记录为{scope}的客户偏好，不改变当前任务计划。\n\n"
+            "下一步：后续筛选和沟通口径会参考这条偏好；需要修改岗位或计划时再明确下达动作。"
+        )
+    if "workflow_observation" in kinds:
+        return (
+            f"结论：已记录「{quote}」这条执行反馈，不自动新建或启动任务。\n\n"
+            "下一步：需要基于反馈继续寻访、复核或调整策略时，请明确说出对应动作。"
+        )
+    return ""
+
+
+_FACT_RECEIPT_KIND_PRIORITY = (
+    "job_budget", "candidate_compensation", "candidate_availability",
+    "candidate_preference", "job_requirement", "client_preference", "workflow_observation",
+)
+
+
+def _build_fact_receipt(
+    message: str,
+    understanding: dict[str, Any],
+    selected_facts: dict[str, Any],
+    conversation_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """与文本回执配套的结构化理解回执；没有可识别事实时返回 {}。"""
+    if str(understanding.get("action") or "none") != "none":
+        return {}
+    fact_updates = [
+        item
+        for item in (understanding.get("fact_updates") or [])
+        if isinstance(item, dict)
+    ]
+    kinds = {str(item.get("kind") or "") for item in fact_updates}
+    kind = next((item for item in _FACT_RECEIPT_KIND_PRIORITY if item in kinds), "")
+    if not kind and str(understanding.get("topic") or "") == "candidate_match":
+        kind = "candidate_match"
+    if not kind:
+        return {}
+    quote = " ".join(str(message or "").split())
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+    client = str(selected_facts.get("client") or job.get("client") or "").strip()
+    title = str(job.get("title") or job.get("job") or "").strip()
+    if kind.startswith("candidate_") or kind == "candidate_match":
+        object_label = str(candidate.get("name") or "当前人选").strip()
+    elif kind == "client_preference":
+        object_label = client or "当前客户"
+    else:
+        object_label = " / ".join(part for part in (client, title) if part) or "当前岗位"
+    value = next(
+        (
+            str(item.get("value") or "").strip()
+            for item in fact_updates
+            if str(item.get("kind") or "") == kind
+        ),
+        "",
+    ) or quote
+    scope = _fact_scope(
+        kind,
+        {
+            "type": str((selected_facts.get("context") or {}).get("type") or "global"),
+            "id": (selected_facts.get("context") or {}).get("id"),
+            "job": job,
+            "candidate": candidate,
+        },
+    )
+    scope_label = (
+        f"{scope.get('type')}:{scope.get('id')}"
+        if scope.get("type") in {"job", "candidate"} and scope.get("id") not in (None, "")
+        else "global"
+    )
+    state = conversation_state if isinstance(conversation_state, dict) else {}
+    pending_plan = state.get("pending_plan") if isinstance(state.get("pending_plan"), dict) else {}
+    active_context = state.get("active_context") if isinstance(state.get("active_context"), dict) else {}
+    impact = "仅更新上下文，不启动工作流"
+    if pending_plan.get("workflow_id") and str(pending_plan.get("status") or "planned") == "planned":
+        scope_type = str(scope.get("type") or "")
+        scope_id = scope.get("id")
+        if scope_type == "job" and scope_id not in (None, ""):
+            related = str((active_context.get("job") or {}).get("id") or "") == str(scope_id)
+        elif scope_type == "candidate" and scope_id not in (None, ""):
+            related = str((active_context.get("candidate") or {}).get("id") or "") == str(scope_id)
+        else:
+            # 全局事实无法定位到具体对象，保守视为与待确认计划相关。
+            related = True
+        if related:
+            impact = "已记录的事实可能影响待确认计划，需重新确认"
+    return {
+        "object": object_label,
+        "kind": kind,
+        "quote": quote,
+        "value": value,
+        "scope": scope_label,
+        "impact": impact,
+    }
+
+
+def _stopped_candidate_action_requested(
+    message: str,
+    understanding: dict[str, Any],
+    turn_decision: dict[str, Any],
+) -> bool:
+    """Block only commands that would resume activity for a stopped relation."""
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return False
+    action = str(understanding.get("action") or "none")
+    fact_updates = [
+        item
+        for item in (understanding.get("fact_updates") or [])
+        if isinstance(item, dict)
+    ]
+    if action == "none" and fact_updates:
+        return False
+    blocked_actions = {"candidate_outreach", "candidate_review", "recommendation", "salary"}
+    if (
+        action in blocked_actions
+        and bool(understanding.get("action_evidence"))
+        and bool(turn_decision.get("safe_for_action"))
+    ):
+        return True
+    explicit_resume_patterns = (
+        r"(?:继续|恢复|重新|重启|再).{0,10}(?:推进|复核|联系|触达|开聊|推荐|谈薪).{0,16}(?:人选|候选人|他|她)?",
+        r"(?:推进|复核|联系|触达|开聊|推荐|谈薪).{0,12}(?:这个|当前|该)?(?:人选|候选人|他|她)",
+        r"(?:这个|当前|该)?(?:人选|候选人|他|她).{0,12}(?:继续推进|恢复推进|联系|触达|开聊|推荐给客户|推给客户|谈薪)",
+        r"(?:约|安排).{0,8}(?:面试|下一轮)",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in explicit_resume_patterns)
 
 
 _CANDIDATE_RESULT_OBSERVATION_RE = re.compile(
@@ -1152,6 +1537,150 @@ def _copilot_action_kind(message: str) -> str:
     return ""
 
 
+def _is_contextual_job_detail_message(message: str) -> bool:
+    """Recognize compact job-detail replies when the job is already bound."""
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return False
+    explicit_detail = any(
+        marker in text
+        for marker in ("补充岗位", "岗位细节", "岗位信息", "职位细节", "职位信息", "补充要求")
+    )
+    groups = (
+        bool(re.search(r"(?:杭州|上海|苏州|北京|深圳|广州|南京|无锡|合肥|宁波|成都|武汉|西安|地点|工作地|base|坐标)", text, re.I)),
+        "汇报" in text or "直属上级" in text or "汇报对象" in text,
+        bool(re.search(r"\d+\s*年(?:以上|以内)?(?:经验|工作年限)?|经验|年限", text, re.I)),
+        any(token in text for token in ("学历", "本科", "硕士", "博士", "专业")),
+        any(token in text for token in ("技能", "技术栈", "行业", "背景", "职责", "团队", "下属", "出差", "英语")),
+        any(token in text for token in ("必须", "优先", "最好", "可看", "不要", "排除", "接受")),
+    )
+    return explicit_detail and any(groups) or sum(bool(item) for item in groups) >= 2
+
+
+def _plan_confirmation_reply(message: str) -> bool:
+    """Only these exact short forms can confirm a previously presented plan."""
+    compact = re.sub(r"[\s。.!！?？,，、]+", "", str(message or ""))
+    return compact.lower() in {
+        "好", "好的", "好了", "可以", "行", "嗯", "收到", "明白", "ok",
+        "确认", "按这个来", "就这样", "开始", "开始吧", "执行", "继续",
+    }
+
+
+def _salary_plan_confirmation_reply(message: str) -> bool:
+    """谈薪复述卡的确认：显式“确认创建”或既有短确认。"""
+    compact = re.sub(r"[\s。.!！?？,，、]+", "", str(message or ""))
+    return compact in {"确认创建", "确认创建计划", "确认创建谈薪计划", "确认创建该计划"} or _plan_confirmation_reply(message)
+
+
+_SALARY_AMOUNT_RE = r"\d+(?:\.\d+)?\s*(?:w|W|万|k|K)"
+
+
+def _salary_recap_amounts(facts: Any) -> tuple[str, str]:
+    """从已记录的人选的薪资事实里取（当前薪资, 期望薪资）；没有则空串。"""
+    quote = ""
+    for item in reversed(facts) if isinstance(facts, list) else []:
+        if (
+            isinstance(item, dict)
+            and not item.get("retracted")
+            and str(item.get("kind") or "") == "candidate_compensation"
+        ):
+            quote = str(item.get("quote") or item.get("value") or "")
+            break
+    if not quote:
+        return "", ""
+    current = re.search(rf"(?:目前|现在|当前)[^，。；;]{{0,10}}?({_SALARY_AMOUNT_RE})", quote)
+    expected = re.search(rf"(?:期望|预期)[^，。；;]{{0,10}}?({_SALARY_AMOUNT_RE})", quote)
+    return (current.group(1) if current else "", expected.group(1) if expected else "")
+
+
+def _deterministic_non_action_intent(
+    message: str,
+    selected: dict[str, Any],
+    selected_facts: dict[str, Any],
+    known_jobs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Build a no-action interpretation for unambiguous factual turns."""
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return None
+    # These markers turn a fact into an explicit business command. Keep the
+    # model/action gate for such turns, even when the same sentence contains a
+    # salary or observation fact.
+    if any(
+        token in text
+        for token in (
+            "帮我", "请你", "麻烦", "整理", "生成", "制作", "处理", "创建", "新建", "建立",
+            "更新岗位库", "写入岗位库", "保存到", "开始", "执行", "启动", "确认执行",
+            "取消计划", "归档", "关闭岗位", "发布岗位", "上架岗位",
+        )
+    ) or re.search(r"(?:继续|恢复|重新|再).{0,8}(?:推进|寻访|搜索|找人|找候选人|触达|联系|复核|谈薪)", text, re.I):
+        return None
+    # 带明确动作语义的输入（“这个岗位再来一轮”）必须让位给动作/模型路径，
+    # 不能被岗位细节事实路径吞掉。
+    if re.search(r"(?:再来|再跑|再开|再做|重新来|重新跑|继续来)(?:一|新一)轮", text):
+        return None
+
+    contextual_job_detail = bool(
+        _copilot_context_job_id(selected, selected_facts) is not None
+        or len(known_jobs) == 1
+    ) and _is_contextual_job_detail_message(text)
+    initial_fact_updates = (
+        [{"kind": "job_requirement", "quote": text, "value": text}]
+        if contextual_job_detail
+        else []
+    )
+    probe = enrich_turn_understanding(
+        {
+            "speech_act": "inform",
+            "action": "none",
+            "topic": "",
+            "objective": "",
+            "target": {"type": "global", "id": None, "client": "", "label": ""},
+            "constraints": [],
+            "fact_updates": initial_fact_updates,
+            "action_evidence": [],
+            "refers_to_previous": False,
+            "confidence": 1.0,
+            "needs_clarification": False,
+        },
+        message=text,
+        pending_plan_ref={},
+    )
+    if any(token in text for token in ("匹配", "完美", "适合", "符合", "不合适")) and any(
+        token in text for token in ("人选", "候选人", "他", "她")
+    ):
+        probe["topic"] = "candidate_match"
+    fact_updates = [item for item in (probe.get("fact_updates") or []) if isinstance(item, dict)]
+    if not fact_updates:
+        return None
+    kinds = {str(item.get("kind") or "") for item in fact_updates}
+    job_fact = bool(kinds & {"job_budget", "job_requirement"})
+    candidate_fact = bool(kinds & {"candidate_compensation", "candidate_availability", "candidate_preference"})
+    if job_fact and _copilot_context_job_id(selected, selected_facts) is None and len(known_jobs) != 1:
+        # Do not persist a job fact against global scope when several jobs are
+        # possible; the caller should clarify the job first.
+        return None
+    if candidate_fact and str(selected.get("type") or "") != "candidate":
+        return None
+    target = {"type": "global", "id": None, "client": "", "label": ""}
+    if str(selected.get("type") or "") in {"job", "candidate", "workflow"} and selected.get("id"):
+        target = {"type": str(selected["type"]), "id": selected["id"], "client": "", "label": ""}
+    elif len(known_jobs) == 1:
+        item = known_jobs[0]
+        target = {
+            "type": "job",
+            "id": item.get("id"),
+            "client": str(item.get("client") or ""),
+            "label": str(item.get("job") or ""),
+        }
+    return {
+        **probe,
+        "target": target,
+        "source_message": text,
+        "raw_constraint_changes": [],
+    }
+
+
 _JOB_REQUIREMENT_MARKERS = (
     "岗位需求", "JD", "jd", "职位描述", "岗位描述", "岗位职责", "岗位职则",
     "任职要求", "任职资格", "职位要求", "岗位要求", "招聘需求", "新增岗位",
@@ -1570,15 +2099,27 @@ def _interpret_copilot_message(
     existing_focus: dict[str, Any] | None,
     conversation_history: list[dict[str, str]],
     last_assistant_message: str,
+    confirmation_plan_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the model for semantics, then constrain its output to verified local facts."""
     deterministic_action = self._copilot_action_kind(message) or "none"
+    plan_reply = _plan_confirmation_reply(message)
+    turn_pending_plan = (
+        dict(confirmation_plan_ref or {})
+        if plan_reply
+        else dict((existing_focus or {}).get("pending_workflow") or {})
+    )
     recent_user_messages = [
         str(item.get("content") or "")
         for item in conversation_history[-16:]
         if item.get("role") == "user"
     ]
-    known_jobs = self._mentioned_jobs_for_copilot(message)
+    known_jobs = _jobs_relevant_to_selected_context(
+        self._mentioned_jobs_for_copilot(message),
+        selected,
+        selected_facts,
+        message,
+    )
     current_job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
     focus_job = existing_focus.get("job") if isinstance(existing_focus, dict) and isinstance(existing_focus.get("job"), dict) else {}
     known_targets: list[dict[str, Any]] = []
@@ -1612,24 +2153,65 @@ def _interpret_copilot_message(
                 or (existing_focus or {}).get("constraints")
                 or []
             ),
-            "pending_plan": dict((existing_focus or {}).get("pending_workflow") or {}),
+            "pending_plan": turn_pending_plan,
+            "confirmation_anchor": bool(plan_reply and turn_pending_plan.get("workflow_id")),
         },
         "conversation_state": dict((existing_focus or {}).get("conversation_state") or {}),
         "deterministic_hint": deterministic_action,
     }
-    raw: dict[str, Any] = {}
-    try:
-        interpreted = self.llm.interpret_copilot_intent(sanitize_payload(payload))
-        if isinstance(interpreted, dict):
-            raw = interpreted
-    except (LLMError, ValueError, TypeError):
-        raw = {}
+    raw = _deterministic_non_action_intent(message, selected, selected_facts, known_jobs) or {}
+    if not raw and not plan_reply:
+        try:
+            interpreted = self.llm.interpret_copilot_intent(sanitize_payload(payload))
+            if isinstance(interpreted, dict):
+                raw = interpreted
+        except (LLMError, ValueError, TypeError):
+            raw = {}
+
+    if plan_reply:
+        # A vague confirmation is safe only when the immediately preceding
+        # assistant turn presented this exact, still-planned workflow. Do not
+        # let a permissive model recover an older focus plan after an
+        # intervening factual turn.
+        if not turn_pending_plan.get("workflow_id"):
+            raw = {
+                "speech_act": "other",
+                "action": "none",
+                "topic": "workflow",
+                "objective": "",
+                "target": {"type": "global", "id": None, "client": "", "label": ""},
+                "constraints": [],
+                "fact_updates": [],
+                "action_evidence": [],
+                "refers_to_previous": False,
+                "confidence": 1.0,
+                "needs_clarification": True,
+                "missing_fields": ["要确认的最新计划"],
+                "clarification_question": "请先确认上一条仍待执行的具体计划。",
+            }
+        else:
+            raw = dict(raw or {})
+            raw["speech_act"] = "confirm"
+            raw["action"] = str(
+                raw.get("action")
+                or turn_pending_plan.get("action")
+                or (existing_focus or {}).get("action")
+                or "none"
+            )
+            raw["refers_to_previous"] = True
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.95)
+            raw["needs_clarification"] = False
+            raw["action_evidence"] = [message]
+            if isinstance(turn_pending_plan.get("target"), dict):
+                raw["target"] = dict(turn_pending_plan["target"])
 
     speech_act = str(raw.get("speech_act") or "").strip().lower()
     if _is_explicit_question(message):
         speech_act = "ask"
     elif speech_act not in _COPILOT_SPEECH_ACTS:
-        if _is_short_ack(message) and (existing_focus or {}).get("action"):
+        if plan_reply and turn_pending_plan.get("workflow_id"):
+            speech_act = "confirm"
+        elif _is_short_ack(message) and (existing_focus or {}).get("action"):
             speech_act = "confirm"
         elif (
             (existing_focus or {}).get("action") in {"candidate_sourcing", "strategy_revision"}
@@ -1656,7 +2238,12 @@ def _interpret_copilot_message(
         action = "none"
         if speech_act in {"propose", "confirm", "execute", "correct"}:
             speech_act = "inform"
-    if action == "none" and speech_act in {"confirm", "correct", "cancel"} and (existing_focus or {}).get("action"):
+    if (
+        action == "none"
+        and speech_act in {"confirm", "correct", "cancel"}
+        and (existing_focus or {}).get("action")
+        and (not plan_reply or turn_pending_plan.get("workflow_id"))
+    ):
         previous_action = str((existing_focus or {}).get("action") or "none")
         action = previous_action if previous_action in _COPILOT_SEMANTIC_ACTIONS else "none"
     refinement_mode = _pending_sourcing_refinement_mode(message, existing_focus, speech_act)
@@ -1700,7 +2287,7 @@ def _interpret_copilot_message(
         confidence = max(0.8, min(float((existing_focus or {}).get("confidence") or 0.0), 1.0))
     missing_fields = [str(item).strip()[:80] for item in (raw.get("missing_fields") or []) if str(item).strip()][:6]
     needs_clarification = bool(raw.get("needs_clarification"))
-    if _is_short_ack(message) and action == "none":
+    if plan_reply and action == "none":
         needs_clarification = True
         missing_fields = missing_fields or ["要确认的动作"]
     raw_constraint_changes = [
@@ -1736,7 +2323,128 @@ def _interpret_copilot_message(
     return enrich_turn_understanding(
         understanding,
         message=message,
-        pending_plan_ref=dict((existing_focus or {}).get("pending_workflow") or {}),
+        pending_plan_ref=turn_pending_plan,
+    )
+
+
+def _latest_assistant_plan_anchor(self, session_id: str) -> dict[str, Any]:
+    """Read only the immediately preceding assistant plan presentation."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {}
+    conn = self._connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT structured_json FROM agent_copilot_messages
+            WHERE session_id=? AND role='assistant'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    structured = _loads(row["structured_json"], {}) if row else {}
+    anchor = structured.get("presented_plan_ref") if isinstance(structured, dict) else {}
+    return dict(anchor) if isinstance(anchor, dict) and anchor.get("workflow_id") else {}
+
+
+def _latest_assistant_plan_confirmation(self, session_id: str) -> dict[str, Any]:
+    """Read the immediately preceding assistant pre-creation recap card (复述确认中间态).
+
+    与 _latest_assistant_plan_anchor 同通道：卡片存在 assistant structured_json 的
+    pending_plan_confirmation 字段，只对紧邻的下一条用户消息生效。
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return {}
+    conn = self._connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT structured_json FROM agent_copilot_messages
+            WHERE session_id=? AND role='assistant'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    structured = _loads(row["structured_json"], {}) if row else {}
+    card = structured.get("pending_plan_confirmation") if isinstance(structured, dict) else {}
+    return dict(card) if isinstance(card, dict) and card.get("kind") and card.get("objective") else {}
+
+
+def _copilot_plan_from_anchor(
+    self,
+    anchor: dict[str, Any],
+    conversation_state: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the plan hash/version before using an assistant confirmation."""
+    workflow_id = str((anchor or {}).get("workflow_id") or "").strip()
+    if not workflow_id:
+        return {}, {}
+    state_context = conversation_state if isinstance(conversation_state, dict) else {}
+    pending_state_plan = (
+        state_context.get("pending_plan")
+        if isinstance(state_context.get("pending_plan"), dict)
+        else {}
+    )
+    if str(pending_state_plan.get("workflow_id") or "") == workflow_id:
+        # 展示后写入的新事实已使计划过期，或状态版本已推进：短确认不再有效。
+        if pending_state_plan.get("stale_reason"):
+            return {}, {}
+        anchor_revision = (anchor or {}).get("state_revision")
+        if anchor_revision is not None and int(state_context.get("revision") or 0) != int(anchor_revision or 0):
+            return {}, {}
+    try:
+        state = self.get_workflow(workflow_id)
+    except (ValueError, sqlite3.Error):
+        return {}, {}
+    workflow = state.get("workflow") if isinstance(state.get("workflow"), dict) else {}
+    if str(workflow.get("status") or "") != "planned":
+        return {}, {}
+    actual = dict(state.get("plan_ref") or {})
+    if not actual.get("workflow_id") or not actual.get("plan_hash"):
+        return {}, {}
+    for key in ("version", "plan_hash"):
+        expected = anchor.get(key)
+        if expected is not None and str(expected) != str(actual.get(key)):
+            return {}, {}
+    goal = state.get("goal") if isinstance(state.get("goal"), dict) else {}
+    goal_context = goal.get("context") if isinstance(goal.get("context"), dict) else {}
+    actual["action"] = str(actual.get("action") or goal.get("action") or workflow.get("action") or "")
+    actual["target"] = dict(actual.get("target") or goal_context)
+    return actual, state
+
+
+def _copilot_plan_matches_selected(
+    selected: dict[str, Any],
+    selected_facts: dict[str, Any],
+    plan_state: dict[str, Any],
+    plan_ref: dict[str, Any],
+) -> bool:
+    """Ensure a short confirmation cannot cross a job/candidate boundary."""
+    if not plan_state or not plan_ref.get("workflow_id"):
+        return False
+    if str(selected.get("type") or "") == "workflow":
+        return str(selected.get("id") or "") == str(plan_ref.get("workflow_id") or "")
+    target = plan_ref.get("target") if isinstance(plan_ref.get("target"), dict) else {}
+    target_type = str(target.get("type") or "")
+    target_id = str(target.get("id") or "")
+    if target_type == "job":
+        selected_job_id = _copilot_context_job_id(selected, selected_facts)
+        return selected_job_id is not None and str(selected_job_id) == target_id
+    if target_type == "candidate":
+        selected_candidate = (
+            selected.get("id")
+            if str(selected.get("type") or "") == "candidate"
+            else (selected_facts.get("candidate") or {}).get("id")
+        )
+        return bool(selected_candidate) and str(selected_candidate) == target_id
+    return (
+        str(selected.get("type") or "") == target_type
+        and str(selected.get("id") or "") == target_id
     )
 
 
@@ -1746,14 +2454,14 @@ def _copilot_pending_plan(
     existing_focus: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     candidates: list[str] = []
-    pending = existing_focus.get("pending_workflow") if isinstance(existing_focus, dict) else {}
-    if isinstance(pending, dict) and pending.get("workflow_id"):
-        candidates.append(str(pending["workflow_id"]))
     if selected.get("type") == "workflow" and selected.get("id"):
         candidates.append(str(selected["id"]))
     focus_context = existing_focus.get("context") if isinstance(existing_focus, dict) else {}
     if isinstance(focus_context, dict) and focus_context.get("type") == "workflow" and focus_context.get("id"):
         candidates.append(str(focus_context["id"]))
+    pending = existing_focus.get("pending_workflow") if isinstance(existing_focus, dict) else {}
+    if isinstance(pending, dict) and pending.get("workflow_id"):
+        candidates.append(str(pending["workflow_id"]))
     for workflow_id in dict.fromkeys(candidates):
         try:
             state = self.get_workflow(workflow_id)
@@ -2009,6 +2717,31 @@ def _format_context_mismatch_answer(
     conflicts: list[dict[str, Any]], *, floating_compact: bool = False
 ) -> str:
     """Ask before answering when the visible/focused object conflicts with the user's explicit client."""
+    ambiguous_job = next((item for item in conflicts if item.get("type") == "ambiguous_job"), None)
+    if ambiguous_job:
+        labels = [
+            f"{item.get('job') or '未命名岗位'}（岗位 {item.get('id')}）"
+            for item in (ambiguous_job.get("candidates") or [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        return (
+            "结论：还不能唯一确定目标岗位；这句话同时指向多个岗位，"
+            "暂不把预算或其他事实归到任何一个岗位，也不创建任务。\n\n"
+            f"依据：{'、'.join(labels) if labels else '当前识别到多个岗位'}。\n\n"
+            "下一步：请补充唯一的岗位名称或岗位编号。"
+        )
+    ambiguous_client = next((item for item in conflicts if item.get("type") == "ambiguous_client"), None)
+    if ambiguous_client:
+        candidates = "、".join(
+            str(item).strip()
+            for item in (ambiguous_client.get("candidates") or [])
+            if str(item).strip()
+        )
+        return (
+            "结论：这句话同时提到多个客户，暂不读取或创建任务。\n\n"
+            f"依据：{candidates or '当前识别到多个客户'}。\n\n"
+            "下一步：请明确客户和岗位。"
+        )
     mismatch = next((item for item in conflicts if item.get("type") == "context_client_mismatch"), None)
     if not mismatch:
         return ""
@@ -2042,7 +2775,14 @@ def _copilot_context_from_focus(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     focus = self.get_copilot_focus(session_id)
     current_clients = self._mentioned_client_names(message)
-    current_jobs = self._mentioned_jobs_for_copilot(message)
+    selected_facts = self._copilot_context_facts(selected)
+    raw_current_jobs = self._mentioned_jobs_for_copilot(message)
+    current_jobs = _jobs_relevant_to_selected_context(
+        raw_current_jobs,
+        selected,
+        selected_facts,
+        message,
+    )
     conflicts: list[dict[str, Any]] = []
     if len(current_clients) > 1:
         conflicts.append({"type": "ambiguous_client", "candidates": current_clients[:5]})
@@ -2056,10 +2796,24 @@ def _copilot_context_from_focus(
                 ],
             }
         )
+    # A uniquely named/numbered job outranks a stale client/page focus. Do this
+    # before the client mismatch check so cross-client references resolve to the
+    # job the consultant actually named.
+    explicit_job_ids = _explicitly_mentioned_job_ids(message, current_jobs)
+    if len(current_jobs) == 1 and explicit_job_ids:
+        try:
+            mentioned_job_id = int(current_jobs[0].get("id") or 0) or None
+        except (TypeError, ValueError):
+            mentioned_job_id = None
+        if mentioned_job_id:
+            return {
+                "type": "job", "id": mentioned_job_id,
+                "page": "positions", "filters": {},
+            }, []
+
     if conflicts:
         return dict(selected), conflicts
 
-    selected_facts = self._copilot_context_facts(selected)
     if selected_facts and current_clients and selected_facts.get("client") not in current_clients:
         conflicts.append({
             "type": "context_client_mismatch",
@@ -2067,6 +2821,20 @@ def _copilot_context_from_focus(
             "mentioned_clients": current_clients[:5],
         })
         return {"type": "global", "id": None, "page": selected.get("page") or "overview", "filters": {}}, conflicts
+    selected_job_id = _copilot_context_job_id(selected, selected_facts)
+    if len(current_jobs) == 1 and selected_job_id is not None:
+        try:
+            mentioned_job_id = int(current_jobs[0].get("id") or 0) or None
+        except (TypeError, ValueError):
+            mentioned_job_id = None
+        if mentioned_job_id and mentioned_job_id != selected_job_id and explicit_job_ids:
+            # A uniquely named/numbered job in the current sentence outranks a
+            # stale page focus. Broad client-only mentions are filtered back to
+            # the selected job by _jobs_relevant_to_selected_context above.
+            return {
+                "type": "job", "id": mentioned_job_id,
+                "page": "positions", "filters": {},
+            }, []
     # 模糊结果追问（"寻访结果呢"类，未提及岗位/客户名）优先会话焦点岗位，
     # 避免前端残留页面 context 把主线串到其他岗位（2026-08-07 长越→电源专家串台）。
     if (
@@ -2302,7 +3070,21 @@ def _persist_copilot_focus(
     conflicts = list(conflicts or [])
     facts = self._copilot_context_facts(selected)
     mentioned_clients = self._mentioned_client_names(message)
-    mentioned_jobs = self._mentioned_jobs_for_copilot(message)
+    resolution_selected = selected
+    resolution_facts = facts
+    if not resolution_facts and isinstance(previous, dict):
+        previous_context = previous.get("context") if isinstance(previous.get("context"), dict) else {}
+        if previous_context.get("type") in {"job", "candidate", "workflow"} and previous_context.get("id"):
+            previous_facts = self._copilot_context_facts(previous_context)
+            if previous_facts:
+                resolution_selected = previous_context
+                resolution_facts = previous_facts
+    mentioned_jobs = _jobs_relevant_to_selected_context(
+        self._mentioned_jobs_for_copilot(message),
+        resolution_selected,
+        resolution_facts,
+        message,
+    )
     if not facts and len(mentioned_jobs) == 1:
         facts = self._copilot_focus_context_facts({"type": "job", "id": mentioned_jobs[0].get("id")})
 
@@ -2934,9 +3716,20 @@ def _ground_copilot_goal(
         client_candidates = [str(selected_job["client"])]
 
     target_job = selected_job
-    current_jobs = self._mentioned_jobs_for_copilot(message)
+    selected_facts = self._copilot_context_facts(selected)
+    current_jobs = _jobs_relevant_to_selected_context(
+        self._mentioned_jobs_for_copilot(message),
+        selected,
+        selected_facts,
+        message,
+    )
     if not target_job and len(current_jobs) == 1:
         target_job = current_jobs[0]
+    if not target_job:
+        context_job = _copilot_context_job_record(selected_facts)
+        context_client = str(context_job.get("client") or "")
+        if context_job and (not client_candidates or not context_client or context_client in client_candidates):
+            target_job = context_job
     client = client_candidates[0] if len(client_candidates) == 1 else ""
     recent_jobs = [item for item in evidence["jobs"] if not client or item.get("client") == client]
     archive_reference = any(token in message for token in ("之前", "那个", "原来", "旧", "没拆分", "未拆分", "合并"))
@@ -3267,8 +4060,31 @@ def _copilot_impl(
     selected = self._normalize_copilot_context(raw_context)
     selected, focus_conflicts = self._copilot_context_from_focus(session_id, message, selected)
     existing_focus = self.get_copilot_focus(session_id)
+    conversation_state = (
+        dict(existing_focus.get("conversation_state"))
+        if isinstance(existing_focus, dict) and isinstance(existing_focus.get("conversation_state"), dict)
+        else {}
+    )
     conversation_history = self._copilot_conversation_history(session_id)
     selected_facts = self._copilot_context_facts(selected)
+    plan_reply = _plan_confirmation_reply(message)
+    latest_plan_anchor = _latest_assistant_plan_anchor(self, session_id) if plan_reply else {}
+    anchored_plan_ref, anchored_plan_state = (
+        _copilot_plan_from_anchor(self, latest_plan_anchor, conversation_state)
+        if latest_plan_anchor
+        else ({}, {})
+    )
+    confirmation_plan_ref = (
+        anchored_plan_ref
+        if plan_reply
+        and _copilot_plan_matches_selected(
+            selected,
+            selected_facts,
+            anchored_plan_state,
+            anchored_plan_ref,
+        )
+        else {}
+    )
     if selected.get("type") == "workflow":
         focused_context = existing_focus.get("context") if isinstance(existing_focus, dict) and isinstance(existing_focus.get("context"), dict) else {}
         if focused_context.get("type") != "workflow" or focused_context.get("id") != selected.get("id"):
@@ -3291,7 +4107,198 @@ def _copilot_impl(
         existing_focus,
         conversation_history,
         last_assistant_message,
+        confirmation_plan_ref,
     )
+    # 谈薪复述卡确认：上一条 assistant 出了创建前复述卡，本轮是明确确认。
+    salary_confirmation_resolved: dict[str, Any] = {}
+    pending_salary_card = _latest_assistant_plan_confirmation(self, session_id)
+    if pending_salary_card and _salary_plan_confirmation_reply(message):
+        salary_confirmation_resolved = pending_salary_card
+    # 纠错与撤销入口：先判 retract/undo-task/对象级纠错的明确措辞，
+    # 再回落到既有 cancel/correct 逻辑；三类输入都绝不能触发新任务创建。
+    state_facts = [
+        item
+        for item in (conversation_state.get("facts") or [])
+        if isinstance(item, dict)
+    ]
+    undo_task_turn = undo_task_requested(message)
+    scope_correction_turn = None if undo_task_turn else fact_scope_correction_request(message)
+    fact_retract_turn = bool(not undo_task_turn and not scope_correction_turn and fact_retract_requested(message))
+    correction_receipt = ""
+    undo_task_info: dict[str, Any] = {}
+    if undo_task_turn or scope_correction_turn or fact_retract_turn:
+        intent_understanding.update({
+            "speech_act": "correct",
+            "action": "none",
+            "target": {"type": "global", "id": None, "client": "", "label": ""},
+            "constraints": [],
+            "fact_updates": [],
+            "action_evidence": [],
+            "raw_constraint_changes": [],
+            "confidence": max(float(intent_understanding.get("confidence") or 0.0), 0.9),
+            "needs_clarification": False,
+            "missing_fields": [],
+            "clarification_question": "",
+            "safe_for_action": False,
+        })
+    ambiguous_job_scope = any(
+        item.get("type") == "ambiguous_job"
+        for item in focus_conflicts
+        if isinstance(item, dict)
+    )
+    if ambiguous_job_scope:
+        # Do not let an otherwise valid budget/detail fact inherit the visible
+        # page job when the same sentence explicitly names more than one job.
+        intent_understanding.update({
+            "speech_act": "other",
+            "action": "none",
+            "topic": str(intent_understanding.get("topic") or "job"),
+            "target": {"type": "global", "id": None, "client": "", "label": ""},
+            "fact_updates": [],
+            "action_evidence": [],
+            "refers_to_previous": False,
+            "needs_clarification": True,
+            "missing_fields": ["唯一岗位"],
+            "clarification_question": "请补充唯一的岗位名称或岗位编号。",
+            "safe_for_action": False,
+        })
+    if salary_confirmation_resolved and not ambiguous_job_scope:
+        # 复述卡已确认：按原目标真正走 create_plan（由后续创建路径生成 planned 计划）。
+        intent_understanding.update({
+            "speech_act": "execute",
+            "action": "salary",
+            "topic": "salary",
+            "objective": str(salary_confirmation_resolved.get("objective") or message),
+            "target": dict(salary_confirmation_resolved.get("target") or {}),
+            "constraints": [],
+            "fact_updates": [],
+            "action_evidence": [message],
+            "refers_to_previous": True,
+            "confidence": 0.95,
+            "needs_clarification": False,
+            "missing_fields": [],
+            "clarification_question": "",
+            "safe_for_action": True,
+        })
+    if (undo_task_turn or scope_correction_turn or fact_retract_turn) and not ambiguous_job_scope:
+        active_context = (
+            conversation_state.get("active_context")
+            if isinstance(conversation_state.get("active_context"), dict)
+            else {}
+        )
+
+        def _state_scope_label(scope: dict[str, Any]) -> str:
+            scope_type = str(scope.get("type") or "")
+            scope_id = scope.get("id")
+            if scope_type == "job":
+                title = str((active_context.get("job") or {}).get("title") or "").strip()
+                return f"岗位「{title}」" if title else f"岗位 #{scope_id}"
+            if scope_type == "candidate":
+                name = str((active_context.get("candidate") or {}).get("name") or "").strip()
+                return f"候选人「{name}」" if name else f"候选人 #{scope_id}"
+            return "全局上下文"
+
+        if fact_retract_turn:
+            intent_understanding["fact_retract"] = True
+            retract_target = latest_correctable_fact(state_facts)
+            if retract_target:
+                kind_label = _FACT_LABELS.get(str(retract_target.get("kind") or ""), "已确认事实")
+                correction_receipt = (
+                    f"结论：已撤销刚才记录的{kind_label}事实（原内容「{retract_target.get('quote')}」），不会用于后续判断。\n\n"
+                    "下一步：如果内容有误，把正确内容再发我一次即可。"
+                )
+            else:
+                correction_receipt = (
+                    "结论：最近没有已记录的事实可撤销。\n\n"
+                    "下一步：如果要纠正已记录的内容，直接告诉我正确信息。"
+                )
+        elif scope_correction_turn:
+            previous_type = str(scope_correction_turn.get("previous_type") or "")
+            scope_target = latest_correctable_fact(state_facts, previous_type)
+            job_facts = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+            candidate_facts = (
+                selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+            )
+            mode = str(scope_correction_turn.get("mode") or "")
+            new_scope: dict[str, Any] = {}
+            new_label = ""
+            if mode == "job":
+                job_id = job_facts.get("id") or (active_context.get("job") or {}).get("id")
+                if job_id not in (None, ""):
+                    new_scope = {"type": "job", "id": job_id}
+                    title = str(job_facts.get("title") or job_facts.get("job") or (active_context.get("job") or {}).get("title") or "").strip()
+                    new_label = f"岗位「{title}」" if title else f"岗位 #{job_id}"
+            elif mode == "candidate":
+                candidate_id = (
+                    selected.get("id")
+                    if str(selected.get("type") or "") == "candidate"
+                    else candidate_facts.get("id") or (active_context.get("candidate") or {}).get("id")
+                )
+                if candidate_id not in (None, ""):
+                    new_scope = {"type": "candidate", "id": candidate_id}
+                    name = str(candidate_facts.get("name") or (active_context.get("candidate") or {}).get("name") or "").strip()
+                    new_label = f"候选人「{name}」" if name else f"候选人 #{candidate_id}"
+            elif mode == "named":
+                named_jobs = self._mentioned_jobs_for_copilot(str(scope_correction_turn.get("name") or ""))
+                if len(named_jobs) == 1:
+                    named_job = named_jobs[0]
+                    new_scope = {"type": "job", "id": named_job.get("id")}
+                    new_label = f"岗位「{named_job.get('client') or ''} {named_job.get('job') or ''}」".replace("  ", " ")
+            if scope_target is not None and new_scope.get("type") and new_scope.get("id") not in (None, ""):
+                intent_understanding["fact_scope_correction"] = {
+                    "previous_type": previous_type,
+                    "new_scope": new_scope,
+                }
+                kind_label = _FACT_LABELS.get(str(scope_target.get("kind") or ""), "已确认事实")
+                correction_receipt = (
+                    f"结论：已把刚才记录的{kind_label}事实从{_state_scope_label(dict(scope_target.get('scope') or {}))}"
+                    f"迁移到{new_label}（原内容「{scope_target.get('quote')}」），后续按新对象使用。\n\n"
+                    "下一步：如果还有要纠正的内容，直接说明即可。"
+                )
+            elif scope_target is None:
+                correction_receipt = (
+                    "结论：最近没有已记录的事实可迁移。\n\n"
+                    "下一步：先把事实告诉我，再说明要记到哪个对象。"
+                )
+            else:
+                # 解析不出目标：走现有澄清路径，不瞎猜。
+                intent_understanding["needs_clarification"] = True
+                intent_understanding["missing_fields"] = ["要迁移到的岗位或候选人"]
+                intent_understanding["clarification_question"] = "请明确这条事实要记到哪个岗位或候选人（名称或编号）。"
+                correction_receipt = (
+                    "结论：还不能确定这条事实要记到哪个对象，暂未迁移。\n\n"
+                    "下一步：请明确说出目标岗位或候选人（名称或编号）。"
+                )
+        elif undo_task_turn:
+            pending_state_plan = (
+                conversation_state.get("pending_plan")
+                if isinstance(conversation_state.get("pending_plan"), dict)
+                else {}
+            )
+            undo_workflow_id = str(pending_state_plan.get("workflow_id") or "")
+            undo_objective = str(pending_state_plan.get("objective") or "")
+            if not undo_workflow_id and isinstance(existing_focus, dict):
+                focus_pending = (
+                    existing_focus.get("pending_workflow")
+                    if isinstance(existing_focus.get("pending_workflow"), dict)
+                    else {}
+                )
+                undo_workflow_id = str(focus_pending.get("workflow_id") or "")
+                undo_objective = undo_objective or str(focus_pending.get("objective") or "")
+            undo_status = ""
+            if undo_workflow_id:
+                try:
+                    undo_state = self.get_workflow(undo_workflow_id)
+                    undo_status = str((undo_state.get("workflow") or {}).get("status") or "")
+                    undo_goal = undo_state.get("goal") if isinstance(undo_state.get("goal"), dict) else {}
+                    undo_objective = undo_objective or str(undo_goal.get("objective") or undo_goal.get("title") or "")
+                except (ValueError, sqlite3.Error):
+                    undo_workflow_id = ""
+            undo_task_info = {
+                "workflow_id": undo_workflow_id,
+                "status": undo_status,
+                "objective": undo_objective,
+            }
     understood_target = intent_understanding.get("target") if isinstance(intent_understanding.get("target"), dict) else {}
     if (
         understood_target.get("type") == "job"
@@ -3305,6 +4312,17 @@ def _copilot_impl(
         selected_facts = self._copilot_context_facts(selected)
         focus_conflicts = []
     pending_plan_ref, pending_plan_state = _copilot_pending_plan(self, selected, existing_focus)
+    available_pending_plan_ref = dict(pending_plan_ref)
+    if plan_reply:
+        # Short confirmations use only the immediately presented plan. An old
+        # focus plan remains available for inspection, but is not an implicit
+        # authorization target.
+        if confirmation_plan_ref:
+            pending_plan_ref = dict(confirmation_plan_ref)
+            pending_plan_state = dict(anchored_plan_state)
+        else:
+            pending_plan_ref = {}
+            pending_plan_state = {}
     pending_goal_context = (
         (pending_plan_state.get("goal") or {}).get("context")
         if pending_plan_state else {}
@@ -3338,8 +4356,13 @@ def _copilot_impl(
         if isinstance(item, dict) and str(item.get("quote") or "").strip()
     ]
     pending_scope_request = ""
-    if (
+    awaiting_unique_job_scope = bool(
         last_assistant_message.strip() == "你要为哪个岗位补充并触达新候选人？"
+        # 多岗位歧义守卫的追问同样在等用户补充唯一岗位，澄清后恢复原动作。
+        or "请补充唯一的岗位名称或岗位编号" in last_assistant_message
+    )
+    if (
+        awaiting_unique_job_scope
         and selected.get("type") == "job"
         and selected.get("id")
     ):
@@ -3385,6 +4408,9 @@ def _copilot_impl(
     pending_sourcing_workflow: dict[str, Any] | None = None
     sourcing_revision_instruction = ""
     goal_request = message
+    if salary_confirmation_resolved:
+        # 复述卡确认后按原谈薪指令创建计划，而不是把“确认创建”当目标。
+        goal_request = str(salary_confirmation_resolved.get("objective") or message)
     if auto_start_sourcing:
         pending_workflow = (
             existing_focus.get("pending_workflow")
@@ -3475,14 +4501,71 @@ def _copilot_impl(
     mentioned_clients = self._mentioned_client_names(message)
     primary_client = mentioned_clients[0] if mentioned_clients else str((existing_focus or {}).get("client") or "该客户")
     forced_answer = None
+    fact_receipt: dict[str, Any] = {}
     workflow_cancelled = False
     started_new_plan = False
+    cancelled_answer_override = ""
+    salary_recap_pending: dict[str, Any] = {}
+    goal_workflow = None
+    if correction_receipt:
+        forced_answer = correction_receipt
+    if undo_task_info and forced_answer is None:
+        undo_workflow_id = str(undo_task_info.get("workflow_id") or "")
+        undo_status = str(undo_task_info.get("status") or "")
+        undo_objective = str(undo_task_info.get("objective") or "").strip()
+        if undo_workflow_id and undo_status == "planned":
+            try:
+                goal_workflow = self.cancel_workflow(undo_workflow_id, message)
+                workflow_cancelled = True
+                task_label = f"「{undo_objective}」" if undo_objective else ""
+                cancelled_answer_override = (
+                    f"结论：已取消刚才创建的{task_label}任务，已记录的岗位/候选人事实保留。\n\n"
+                    "下一步：如需重新发起，直接再说一次目标即可。"
+                )
+            except ValueError as exc:
+                forced_answer = f"结论：未能撤销刚才创建的任务。\n\n下一步：{str(exc)[:180]}。"
+        elif undo_workflow_id and undo_status and undo_status not in TERMINAL_WORKFLOW_STATUSES:
+            forced_answer = (
+                "结论：刚才创建的任务已开始执行，不能直接撤销。\n\n"
+                "下一步：如需停止，只能走停止流程（在计划卡上暂停/停止，或明确说“暂停该任务”）。"
+            )
+        else:
+            forced_answer = (
+                "结论：本会话没有刚创建且尚未开始的任务可撤销。\n\n"
+                "下一步：如果要取消待确认计划，直接说“取消计划”。"
+            )
+    if plan_reply and not confirmation_plan_ref and not salary_confirmation_resolved:
+        stale_reason = ""
+        if available_pending_plan_ref.get("workflow_id"):
+            pending_state_plan = (
+                conversation_state.get("pending_plan")
+                if isinstance(conversation_state.get("pending_plan"), dict)
+                else {}
+            )
+            if str(pending_state_plan.get("workflow_id") or "") == str(available_pending_plan_ref.get("workflow_id") or ""):
+                stale_reason = str(pending_state_plan.get("stale_reason") or "")
+        if stale_reason:
+            forced_answer = (
+                f"结论：待确认计划基于旧信息（{stale_reason_text(stale_reason)}），这句短确认不会启动它，当前没有启动任何任务。\n\n"
+                "下一步：原计划仍保持“尚未开始”；请确认是否按新信息继续——回复“按新信息重新生成计划”我会基于最新事实重建计划，"
+                "或明确说出要启动的岗位/候选人任务。"
+            )
+        elif available_pending_plan_ref.get("workflow_id"):
+            forced_answer = (
+                "结论：这句短确认没有绑定到上一条刚展示的计划，当前没有启动任何任务。\n\n"
+                "下一步：原计划仍保持“尚未开始”；请重新打开该计划后，用计划卡上的确认动作，"
+                "或明确说出要启动的岗位/候选人任务。"
+            )
+        else:
+            forced_answer = (
+                "结论：当前没有上一条刚展示且可确认的计划，没有启动任何任务。\n\n"
+                "下一步：请明确说明要执行的岗位、候选人或具体动作。"
+            )
     if re.search(r"(?:性子|性质)结构", message) and not any(token in message for token in ("公司性质", "组织结构", "薪资结构")):
         forced_answer = (
             f"你是想问{primary_client}的公司性质/组织结构，还是薪资结构？\n\n"
             "请确认一个方向，我再按对应证据回答。"
         )
-    goal_workflow = None
     goal_patterns = (
         r"(?:补充|补池|寻访|再寻访|继续寻访|找|搜索|搜|再找|继续找)\s*(?:一些|些|若干|一批|一轮|新一批)?\s*\d*\s*(?:位|个|名|人)?\s*(?:合适|匹配|合适的)?(?:人选|候选人)",
         r"(?:多渠道|猎聘|X-?SaaS|x-?saas).*(?:寻访|搜索|找人|找候选人|补池)",
@@ -3517,6 +4600,7 @@ def _copilot_impl(
             forced_answer = context_mismatch_answer
     if forced_answer is None and _is_job_budget_fact_update(message):
         forced_answer = _format_job_budget_fact_answer(message, selected_facts)
+        fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
     if forced_answer is None and _is_candidate_result_observation(message, intent_understanding):
         forced_answer = _format_candidate_result_observation_answer(
             message,
@@ -3524,6 +4608,16 @@ def _copilot_impl(
             existing_focus,
             floating_compact=floating_compact,
         )
+        fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
+    if forced_answer is None and turn_decision.get("effect") == "answer":
+        fact_answer = _format_non_action_fact_answer(
+            message,
+            intent_understanding,
+            selected_facts,
+        )
+        if fact_answer:
+            forced_answer = fact_answer
+            fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
     strategy_revision: dict[str, Any] | None = None
     strategy_revision_requested = bool(
         not suppress_goal_intent
@@ -3653,31 +4747,25 @@ def _copilot_impl(
         and _is_candidate_list_query(message)
     ):
         list_job_id = 0
-        if selected.get("type") == "job" and selected.get("id"):
-            list_job_id = int(selected["id"])
-        elif isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
-            list_job_id = int(focus_context["id"])
+        # 消息里明确提到的唯一岗位优先；没有明确岗位时才回到当前人选/岗位焦点。
+        mentioned = _jobs_relevant_to_selected_context(
+            self._mentioned_jobs_for_copilot(message),
+            selected,
+            selected_facts,
+            message,
+        )
+        if len(mentioned) == 1:
+            list_job_id = int(mentioned[0]["id"])
         if not list_job_id:
-            # 消息里显式提到岗位（如“岗位 137 的名单”）优先于选中/焦点，避免答错对象。
-            mentioned = self._mentioned_jobs_for_copilot(message)
-            if len(mentioned) == 1:
-                list_job_id = int(mentioned[0]["id"])
+            list_job_id = _copilot_context_job_id(selected, selected_facts) or 0
+        if not list_job_id and isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
+            list_job_id = int(focus_context["id"])
         if not list_job_id and mentioned_clients:
-            conn = self._connect()
-            try:
-                job_row = conn.execute(
-                    """
-                    SELECT j.id FROM jobs j
-                    JOIN clients c ON c.id = j.client_id
-                    WHERE c.name LIKE ? AND j.status NOT IN ('closed','archived')
-                    ORDER BY j.id LIMIT 1
-                    """,
-                    (f"%{mentioned_clients[0]}%",),
-                ).fetchone()
-                if job_row:
-                    list_job_id = int(job_row["id"])
-            finally:
-                conn.close()
+            client_jobs = self._mentioned_jobs_for_copilot(mentioned_clients[0], limit=10)
+            if len(client_jobs) == 1:
+                list_job_id = int(client_jobs[0]["id"])
+            elif len(client_jobs) > 1:
+                forced_answer = _format_ambiguous_job_scope(mentioned_clients[0], client_jobs)
         if list_job_id:
             candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
             if candidate_list_answer:
@@ -3686,30 +4774,24 @@ def _copilot_impl(
     # 而不是再输出一遍名单（2026-08-11 copilot_ad7e7086917d 答非所问修复）。
     if forced_answer is None and not suppress_goal_intent and _is_candidate_list_composition_question(message):
         comp_job_id = 0
-        if selected.get("type") == "job" and selected.get("id"):
-            comp_job_id = int(selected["id"])
-        elif isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
-            comp_job_id = int(focus_context["id"])
+        mentioned = _jobs_relevant_to_selected_context(
+            self._mentioned_jobs_for_copilot(message),
+            selected,
+            selected_facts,
+            message,
+        )
+        if len(mentioned) == 1:
+            comp_job_id = int(mentioned[0]["id"])
         if not comp_job_id:
-            mentioned = self._mentioned_jobs_for_copilot(message)
-            if len(mentioned) == 1:
-                comp_job_id = int(mentioned[0]["id"])
+            comp_job_id = _copilot_context_job_id(selected, selected_facts) or 0
+        if not comp_job_id and isinstance(focus_context, dict) and focus_context.get("type") == "job" and focus_context.get("id"):
+            comp_job_id = int(focus_context["id"])
         if not comp_job_id and mentioned_clients:
-            conn = self._connect()
-            try:
-                job_row = conn.execute(
-                    """
-                    SELECT j.id FROM jobs j
-                    JOIN clients c ON c.id = j.client_id
-                    WHERE c.name LIKE ? AND j.status NOT IN ('closed','archived')
-                    ORDER BY j.id LIMIT 1
-                    """,
-                    (f"%{mentioned_clients[0]}%",),
-                ).fetchone()
-                if job_row:
-                    comp_job_id = int(job_row["id"])
-            finally:
-                conn.close()
+            client_jobs = self._mentioned_jobs_for_copilot(mentioned_clients[0], limit=10)
+            if len(client_jobs) == 1:
+                comp_job_id = int(client_jobs[0]["id"])
+            elif len(client_jobs) > 1:
+                forced_answer = _format_ambiguous_job_scope(mentioned_clients[0], client_jobs)
         if comp_job_id:
             composition_answer = _build_candidate_list_composition_answer(self.db_path, comp_job_id, message)
             if composition_answer:
@@ -3731,15 +4813,27 @@ def _copilot_impl(
         if focus_context_candidate and float((existing_focus or {}).get("confidence") or 0) >= 0.7:
             inferred_target = {"type": str(focus_context_candidate["type"]), "id": int(focus_context_candidate["id"])}
         else:
+            current_jobs = _jobs_relevant_to_selected_context(
+                self._mentioned_jobs_for_copilot(message),
+                selected,
+                selected_facts,
+                message,
+            )
+            if len(current_jobs) == 1:
+                inferred_target = {"type": "job", "id": int(current_jobs[0]["id"])}
             evidence = self._copilot_session_business_evidence(session_id)
             evidence_jobs = list(evidence.get("jobs") or [])
-            if len(evidence_jobs) == 1:
+            if inferred_target:
+                pass
+            elif len(evidence_jobs) == 1:
                 inferred_target = {"type": "job", "id": int(evidence_jobs[0]["id"])}
             elif len(evidence_jobs) > 1:
                 # 多岗位时取最近一条 assistant 引用/用户 context 的岗位（按消息倒序优先）。
+                evidence_job_ids = {str(item.get("id")) for item in evidence_jobs}
                 recent = conversation_history[-6:]
                 for item in reversed(recent):
                     mentioned = self._mentioned_jobs_for_copilot(str(item.get("content") or ""))
+                    mentioned = [item for item in mentioned if str(item.get("id")) in evidence_job_ids]
                     if len(mentioned) == 1:
                         inferred_target = {"type": "job", "id": int(mentioned[0]["id"])}
                         break
@@ -3763,11 +4857,24 @@ def _copilot_impl(
         forced_answer = str(intent_understanding.get("clarification_question") or "").strip() or (
             f"我还缺少{missing_text}，确认后才能继续。" if missing_text else "我还不能唯一确定你的对象或动作，请再确认一句。"
         )
+    stopped_candidate_action_blocked = False
+    if selected.get("type") == "candidate" and selected.get("id"):
+        try:
+            stopped_candidate_action_blocked = is_stopped(
+                build_candidate_context(self.db_path, int(selected["id"]))
+            ) and _stopped_candidate_action_requested(
+                message,
+                intent_understanding,
+                turn_decision,
+            )
+        except (sqlite3.Error, TypeError, ValueError):
+            stopped_candidate_action_blocked = False
     start_pending_plan = bool(
         turn_decision.get("effect") == "start_plan"
         and pending_plan_state
         and intent_understanding.get("safe_for_action")
         and not workflow_outcome_question
+        and not stopped_candidate_action_blocked
     )
     if start_pending_plan and forced_answer is None and not suppress_goal_intent and goal_workflow is None:
         try:
@@ -3784,9 +4891,46 @@ def _copilot_impl(
         turn_decision.get("effect") == "create_plan"
         and intent_understanding.get("safe_for_action")
     )
+    if (
+        create_plan_requested
+        and semantic_action == "salary"
+        and not salary_confirmation_resolved
+        and not suppress_goal_intent
+        and not stopped_candidate_action_blocked
+        and goal_workflow is None
+        and forced_answer is None
+    ):
+        # 高风险动作前置复述确认（谈薪）：创建前先出复述卡，明确确认后才真正
+        # create_plan；寻访类维持现状不拦截。卡片写入 assistant structured_json，
+        # 由 _latest_assistant_plan_confirmation 在下一轮锚定读取。
+        recap_candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+        recap_job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+        recap_label = str(recap_candidate.get("name") or "").strip() or " / ".join(
+            part
+            for part in (
+                str(selected_facts.get("client") or recap_job.get("client") or "").strip(),
+                str(recap_job.get("title") or recap_job.get("job") or "").strip(),
+            )
+            if part
+        ) or "当前对象"
+        current_amount, expected_amount = _salary_recap_amounts(state_facts)
+        amounts_note = "来自已记录事实" if (current_amount or expected_amount) else "暂未提供"
+        forced_answer = (
+            f"结论：我理解你要对「{recap_label}」发起谈薪。"
+            f"当前薪资 {current_amount or '未提供'}，期望 {expected_amount or '未提供'}（{amounts_note}）。"
+            "确认后我将创建谈薪计划，回复“确认创建”。\n\n"
+            "下一步：回复“确认创建”后我会生成待确认计划；对象或金额不对时直接纠正。"
+        )
+        salary_recap_pending = {
+            "kind": "salary_plan",
+            "action": "salary",
+            "objective": goal_request,
+            "target": {"type": str(selected.get("type") or "global"), "id": selected.get("id")},
+            "source_message": message,
+        }
     if goal_workflow is None and forced_answer is None and not suppress_goal_intent and (
         create_plan_requested or scope_clarification_resolved or strategy_gate_force_goal
-    ):
+    ) and not stopped_candidate_action_blocked:
         ground_base = selected
         if strategy_gate_force_goal and pending_clarification.get("job_id"):
             ground_base = {"type": "job", "id": int(pending_clarification["job_id"]), "page": "positions", "filters": {}}
@@ -3955,7 +5099,14 @@ def _copilot_impl(
             }
         )
         suggested_actions.append({"type": "open_candidate", "id": context_id, "label": "打开人选"})
-        if stopped_context:
+        if stopped_context and (
+            stopped_candidate_action_blocked
+            or _stopped_candidate_action_requested(
+                message,
+                intent_understanding,
+                turn_decision,
+            )
+        ):
             stage = str((candidate_context.get("relation") or {}).get("clean_stage") or "已停止")
             identity_label = identity.get("name") or f"关系 #{context_id}"
             project_label = f"{position.get('client','')} / {position.get('job','')}".strip(" /")
@@ -4238,7 +5389,12 @@ def _copilot_impl(
                 "business_focus": business_focus,
                 "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
             }
-    mentioned_jobs = self._mentioned_jobs_for_copilot(message)
+    mentioned_jobs = _jobs_relevant_to_selected_context(
+        self._mentioned_jobs_for_copilot(message),
+        selected,
+        selected_facts,
+        message,
+    )
     if mentioned_jobs:
         selected_payload["mentioned_jobs"] = mentioned_jobs
         for item in mentioned_jobs[:3]:
@@ -4340,7 +5496,7 @@ def _copilot_impl(
         plan_steps = goal_workflow.get("steps") or []
         risk_steps = [step for step in plan_steps if step.get("risk_level") in {"R2", "R3"}]
         if workflow_cancelled:
-            answer = "结论：当前计划已取消，后续步骤不会继续执行。"
+            answer = cancelled_answer_override or "结论：当前计划已取消，后续步骤不会继续执行。"
         elif strategy_revision and floating_compact:
             answer = (
                 "结论：已生成寻访策略修订版，旧计划和旧审批已失效。\n\n"
@@ -4463,6 +5619,7 @@ def _copilot_impl(
         if not answer:
             answer = "当前查询已完成，但暂时没有生成可用结论。"
         answer_source = "model_tools" if model_tool_calls else "model"
+    references = _dedupe_copilot_references(references)
     persisted_payload = _persistable_attachment_payload(selected_payload)
     focus_context = (
         (goal_workflow.get("goal") or {}).get("context")
@@ -4500,6 +5657,7 @@ def _copilot_impl(
         ],
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
+        "fact_receipt": fact_receipt or None,
         "turn_decision": turn_decision,
         "tool_calls": model_tool_calls,
         "model_participation": {
@@ -4519,6 +5677,30 @@ def _copilot_impl(
             ),
         },
     }
+    if goal_workflow and not workflow_cancelled and not start_pending_plan and not started_new_plan:
+        presented_workflow = goal_workflow.get("workflow") if isinstance(goal_workflow.get("workflow"), dict) else {}
+        presented_plan = goal_workflow.get("plan_ref") if isinstance(goal_workflow.get("plan_ref"), dict) else {}
+        presented_goal = goal_workflow.get("goal") if isinstance(goal_workflow.get("goal"), dict) else {}
+        if (
+            str(presented_workflow.get("status") or "") == "planned"
+            and presented_plan.get("workflow_id")
+            and presented_plan.get("plan_hash")
+        ):
+            assistant_structured["presented_plan_ref"] = {
+                "workflow_id": presented_plan.get("workflow_id"),
+                "version": presented_plan.get("version"),
+                "plan_hash": presented_plan.get("plan_hash"),
+                "action": str(presented_goal.get("action") or semantic_action or ""),
+                "target": dict(presented_goal.get("context") or {}),
+                "state_revision": int(
+                    ((business_focus or {}).get("conversation_state") or {}).get("revision") or 0
+                ),
+            }
+    if salary_recap_pending:
+        salary_recap_pending["state_revision"] = int(
+            ((business_focus or {}).get("conversation_state") or {}).get("revision") or 0
+        )
+        assistant_structured["pending_plan_confirmation"] = salary_recap_pending
     if strategy_revision:
         assistant_structured["workflow_revision"] = strategy_revision
     # 策略建议结构化：本轮未直接执行修订时，从回答中提取可应用的策略补丁
@@ -4596,6 +5778,36 @@ def _copilot_impl(
         conn.commit()
     finally:
         conn.close()
+    # 决策审计：每轮把回合决策链写入 agent_copilot_events（payload 走 JSON，不改表结构）。
+    try:
+        self.record_copilot_event(
+            session_id,
+            "turn_decision",
+            {
+                "intent": str(intent_understanding.get("speech_act") or ""),
+                "target": dict(intent_understanding.get("target") or {}),
+                "action": str(intent_understanding.get("action") or "none"),
+                "effect": str(turn_decision.get("effect") or ""),
+                "workflow_created": bool(goal_workflow) and not workflow_cancelled,
+                "evidence": [
+                    str(item)
+                    for item in ((turn_decision.get("authorization") or {}).get("evidence") or [])
+                ],
+                "fact_receipt": dict(fact_receipt) if fact_receipt else None,
+                "confirmation_mode": (
+                    "salary_confirmed"
+                    if salary_confirmation_resolved
+                    else "salary_precreate"
+                    if salary_recap_pending
+                    else "plan_anchor"
+                    if (plan_reply and confirmation_plan_ref)
+                    else ""
+                ),
+            },
+        )
+    except Exception:
+        # 审计埋点失败不阻塞主回复。
+        pass
     # Phase 1.2: 触发对话摘要（非阻塞，失败不影响主流程）
     try:
         self._maybe_summarize_copilot_conversation(session_id)
@@ -4658,6 +5870,7 @@ def _copilot_impl(
         "memory": {"mode": memories.get("mode"), "hits": len(memories.get("memories") or [])},
         "business_focus": business_focus,
         "intent_understanding": intent_understanding,
+        "fact_receipt": fact_receipt or None,
         "turn_decision": turn_decision,
         "tool_calls": model_tool_calls,
         "proactive_suggestions": generate_proactive_suggestions(str(self.db_path)),

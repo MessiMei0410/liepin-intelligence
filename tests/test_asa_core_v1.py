@@ -1676,6 +1676,15 @@ def test_dashboard_workflows_expose_business_outcome_matching_summary(db_path: P
 
 
 def test_copilot_job_split_creates_job_library_update_workflow(db_path: Path) -> None:
+    # 数据漂移隔离：真实库里的士兰微技术市场岗位已完成拆分（状态进入黑名单），
+    # 自造一个状态可拆分的同题岗位，不依赖真实库数据快照。
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO jobs(id,client_id,title,location,status,summary,updated_at) "
+        "VALUES (900,(SELECT id FROM clients WHERE name='士兰微'),'技术市场经理/总监','上海','active','','2026-08-12')"
+    )
+    conn.commit()
+    conn.close()
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         request_id = f"copilot-job-library-update-{uuid.uuid4().hex[:8]}"
         response = client.post(

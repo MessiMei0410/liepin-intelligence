@@ -59,8 +59,8 @@ _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"(?:岗位|职位).{0,24}(?:发布|上架|发到猎聘)",
     ),
     "job_split": (
-        r"(?:拆分|拆成|新建|建立|录入).{0,24}(?:岗位|职位)",
-        r"(?:岗位|职位).{0,24}(?:拆分|拆成|新建|建立|录入)",
+        r"(?:拆分|拆成|分成|新建|建立|录入).{0,24}(?:岗位|职位)",
+        r"(?:岗位|职位).{0,24}(?:拆分|拆成|分成|新建|建立|录入)",
     ),
     "job_archive": (
         r"(?:归档|关闭|下线).{0,24}(?:岗位|职位)",
@@ -94,6 +94,83 @@ def _looks_like_question(message: str) -> bool:
     )
 
 
+_FACT_RETRACT_PATTERNS = (
+    r"(?:不要|别|不用|不可以)记(?:录|下)?(?:了|吧)?",
+    r"(?:那条|这条|刚才那条|刚刚那条|上一条)(?:记录|事实)?(?:不算|作废|撤掉|撤回|去掉)",
+    r"(?:把)?(?:刚才|刚刚|上一条)?(?:那条|这条)?(?:记录|事实)(?:不算|作废|撤掉|撤回|删掉|去掉)",
+)
+
+_UNDO_TASK_PATTERNS = (
+    r"(?:撤销|撤回|撤掉|作废|删除|删掉)[^，。；;]{0,12}(?:任务|工作流)",
+    r"(?:刚才|刚刚|刚)[^，。；;]{0,12}(?:任务|工作流)[^，。；;]{0,8}(?:不要了?|撤销|撤回|撤掉|作废|取消)",
+    r"(?:任务|工作流)[^，。；;]{0,6}(?:不要了)",
+)
+
+
+def undo_task_requested(message: str) -> bool:
+    """“撤销刚才创建的任务/刚才那个任务不要了”：针对本会话刚建的工作流。
+
+    与 cancel plan 的“取消”区分：cancel 针对待确认计划本身（“取消计划”），
+    这里只匹配明确指向“任务/工作流”的撤销措辞。
+    """
+    text = _clean(message)
+    if not text or _looks_like_question(text):
+        return False
+    return any(re.search(pattern, text) for pattern in _UNDO_TASK_PATTERNS)
+
+
+def fact_retract_requested(message: str) -> bool:
+    """“刚才那条不要记/别记/那条不算”：撤销最近一条已记录事实（非物理删除）。"""
+    text = _clean(message)
+    if not text or _looks_like_question(text):
+        return False
+    if undo_task_requested(text):
+        return False
+    return any(re.search(pattern, text) for pattern in _FACT_RETRACT_PATTERNS)
+
+
+def fact_scope_correction_request(message: str) -> dict[str, str] | None:
+    """“不是这个岗位/不是这个人，是XXX”：对象级纠错，迁移最近事实的 scope。
+
+    返回 {"previous_type", "mode", "name"}；mode 为 job/candidate/named。
+    解析不出目标形态时返回 None，交给既有 correct/澄清路径。
+    """
+    text = _clean(message)
+    if not text or _looks_like_question(text):
+        return None
+    match = re.search(r"不是这(?:个|一|位)?(?P<from>岗位|职位|人选|候选人|人)", text)
+    if not match:
+        return None
+    previous_type = "job" if match.group("from") in {"岗位", "职位"} else "candidate"
+    target = re.search(r"是给(?P<to>岗位|职位|候选人|人选|这个人|这人)(?:记|录|用)?的", text) or re.search(
+        r"记到(?P<to>岗位|职位|候选人|人选)", text
+    )
+    if target:
+        return {
+            "previous_type": previous_type,
+            "mode": "job" if target.group("to") in {"岗位", "职位"} else "candidate",
+            "name": "",
+        }
+    named = re.search(r"是(?P<name>[^，。；;]{1,30}?)的?(?:那个|这个|这家)(?:岗位|职位|人选|候选人)?", text)
+    if named:
+        return {"previous_type": previous_type, "mode": "named", "name": _clean(named.group("name"), 60)}
+    return None
+
+
+def latest_correctable_fact(facts: Any, scope_type: str = "") -> dict[str, Any] | None:
+    """最近一条未撤销的事实；给定 scope_type 时优先同类型 scope 的最近一条。"""
+    items = (
+        [item for item in facts if isinstance(item, dict) and not item.get("retracted")]
+        if isinstance(facts, list)
+        else []
+    )
+    if scope_type:
+        for item in reversed(items):
+            if str((item.get("scope") or {}).get("type") or "") == scope_type:
+                return item
+    return items[-1] if items else None
+
+
 def _looks_like_observation(message: str) -> bool:
     text = _clean(message)
     return bool(
@@ -122,8 +199,13 @@ def _detect_topic(message: str, action: str, raw_topic: Any) -> str:
 
 
 def _budget_value(message: str) -> str:
+    # Accept the range forms consultants commonly use: 80-120w, 80w-120w,
+    # and 80至120万. The unit may appear on either side, but a range must
+    # contain at least one unit so plain candidate counts are not budgets.
     match = re.search(
-        r"\d+(?:\.\d+)?\s*(?:w|W|万|k|K)(?:\s*[-~至到]\s*\d+(?:\.\d+)?\s*(?:w|W|万|k|K))?",
+        r"(?:\d+(?:\.\d+)?\s*(?:w|W|万|k|K)?\s*[-~至到]\s*\d+(?:\.\d+)?\s*(?:w|W|万|k|K)"
+        r"|\d+(?:\.\d+)?\s*(?:w|W|万|k|K)\s*[-~至到]\s*\d+(?:\.\d+)?\s*(?:w|W|万|k|K)?)"
+        r"|\d+(?:\.\d+)?\s*(?:w|W|万|k|K)",
         message,
     )
     return _clean(match.group(0), 80) if match else ""
@@ -135,7 +217,18 @@ def _deterministic_fact_updates(message: str) -> list[dict[str, str]]:
         return []
     rows: list[dict[str, str]] = []
     budget_value = _budget_value(text)
-    if budget_value and any(marker in text for marker in ("预算", "薪资范围", "薪酬范围", "年薪范围", "总包范围", "总包上限")):
+    candidate_subject = bool(re.search(r"(?:这个|该|当前|这位)?(?:人选|候选人|候选|人儿)", text))
+    candidate_budget = bool(
+        candidate_subject
+        and budget_value
+        and any(marker in text for marker in ("预算", "薪资", "薪酬", "总包", "期望", "预期", "目前", "现在", "当前"))
+    )
+    job_budget = bool(
+        budget_value
+        and not candidate_budget
+        and any(marker in text for marker in ("预算", "薪资范围", "薪酬范围", "年薪范围", "总包范围", "总包上限"))
+    )
+    if job_budget:
         rows.append({"kind": "job_budget", "quote": text, "value": budget_value})
     if (
         any(marker in text for marker in ("岗位", "职位", "这个岗", "该岗位"))
@@ -148,7 +241,10 @@ def _deterministic_fact_updates(message: str) -> list[dict[str, str]]:
             for marker in ("当前薪资", "期望薪资", "目前薪资", "现在薪资", "总包", "涨幅")
         ) or bool(
             budget_value
-            and any(marker in text for marker in ("目前", "现在", "当前", "期望", "预期"))
+            and (
+                any(marker in text for marker in ("目前", "现在", "当前", "期望", "预期"))
+                or candidate_budget
+            )
         )
         if compensation_fact:
             # 保留整句，避免“目前 80w，期望 100w”只留下第一个金额。
@@ -317,9 +413,11 @@ def build_context_state(
     now: str,
 ) -> dict[str, Any]:
     state = copy.deepcopy(previous) if isinstance(previous, dict) else {}
+    revision = int(state.get("revision") or 0) + 1
     active_context = _normalized_context(context, business_focus)
     facts = [dict(item) for item in state.get("facts") or [] if isinstance(item, dict)]
     corrections = [dict(item) for item in state.get("corrections") or [] if isinstance(item, dict)]
+    new_fact_kinds: list[str] = []
 
     for update in understanding.get("fact_updates") or []:
         if not isinstance(update, dict):
@@ -349,6 +447,47 @@ def build_context_state(
             "source": "user",
             "at": now,
         })
+        new_fact_kinds.append(kind)
+
+    if understanding.get("fact_retract"):
+        # 事实撤销：不物理删除，打 retracted 标记并写 corrections 留痕。
+        retract_target = latest_correctable_fact(facts)
+        if retract_target is not None:
+            retract_target["retracted"] = True
+            corrections.append({
+                "id": _stable_id("fact_retract", retract_target.get("id"), now),
+                "kind": "fact_retract",
+                "fact_kind": _clean(retract_target.get("kind"), 48),
+                "previous_quote": _clean(retract_target.get("quote")),
+                "quote": "",
+                "at": now,
+            })
+
+    scope_fix = understanding.get("fact_scope_correction")
+    if isinstance(scope_fix, dict) and isinstance(scope_fix.get("new_scope"), dict):
+        # 对象级纠错：把最近事实的 scope 迁移到用户指定的岗位/候选人。
+        new_scope = {
+            "type": _clean(scope_fix["new_scope"].get("type"), 32),
+            "id": scope_fix["new_scope"].get("id"),
+        }
+        scope_target = latest_correctable_fact(facts, _clean(scope_fix.get("previous_type"), 32))
+        if scope_target is not None and new_scope.get("type"):
+            previous_scope = dict(scope_target.get("scope") or {})
+            new_key = _stable_id(scope_target.get("kind"), new_scope.get("type"), new_scope.get("id"))
+            corrections.append({
+                "id": _stable_id("fact_scope", scope_target.get("id"), new_key, now),
+                "kind": "fact_scope",
+                "fact_kind": _clean(scope_target.get("kind"), 48),
+                "quote": _clean(scope_target.get("quote")),
+                "previous_scope": previous_scope,
+                "new_scope": new_scope,
+                "at": now,
+            })
+            migrated = dict(scope_target)
+            migrated["scope"] = new_scope
+            migrated["id"] = new_key
+            facts = [item for item in facts if item is not scope_target and item.get("id") != new_key]
+            facts.append(migrated)
 
     for change in decision.get("constraint_changes") or []:
         if not isinstance(change, dict):
@@ -378,7 +517,8 @@ def build_context_state(
         active_goal = {}
 
     pending_plan = dict(state.get("pending_plan") or {})
-    if isinstance(workflow_intent, dict) and workflow_intent.get("workflow_id"):
+    plan_refreshed = bool(isinstance(workflow_intent, dict) and workflow_intent.get("workflow_id"))
+    if plan_refreshed:
         workflow_status = _clean(workflow_intent.get("status"), 48)
         plan = {
             key: workflow_intent.get(key)
@@ -394,6 +534,15 @@ def build_context_state(
                 active_goal["workflow_id"] = workflow_intent.get("workflow_id")
     elif effect == "cancel_plan":
         pending_plan = {}
+    if new_fact_kinds and pending_plan.get("workflow_id") and not plan_refreshed:
+        # 本轮写入了新事实，而待确认计划仍基于之前的信息：标记过期原因，
+        # 由消费侧（计划锚点/短确认）决定要求重新确认，而不是直接启动。
+        stale_reasons = [item for item in str(pending_plan.get("stale_reason") or "").split(",") if item]
+        stale_reasons = list(dict.fromkeys([*stale_reasons, *(f"{kind}_updated" for kind in new_fact_kinds)]))
+        pending_plan = dict(pending_plan)
+        pending_plan["stale_reason"] = ",".join(stale_reasons)
+        pending_plan["last_referenced_at"] = pending_plan.get("updated_at") or now
+        pending_plan["state_revision"] = revision
 
     open_questions = [dict(item) for item in state.get("open_questions") or [] if isinstance(item, dict)]
     if effect == "clarify":
@@ -410,7 +559,7 @@ def build_context_state(
     )
     return {
         "version": STATE_VERSION,
-        "revision": int(state.get("revision") or 0) + 1,
+        "revision": revision,
         "active_context": active_context,
         "facts": facts[-32:],
         "corrections": corrections[-24:],
@@ -429,6 +578,18 @@ def build_context_state(
         },
         "updated_at": now,
     }
+
+
+def stale_reason_text(stale_reason: Any) -> str:
+    """把机器可读的过期原因（如 job_budget_updated）转成中文标签。"""
+    labels: list[str] = []
+    for reason in str(stale_reason or "").split(","):
+        reason = reason.strip()
+        if not reason:
+            continue
+        kind = reason[:-len("_updated")] if reason.endswith("_updated") else reason
+        labels.append(f"{_FACT_LABELS.get(kind, kind)}更新")
+    return "、".join(labels)
 
 
 def deterministic_context_summary(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -452,9 +613,16 @@ def deterministic_context_summary(state: dict[str, Any] | None) -> dict[str, Any
     key_facts = [
         f"{_FACT_LABELS.get(str(item.get('kind') or ''), '已确认事实')}：{_clean(item.get('quote'))}"
         for item in (state.get("facts") or [])[-12:]
-        if isinstance(item, dict) and _clean(item.get("quote"))
+        if isinstance(item, dict) and _clean(item.get("quote")) and not item.get("retracted")
     ]
-    pending = [f"待确认计划 {plan['workflow_id']}"] if plan.get("workflow_id") and plan.get("status") == "planned" else []
+    pending: list[str] = []
+    if plan.get("workflow_id") and plan.get("status") == "planned":
+        plan_label = f"待确认计划 {plan['workflow_id']}"
+        stale_text = stale_reason_text(plan.get("stale_reason"))
+        if stale_text:
+            based_at = _clean(plan.get("last_referenced_at"), 32) or "此前"
+            plan_label += f"（已过期：{stale_text}，计划基于 {based_at} 的信息）"
+        pending.append(plan_label)
     pending.extend(
         _clean(item.get("question"))
         for item in state.get("open_questions") or []

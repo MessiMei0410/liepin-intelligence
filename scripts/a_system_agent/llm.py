@@ -149,7 +149,7 @@ COPILOT_INTENT_SYSTEM_PROMPT = """你是 ASA Copilot 的任务理解器。你只
 判断原则：
 1. 区分 ask（询问事实）、inform（补充事实/陈述观察）、discuss（讨论方案）、propose（提出明确目标）、confirm（确认上一项明确动作）、execute（明确要求执行）、correct（纠正此前理解）、cancel（取消）和 other。
 2. action 只能是 none、candidate_sourcing、strategy_revision、candidate_outreach、candidate_review、job_publish、job_split、job_archive、recommendation、salary。
-3. “可以/好/按这个来”等短回复，只有 pending_action 明确且对象唯一时才能解释为 confirm；否则 needs_clarification=true。
+3. “可以/好/按这个来/继续”等短回复，只有 pending_action 明确、对象唯一、且上一条助手消息刚刚展示了同一份待执行计划时才能解释为 confirm；中间插入任何事实补充或其他回答后不得继承旧授权，否则 needs_clarification=true。
 4. observation（例如“只找到两个人”）不是 objective；应从最近一条仍有效的顾问目标恢复 objective。
 5. constraints.quote 必须逐字复制自 current_message 或 recent_user_messages，不得改写、扩写或归一化。尤其“三次电源”是行业术语，不得解释成次数，也不得改写成“三次以上”。
 6. 用户纠正过的对象、术语或条件优先于更早内容；correct 本身不代表执行。
