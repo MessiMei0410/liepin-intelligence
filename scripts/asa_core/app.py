@@ -41,6 +41,7 @@ from .analytics import AnalyticsService
 from .company_calibration import CompanyCalibrationService
 from .database import DEFAULT_DB, migrate, transaction
 from .knowledge_proposals import KnowledgeProposalService
+from .scheduler import Scheduler
 from .service import CoreService
 
 
@@ -67,6 +68,26 @@ _BOOTSTRAP_CACHE_TTL = 5.0
 
 class WriteEnvelope(BaseModel):
     request_id: str = Field(min_length=4)
+
+
+class MemoryStore(WriteEnvelope):
+    scope_type: str = Field(default="global", pattern="^(global|client|job|candidate)$")
+    scope_id: str | None = None
+    memory_type: str = "fact"
+    content: str = Field(min_length=1)
+    source_type: str = "copilot"
+    confidence: float = 1.0
+
+
+class SchedulerTaskCreate(WriteEnvelope):
+    name: str = Field(min_length=1)
+    task_type: str = Field(min_length=1)
+    cron_expr: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class SchedulerTaskPatch(WriteEnvelope):
+    action: Literal["pause", "resume"]
 
 
 class WorkflowCreate(WriteEnvelope):
@@ -440,12 +461,16 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
                 await asyncio.sleep(30)
 
         scheduler_task = asyncio.create_task(analytics_scheduler(), name="asa-analysis-scheduler")
+        scheduler = Scheduler(db_path)
+        scheduler.start()
+        app.state.scheduler = scheduler
         try:
             yield
         finally:
             scheduler_task.cancel()
             with suppress(asyncio.CancelledError):
                 await scheduler_task
+            scheduler.stop()
             if runtime:
                 runtime.close()
             agent.close()
@@ -1020,6 +1045,55 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
                         message=body.message,
                         session_id=body.session_id,
                     ))
+
+    # ---- 记忆系统（跨会话） ----
+    @app.get("/api/v1/memories")
+    def memories(query: str = "", scope_type: str = "", limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
+        if query:
+            return agent.search_memories(query, context_type=scope_type or "global", limit=limit)
+        return agent.list_memories(scope_type=scope_type or "", limit=limit)
+
+    @app.post("/api/v1/memories", status_code=201)
+    def memory_store(body: MemoryStore, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem("memory.store", body, idempotency_key, "agent_memory", "",
+                    lambda: agent.store_memory(
+                        scope_type=body.scope_type, scope_id=body.scope_id,
+                        memory_type=body.memory_type, content=body.content,
+                        source_type=body.source_type, confidence=body.confidence,
+                    ))
+
+    @app.delete("/api/v1/memories/{memory_id}")
+    def memory_revoke(memory_id: int, body: WriteEnvelope, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem("memory.revoke", body, idempotency_key, "agent_memory", str(memory_id),
+                    lambda: agent.revoke_memory(memory_id))
+
+    # ---- 内建调度器 ----
+    @app.get("/api/v1/scheduler/tasks")
+    def scheduler_tasks() -> dict[str, Any]:
+        return {"ok": True, "tasks": app.state.scheduler.list_tasks()}
+
+    @app.post("/api/v1/scheduler/tasks", status_code=201)
+    def scheduler_task_create(body: SchedulerTaskCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        return idem("scheduler.create", body, idempotency_key, "scheduled_task", "",
+                    lambda: {"ok": True, "task": app.state.scheduler.create_task(
+                        body.name, body.task_type, body.cron_expr, body.params or None)})
+
+    @app.patch("/api/v1/scheduler/tasks/{task_id}")
+    def scheduler_task_patch(task_id: int, body: SchedulerTaskPatch) -> dict[str, Any]:
+        if body.action == "pause":
+            return app.state.scheduler.pause_task(task_id)
+        return app.state.scheduler.resume_task(task_id)
+
+    @app.delete("/api/v1/scheduler/tasks/{task_id}")
+    def scheduler_task_delete(task_id: int, body: WriteEnvelope) -> dict[str, Any]:
+        return app.state.scheduler.delete_task(task_id)
+
+    @app.post("/api/v1/scheduler/tasks/{task_id}/run")
+    def scheduler_task_run(task_id: int) -> dict[str, Any]:
+        scheduler = app.state.scheduler
+        scheduler.run_now(task_id)
+        task = next((t for t in scheduler.list_tasks() if int(t["id"]) == task_id), None)
+        return {"ok": True, "task": task}
 
     def idem(operation: str, body: WriteEnvelope, key: str, target_type: str, target_id: str, action):
         try:

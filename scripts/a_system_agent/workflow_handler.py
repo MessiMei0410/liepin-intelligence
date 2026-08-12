@@ -4,7 +4,7 @@ All functions receive 'self' (AgentService instance) as first parameter.
 """
 
 from __future__ import annotations
-import hashlib, json, os, secrets, shlex, subprocess, time
+import hashlib, json, os, secrets, shlex, subprocess, threading, time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,9 +22,10 @@ from .policy import action_decision, is_stopped
 from .privacy import sanitize_payload
 from .schema import ensure_schema
 from .skills import SkillRegistry, SkillSpec
+from .strategy_handler import execute_outreach_queue
 
 def _execute_workflow_capability(self, capability_id: str, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-    locally_specialized = {"talent_pool_search", "candidate_batch_assessment", "reply_triage", "communication_draft_batch"}
+    locally_specialized = {"talent_pool_search", "candidate_batch_assessment", "candidate_pool_filter", "outreach_queue", "pool_gap_advice", "reply_triage", "communication_draft_batch"}
     if capability_id not in locally_specialized:
         return self.capability_runtime.execute(capability_id, context, inputs)
     context_type = str(context.get("type") or "global")
@@ -88,6 +89,21 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
             "references": [
                 {"type": "candidate", "id": item["id"], "label": item["display_name"], "subtitle": f"{item['current_company']} / {item['current_title']}"}
                 for item in candidates[:8]
+            ],
+        }
+    if capability_id == "candidate_pool_filter":
+        if context_type != "job" or not context_id:
+            return {"summary": "候选池分级过滤需要 job 上下文。", "candidates": [], "references": []}
+        from .candidate_pool_filter import filter_job_candidates, format_grade_list
+        result = filter_job_candidates(self.db_path, context_id, client=str(facts.get("client") or ""))
+        candidates = result.get("candidates") or []
+        return {
+            "summary": f"候选池过滤完成：共 {result.get('total')} 人，A级 {len([c for c in candidates if c['grade'].startswith('A')])} 人、B级 {len([c for c in candidates if c['grade'].startswith('B')])} 人。",
+            "filter_result": result,
+            "candidates": candidates,
+            "references": [
+                {"type": "candidate", "id": i, "label": item["name"], "subtitle": f"{item['grade']} | {item['company'][:16]} / {item['title'][:12]}"}
+                for i, item in enumerate(candidates[:10])
             ],
         }
     if capability_id == "candidate_batch_assessment":
@@ -315,6 +331,43 @@ def _skill_document_understanding(self, context: dict[str, Any], inputs: dict[st
     }
 
 
+def _skill_outreach_queue(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+    """候选池分级名单 → 触达队列：生成 P0/P1/P2 优先级触达提案。
+
+    inputs.job_candidate_ids: 人岗关系 id 列表；inputs.priorities: {jc_id: "P0"/"P1"/"P2"}。
+    job_id 从 context.job.id 或 inputs.job_id 取。
+    """
+    job_candidate_ids: list[int] = []
+    for value in inputs.get("job_candidate_ids") or []:
+        try:
+            jc_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if jc_id > 0 and jc_id not in job_candidate_ids:
+            job_candidate_ids.append(jc_id)
+    raw_priorities = inputs.get("priorities")
+    raw_priorities = raw_priorities if isinstance(raw_priorities, dict) else {}
+    priorities: dict[int, str] = {}
+    for key, value in raw_priorities.items():
+        try:
+            priorities[int(key)] = str(value or "").strip().upper()
+        except (TypeError, ValueError):
+            continue
+    job_context = (context or {}).get("job")
+    job_id = job_context.get("id") if isinstance(job_context, dict) else None
+    if job_id is None:
+        job_id = inputs.get("job_id")
+    result = execute_outreach_queue(self.db_path, job_candidate_ids, priorities)
+    proposals = result.get("proposals") if isinstance(result, dict) else []
+    payload: dict[str, Any] = {
+        "outreach_queue_result": result,
+        "summary": f"已生成 {len(proposals or [])} 个触达提案",
+    }
+    if job_id is not None:
+        payload["job_id"] = job_id
+    return payload
+
+
 def get_workflow(self, workflow_id: str) -> dict[str, Any]:
     return self.workflow_engine.get_workflow(workflow_id)
 
@@ -535,3 +588,25 @@ def get_workflow_quality(self) -> dict[str, Any]:
 
 def record_workflow_feedback(self, workflow_id: str, feedback_type: str, note: str = "", correction: dict[str, Any] | None = None) -> dict[str, Any]:
     return self.workflow_engine.record_feedback(workflow_id, feedback_type, note, correction or {})
+
+
+# ------------------------------------------------------------------
+# Skill 触达队列（outreach_queue）挂载
+# ------------------------------------------------------------------
+# service.py 的 import 语句先于 AgentService 类定义执行（本模块模块体在
+# service 类定义之前运行），此时 from .service import AgentService 会命中
+# 部分初始化的循环导入 → ImportError。这里做幂等延迟挂载：首次导入跳过，
+# 等服务.py 完成类定义后再把 _skill_outreach_queue 绑定为 AgentService 类方法。
+def _install_outreach_queue_skill(_attempts: int = 8) -> None:
+    try:
+        from .service import AgentService
+    except ImportError:
+        if _attempts > 0:
+            threading.Timer(
+                0.05, _install_outreach_queue_skill, kwargs={"_attempts": _attempts - 1}
+            ).start()
+        return
+    AgentService._skill_outreach_queue = _skill_outreach_queue
+
+
+_install_outreach_queue_skill()

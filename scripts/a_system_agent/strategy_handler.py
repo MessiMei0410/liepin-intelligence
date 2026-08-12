@@ -616,6 +616,258 @@ def generate_proposals(
         conn.close()
 
 
+# ------------------------------------------------------------------
+# 触达队列 —— 候选池分级名单 → P0/P1/P2 触达提案（create_task / outreach_priority）
+# ------------------------------------------------------------------
+
+# P0 优先推进 / P1 本周推进 / P2 备选 → followup_tasks.priority 数字
+OUTREACH_QUEUE_PRIORITIES = {
+    "P0": (1, "优先推进"),
+    "P1": (2, "本周推进"),
+    "P2": (3, "备选"),
+}
+
+
+def _outreach_proposal_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    proposal = {
+        "id": item.get("id"),
+        "proposal_id": item.get("proposal_id"),
+        "job_candidate_id": item.get("job_candidate_id"),
+        "assessment_id": item.get("assessment_id"),
+        "candidate": item.get("candidate") or "",
+        "company": item.get("company") or "",
+        "title": item.get("candidate_title") or "",
+        "client": item.get("client") or "",
+        "job": item.get("job") or "",
+        "action_type": item.get("action_type"),
+        "risk_level": item.get("risk_level"),
+        "title_text": item.get("title"),
+        "rationale": item.get("rationale") or "",
+        "request": _loads(item.get("request_json"), {}),
+        "preflight": _loads(item.get("preflight_json"), {}),
+        "status": item.get("status"),
+        "reviewed_at": item.get("reviewed_at"),
+        "review_note": item.get("review_note") or "",
+        "expires_at": item.get("expires_at"),
+        "created_at": item.get("created_at"),
+    }
+    proposal["action_card"] = {
+        "proposal_id": proposal["proposal_id"],
+        "capability_id": "outreach_priority",
+        "action_kind": "internal_write" if proposal["action_type"] == "create_task" else "external_write",
+        "risk_level": proposal["risk_level"],
+        "context": {
+            "type": "candidate",
+            "id": proposal["job_candidate_id"],
+            "candidate": proposal["candidate"],
+            "client": proposal["client"],
+            "job": proposal["job"],
+        },
+        "evidence": [
+            {"label": "建议原因", "value": proposal["rationale"]},
+            {"label": "动作", "value": proposal["title_text"]},
+        ],
+        "blocked_reasons": [],
+        "next_actions": [
+            {"type": "preflight", "label": "查看预检"},
+            {"type": "decision", "decision": "approve", "label": "确认执行"},
+            {"type": "decision", "decision": "reject", "label": "不执行"},
+            {"type": "open_candidate", "id": proposal["job_candidate_id"], "label": "打开人选"},
+        ],
+        "post_check": "agent_action",
+    }
+    return proposal
+
+
+def generate_outreach_queue(
+    conn: sqlite3.Connection,
+    job_candidate_ids: list[int] | None = None,
+    priorities: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """候选池分级名单 → 触达队列提案（action_type=create_task，task_type=outreach_priority）。
+
+    输入 {job_candidate_id: "P0"/"P1"/"P2"}：为每个候选人生成一条触达提案，
+    priority 映射 P0→1 / P1→2 / P2→3，rationale 以「触达队列 {P0/P1/P2}:
+    优先推进/本周推进/备选」为前缀。同 jc 同优先级幂等（dedupe_key，
+    INSERT OR IGNORE），重复调用返回既有提案。返回提案列表（含 proposal_id）。
+    不碰 generate_proposals 的既有核验提案逻辑。
+    """
+    # 确保行可按下标取列（调用方可能传未设 row_factory 的连接）
+    if getattr(conn, "row_factory", None) is None:
+        conn.row_factory = sqlite3.Row
+    norm: dict[int, str] = {}
+    for key, value in (priorities or {}).items():
+        try:
+            jc_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        priority = str(value or "").strip().upper()
+        if priority in OUTREACH_QUEUE_PRIORITIES:
+            norm[jc_id] = priority
+    ids: list[int] = []
+    for value in job_candidate_ids or []:
+        try:
+            jc_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if jc_id > 0 and jc_id not in ids:
+            ids.append(jc_id)
+    if not ids:
+        return {"ok": True, "proposals": [], "skipped": []}
+
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT jc.id AS job_candidate_id,pe.display_name AS candidate,
+               pe.current_company AS company,pe.current_title AS candidate_title,
+               COALESCE(NULLIF(jc.raw_client,''),c.name) AS client,
+               COALESCE(NULLIF(jc.raw_position,''),j.title) AS job,
+               COALESCE(jc.updated_at,'') AS updated_at
+        FROM job_candidates jc
+        JOIN people pe ON pe.id=jc.person_id
+        LEFT JOIN jobs j ON j.id=jc.job_id
+        LEFT JOIN clients c ON c.id=j.client_id
+        WHERE jc.id IN ({placeholders})
+        """,
+        tuple(ids),
+    ).fetchall()
+    rows_by_id = {int(row["job_candidate_id"]): row for row in rows}
+
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for jc_id in ids:
+        row = rows_by_id.get(jc_id)
+        if row is None:
+            skipped.append({"job_candidate_id": jc_id, "reason": "人岗关系不存在"})
+            continue
+        priority = norm.get(jc_id, "P2")
+        numeric_priority, label = OUTREACH_QUEUE_PRIORITIES[priority]
+        rationale = f"触达队列 {priority}: {label}"
+        request = {
+            "job_candidate_id": jc_id,
+            "task_type": "outreach_priority",
+            "reason": rationale,
+            "due_at": "",
+            "priority": numeric_priority,
+            "write": True,
+        }
+        dedupe_key = hashlib.sha256(
+            f"outreach_queue|{jc_id}|create_task|{_dumps(request)}".encode("utf-8")
+        ).hexdigest()
+        proposal_id = f"proposal_{jc_id}_{dedupe_key[:10]}"
+        snapshot_hash = hashlib.sha256(
+            f"outreach_queue|{jc_id}|{row['candidate']}|{row['company']}|"
+            f"{row['client']}|{row['job']}|{row['updated_at']}".encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_action_proposals
+            (proposal_id,job_candidate_id,assessment_id,snapshot_hash,dedupe_key,
+             action_type,risk_level,title,rationale,request_json,status,expires_at)
+            VALUES (?,?,NULL,?,?,'create_task',?,?,?,?,'pending',datetime('now','+7 days','localtime'))
+            """,
+            (
+                proposal_id,
+                jc_id,
+                snapshot_hash,
+                dedupe_key,
+                action_decision("create_task")["risk_level"],
+                "创建触达任务",
+                rationale,
+                _dumps(request),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE agent_action_proposals
+            SET status='pending',review_note='',reviewed_at=NULL,action_id=NULL,
+                updated_at=datetime('now','localtime')
+            WHERE dedupe_key=? AND status='failed' AND snapshot_hash=?
+            """,
+            (dedupe_key, snapshot_hash),
+        )
+        proposal = conn.execute(
+            """
+            SELECT p.*,pe.display_name AS candidate,pe.current_company AS company,
+                   pe.current_title AS candidate_title,
+                   COALESCE(NULLIF(jc.raw_client,''),c.name) AS client,
+                   COALESCE(NULLIF(jc.raw_position,''),j.title) AS job
+            FROM agent_action_proposals p
+            JOIN job_candidates jc ON jc.id=p.job_candidate_id
+            JOIN people pe ON pe.id=jc.person_id
+            LEFT JOIN jobs j ON j.id=jc.job_id
+            LEFT JOIN clients c ON c.id=j.client_id
+            WHERE p.dedupe_key=?
+            """,
+            (dedupe_key,),
+        ).fetchone()
+        if proposal is not None:
+            created.append(_outreach_proposal_payload(proposal))
+    conn.commit()
+    return {"ok": True, "proposals": created, "skipped": skipped}
+
+
+def execute_outreach_queue(
+    db_path: str | os.PathLike[str],
+    job_candidate_ids: list[int],
+    priorities: dict[int, str],
+) -> dict[str, Any]:
+    """触达队列便捷入口：先以只读连接取 client/job 名，再以写连接生成触达提案并落库。
+
+    返回 {"success": True, "proposals": [...]}；任何错误返回 {"success": False, "error": ...}。
+    """
+    db = Path(db_path).expanduser()
+    try:
+        ids: list[int] = []
+        for value in job_candidate_ids or []:
+            try:
+                jc_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if jc_id > 0 and jc_id not in ids:
+                ids.append(jc_id)
+        client_job: dict[int, dict[str, str]] = {}
+        read_conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        read_conn.row_factory = sqlite3.Row
+        try:
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                for row in read_conn.execute(
+                    f"""
+                    SELECT jc.id,COALESCE(NULLIF(jc.raw_client,''),c.name) AS client,
+                           COALESCE(NULLIF(jc.raw_position,''),j.title) AS job
+                    FROM job_candidates jc
+                    LEFT JOIN jobs j ON j.id=jc.job_id
+                    LEFT JOIN clients c ON c.id=j.client_id
+                    WHERE jc.id IN ({placeholders})
+                    """,
+                    tuple(ids),
+                ).fetchall():
+                    client_job[int(row["id"])] = {
+                        "client": str(row["client"] or ""),
+                        "job": str(row["job"] or ""),
+                    }
+        finally:
+            read_conn.close()
+        write_conn = sqlite3.connect(str(db))
+        write_conn.row_factory = sqlite3.Row
+        try:
+            result = generate_outreach_queue(write_conn, ids, priorities)
+            write_conn.commit()
+            proposals = result.get("proposals") if isinstance(result, dict) else []
+            for proposal in proposals or []:
+                info = client_job.get(int(proposal.get("job_candidate_id") or 0))
+                if info:
+                    proposal.setdefault("client", info["client"])
+                    proposal.setdefault("job", info["job"])
+            return {"success": True, "proposals": proposals}
+        finally:
+            write_conn.close()
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 def proposal_preflight(self, proposal_id: str) -> dict[str, Any]:
     conn = self._connect()
     try:

@@ -34,6 +34,36 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "filter_candidates",
+            "description": "按岗位硬性证据分级过滤候选池，输出 A-核心/A-强/B/C 名单并排除禁挖公司。用于'过滤/分级/筛一下候选池'类请求，一次性返回分级结果，不需要逐人查询。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "integer",
+                        "description": "岗位ID",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回人数，默认 200",
+                    },
+                    "max_salary_k": {
+                        "type": "integer",
+                        "description": "期望月薪上限(K)。候选人期望薪资上限超过该值将归入 D-期望超限，默认不过滤",
+                    },
+                    "cities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "允许的期望城市关键词列表（命中任一即保留），候选人期望城市不匹配将归入 D-城市不符，默认不过滤",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_job",
             "description": "查询岗位详情，包括候选池大小、当前状态、岗位要求等。",
             "parameters": {
@@ -130,6 +160,123 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_candidate_stage",
+            "description": "更新候选人的流程阶段（clean_stage），并写入审计日志。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {
+                        "type": "integer",
+                        "description": "候选人关系ID（job_candidate_id）",
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": "新阶段，如 'S3 已触达'、'S4 面试中'、'S5 offer'",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "变更备注（可选）",
+                    },
+                },
+                "required": ["candidate_id", "stage"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_communication",
+            "description": "记录一次与候选人的沟通（电话、微信、邮件等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {
+                        "type": "integer",
+                        "description": "候选人关系ID（job_candidate_id）",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "沟通渠道，如 '电话'、'微信'、'邮件'、'猎聘'",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "沟通内容摘要",
+                    },
+                },
+                "required": ["candidate_id", "channel", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_report",
+            "description": "为某个岗位生成推荐报告（markdown），写入桌面客户项目目录。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "integer",
+                        "description": "岗位ID",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "报告类型，默认 'recommendation'",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memorize",
+            "description": "把一条事实、经验或偏好存入长期记忆（幂等：相同内容只更新不重复插入）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "要记住的内容",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "记忆类型，如 'fact'、'preference'、'experience'，默认 'fact'",
+                    },
+                    "importance": {
+                        "type": "integer",
+                        "description": "重要度 1-5，默认 3",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall",
+            "description": "从长期记忆中按关键词召回相关条目，按重要度和时间排序。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回数量，默认 8",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
@@ -144,6 +291,56 @@ def _safe_query(conn, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def execute_filter_candidates(
+    db_path: str,
+    job_id: int,
+    limit: int = 200,
+    max_salary_k: int | None = None,
+    cities: list[str] | None = None,
+) -> dict[str, Any]:
+    """按岗位硬性证据分级过滤候选池（调用 candidate_pool_filter，含禁挖排除）。
+
+    max_salary_k: 期望月薪上限(K)，超出者归入 D-期望超限。
+    cities: 允许的期望城市关键词，不匹配者归入 D-城市不符。
+    """
+    from .candidate_pool_filter import filter_job_candidates
+    import sqlite3
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        jrow = conn.execute(
+            "SELECT c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    client = str(jrow["client"]) if jrow is not None else ""
+    try:
+        result = filter_job_candidates(
+            db_path, job_id, client=client, max_candidates=int(limit or 200),
+            max_salary_k=max_salary_k, cities=cities,
+        )
+    except Exception as exc:
+        return {"success": False, "error": f"分级过滤失败: {exc}"}
+    candidates = result.get("candidates") or []
+    grades: dict[str, list[dict[str, Any]]] = {}
+    for c in candidates:
+        grades.setdefault(c.get("grade") or "未知", []).append(c)
+    return {
+        "success": True,
+        "data": {
+            "job_id": job_id,
+            "client": client,
+            "total": result.get("total") or 0,
+            "summary": {g: len(items) for g, items in grades.items()},
+            "groups": [
+                {"grade": g, "label": g, "candidates": items[:50]}
+                for g, items in sorted(grades.items(), key=lambda kv: -len(kv[1]))
+            ],
+        },
+    }
+
+
 def execute_query_candidate(db_path: str, candidate_id: int) -> dict[str, Any]:
     """查询候选人详情。"""
     import sqlite3
@@ -151,7 +348,7 @@ def execute_query_candidate(db_path: str, candidate_id: int) -> dict[str, Any]:
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
-            """SELECT jc.id, jc.clean_stage, jc.stopped_at, jc.stop_reason,
+            """SELECT jc.id, jc.clean_stage, jc.stop_reason,
                       p.display_name as candidate_name,
                       j.title as job_title, cl.name as client_name
                FROM job_candidates jc
@@ -171,7 +368,7 @@ def execute_query_candidate(db_path: str, candidate_id: int) -> dict[str, Any]:
                 "stage": row["clean_stage"] or "未知",
                 "job": row["job_title"] or "未分配",
                 "client": row["client_name"] or "未知",
-                "stopped": bool(row["stopped_at"]),
+                "stopped": bool(row["stop_reason"]),
                 "stop_reason": row["stop_reason"] or "",
             },
         }
@@ -403,6 +600,7 @@ def execute_search_knowledge(
 # 工具执行路由表
 TOOL_EXECUTORS = {
     "query_candidate": execute_query_candidate,
+    "filter_candidates": execute_filter_candidates,
     "query_job": execute_query_job,
     "search_candidates": execute_search_candidates,
     "get_dashboard": execute_get_dashboard,
@@ -505,3 +703,255 @@ def generate_proactive_suggestions(db_path: str) -> list[dict[str, Any]]:
             seen_types.add(s["type"])
             deduped.append(s)
     return deduped[:5]  # 最多5条
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: 写操作与记忆工具
+# ---------------------------------------------------------------------------
+
+def execute_update_candidate_stage(
+    db_path: str, candidate_id: int, stage: str, note: str = ""
+) -> dict[str, Any]:
+    """更新候选人阶段，并写入审计日志。"""
+    import json
+    import sqlite3
+    import uuid
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT id, clean_stage FROM job_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if not row:
+            return {"success": False, "error": f"未找到候选人 #{candidate_id}"}
+        before_stage = row["clean_stage"]
+        cur = conn.execute(
+            "UPDATE job_candidates SET clean_stage = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+            (stage, candidate_id),
+        )
+        updated_rows = cur.rowcount
+        conn.execute(
+            """INSERT INTO audit_events
+               (event_id, actor, surface, request_id, operation, target_type, target_id,
+                before_json, after_json, result)
+               VALUES (?, 'copilot', 'copilot_tool', ?, 'update_candidate_stage',
+                       'job_candidate', ?, ?, ?, 'success')""",
+            (
+                uuid.uuid4().hex,
+                uuid.uuid4().hex,
+                str(candidate_id),
+                json.dumps({"stage": before_stage}, ensure_ascii=False),
+                json.dumps({"stage": stage, "note": note}, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        return {"success": True, "updated_rows": updated_rows}
+    finally:
+        conn.close()
+
+
+def execute_record_communication(
+    db_path: str, candidate_id: int, channel: str, summary: str
+) -> dict[str, Any]:
+    """记录一次候选人沟通。表不存在则自动创建。"""
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS candidate_communications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                summary TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )"""
+        )
+        cur = conn.execute(
+            "INSERT INTO candidate_communications (candidate_id, channel, summary) VALUES (?, ?, ?)",
+            (candidate_id, channel, summary),
+        )
+        conn.commit()
+        return {"success": True, "communication_id": cur.lastrowid}
+    finally:
+        conn.close()
+
+
+def execute_generate_report(
+    db_path: str, job_id: int, kind: str = "recommendation"
+) -> dict[str, Any]:
+    """生成岗位推荐报告，写入 ~/Desktop/客户项目/{客户}/{岗位}/。
+    kind='recommendation' 输出 .md；kind='docx' 输出排版 .docx（python-docx）。
+    """
+    import datetime
+    import os
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        job = conn.execute(
+            """SELECT j.id, j.title, j.location, j.status, j.summary,
+                      cl.name as client_name
+               FROM jobs j
+               LEFT JOIN clients cl ON cl.id = j.client_id
+               WHERE j.id = ?""",
+            (job_id,),
+        ).fetchone()
+        if not job:
+            return {"success": False, "error": f"未找到岗位 #{job_id}"}
+        candidates = conn.execute(
+            """SELECT jc.id, jc.clean_stage, jc.updated_at,
+                      p.display_name, p.current_company, p.current_title
+               FROM job_candidates jc
+               LEFT JOIN people p ON p.id = jc.person_id
+               WHERE jc.job_id = ?
+               ORDER BY jc.clean_stage, jc.updated_at DESC""",
+            (job_id,),
+        ).fetchall()
+        client_name = job["client_name"] or "未知客户"
+        job_title = job["title"] or f"岗位{job_id}"
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            f"# 推荐报告：{client_name} - {job_title}",
+            "",
+            f"- 报告类型：{kind}",
+            f"- 岗位ID：{job_id}",
+            f"- 地点：{job['location'] or '未知'}",
+            f"- 状态：{job['status'] or '未知'}",
+            f"- 生成时间：{now}",
+            "",
+            "## 岗位摘要",
+            "",
+            (job["summary"] or "（无）")[:1000],
+            "",
+            f"## 候选人列表（{len(candidates)} 人）",
+            "",
+            "| ID | 姓名 | 当前公司 | 当前职位 | 阶段 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for c in candidates:
+            lines.append(
+                f"| {c['id']} | {c['display_name'] or '未知'} | {c['current_company'] or '-'} "
+                f"| {c['current_title'] or '-'} | {c['clean_stage'] or '未知'} |"
+            )
+        lines.append("")
+        report_dir = os.path.expanduser(f"~/Desktop/客户项目/{client_name}/{job_title}")
+        os.makedirs(report_dir, exist_ok=True)
+        if kind == "docx":
+            path = os.path.join(report_dir, f"推荐报告_{job_id}.docx")
+            _write_report_docx(path, client_name, job_title, job, candidates, kind, now)
+        else:
+            path = os.path.join(report_dir, f"推荐报告_{job_id}.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        return {"success": True, "path": path, "candidate_count": len(candidates)}
+    finally:
+        conn.close()
+
+
+def _write_report_docx(
+    path: str, client_name: str, job_title: str, job: Any,
+    candidates: list[Any], kind: str, now: str,
+) -> None:
+    """用 python-docx 写推荐报告：标题 + 岗位摘要 + 候选人表格。"""
+    from docx import Document
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    title = doc.add_heading(f"推荐报告：{client_name} - {job_title}", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    meta = doc.add_paragraph()
+    for label, value in (
+        ("报告类型", kind), ("岗位ID", job["id"]), ("地点", job["location"] or "未知"),
+        ("状态", job["status"] or "未知"), ("生成时间", now),
+    ):
+        run = meta.add_run(f"{label}：{value}\n")
+        run.font.size = Pt(9)
+    doc.add_heading("岗位摘要", level=1)
+    doc.add_paragraph((job["summary"] or "（无）")[:1000])
+    doc.add_heading(f"候选人列表（{len(candidates)} 人）", level=1)
+    table = doc.add_table(rows=1, cols=5)
+    table.style = "Light Grid Accent 1"
+    for i, header in enumerate(["ID", "姓名", "当前公司", "当前职位", "阶段"]):
+        table.rows[0].cells[i].text = header
+    for c in candidates:
+        row = table.add_row().cells
+        row[0].text = str(c["id"])
+        row[1].text = c["display_name"] or "未知"
+        row[2].text = c["current_company"] or "-"
+        row[3].text = c["current_title"] or "-"
+        row[4].text = c["clean_stage"] or "未知"
+    doc.save(path)
+
+
+def execute_memorize(
+    db_path: str, content: str, kind: str = "fact", importance: int = 3
+) -> dict[str, Any]:
+    """写入长期记忆；content_hash 冲突时幂等更新 updated_at 并返回原 id。"""
+    import hashlib
+    import sqlite3
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        try:
+            cur = conn.execute(
+                """INSERT INTO agent_memories
+                   (scope_type, memory_type, content, source_type, confidence, content_hash)
+                   VALUES ('global', ?, ?, 'copilot', ?, ?)""",
+                (kind, content, importance, content_hash),
+            )
+            conn.commit()
+            return {"success": True, "memory_id": cur.lastrowid}
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT id FROM agent_memories WHERE content_hash = ?",
+                (content_hash,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE agent_memories SET updated_at = datetime('now','localtime') WHERE id = ?",
+                (row[0],),
+            )
+            conn.commit()
+            return {"success": True, "memory_id": row[0]}
+    finally:
+        conn.close()
+
+
+def execute_recall(db_path: str, query: str, limit: int = 8) -> dict[str, Any]:
+    """按关键词召回长期记忆。"""
+    import sqlite3
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        limit = min(max(1, limit), 50)
+        rows = conn.execute(
+            """SELECT id, memory_type, content, confidence, created_at
+               FROM agent_memories
+               WHERE status = 'active' AND content LIKE '%' || ? || '%'
+               ORDER BY confidence DESC, updated_at DESC
+               LIMIT ?""",
+            (query, limit),
+        ).fetchall()
+        memories = [
+            {
+                "id": row["id"],
+                "memory_type": row["memory_type"],
+                "content": row["content"],
+                "confidence": row["confidence"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        return {"success": True, "memories": memories}
+    finally:
+        conn.close()
+
+
+TOOL_EXECUTORS.update({
+    "update_candidate_stage": execute_update_candidate_stage,
+    "record_communication": execute_record_communication,
+    "generate_report": execute_generate_report,
+    "memorize": execute_memorize,
+    "recall": execute_recall,
+})

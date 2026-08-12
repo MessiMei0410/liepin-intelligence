@@ -47,6 +47,7 @@ MAX_SOURCING_CONTINUATION_BATCHES = 256
 SERVICE_HANDLED_CAPABILITY_IDS: frozenset[str] = frozenset({
     "talent_pool_search",
     "candidate_batch_assessment",
+    "candidate_pool_filter",
     "reply_triage",
     "communication_draft_batch",
 })

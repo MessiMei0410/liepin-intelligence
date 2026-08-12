@@ -38,6 +38,7 @@ CATALOGS: dict[str, dict[str, Any]] = {
     "talent_search": {"label": "人才查询", "fields": {"job_id", "company", "title", "city", "stage", "limit"}},
     "candidate_compare": {"label": "人选对比", "fields": {"candidate_ids"}},
     "channel_performance": {"label": "渠道效果", "fields": {"days", "job_id"}},
+    "query_effectiveness": {"label": "Query有效性", "fields": {"days", "job_id"}},
     "workflow_funnel": {"label": "工作流漏斗", "fields": {"workflow_id"}},
     "data_quality": {"label": "数据质量", "fields": set()},
     "delivery_scorecard": {"label": "交付记分卡", "fields": {"job_id", "days"}},
@@ -144,6 +145,7 @@ class AnalyticsService:
             "talent_search": self._talent_search,
             "candidate_compare": self._candidate_compare,
             "channel_performance": self._channel_performance,
+            "query_effectiveness": self._query_effectiveness,
             "workflow_funnel": self._workflow_funnel,
             "data_quality": self._data_quality,
             "delivery_scorecard": self._delivery_scorecard,
@@ -545,7 +547,18 @@ class AnalyticsService:
             conn.close()
         return {**receipt, "analysis_run_id": analysis_run_id, "status": status, "completed_at": completed_at, "error": error}
 
-    def run_template(self, template_id: str, *, trigger: str = "manual") -> dict[str, Any]:
+    def run_template(
+        self,
+        template_id: str,
+        scope: dict[str, Any] | None = None,
+        *,
+        trigger: str = "manual",
+    ) -> dict[str, Any]:
+        # 传入 scope 时按 catalog 直跑（template_id 解释为 catalog_id），返回 {"ok","data"}；
+        # 不传 scope 时保持原定时模板语义（template_id 为 agent_analysis_templates 主键）。
+        if scope is not None:
+            run = self.create_run(template_id, scope=scope)
+            return {"ok": run.get("ok"), "data": run.get("result"), "duration_ms": run.get("duration_ms")}
         claimed = self._claim_template_run(template_id, trigger)
         if claimed is None:
             return {"ok": True, "skipped": True, "reason": "模板尚未到执行时间"}
@@ -1000,6 +1013,53 @@ class AnalyticsService:
             "metrics": [_metric("channel_recalled", "渠道召回", recalled), _metric("channel_intaked", "新增入库", intaked), _metric("channel_intake_rate", "入库率", _ratio(intaked, recalled), "ratio")],
             "sections": [{"type": "bar", "title": "渠道效果", "columns": ["channel", "recalled", "intaked", "assessed", "high_score", "intake_rate"], "rows": data}],
             "references": [], "caveats": ["无召回时入库率为 null。"] if not recalled else [],
+        }
+
+    def _query_effectiveness(self, conn: sqlite3.Connection, scope: dict[str, Any]) -> dict[str, Any]:
+        days = int(scope.get("days", 30))
+        conditions, params = ["created_at>=datetime('now','localtime',?)"], [f"-{days} days"]
+        # search_experiments 表不一定有 job_id 列，有才按岗位过滤。
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(search_experiments)")}
+        if scope.get("job_id") and "job_id" in columns:
+            conditions.append("job_id=?")
+            params.append(scope["job_id"])
+        rows = conn.execute(
+            f"""SELECT channel,query,COUNT(*) AS runs,SUM(COALESCE(result_count,0)) AS recalled,
+                       SUM(COALESCE(extracted_count,0)) AS intaked,SUM(COALESCE(recommended_count,0)) AS recommended,
+                       SUM(COALESCE(positive_reply_count,0)) AS positive_reply,SUM(COALESCE(reply_count,0)) AS replies
+                FROM search_experiments WHERE {' AND '.join(conditions)}
+                GROUP BY channel,query""",
+            params,
+        ).fetchall()
+        data = []
+        for row in rows:
+            item = _row(row)
+            item["intake_rate"] = _ratio(int(item["intaked"] or 0), int(item["recalled"] or 0))
+            data.append(item)
+        data.sort(key=lambda item: (item["intake_rate"] is not None, item["intake_rate"] or 0), reverse=True)
+        recalled = sum(int(item["recalled"] or 0) for item in data)
+        intaked = sum(int(item["intaked"] or 0) for item in data)
+        weak = [
+            {
+                "channel": item["channel"], "query": item["query"], "runs": item["runs"],
+                "recalled": item["recalled"], "intaked": item["intaked"], "intake_rate": item["intake_rate"],
+                "reason": "零召回" if not int(item["recalled"] or 0) else "入库率过低",
+            }
+            for item in data
+            if not int(item["recalled"] or 0) or (item["intake_rate"] is not None and item["intake_rate"] < 0.1)
+        ]
+        return {
+            "headline": f"最近 {days} 天 {len(data)} 组 query 共召回 {recalled} 人入库 {intaked} 人",
+            "metrics": [
+                _metric("query_runs", "Query 组数", len(data)),
+                _metric("query_recalled", "Query 召回", recalled),
+                _metric("query_intake_rate", "总入库率", _ratio(intaked, recalled), "ratio"),
+            ],
+            "sections": [
+                {"type": "bar", "title": "Query 有效性", "columns": ["channel", "query", "runs", "recalled", "intaked", "intake_rate", "recommended", "positive_reply"], "rows": data},
+                {"type": "table", "title": "废 Query 建议淘汰", "columns": ["channel", "query", "runs", "recalled", "intaked", "intake_rate", "reason"], "rows": weak},
+            ],
+            "references": [], "caveats": [f"最近 {days} 天没有 query 实验记录。"] if not data else [],
         }
 
     def _workflow_funnel(self, conn: sqlite3.Connection, scope: dict[str, Any]) -> dict[str, Any]:

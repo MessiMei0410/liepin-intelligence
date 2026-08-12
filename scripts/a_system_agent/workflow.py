@@ -451,7 +451,8 @@ class WorkflowEngine:
             if context.get("type") == "job":
                 add("job_diagnosis", "锁定岗位核验范围", "jd_calibration", "读取岗位漏斗、风险提示和当前待核验人选，不触发外部渠道")
                 add("talent_pool_search", "整理候选人核验队列", "verification", "优先继承上一轮指出的判断过期、待确认和已触达未回复人选", ["job_diagnosis"])
-                add("candidate_batch_assessment", "生成逐人核验点", "assessment", "基于现有 v3 简历和评估结果形成可推进、待核验和停止建议", ["talent_pool_search"])
+                add("candidate_pool_filter", "候选池分级过滤", "assessment", "按岗位硬性证据（简历原文）批量分级过滤，输出 A/B/C 名单并排除禁挖", ["talent_pool_search"])
+                add("candidate_batch_assessment", "生成逐人核验点", "assessment", "基于现有 v3 简历和评估结果形成可推进、待核验和停止建议", ["candidate_pool_filter"])
             elif context.get("type") == "candidate":
                 add("candidate_assessment", "复核当前人岗判断", "assessment", "基于当前岗位、简历和已有评估重新检查匹配判断")
                 add("verification_plan", "生成候选人核验清单", "verification", "列出证据缺口和需要顾问确认的关键问题", ["candidate_assessment"])

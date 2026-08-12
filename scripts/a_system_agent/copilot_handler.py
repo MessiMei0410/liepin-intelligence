@@ -1522,12 +1522,13 @@ def _copilot_action_kind(message: str) -> str:
     ):
         return "candidate_sourcing"
     rules = (
+        ("memory_capture", ("记住", "别忘了", "记一下", "记住这个", "帮我记住")),
         ("job_archive", ("归档岗位", "岗位归档", "关闭岗位", "岗位关闭", "没拆分的岗位", "未拆分的岗位")),
         ("job_split", ("拆分岗位", "岗位拆分", "分成")),
         ("job_publish", ("发布岗位", "岗位发布", "上架岗位")),
         ("candidate_sourcing", ("补池", "寻访", "找人", "找些人选", "找候选人", "搜索人选")),
         ("candidate_outreach", ("触达", "开聊", "发送消息", "联系候选人", "二次跟进", "再跟一次", "催回复")),
-        ("candidate_review", ("复核", "初筛", "停止推进", "继续推进")),
+        ("candidate_review", ("复核", "初筛", "停止推进", "继续推进", "过滤", "筛选", "名单", "重新过滤")),
         ("recommendation", ("推荐报告", "推荐给客户", "提交客户")),
         ("salary", ("谈薪", "薪资")),
     )
@@ -1612,8 +1613,9 @@ def _deterministic_non_action_intent(
             "帮我", "请你", "麻烦", "整理", "生成", "制作", "处理", "创建", "新建", "建立",
             "更新岗位库", "写入岗位库", "保存到", "开始", "执行", "启动", "确认执行",
             "取消计划", "归档", "关闭岗位", "发布岗位", "上架岗位",
+            "过滤", "筛选", "名单", "重新过滤", "输出名单", "给名单",
         )
-    ) or re.search(r"(?:继续|恢复|重新|再).{0,8}(?:推进|寻访|搜索|找人|找候选人|触达|联系|复核|谈薪)", text, re.I):
+    ) or re.search(r"(?:继续|恢复|重新|再).{0,8}(?:推进|寻访|搜索|找人|找候选人|触达|联系|复核|谈薪|过滤|筛选)", text, re.I):
         return None
     # 带明确动作语义的输入（“这个岗位再来一轮”）必须让位给动作/模型路径，
     # 不能被岗位细节事实路径吞掉。
@@ -1746,12 +1748,39 @@ _QUERY_LIST_EXCLUSIONS = (
 )
 
 
-def _is_candidate_list_query(message: str) -> bool:
-    """判断消息是否为“直接要候选名单/筛选结果”的查询型请求。
+_PLAIN_QUERY_MARKERS = (
+    "哪些", "几个", "多少", "什么岗位", "岗位情况", "岗位列表", "岗位状态",
+    "情况如何", "进展", "看看", "查一下", "有没有", "有哪", "怎么样", "如何",
+    "几个岗位", "在招", "招聘中", "招什么",
+)
+_PLAIN_QUERY_ACTION_MARKERS = (
+    "寻访", "补池", "补人", "补", "找人", "找候选人", "触达", "开聊", "发送", "联系",
+    "谈薪", "创建", "启动", "执行", "发布", "归档", "更新", "拆分", "推荐给",
+    "提交", "发给", "预算", "薪资", "薪酬", "期望", "到岗", "意向", "匹配",
+    "复核", "过滤", "筛选", "名单", "评估", "推进",
+)
 
-    疑问句（“这个名单上怎么都是做光刻机的”“名单里为什么没有XX”）
-    不是“再给一份名单”的指令，必须排除，避免名单直答把质疑吞掉。
+
+def _is_plain_query(message: str) -> bool:
+    """判断消息是否为纯查询（不需要唯一岗位归因即可回答）。
+
+    含执行/事实归因词（补人、触达、谈薪、预算…）的消息一律不是纯查询；
+    其余：疑问句、候选名单请求、或含岗位/客户查询词的消息视为纯查询，
+    歧义守卫放行给 LLM，LLM 列出多岗位/多客户即可。
     """
+    text = " ".join(str(message or "").split())
+    if not text:
+        return False
+    if any(marker in text for marker in _PLAIN_QUERY_ACTION_MARKERS):
+        return False
+    if _is_explicit_question(text):
+        return True
+    if _is_candidate_list_query(text):
+        return True
+    return any(marker in text for marker in _PLAIN_QUERY_MARKERS)
+
+
+def _is_candidate_list_query(message: str) -> bool:
     text = " ".join(str(message or "").split())
     if _is_explicit_question(text):
         return False
@@ -1769,6 +1798,23 @@ def _is_candidate_list_query(message: str) -> bool:
     if any(token in candidate_list_text for token in _QUERY_LIST_EXCLUSIONS):
         return False
     return True
+
+
+def _requests_grade_filter(message: str) -> bool:
+    """判断消息是否请求“分级过滤”（按硬性证据输出 A/B/C 名单）。
+
+    与普通名单直答的区别：含“过滤/分级/按证据/按硬性门槛/筛一下再给”
+    等明确分级意图时升级为 candidate_pool_filter；仅“给名单/列一下”
+    维持普通候选名单。
+    """
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return False
+    return bool(
+        re.search(r"(?:过滤|筛选|分级|分层|重新过滤|再筛|筛一?下).{0,20}(?:名单|列表|给我|输出)", text)
+        or re.search(r"(?:名单|列表|给我).{0,20}(?:过滤|筛选|分级|按证据|按硬)", text)
+        or any(token in text for token in ("按硬性", "按证据", "按匹配度", "分级过滤", "筛选出", "过滤出"))
+    )
 
 
 def _format_candidate_list_answer(db_path: str, job_id: int, message: str) -> str:
@@ -3922,6 +3968,9 @@ def _route_copilot_skills(self, message: str, context: dict[str, Any]) -> list[s
         ("communication_draft", ("草稿", "怎么联系", "沟通话术", "怎么聊", "私聊话术")),
         ("resume_export", ("导出简历", "简历导出", "结构化简历", "简历文档")),
         ("candidate_batch_assessment", ("批量评估", "批量判断", "批量匹配", "评估这一批")),
+        ("candidate_pool_filter", ("过滤", "筛选", "名单", "分级", "重新过滤", "输出名单", "给名单", "把名单", "期望", "薪资上限", "只要.*万", "只要.*k", "江浙沪", "城市")),
+        ("outreach_queue", ("转成触达队列", "触达队列", "排触达", "触达优先级", "P0队列", "按P0", "按P1")),
+        ("pool_gap_advice", ("补池", "去哪补", "缺口", "目标公司", "补人", "还差哪些公司")),
         ("matching_report", ("匹配报告", "人岗匹配报告", "匹配分析", "人岗分析")),
         ("recommendation_report", ("推荐报告", "嘉驰推荐", "推荐材料", "候选人报告")),
         ("reply_triage", ("回复识别", "回复分流", "回复待办", "回复处理", "回复 triage")),
@@ -4345,6 +4394,9 @@ def _copilot_impl(
     intent_understanding["effective_constraints"] = list(turn_decision.get("effective_constraints") or [])
     semantic_action = str(intent_understanding.get("action") or "none")
     semantic_speech_act = str(intent_understanding.get("speech_act") or "other")
+    # 规则优先：明确指令词（记住/别忘了等）覆盖 LLM 意图理解，避免被预算事实等分支抢先。
+    if semantic_action != "memory_capture" and self._copilot_action_kind(message) == "memory_capture":
+        semantic_action = "memory_capture"
     workflow_outcome_question = bool(
         "寻访" in message
         and re.search(r"(?:什么结果|结果如何|结果怎样|结果怎么样|进展如何|进展怎么样|情况如何|情况怎么样)", message)
@@ -4507,6 +4559,33 @@ def _copilot_impl(
     cancelled_answer_override = ""
     salary_recap_pending: dict[str, Any] = {}
     goal_workflow = None
+    if forced_answer is None and semantic_action == "memory_capture":
+        # “记住 X/别忘了 X/记一下 X”：直接写入记忆库，不进入工作流路径。
+        try:
+            memory_content = re.sub(
+                r"^.*?(?:记住这个|帮我记住|别忘了|记一下|记住)\s*[：:，,。]?\s*",
+                "",
+                " ".join(str(message or "").split()),
+            ).strip()
+            if not memory_content:
+                forced_answer = "要记住什么？"
+            else:
+                scope_type, scope_id = "global", None
+                if selected.get("type") == "candidate" and selected.get("id"):
+                    scope_type, scope_id = "candidate", selected["id"]
+                elif selected.get("type") == "job" and selected.get("id"):
+                    scope_type, scope_id = "job", selected["id"]
+                memory = self.store_memory(
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    memory_type="fact",
+                    content=memory_content,
+                    source_type="copilot",
+                    confidence=1.0,
+                )
+                forced_answer = f"已记住：{memory_content}（记忆ID {memory.get('memory_id')}）"
+        except Exception as exc:  # 记忆写入失败不能拖垮 Copilot 回复
+            forced_answer = f"记忆写入失败：{exc}"
     if correction_receipt:
         forced_answer = correction_receipt
     if undo_task_info and forced_answer is None:
@@ -4591,13 +4670,24 @@ def _copilot_impl(
         or workflow_outcome_question
         or workflow_strategy_question
     )
+    context_conflicts: list[dict[str, Any]] = []
     if forced_answer is None and not suppress_goal_intent:
         context_mismatch_answer = _format_context_mismatch_answer(
             focus_conflicts,
             floating_compact=floating_compact,
         )
         if context_mismatch_answer:
-            forced_answer = context_mismatch_answer
+            if _is_plain_query(message):
+                # 查询类放行给 LLM：歧义冲突作为上下文注入，LLM 自然回答
+                # （如“长越科技现在有几个在招岗位”→ 列出多岗位，而不是反问“唯一确定哪个”）。
+                context_conflicts = [
+                    item
+                    for item in focus_conflicts
+                    if item.get("type") in {"ambiguous_job", "ambiguous_client", "context_client_mismatch"}
+                ]
+                forced_answer = None
+            else:
+                forced_answer = context_mismatch_answer
     if forced_answer is None and _is_job_budget_fact_update(message):
         forced_answer = _format_job_budget_fact_answer(message, selected_facts)
         fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
@@ -4609,6 +4699,7 @@ def _copilot_impl(
             floating_compact=floating_compact,
         )
         fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
+    rule_evidence: str = ""
     if forced_answer is None and turn_decision.get("effect") == "answer":
         fact_answer = _format_non_action_fact_answer(
             message,
@@ -4616,7 +4707,9 @@ def _copilot_impl(
             selected_facts,
         )
         if fact_answer:
-            forced_answer = fact_answer
+            # 事实/观察陈述：规则先解析出“记录语义”作为证据，回答交给 LLM
+            # 自然确认并给出下一步建议（模板仅作 LLM 空回答的兜底）。
+            rule_evidence = fact_answer
             fact_receipt = _build_fact_receipt(message, intent_understanding, selected_facts, conversation_state)
     strategy_revision: dict[str, Any] | None = None
     strategy_revision_requested = bool(
@@ -4767,9 +4860,68 @@ def _copilot_impl(
             elif len(client_jobs) > 1:
                 forced_answer = _format_ambiguous_job_scope(mentioned_clients[0], client_jobs)
         if list_job_id:
-            candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
-            if candidate_list_answer:
-                forced_answer = candidate_list_answer
+            # 分级过滤升级：消息含“过滤/分级/按证据筛选”等明确分级意图时，
+            # 走 candidate_pool_filter 输出 A/B/C 分级名单（含禁挖排除），
+            # 否则维持普通候选名单直答。
+            if _requests_grade_filter(message):
+                try:
+                    import sqlite3 as _sqlite3
+                    _conn = _sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+                    _conn.row_factory = _sqlite3.Row
+                    try:
+                        _jrow = _conn.execute("SELECT c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?", (list_job_id,)).fetchone()
+                    finally:
+                        _conn.close()
+                    _client_name = str(_jrow["client"]) if _jrow is not None else ""
+                    from .candidate_pool_filter import filter_job_candidates, format_grade_list
+                    _filter_result = filter_job_candidates(self.db_path, list_job_id, client=_client_name)
+                    candidate_list_answer = format_grade_list(_filter_result)
+                    # 分级名单同样生成结构化 action_card（前端渲染可点击名单弹窗）
+                    _grade_groups: list[dict[str, Any]] = []
+                    _grade_order = ("A-核心", "A-强", "B-中", "C-弱", "D-无证据", "D-无画像", "X-排除", "禁挖")
+                    for _g in _grade_order:
+                        _items = [c for c in (_filter_result.get("candidates") or []) if c.get("grade") == _g]
+                        if _items:
+                            _grade_groups.append({
+                                "key": _g,
+                                "label": _g,
+                                "priority": _g.startswith("A"),
+                                "candidates": [
+                                    {
+                                        "id": int(c.get("id") or 0),
+                                        "name": c.get("name") or "",
+                                        "company": c.get("company") or "",
+                                        "title": c.get("title") or "",
+                                        "stage": c.get("stage") or "",
+                                        "flow_bucket": c.get("stage") or "",
+                                    }
+                                    for c in _items[:200]
+                                ],
+                            })
+                    candidate_list_card = {
+                        "type": "candidate_list",
+                        "title": f"{_client_name}｜机械高级工程师（岗位 {list_job_id}）分级过滤名单",
+                        "context": {"type": "job", "id": list_job_id},
+                        "summary": {
+                            "total": _filter_result.get("total") or 0,
+                            "active": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade", "").startswith(("A", "B", "C"))]),
+                            "stopped": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("X-排除", "禁挖", "D-无证据", "D-无画像")]),
+                        },
+                        "groups": _grade_groups,
+                    }
+                    if candidate_list_answer:
+                        forced_answer = candidate_list_answer
+                except Exception as _exc:
+                    # 分级过滤失败时回落到普通名单，不让用户空手
+                    import logging
+                    logging.getLogger("copilot.grade_filter").exception("candidate_pool_filter failed for job %s: %s", list_job_id, _exc)
+                    candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
+                    if candidate_list_answer:
+                        forced_answer = candidate_list_answer
+            else:
+                candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
+                if candidate_list_answer:
+                    forced_answer = candidate_list_answer
     # 名单构成质疑直答：用户问“怎么都是做光刻机的”时给出构成分析，
     # 而不是再输出一遍名单（2026-08-11 copilot_ad7e7086917d 答非所问修复）。
     if forced_answer is None and not suppress_goal_intent and _is_candidate_list_composition_question(message):
@@ -5481,6 +5633,8 @@ def _copilot_impl(
     }
     if memories.get("mode") == "active":
         payload["approved_memories"] = memories.get("memories") or []
+    if context_conflicts:
+        payload["context_conflicts"] = context_conflicts
     if workflow_outcome_context:
         payload["workflow_outcome"] = workflow_outcome_context
     capture_run = next(
@@ -5611,13 +5765,15 @@ def _copilot_impl(
     elif forced_answer is not None:
         answer = forced_answer
     else:
+        if rule_evidence:
+            payload["rule_evidence"] = rule_evidence
         answer, model_tool_calls, tool_references = _generate_copilot_model_answer(
             self,
             sanitize_payload(payload),
         )
         references.extend(tool_references)
         if not answer:
-            answer = "当前查询已完成，但暂时没有生成可用结论。"
+            answer = rule_evidence or "当前查询已完成，但暂时没有生成可用结论。"
         answer_source = "model_tools" if model_tool_calls else "model"
     references = _dedupe_copilot_references(references)
     persisted_payload = _persistable_attachment_payload(selected_payload)
