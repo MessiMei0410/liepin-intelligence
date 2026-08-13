@@ -200,3 +200,5 @@
 - 历史数据遵循“可证明才回填”：旧 recall 可通过 `run_id + query_cell_id` 可靠关联 query-cell 的 plan hash，但旧 query-cell 没有 family/provenance，也不能仅凭相同查询词推断策略 artifact/revision/hash。不可证明的旧字段保持空值，新执行保证完整溯源。
 - 运行时迁移已在正式库副本验证：47,256 条 recall、116 个 artifact、3 个待审批及其完整 preflight 指纹均不变，6 个新列和 `idx_agent_candidate_recalls_strategy` 索引正常创建。策略 artifact/revision 元数据不参与语义 `strategy_hash` 计算，避免部署后使既有 R3 审批误过期。
 - 正式 Core 重启后完成幂等迁移，`/api/v1/health` 正常，候选人详情已返回 `sourcing_recalls`。门禁：后端相关主链 224 passed + 17 subtests，前端 L1 62 files / 537 tests，契约 58/58，Playwright functional 22/22。
+- 候选人详情现在将长期 attribution 效果聚合与每次 recall 执行历史分层展示：同一渠道/查询词的多次执行不再只保留第一条，没有 attribution 的执行也不会从“怎么找到他的”消失。旧记录缺少版本时显式标注“历史记录未保存策略版本”，不伪造批准证据。
+- 渠道标签统一识别中文“猎聘”与英文 `liepin`、`X-SaaS`，避免联结源溯时因字面不同被误归为“人才库”。验证：前端 L1 62 files / 539 tests，新增功能 E2E 后共 23/23，API drift 通过，390px 无页面横向溢出。

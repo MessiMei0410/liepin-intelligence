@@ -66,7 +66,7 @@ describe('顾问确认推荐（recommendation-decision）', () => {
 
   const decisionCall = () => fetchMock.mock.calls.find(([input]) => String(input).includes(decisionCommitUrl))
 
-  it('候选人详情展示精确的寻访执行、策略修订和查询单元', () => {
+  it('候选人详情在长期效果下展示同一查询的多次精确执行', () => {
     const value: CandidateDetail = {
       ...recommendationCandidate(),
       sourcing_recalls: [
@@ -80,19 +80,90 @@ describe('顾问确认推荐（recommendation-decision）', () => {
           query_plan_hash: 'query-plan-hash-7',
           query_cell_id: 'cell-core-peer-2',
           query_family_ids: ['keyword_group:power'],
-          query_provenance: [{ tier: 'T1', group: '核心同层', targets: '服务器电源' }],
-          channel: '猎聘',
+          query_provenance: [{ kind: 'keyword_group', tier: 'T1', group: '核心同层', targets: '服务器电源' }],
+          channel: 'liepin',
           source_query: '前端工程师',
           page_number: 1,
           position_index: 2,
           created_at: '2026-08-14 03:00:00',
         },
+        {
+          recall_id: 'recall-2',
+          run_id: 'run-lineage-8',
+          workflow_id: 'wf-lineage-8',
+          strategy_hash: 'strategy-hash-8',
+          strategy_artifact_id: 'artifact-strategy-8',
+          strategy_revision: 8,
+          query_plan_hash: 'query-plan-hash-8',
+          query_cell_id: 'cell-core-peer-3',
+          query_family_ids: ['company_keyword:Example'],
+          query_provenance: [{ kind: 'company_keyword', tier: 'T2', company: '示例科技', path: '相邻行业' }],
+          channel: 'liepin',
+          source_query: '  前端工程师  ',
+          page_number: 2,
+          position_index: 1,
+          created_at: '2026-08-14 04:00:00',
+        },
       ],
+    }
+
+    const { container } = render(<CandidatePanel value={value} close={() => undefined} changed={() => undefined} />)
+
+    expect(screen.getByText('寻访来源 · 2 次执行')).toBeInTheDocument()
+    expect(container.querySelectorAll('.sourcing-trace-row')).toHaveLength(1)
+    expect(container.querySelectorAll('.sourcing-recall')).toHaveLength(2)
+    expect(screen.getByText('猎聘 · R1')).toBeInTheDocument()
+    expect(screen.getByText('执行 run-lineage-7')).toBeInTheDocument()
+    expect(screen.getByText('策略 revision 7 · 单元 cell-core-peer-2')).toBeInTheDocument()
+    expect(screen.getByText('关键词组 · T1 · 核心同层 · 服务器电源')).toBeInTheDocument()
+    expect(screen.getByText('执行 run-lineage-8')).toBeInTheDocument()
+    expect(screen.getByText('策略 revision 8 · 单元 cell-core-peer-3')).toBeInTheDocument()
+    expect(screen.getByText('公司定向 · T2 · 示例科技 · 相邻行业')).toBeInTheDocument()
+  })
+
+  it('聚合来源缺失时仍显示 recall，旧记录不伪造策略版本', () => {
+    const value: CandidateDetail = {
+      ...recommendationCandidate(),
+      sourcing_attributions: [],
+      sourcing_recalls: [{
+        recall_id: 'legacy-recall',
+        run_id: 'legacy-run',
+        query_cell_id: 'legacy-cell',
+        channel: 'xsaas',
+        source_query: '结构工程师',
+        created_at: '2026-08-11 18:36:08',
+      }],
     }
 
     render(<CandidatePanel value={value} close={() => undefined} changed={() => undefined} />)
 
-    expect(screen.getByText('执行 run-lineage-7 · 策略 revision 7 · 单元 cell-core-peer-2')).toBeInTheDocument()
+    expect(screen.getByText('怎么找到他的')).toBeInTheDocument()
+    expect(screen.getByText('X-SaaS · 执行记录')).toBeInTheDocument()
+    expect(screen.getByText('结构工程师')).toBeInTheDocument()
+    expect(screen.getByText('历史记录未保存策略版本 · 单元 legacy-cell')).toBeInTheDocument()
+    expect(screen.getByText('待汇总效果')).toBeInTheDocument()
+  })
+
+  it('provenance 缺失时回显查询族，有哈希无 revision 时仅声明已批准', () => {
+    const value: CandidateDetail = {
+      ...recommendationCandidate(),
+      sourcing_attributions: [],
+      sourcing_recalls: [{
+        recall_id: 'family-recall',
+        run_id: 'family-run',
+        strategy_hash: 'approved-hash',
+        query_cell_id: 'family-cell',
+        query_family_ids: ['keyword_group:power', 'company_keyword:Example'],
+        channel: 'liepin',
+        source_query: '服务器电源',
+      }],
+    }
+
+    render(<CandidatePanel value={value} close={() => undefined} changed={() => undefined} />)
+
+    expect(screen.getByText('查询族 · keyword_group:power · company_keyword:Example')).toBeInTheDocument()
+    expect(screen.getByText('已批准策略 · 单元 family-cell')).toBeInTheDocument()
+    expect(screen.queryByText(/^\u7b56略 ·/)).not.toBeInTheDocument()
   })
 
   it('推荐对话框展示评估依据与风险提示（来自既有候选人字段）', async () => {

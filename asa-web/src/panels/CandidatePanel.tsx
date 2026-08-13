@@ -1,15 +1,15 @@
 import { useState } from 'react'
-import { Ban, BriefcaseBusiness, CalendarPlus, Check, ChevronLeft, CircleCheck, ClipboardCheck, Clock3, ExternalLink, FileText, LoaderCircle, MessageSquareText, Search, ShieldCheck, TriangleAlert, UserRoundSearch, X } from 'lucide-react'
+import { Ban, BriefcaseBusiness, CalendarPlus, Check, ChevronLeft, CircleCheck, ClipboardCheck, Clock3, ExternalLink, FileText, LoaderCircle, MessageSquareText, ShieldCheck, TriangleAlert, UserRoundSearch, X } from 'lucide-react'
 import { api, CandidateDetail } from '../api'
 import { CandidateAssessment } from './CandidateAssessment'
-import { date, sourceLabel, sourceLinkLabel, eventStatusLabel, lifecycleEventLabel, lifecycleEventTone } from '../shared/format'
+import { date, sourceLinkLabel, eventStatusLabel, lifecycleEventLabel, lifecycleEventTone } from '../shared/format'
 import { copilotText } from '../shared/text'
 import { SectionHead } from '../shared/primitives'
 import { openAgentWorkspace } from '../agent/navigation'
 import { DialogPanel } from '../shared/Dialog'
 import type { DragResizeAnchor } from '../shared/dialogDragResize'
 import { nativeBridge } from '../shared/nativeBridge'
-import { buildResumeOverview, formatFeedbackScore } from './overviewFormat'
+import { buildResumeOverview } from './overviewFormat'
 import { parseEducationDetails, parseProjectDetails, parseWorkDetails } from './resumeDetail'
 import { WorkflowArtifactDialog } from '../workflows/WorkflowArtifactDialog'
 import { artifactStatusLabel, artifactTypeLabel } from '../workflows/artifactPresentation'
@@ -19,6 +19,7 @@ import { RecommendationPackagesSection } from './RecommendationPackages'
 import { LifecycleEventForm } from './LifecycleEventForm'
 import { useDialogFocus } from '../shared/useDialogFocus'
 import { dispatchCandidateUpdated } from '../shared/candidateEvents'
+import { SourcingTrace } from './SourcingTrace'
 
 export type CandidateAction = 'advance' | 'review' | 'contact' | 'recommend' | 'stop'
 export type CandidateActionPreflight = { action: CandidateAction; token: string; consultant_token?: string; impact: string; expires_at?: string }
@@ -130,7 +131,7 @@ export function CandidatePanel({value,close,changed}:{value:CandidateDetail,clos
         <nav className="candidate-tabs" aria-label="候选人详情"><button className={view==='overview'?'active':''} onClick={()=>setView('overview')}><UserRoundSearch/>概览</button><button className={view==='resume'?'active':''} onClick={()=>setView('resume')}><BriefcaseBusiness/>履历</button><button className={view==='activity'?'active':''} onClick={()=>setView('activity')}><Clock3/>记录</button><button className={view==='assessment'?'active':''} onClick={()=>setView('assessment')}><ClipboardCheck/>评估</button></nav>
         {view==='overview'&&<>
           <ResumeOverview text={resume.summary} candidate={value}/>
-          {value.sourcing_attributions?.length>0&&<section className="sourcing-trace"><div className="sourcing-trace-head"><Search/><div><span>寻访来源</span><b>怎么找到他的</b></div></div>{value.sourcing_attributions.map(item=>{const recall=value.sourcing_recalls?.find(entry=>entry.channel===item.channel&&entry.source_query===item.source_query);return <div className="sourcing-trace-row" key={item.id}><div className="trace-main"><span>{sourceLabel(item.channel)} · {item.source_round||'寻访查询'}</span><b>{item.source_query}</b><small>{item.source_purpose||'根据岗位策略生成'}</small>{recall&&<small>执行 {recall.run_id}{recall.strategy_revision?` · 策略 revision ${recall.strategy_revision}`:''}{recall.query_cell_id?` · 单元 ${recall.query_cell_id}`:''}</small>}</div><div className="trace-side"><span className={`feedback-score ${formatFeedbackScore(item.learning_score).tone}`}>{formatFeedbackScore(item.learning_score).text}</span><LearningSignals item={item}/></div></div>})}</section>}
+          <SourcingTrace value={value}/>
         </>}
         {view==='assessment'&&<CandidateAssessment candidateId={value.id} jobId={value.job_id}/>}
         {view==='resume'&&<div className="resume-workspace"><ResumeWorkDetail text={resume.full_text} fallback={<ResumeTimelineSection title="工作经历" text={resume.work_text} empty="尚未采集结构化工作经历，可通过来源链接核对原始简历。"/>}/><ResumeProjectSection text={resume.project_text}/><ResumeEducationSection text={resume.education_text}/>{resume.full_text&&<details className="raw-resume"><summary>完整原始履历</summary><pre>{resume.full_text}</pre></details>}</div>}
@@ -179,9 +180,4 @@ function ResumeHistoryField({label,lines}:{label:string;lines:string[]}) {
 function ResumeSourceFallback({title,text,empty}:{title:string;text?:string;empty:string}) {
   const source=String(text||'').trim()
   return <section className="resume-section"><h3>{title}</h3>{source?<details className="resume-source-fallback"><summary>查看原始{title}</summary><pre>{source}</pre></details>:<div className="empty">{empty}</div>}</section>
-}
-
-function LearningSignals({item}:{item:CandidateDetail['sourcing_attributions'][number]}) {
-  const signals=[['通过',item.review_pass_count],['联系',item.contacted_count],['推荐',item.recommended_count],['停止',item.stopped_count],['客户正向',item.client_positive_count],['客户否决',item.client_rejected_count]].filter(([,count])=>Number(count||0)>0)
-  return <div className="learning-signals">{signals.length?signals.map(([label,count])=><span key={String(label)}>{label} {Number(count)}</span>):<span>暂无后续业务反馈</span>}</div>
 }
