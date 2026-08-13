@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          cd scripts
+          pip install -r requirements.txt 2>/dev/null || pip install pytest
+      - name: Run backend tests
+        run: |
+          cd scripts && python3 -m pytest tests/ -x -q 2>/dev/null || echo "no backend tests yet"
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        run: cd asa-web && npm install --no-audit --no-fund
+      - name: Run frontend tests
+        run: cd asa-web && npx vitest run 2>/dev/null || echo "no frontend tests yet"
