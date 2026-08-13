@@ -17,6 +17,7 @@ import { agentConversationReducer, initialAgentConversationState } from './conve
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
 import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
+import { StrategyPatchCard } from './StrategyPatchCard'
 
 const ACTIVE_SESSION_KEY = 'asaAgentSessionId'
 const RadarPage = lazy(() => import('../pages/Radar').then(module => ({ default: module.RadarPage })))
@@ -739,6 +740,13 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
           {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
           {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
+          {message.role === 'assistant' && !message.invalidated && message.strategy_patch && <StrategyPatchCard
+            patch={message.strategy_patch}
+            sessionId={sessionId}
+            applied={message.strategy_patch_applied}
+            appliedRevision={message.strategy_patch_revision}
+            appliedCount={message.strategy_patch_applied_count}
+          />}
           {message.role === 'assistant' && !message.invalidated && !message.pending_intent && <SuggestedActionBar actions={message.suggested_actions} busy={structuredActionBusy} onAction={action => void runStructuredAction(action)}/>}
           {message.role === 'assistant' && <ExecutionReceipt receipt={message.execution_receipt}/>}
           {message.role === 'assistant' && interactionError && index === messages.length - 1 && <p className="agent-card-error" role="alert">{interactionError}</p>}

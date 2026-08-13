@@ -983,7 +983,15 @@ class WorkflowEngine:
 
     def _sourcing_strategy_snapshot(self, conn, workflow_id: str) -> dict[str, Any]:
         """Build the immutable strategy view shown at and verified after R3 approval."""
-        _, metadata = self._latest_artifact_payload(conn, workflow_id, "search_strategy")
+        artifact_row = conn.execute(
+            """
+            SELECT id,artifact_id,metadata_json FROM agent_artifacts
+            WHERE workflow_id=? AND artifact_type='search_strategy'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+        metadata = _loads(artifact_row["metadata_json"], {}) if artifact_row else {}
         plan = metadata.get("plan") if isinstance(metadata.get("plan"), dict) else {}
         strategy_v2 = metadata.get("strategy_v2") if isinstance(metadata.get("strategy_v2"), dict) else {}
         query_plan = metadata.get("query_plan_v1") if isinstance(metadata.get("query_plan_v1"), dict) else {}
@@ -1042,7 +1050,13 @@ class WorkflowEngine:
         strategy_hash = hashlib.sha256(_dumps(snapshot).encode("utf-8")).hexdigest()
         replay_valid = golden_replay is None or bool(golden_replay.get("passed"))
         ready = bool(plan and strategy_v2 and query_plan_valid and replay_valid and target_count > 0)
-        return {**snapshot, "strategy_hash": strategy_hash, "ready": ready}
+        return {
+            **snapshot,
+            "strategy_artifact_id": str(artifact_row["artifact_id"] or "") if artifact_row else "",
+            "strategy_revision": int(metadata.get("edit_revision") or strategy_v2.get("edit_revision") or 0),
+            "strategy_hash": strategy_hash,
+            "ready": ready,
+        }
 
     def _approval_preflight_details(self, conn, workflow_id: str, step: Any) -> dict[str, Any]:
         capability_id = step["capability_id"]

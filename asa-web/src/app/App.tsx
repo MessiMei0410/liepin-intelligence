@@ -367,6 +367,18 @@ export function App() {
     return () => window.removeEventListener(AGENT_NAVIGATE_EVENT, navigate)
   }, [showAgent])
 
+  // 错误/通知 toast 8 秒后自动消失，避免常驻遮挡。
+  useEffect(() => {
+    if (!error) return
+    const timer = window.setTimeout(() => setError(''), 8000)
+    return () => window.clearTimeout(timer)
+  }, [error])
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 8000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   if (error && !boot) return <Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} />
 
   const pageTitle = sourcingCandidatesWorkflowId ? '寻访候选人名单' : analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
@@ -383,17 +395,6 @@ export function App() {
     }
     return null
   }
-  // 错误/通知 toast 8 秒后自动消失，避免常驻遮挡。
-  useEffect(() => {
-    if (!error) return
-    const timer = window.setTimeout(() => setError(''), 8000)
-    return () => window.clearTimeout(timer)
-  }, [error])
-  useEffect(() => {
-    if (!notice) return
-    const timer = window.setTimeout(() => setNotice(''), 8000)
-    return () => window.clearTimeout(timer)
-  }, [notice])
   const navigateTab = (id: Tab) => {
     setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)

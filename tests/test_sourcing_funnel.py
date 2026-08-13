@@ -165,6 +165,11 @@ FUNNEL_COLUMNS = {
     "zero_attribution", "error", "created_at", "updated_at",
 }
 
+RECALL_LINEAGE_COLUMNS = {
+    "strategy_hash", "strategy_artifact_id", "strategy_revision", "query_plan_hash",
+    "query_cell_id", "query_family_ids_json", "query_provenance_json",
+}
+
 
 class FunnelSchemaTest(unittest.TestCase):
     def test_ensure_schema_creates_funnel_table_idempotently(self) -> None:
@@ -178,6 +183,8 @@ class FunnelSchemaTest(unittest.TestCase):
             ensure_schema(conn)  # 第二次执行不得报错也不得丢数据
             columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_sourcing_funnel)")}
             assert FUNNEL_COLUMNS <= columns
+            recall_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_candidate_recalls)")}
+            assert RECALL_LINEAGE_COLUMNS <= recall_columns
             row = conn.execute("SELECT run_id,status FROM agent_sourcing_funnel").fetchone()
             assert row == ("r1", "completed")
             conn.close()
@@ -639,6 +646,12 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
             client="长越科技",
             job="机械高级工程师",
             query_plan=request["query_plan_v1"],
+            strategy_snapshot={
+                "strategy_hash": "approved-strategy-hash",
+                "strategy_artifact_id": "artifact-strategy-7",
+                "strategy_revision": 7,
+                "query_plan_hash": request["query_plan_hash"],
+            },
             raw_candidates=raw_candidates,
             applied=applied,
             min_score=55,
@@ -648,7 +661,9 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         conn = self.service._connect()
         try:
             rows = conn.execute(
-                "SELECT source_candidate_id,duplicate_state,exclusion_reason,candidate_id,job_candidate_id "
+                "SELECT source_candidate_id,duplicate_state,exclusion_reason,candidate_id,job_candidate_id,"
+                "strategy_hash,strategy_artifact_id,strategy_revision,query_plan_hash,query_cell_id,"
+                "query_family_ids_json,query_provenance_json "
                 "FROM agent_candidate_recalls WHERE run_id=? ORDER BY source_candidate_id",
                 ("asa-source-ledger",),
             ).fetchall()
@@ -658,6 +673,13 @@ class SourcingFunnelExecutionTest(unittest.TestCase):
         assert by_id["lp-accepted"]["duplicate_state"] == "accepted"
         assert by_id["lp-accepted"]["candidate_id"] == 201
         assert by_id["lp-accepted"]["job_candidate_id"] == 101
+        assert by_id["lp-accepted"]["strategy_hash"] == "approved-strategy-hash"
+        assert by_id["lp-accepted"]["strategy_artifact_id"] == "artifact-strategy-7"
+        assert by_id["lp-accepted"]["strategy_revision"] == 7
+        assert by_id["lp-accepted"]["query_plan_hash"] == request["query_plan_hash"]
+        assert by_id["lp-accepted"]["query_cell_id"] == "qpc_test_liepin"
+        assert json.loads(by_id["lp-accepted"]["query_family_ids_json"]) == []
+        assert json.loads(by_id["lp-accepted"]["query_provenance_json"])[0]["group"] == "mechanical"
         assert by_id["lp-existing"]["duplicate_state"] == "existing"
         assert by_id["lp-low"]["duplicate_state"] == "not_intaked"
         assert by_id["lp-low"]["exclusion_reason"] == "score_below_threshold"

@@ -137,6 +137,73 @@ test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {
   expect(layout.gridColumn).toBe('3')
 })
 
+test('Agent 策略建议逐项预检、二次确认并持久化回执', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 700 })
+  await page.addInitScript(() => localStorage.setItem('asaAgentSessionId', 'agent-strategy-patch-e2e'))
+  const calls: Record<string, unknown>[] = []
+  await page.route('**/api/v1/copilot/sessions**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/agent-strategy-patch-e2e')) return route.fulfill({ json: {
+      ok: true,
+      session_id: 'agent-strategy-patch-e2e',
+      messages: [{
+        role: 'assistant',
+        content: '建议把以下顾问判断沉淀到当前寻访策略。',
+        strategy_patch: {
+          workflow_id: 'workflow-strategy-e2e',
+          workflow_title: '长越科技｜机械高级工程师｜第 2 轮',
+          strategy_hash: 'strategy-hash-e2e',
+          changes: [
+            { type: 'add_keyword', value: '精密运动平台', clause: '新增关键词「精密运动平台」' },
+            { type: 'add_company', value: 'ASMPT', clause: '新增对标公司「ASMPT」' },
+            { type: 'add_filter', value: '排除纯销售背景', clause: '新增过滤条件「排除纯销售背景」' },
+          ],
+        },
+      }],
+    } })
+    return route.fulfill({ json: { ok: true, sessions: [] } })
+  })
+  await page.route('**/strategy/edits/preflight', route => {
+    calls.push({ type: 'preflight', body: route.request().postDataJSON() })
+    return route.fulfill({ json: {
+      ok: true, workflow_id: 'workflow-strategy-e2e', strategy_hash: 'strategy-hash-e2e',
+      preflight_token: 'strategy-token-e2e', impact: '只更新策略，不启动寻访',
+    } })
+  })
+  await page.route('**/strategy/edits', route => {
+    calls.push({ type: 'apply', body: route.request().postDataJSON() })
+    return route.fulfill({ json: {
+      ok: true, workflow_id: 'workflow-strategy-e2e', revision: 3, edit_count: 2, artifact_id: 'artifact-strategy-e2e',
+    } })
+  })
+  await page.route('**/api/v1/copilot/events', route => {
+    calls.push({ type: 'event', body: route.request().postDataJSON() })
+    return route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/asa-app')
+  const card = page.getByRole('region', { name: '寻访策略建议' })
+  await expect(card).toBeVisible()
+  await card.getByRole('checkbox', { name: /排除纯销售背景/ }).uncheck()
+  await card.getByRole('button', { name: '检查写入内容' }).click()
+  await expect(card).toContainText('预检通过，令牌有效期 5 分钟')
+  await expect(card).toContainText('新增关键词「精密运动平台」')
+  await expect(card).not.toContainText('排除纯销售背景')
+  await card.getByRole('button', { name: '确认写入' }).click()
+  await expect(card).toContainText('已将 2 项顾问确认写入策略 revision 3')
+
+  const preflight = calls.find(item => item.type === 'preflight')?.body as Record<string, unknown>
+  const apply = calls.find(item => item.type === 'apply')?.body as Record<string, unknown>
+  const event = calls.find(item => item.type === 'event')?.body as Record<string, unknown>
+  expect(preflight).toMatchObject({ expected_strategy_hash: 'strategy-hash-e2e' })
+  expect(preflight.edits).toHaveLength(2)
+  expect(apply).toMatchObject({ expected_strategy_hash: 'strategy-hash-e2e', preflight_token: 'strategy-token-e2e' })
+  expect(apply.edits).toHaveLength(2)
+  expect(event).toMatchObject({ session_id: 'agent-strategy-patch-e2e', event: 'copilot_strategy_applied' })
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+  expect(overflow).toBeLessThanOrEqual(0)
+})
+
 test('岗位详情的“交给 Agent”显式附着岗位上下文', async ({ page }) => {
   const panel = await openJob(page)
   await panel.getByRole('button', { name: '交给 Agent' }).click()

@@ -243,6 +243,8 @@ class StrategyItemEdits(WriteEnvelope):
     # 服务层逐项校验并给可读 409）；编辑落新 strategy revision，不原地替换。
     edits: list[dict[str, Any]] = Field(min_length=1)
     note: str = ""
+    expected_strategy_hash: str = ""
+    preflight_token: str = ""
 
 
 class MappingTaskCreate(WriteEnvelope):
@@ -723,7 +725,21 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 不绕过 R3：编辑后策略 hash 变化，waiting_approval 的旧审批卡作废并自动换新。
         return idem("workflow.strategy_item_edits", body, idempotency_key, "workflow", workflow_id,
                     lambda: core.apply_strategy_item_edits(
-                        workflow_id, [dict(item) for item in body.edits], note=body.note))
+                        workflow_id, [dict(item) for item in body.edits], note=body.note,
+                        expected_strategy_hash=body.expected_strategy_hash,
+                        preflight_token=body.preflight_token))
+
+    @app.post("/api/v1/workflows/{workflow_id}/strategy/edits/preflight")
+    def workflow_strategy_item_edits_preflight(workflow_id: str, body: StrategyItemEdits):
+        try:
+            return core.strategy_item_edits_preflight(
+                workflow_id, [dict(item) for item in body.edits],
+                expected_strategy_hash=body.expected_strategy_hash,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}")
     def job_mapping_task(job_id: int, artifact_id: str) -> dict[str, Any]:

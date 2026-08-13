@@ -43,14 +43,16 @@ _POOL_SOURCES = {
     "legacy_profile_suggestions",
     "llm_inferred",
     "consultant_calibrated",
+    "consultant_confirmed",
     "company_kb",
 }
 _CONFIDENCES = {"high", "medium", "low"}
 _CONSTRAINT_TYPES = {"hard_requirement", "preference", "conditional_acceptance", "exclusion", "target_count", "consultant_wording"}
 
 SUPPORTED_OPS = (
-    "add_keyword_group", "update_keyword_group", "delete_keyword_group",
+    "add_keyword_group", "append_keyword_terms", "update_keyword_group", "delete_keyword_group",
     "add_company", "update_company", "delete_company",
+    "add_negative_rule",
     "update_accepted_levels", "update_consultant_constraints",
 )
 
@@ -101,7 +103,7 @@ def apply_item_edits(v2: dict[str, Any], edits: list[dict[str, Any]]) -> tuple[d
         if op not in SUPPORTED_OPS:
             raise ValueError(f"第 {index} 项编辑 op 非法：{op or '（缺失）'}，支持 {'/'.join(SUPPORTED_OPS)}")
 
-        if op in {"add_keyword_group", "update_keyword_group", "delete_keyword_group"}:
+        if op in {"add_keyword_group", "append_keyword_terms", "update_keyword_group", "delete_keyword_group"}:
             name = _norm_text(raw.get("group"))
             if not name:
                 raise ValueError(f"第 {index} 项编辑缺少关键词组名 group")
@@ -121,6 +123,21 @@ def apply_item_edits(v2: dict[str, Any], edits: list[dict[str, Any]]) -> tuple[d
                     raise ValueError(f"新增关键词组「{name}」必须提供至少 1 个词条 terms")
                 groups.append({"group": name, "targets": targets or "", "terms": terms})
                 applied.append({"op": op, "summary": f"新增关键词组「{name}」（{len(terms)} 词）"})
+                continue
+            if op == "append_keyword_terms":
+                if not terms:
+                    raise ValueError(f"追加关键词组「{name}」必须提供至少 1 个词条 terms")
+                if group is None:
+                    group = {"group": name, "targets": targets or "顾问对话确认", "terms": []}
+                    groups.append(group)
+                previous_terms = _norm_terms(group.get("terms"))
+                appended = [term for term in terms if term not in previous_terms]
+                if not appended:
+                    raise ValueError(f"关键词组「{name}」已包含本次全部词条，请刷新策略")
+                group["terms"] = [*previous_terms, *appended]
+                if targets is not None:
+                    group["targets"] = targets
+                applied.append({"op": op, "summary": f"关键词组「{name}」追加：{'、'.join(appended)}"})
                 continue
             # update_keyword_group
             if group is None:
@@ -188,6 +205,27 @@ def apply_item_edits(v2: dict[str, Any], edits: list[dict[str, Any]]) -> tuple[d
             # 池内公司删空则整层移除（validate_strategy_v2 要求 companies 非空）
             if pool is not None and not pool.get("companies"):
                 pools.remove(pool)
+
+        elif op == "add_negative_rule":
+            rule = _norm_text(raw.get("rule"))
+            if not rule:
+                raise ValueError(f"第 {index} 项编辑缺少排除规则 rule")
+            rule_type = _norm_text(raw.get("type")) or "consultant_exclusion"
+            negative_rules = new_v2.setdefault("negative_rules", [])
+            existing_rules = {
+                _norm_text(item.get("rule"))
+                for item in negative_rules
+                if isinstance(item, dict) and _norm_text(item.get("rule"))
+            }
+            if rule in existing_rules:
+                raise ValueError(f"排除规则「{rule}」已存在，请刷新策略")
+            negative_rules.append({
+                "type": rule_type,
+                "rule": rule,
+                "source": "consultant_item_edit",
+                "confidence": "high",
+            })
+            applied.append({"op": op, "summary": f"新增排除规则「{rule}」"})
 
         elif op == "update_accepted_levels":
             levels = _norm_terms(raw.get("accepted_levels"))
@@ -285,6 +323,7 @@ def apply_strategy_item_edits(
     edits: list[dict[str, Any]],
     *,
     note: str = "",
+    expected_strategy_hash: str = "",
 ) -> dict[str, Any]:
     """按项编辑工作流寻访策略（self=AgentService）。落新 search_strategy artifact 并回读。
 
@@ -323,6 +362,11 @@ def apply_strategy_item_edits(
         if not v2:
             raise LookupError(f"该工作流还没有可编辑的寻访策略（缺少 strategy_v2）：{workflow_id}")
         plan = metadata.get("plan") if isinstance(metadata.get("plan"), dict) else {}
+        initial_snapshot = self.workflow_engine._sourcing_strategy_snapshot(conn, workflow_id)
+        initial_strategy_hash = str(initial_snapshot.get("strategy_hash") or "")
+        expected_strategy_hash = _norm_text(expected_strategy_hash)
+        if expected_strategy_hash and expected_strategy_hash != initial_strategy_hash:
+            raise ValueError("寻访策略已更新，本次建议基于旧版本；请刷新对话后重新确认")
 
         new_v2, applied = apply_item_edits(v2, edits)
         errors = validate_edited_strategy(new_v2)
@@ -377,6 +421,29 @@ def apply_strategy_item_edits(
             "edit_revision": revision,
             "edited_via": "strategy_item_edit",
         }
+        # 编译与质量检查完成后再获取写锁，并在任何落库前二次核对状态与策略版本。
+        # 防止 R3 审批恰好在首次检查后启动寻访，或另一位顾问同时提交了新 revision。
+        conn.execute("BEGIN IMMEDIATE")
+        locked_workflow = conn.execute(
+            "SELECT status FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+        ).fetchone()
+        locked_sourcing = conn.execute(
+            """
+            SELECT status FROM agent_workflow_steps
+            WHERE workflow_id=? AND capability_id='multi_channel_sourcing'
+            ORDER BY sequence LIMIT 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+        if locked_workflow is None or locked_workflow["status"] not in _EDITABLE_WORKFLOW_STATUSES:
+            raise ValueError("工作流已进入外部执行或已结束，不能按项编辑策略")
+        if locked_sourcing is None or locked_sourcing["status"] not in _EDITABLE_SOURCING_STATUSES:
+            raise ValueError("外部寻访已经开始，当前策略不能原地替换；请先停止本轮寻访再调整")
+        locked_strategy_hash = str(
+            self.workflow_engine._sourcing_strategy_snapshot(conn, workflow_id).get("strategy_hash") or ""
+        )
+        if locked_strategy_hash != initial_strategy_hash:
+            raise ValueError("寻访策略已被其他操作更新，本次编辑未写入；请刷新后重试")
         conn.execute(
             """
             INSERT INTO agent_artifacts
@@ -438,6 +505,61 @@ def apply_strategy_item_edits(
             "query_plan_hash": snapshot["query_plan_hash"],
             "strategy_ready": bool(snapshot["ready"]),
             "strategy_v2": new_v2,
+        }
+    finally:
+        conn.close()
+
+
+def preflight_strategy_item_edits(
+    self,
+    workflow_id: str,
+    edits: list[dict[str, Any]],
+    *,
+    expected_strategy_hash: str = "",
+) -> dict[str, Any]:
+    """只读预检：复用正式写入的状态、版本、质量和查询计划校验，不产生 artifact。"""
+    conn = self._connect()
+    try:
+        workflow = conn.execute(
+            "SELECT status FROM agent_workflows WHERE workflow_id=?", (workflow_id,)
+        ).fetchone()
+        if workflow is None:
+            raise LookupError(f"工作流不存在：{workflow_id}")
+        if workflow["status"] not in _EDITABLE_WORKFLOW_STATUSES:
+            raise ValueError("工作流已进入外部执行或已结束，不能按项编辑策略")
+        sourcing = conn.execute(
+            """
+            SELECT status FROM agent_workflow_steps
+            WHERE workflow_id=? AND capability_id='multi_channel_sourcing'
+            ORDER BY sequence LIMIT 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+        if sourcing is None or sourcing["status"] not in _EDITABLE_SOURCING_STATUSES:
+            raise ValueError("外部寻访已经开始，当前策略不能原地替换；请先停止本轮寻访再调整")
+        _content, metadata = self.workflow_engine._latest_artifact_payload(conn, workflow_id, "search_strategy")
+        v2 = metadata.get("strategy_v2") if isinstance(metadata.get("strategy_v2"), dict) else {}
+        if not v2:
+            raise LookupError(f"该工作流还没有可编辑的寻访策略（缺少 strategy_v2）：{workflow_id}")
+        snapshot = self.workflow_engine._sourcing_strategy_snapshot(conn, workflow_id)
+        strategy_hash = str(snapshot.get("strategy_hash") or "")
+        if expected_strategy_hash and expected_strategy_hash != strategy_hash:
+            raise ValueError("寻访策略已更新，本次建议基于旧版本；请刷新对话后重新确认")
+        new_v2, applied = apply_item_edits(v2, edits)
+        errors = validate_edited_strategy(new_v2)
+        if errors:
+            raise ValueError("编辑后策略未通过质量校验：" + "；".join(errors[:6]))
+        query_plan = query_builders.compile_query_plan_v1(new_v2)
+        plan_ok, plan_errors = query_builders.validate_query_plan_v1(query_plan)
+        if not plan_ok:
+            raise ValueError("编辑后查询计划不可执行：" + "；".join(plan_errors[:6]))
+        return {
+            "ok": True,
+            "workflow_id": workflow_id,
+            "strategy_hash": strategy_hash,
+            "query_plan_hash": str(query_plan.get("plan_hash") or ""),
+            "applied": applied,
+            "edit_count": len(applied),
         }
     finally:
         conn.close()

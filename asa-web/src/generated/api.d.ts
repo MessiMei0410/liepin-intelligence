@@ -566,6 +566,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflow_id}/strategy/edits/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Workflow Strategy Item Edits Preflight */
+        post: operations["workflow_strategy_item_edits_preflight_api_v1_workflows__workflow_id__strategy_edits_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{job_id}/mapping-tasks/{artifact_id}": {
         parameters: {
             query?: never;
@@ -2474,6 +2491,16 @@ export interface components {
              * @default
              */
             note: string;
+            /**
+             * Expected Strategy Hash
+             * @default
+             */
+            expected_strategy_hash: string;
+            /**
+             * Preflight Token
+             * @default
+             */
+            preflight_token: string;
         };
         /** StrategyReviewDiffDecisions */
         StrategyReviewDiffDecisions: {
@@ -3648,6 +3675,41 @@ export interface operations {
             header: {
                 "Idempotency-Key": string;
             };
+            path: {
+                workflow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StrategyItemEdits"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    workflow_strategy_item_edits_preflight_api_v1_workflows__workflow_id__strategy_edits_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
             path: {
                 workflow_id: string;
             };

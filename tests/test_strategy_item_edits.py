@@ -127,10 +127,21 @@ def client(db_path: Path):
 
 
 def _post_edits(client: TestClient, edits: list[dict], *, key: str, note: str = ""):
+    preflight = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+        json={"request_id": f"preflight-{key}", "edits": edits, "note": note},
+    )
+    if preflight.status_code != 200:
+        return preflight
+    preview = preflight.json()
     return client.post(
         "/api/v1/workflows/workflow_edit1/strategy/edits",
         headers={"Idempotency-Key": key},
-        json={"request_id": f"req-{key}", "edits": edits, "note": note},
+        json={
+            "request_id": f"req-{key}", "edits": edits, "note": note,
+            "expected_strategy_hash": preview["strategy_hash"],
+            "preflight_token": preview["preflight_token"],
+        },
     )
 
 
@@ -149,6 +160,27 @@ def test_apply_item_edits_keyword_group_update_and_delete() -> None:
     assert groups["core_power"]["terms"] == ["通信电源"]
     assert groups["core_power"]["targets"] == "基站电源方向"
     assert len(applied) == 2
+
+
+def test_apply_item_edits_append_terms_and_negative_rule_without_overwriting() -> None:
+    v2, applied = apply_item_edits(_strategy_v2(), [
+        {"op": "append_keyword_terms", "group": "core_power", "terms": ["通信电源"]},
+        {"op": "append_keyword_terms", "group": "顾问场景确认", "terms": ["AI 服务器"], "targets": "顾问确认场景"},
+        {"op": "add_negative_rule", "type": "consultant_exclusion", "rule": "排除纯销售背景"},
+    ])
+    groups = {group["group"]: group for group in v2["step4_keyword_groups"]}
+    assert groups["core_power"]["terms"] == ["服务器电源", "电源模块", "通信电源"]
+    assert groups["顾问场景确认"]["terms"] == ["AI 服务器"]
+    assert v2["negative_rules"][-1] == {
+        "type": "consultant_exclusion", "rule": "排除纯销售背景",
+        "source": "consultant_item_edit", "confidence": "high",
+    }
+    assert len(applied) == 3
+
+    with pytest.raises(ValueError, match="已包含"):
+        apply_item_edits(v2, [{"op": "append_keyword_terms", "group": "core_power", "terms": ["通信电源"]}])
+    with pytest.raises(ValueError, match="已存在"):
+        apply_item_edits(v2, [{"op": "add_negative_rule", "rule": "排除纯销售背景"}])
 
 
 def test_apply_item_edits_add_group_rejects_duplicate_and_missing_target() -> None:
@@ -360,10 +392,131 @@ def test_strategy_item_edits_happy_path_creates_new_revision(client: TestClient,
     assert output["strategy_v2"]["edit_revision"] == 1
 
 
+def test_strategy_item_edits_preflight_is_read_only_and_token_is_single_use(client: TestClient, db_path: Path) -> None:
+    edits = [{"op": "append_keyword_terms", "group": "顾问对话确认", "terms": ["通信电源"]}]
+    preflight = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+        json={"request_id": "preflight-single", "edits": edits},
+    )
+    assert preflight.status_code == 200, preflight.text
+    preview = preflight.json()
+    assert preview["preflight_token"]
+    assert preview["strategy_hash"]
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM agent_artifacts WHERE workflow_id='workflow_edit1' AND artifact_type='search_strategy'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    body = {
+        "request_id": "commit-single", "edits": edits,
+        "expected_strategy_hash": preview["strategy_hash"], "preflight_token": preview["preflight_token"],
+    }
+    first = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits",
+        headers={"Idempotency-Key": "commit-single"}, json=body,
+    )
+    assert first.status_code == 200, first.text
+    replay_with_new_key = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits",
+        headers={"Idempotency-Key": "commit-single-reuse"}, json={**body, "request_id": "commit-single-reuse"},
+    )
+    assert replay_with_new_key.status_code == 409
+    assert "预检已失效" in replay_with_new_key.json()["detail"]
+
+
+def test_strategy_item_edits_preflight_rejects_stale_strategy_hash(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+        json={
+            "request_id": "preflight-stale", "expected_strategy_hash": "old_hash",
+            "edits": [{"op": "delete_keyword_group", "group": "scene"}],
+        },
+    )
+    assert response.status_code == 409
+    assert "基于旧版本" in response.json()["detail"]
+
+
+def test_strategy_item_edits_rechecks_sourcing_state_before_any_write(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_workflow(db_path)
+    edits = [{"op": "delete_keyword_group", "group": "scene"}]
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        preflight = client.post(
+            "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+            json={"request_id": "race-preflight", "edits": edits},
+        )
+        assert preflight.status_code == 200, preflight.text
+        preview = preflight.json()
+
+        original_compile = query_builders.compile_query_plan_v1
+        state_changed = False
+
+        def compile_after_sourcing_started(strategy: dict) -> dict:
+            nonlocal state_changed
+            result = original_compile(strategy)
+            if not state_changed:
+                state_changed = True
+                conn = sqlite3.connect(db_path)
+                try:
+                    conn.execute(
+                        "UPDATE agent_workflows SET status='paused' WHERE workflow_id='workflow_edit1'"
+                    )
+                    conn.execute(
+                        "UPDATE agent_workflow_steps SET status='waiting_external' "
+                        "WHERE workflow_id='workflow_edit1' AND capability_id='multi_channel_sourcing'"
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            return result
+
+        monkeypatch.setattr(query_builders, "compile_query_plan_v1", compile_after_sourcing_started)
+        response = client.post(
+            "/api/v1/workflows/workflow_edit1/strategy/edits",
+            headers={"Idempotency-Key": "race-commit"},
+            json={
+                "request_id": "race-commit", "edits": edits,
+                "expected_strategy_hash": preview["strategy_hash"],
+                "preflight_token": preview["preflight_token"],
+            },
+        )
+    assert response.status_code == 409
+    assert "外部寻访已经开始" in response.json()["detail"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM agent_artifacts WHERE workflow_id='workflow_edit1' AND artifact_type='search_strategy'"
+        ).fetchone()[0] == 1
+        output = json.loads(conn.execute(
+            "SELECT output_json FROM agent_workflow_steps WHERE workflow_id='workflow_edit1' AND capability_id='search_strategy'"
+        ).fetchone()[0])
+        assert output["strategy_v2"].get("edit_revision") is None
+    finally:
+        conn.close()
+
+
 def test_strategy_item_edits_idempotent_replay(client: TestClient, db_path: Path) -> None:
     edits = [{"op": "delete_company", "tier": "T1", "name": "台达"}]
-    first = _post_edits(client, edits, key="se-idem-1")
-    replay = _post_edits(client, edits, key="se-idem-1")
+    preflight = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+        json={"request_id": "preflight-se-idem-1", "edits": edits},
+    ).json()
+    body = {
+        "request_id": "req-se-idem-1", "edits": edits,
+        "expected_strategy_hash": preflight["strategy_hash"],
+        "preflight_token": preflight["preflight_token"],
+    }
+    first = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits",
+        headers={"Idempotency-Key": "se-idem-1"}, json=body,
+    )
+    replay = client.post(
+        "/api/v1/workflows/workflow_edit1/strategy/edits",
+        headers={"Idempotency-Key": "se-idem-1"}, json=body,
+    )
     assert first.status_code == 200, first.text
     assert replay.status_code == 200, replay.text
     assert replay.json()["receipt"]["idempotent_replay"] is True
@@ -406,8 +559,7 @@ def test_strategy_item_edits_workflow_not_found(db_path: Path) -> None:
     _seed_workflow(db_path)
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         response = client.post(
-            "/api/v1/workflows/workflow_ghost/strategy/edits",
-            headers={"Idempotency-Key": "se-404"},
+            "/api/v1/workflows/workflow_ghost/strategy/edits/preflight",
             json={"request_id": "req-se-404", "edits": [{"op": "delete_keyword_group", "group": "scene"}]},
         )
     assert response.status_code == 404

@@ -182,3 +182,12 @@
 - 三期：今日工作台五分组（待判断/运行中/待客户/风险逾期/最近交付）并挂载 Agent 首页；岗位自动周报（`/api/v1/jobs/{id}/weekly-report`，漏斗/有效推荐/渠道质量/风险/规则建议，同周幂等版本自增）；面试/Offer/入职六个一等生命周期事件（自动建跟进待办，不自动对外）；交付记分卡分析目录（有效推荐率、推荐至面试转化、渠道质量、岗位关闭周期、复盘完成率，全部带样本量与口径说明）。
 - 确认规则消费闭环：kb_agent_confirmed_rules_v1.json 的 negative_rule/skill_alias/level_mapping 已接入排除规则清单、技能归一和职级映射（source=consultant_confirmed，缺文件/坏文件降级不炸）。
 - 门禁：后端 1108 pytest + 116 subtests 全绿；前端 L1 ci:fast 全绿；契约 58/58；e2e 功能 17/17；截图基线已按 UI 里程碑重生成（Agent 首页/岗位详情/工作流详情）。
+
+## 十八、主 Agent 对话建议沉淀闭环（2026-08-14）
+
+- 主 Agent 会展示后端 `strategy_patch`，顾问可逐项选择关键词、场景词、目标公司和排除规则；勾选内容转换为确定性策略编辑，不通过自由文本重生成整个工作流。
+- 写入采用服务端只读 preflight + 显式二次确认。一次性令牌绑定工作流、编辑内容 hash、当前策略 hash 和有效期；最终写入在 SQLite 写锁内再次检查工作流状态、寻访步骤状态和策略版本，拒绝审批后启动寻访或并发修订造成的漂移。
+- 新增 `append_keyword_terms` 和 `add_negative_rule` 两类按项编辑；顾问补充词进入独立确认组，目标公司标记 `consultant_confirmed`，排除条件进入 `strategy_v2.negative_rules`，避免覆盖原策略组。
+- 策略补丁写入只生成新的 `search_strategy` revision，不启动外部寻访，也不替代 R3。处于待审批状态时，旧审批卡随策略 hash 变化失效并换新。
+- 成功回执将 revision、artifact 和写入数量持久化到会话事件及 assistant structured data；任务恢复后直接显示“策略已沉淀”，不重复提供写入动作。策略已写入但会话同步失败时保留成功态并提供幂等重试；服务端按 session/workflow/revision/artifact 去重事件，同时修复会话终态。精简库缺少候选人辅助表时，上下文识别降级为空匹配，不再中断岗位或策略问答。
+- 验证：相关后端主链回归 228/228、前端 L1 536/536、Agent 聚焦回归 75/75、Playwright functional 22/22、契约测试 58/58；正式 Core OpenAPI 已包含 `/strategy/edits/preflight`，正式 v3 库只读预检前后 artifact 数和 revision 均未变化。

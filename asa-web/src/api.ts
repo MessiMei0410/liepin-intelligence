@@ -63,6 +63,13 @@ export type CandidateDetail = Candidate & {
     review_pass_count: number; contacted_count: number; recommended_count: number; stopped_count: number;
     client_positive_count: number; client_rejected_count: number;
   }>;
+  sourcing_recalls?: Array<{
+    recall_id: string; run_id: string; workflow_id?: string; strategy_hash?: string;
+    strategy_artifact_id?: string; strategy_revision?: number | null; query_plan_hash?: string;
+    query_cell_id?: string; query_family_ids?: string[]; query_provenance?: Array<Record<string, unknown>>;
+    channel: string; source_query: string; page_number?: number; position_index?: number;
+    fit_score?: number | null; fit_level?: string; duplicate_state?: string; created_at?: string;
+  }>;
   report_artifacts?: Array<{
     id: number; artifact_id: string; workflow_id?: string; artifact_type: string; title: string;
     mime_type?: string; validation_status: string; created_at?: string; version: number;
@@ -102,6 +109,9 @@ export type ContractAnchor = [
   // S4-3 增补：策略复盘读取与按需重算路由入锚。
   paths['/api/v1/workflows/{workflow_id}/strategy-review']['get'],
   paths['/api/v1/workflows/{workflow_id}/strategy-review/rebuild']['post'],
+  // 主 Agent 策略建议沉淀：只读预检 + 一次性令牌写入。
+  paths['/api/v1/workflows/{workflow_id}/strategy/edits/preflight']['post'],
+  paths['/api/v1/workflows/{workflow_id}/strategy/edits']['post'],
   // S4-3c 增补：逐项决策回写路由入锚。generated/api.d.ts 尚无此路由（后端本期新上，
   // 主控 regenerate 后条件类型自动收紧为真实 patch 操作类型，此前解析为 never）。
   StrategyReviewDiffsPatchAnchor,
@@ -682,6 +692,8 @@ export const api = {
   health: () => json<{ ok?: boolean; status?: string }>('/api/v1/health'),
   updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
     write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),
+  recordCopilotEvent: (sessionId: string, event: string, payload: Record<string, unknown> = {}) =>
+    write<{ ok: boolean }>('/api/v1/copilot/events', { session_id: sessionId, event, payload }),
   archiveAllAgentSessions: () =>
     write<{ ok: boolean; archived_count: number; session_ids: string[] }>('/api/v1/copilot/sessions/archive-all', {}),
   analysisRun: (runId: string) => json<{ ok: boolean; result: AnalysisResult; duration_ms: number; template_id?: string | null }>(`/api/v1/analytics/runs/${encodeURIComponent(runId)}`),
@@ -885,11 +897,17 @@ export const api = {
     write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/confirm`, {}),
   ignoreSourcingAdjustment: (id: number) =>
     write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/ignore`, {}),
-  // 寻访策略按项编辑（本期新上，generated/api.d.ts 尚无此路由，主控 regenerate 后可补锚）。
+  // 寻访策略按项编辑：generated/api.d.ts 已同步 preflight 与最终写入路由并加入 ContractAnchor。
   // 走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应）；
   // 404=工作流/策略不存在，409=外部寻访已开始/目标项缺失/质量校验不过（中文 detail 透出）。
-  applyStrategyEdits: (workflowId: string, edits: StrategyItemEdit[], note = '') =>
-    write<StrategyItemEditResult>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/strategy/edits`, { edits, note }),
+  preflightStrategyEdits: (workflowId: string, edits: StrategyItemEdit[], expectedStrategyHash = '') =>
+    write<StrategyItemEditPreflight>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/strategy/edits/preflight`, {
+      edits, expected_strategy_hash: expectedStrategyHash,
+    }),
+  applyStrategyEdits: (workflowId: string, edits: StrategyItemEdit[], note = '', expectedStrategyHash = '', preflightToken = '') =>
+    write<StrategyItemEditResult>(`/api/v1/workflows/${encodeURIComponent(workflowId)}/strategy/edits`, {
+      edits, note, expected_strategy_hash: expectedStrategyHash, preflight_token: preflightToken,
+    }),
   // 版本化推荐包：列表随候选人详情返回（recommendation_packages 字段），详情/反馈按需拉取与写入。
   // 详情 404=推荐包不存在；反馈走 write 幂等封装，404=推荐包不存在，409=反馈类型非法/内容为空。
   recommendationPackages: (candidateId: number) =>
@@ -944,6 +962,11 @@ export type StrategyItemEditResult = WriteAck & {
   strategy_hash?: string; query_plan_hash?: string; strategy_ready?: boolean;
   strategy_v2?: Record<string, unknown>;
   receipt?: { idempotent_replay?: boolean; request_id?: string };
+}
+export type StrategyItemEditPreflight = {
+  ok?: boolean; workflow_id: string; strategy_hash: string; query_plan_hash?: string;
+  edit_count?: number; applied?: Array<{ op?: string; summary?: string }>;
+  preflight_token: string; expires_at?: string; impact?: string;
 }
 
 // 岗位自动周报：Core 返回动态 dict，按 asa_core/job_weekly_report.py 实际 payload 收窄声明。

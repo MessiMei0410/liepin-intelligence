@@ -2099,6 +2099,26 @@ def test_user_business_actions_update_sourcing_keyword_memory(db_path: Path) -> 
             assert response.status_code == 200
             assert response.json()["sourcing_learning"]["recorded"] is True
 
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO agent_candidate_recalls
+            (recall_id,run_id,workflow_id,job_id,strategy_hash,strategy_artifact_id,strategy_revision,
+             query_plan_hash,query_cell_id,query_family_ids_json,query_provenance_json,channel,
+             source_candidate_id,source_query,candidate_name,candidate_id,job_candidate_id,duplicate_state)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "recall-detail-lineage", "run-detail-lineage", "workflow-detail-lineage", 142,
+                "strategy-detail-hash", "artifact-detail-lineage", 4, "plan-detail-hash",
+                "qpc-detail-lineage", json.dumps(["keyword_group:power"]),
+                json.dumps([{"kind": "keyword_group", "group": "power", "targets": "服务器电源"}]),
+                "liepin", "source-detail-lineage", "电气/硬件", "候选人", 805, 558, "accepted",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
         detail = client.get("/api/v1/candidates/558").json()["candidate"]
         assert detail["clean_stage"] == "S7 已推荐客户/待反馈"
         assert detail["sourcing_attributions"][0]["source_query"] == "电气/硬件"
@@ -2106,6 +2126,12 @@ def test_user_business_actions_update_sourcing_keyword_memory(db_path: Path) -> 
         assert detail["sourcing_attributions"][0]["review_pass_count"] == 1
         assert detail["sourcing_attributions"][0]["contacted_count"] == 1
         assert detail["sourcing_attributions"][0]["recommended_count"] == 1
+        assert detail["sourcing_recalls"][0]["run_id"] == "run-detail-lineage"
+        assert detail["sourcing_recalls"][0]["strategy_revision"] == 4
+        assert detail["sourcing_recalls"][0]["query_cell_id"] == "qpc-detail-lineage"
+        assert detail["sourcing_recalls"][0]["query_family_ids"] == ["keyword_group:power"]
+        assert detail["sourcing_recalls"][0]["query_provenance"][0]["targets"] == "服务器电源"
+        assert "query_provenance_json" not in detail["sourcing_recalls"][0]
 
         agent = client.app.state.core.agent_service
         client_signal = agent.record_sourcing_business_signal(

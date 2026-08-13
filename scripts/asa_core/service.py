@@ -366,6 +366,7 @@ class CoreService:
         self.analytics_service = analytics_service
         self._preflight_tokens: dict[str, tuple[int, str, datetime]] = {}
         self._preflight_lock = threading.Lock()
+        self._strategy_edit_tokens: dict[str, dict[str, Any]] = {}
         self._bootstrap_cache: dict[str, Any] | None = None
         self._bootstrap_cache_ts: float = 0.0
         self._bootstrap_cache_ttl: float = 5.0
@@ -1567,6 +1568,28 @@ class CoreService:
                 (candidate_id,),
             )]
             item["sourcing_attributions"] = attributions
+            sourcing_recalls = []
+            recalls_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_candidate_recalls'"
+            ).fetchone()
+            if recalls_table:
+                for row in conn.execute(
+                    """
+                    SELECT recall_id,run_id,workflow_id,strategy_hash,strategy_artifact_id,
+                           strategy_revision,query_plan_hash,query_cell_id,query_family_ids_json,
+                           query_provenance_json,channel,source_query,page_number,position_index,
+                           fit_score,fit_level,duplicate_state,created_at
+                    FROM agent_candidate_recalls
+                    WHERE job_candidate_id=?
+                    ORDER BY datetime(created_at) DESC,id DESC LIMIT 20
+                    """,
+                    (candidate_id,),
+                ).fetchall():
+                    recall = _row(row)
+                    recall["query_family_ids"] = _loads(recall.pop("query_family_ids_json", "[]"), [])
+                    recall["query_provenance"] = _loads(recall.pop("query_provenance_json", "[]"), [])
+                    sourcing_recalls.append(recall)
+            item["sourcing_recalls"] = sourcing_recalls
             report_rows = conn.execute(
                 """
                 SELECT DISTINCT a.id,a.artifact_id,a.workflow_id,a.artifact_type,a.title,
@@ -1792,12 +1815,67 @@ class CoreService:
             return self.agent_service.rebuild_strategy_review(workflow_id)
         raise RuntimeError("workflow service unavailable")
 
-    def apply_strategy_item_edits(self, workflow_id: str, edits: list[dict[str, Any]], *, note: str = "") -> dict[str, Any]:
+    def apply_strategy_item_edits(
+        self,
+        workflow_id: str,
+        edits: list[dict[str, Any]],
+        *,
+        note: str = "",
+        expected_strategy_hash: str = "",
+        preflight_token: str = "",
+    ) -> dict[str, Any]:
         # 寻访策略结构化按项编辑：新 revision artifact + 质量门重校验；404=工作流/策略不存在，
         # 409=状态闸门/目标项缺失/质量校验不过（ValueError/LookupError 由路由层映射）。
+        edits_hash = hashlib.sha256(json.dumps(edits, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        with self._preflight_lock:
+            grant = self._strategy_edit_tokens.pop(str(preflight_token or ""), None)
+        if (
+            not grant
+            or grant.get("workflow_id") != workflow_id
+            or grant.get("edits_hash") != edits_hash
+            or grant.get("strategy_hash") != str(expected_strategy_hash or "")
+            or grant.get("expires_at") <= datetime.now()
+        ):
+            raise ValueError("策略写入预检已失效，请重新检查写入内容")
         if self.agent_service:
-            return self.agent_service.apply_strategy_item_edits(workflow_id, edits, note=note)
+            return self.agent_service.apply_strategy_item_edits(
+                workflow_id, edits, note=note, expected_strategy_hash=expected_strategy_hash,
+            )
         raise RuntimeError("workflow service unavailable")
+
+    def strategy_item_edits_preflight(
+        self,
+        workflow_id: str,
+        edits: list[dict[str, Any]],
+        *,
+        expected_strategy_hash: str = "",
+    ) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("workflow service unavailable")
+        preview = self.agent_service.preflight_strategy_item_edits(
+            workflow_id, edits, expected_strategy_hash=expected_strategy_hash,
+        )
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=5)
+        edits_hash = hashlib.sha256(json.dumps(edits, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        with self._preflight_lock:
+            now = datetime.now()
+            self._strategy_edit_tokens = {
+                key: value for key, value in self._strategy_edit_tokens.items()
+                if value.get("expires_at") > now
+            }
+            self._strategy_edit_tokens[token] = {
+                "workflow_id": workflow_id,
+                "edits_hash": edits_hash,
+                "strategy_hash": str(preview.get("strategy_hash") or ""),
+                "expires_at": expires,
+            }
+        return {
+            **preview,
+            "preflight_token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "impact": "确认后只写入所列策略项并生成新 revision；不会启动寻访，R3 审批仍需单独确认。",
+        }
 
     def create_mapping_task(self, job_id: int, *, trigger: str = "manual") -> dict[str, Any]:
         if self.agent_service:

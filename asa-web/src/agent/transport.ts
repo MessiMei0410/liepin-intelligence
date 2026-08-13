@@ -31,6 +31,12 @@ export type AgentTurnResult = {
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
+  strategy_patch?: Record<string, unknown> | null
+  strategy_patch_applied?: boolean
+  strategy_patch_ignored?: boolean
+  strategy_patch_revision?: number | null
+  strategy_patch_artifact_id?: string | null
+  strategy_patch_applied_count?: number | null
   invalidated?: boolean
   invalidated_reason?: string
   revoked_actions?: Array<Record<string, unknown>>
@@ -70,6 +76,12 @@ const doneEventSchema = z.object({
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
+  strategy_patch: structuredRecord.nullable().optional(),
+  strategy_patch_applied: z.boolean().optional(),
+  strategy_patch_ignored: z.boolean().optional(),
+  strategy_patch_revision: z.number().nullable().optional(),
+  strategy_patch_artifact_id: z.string().nullable().optional(),
+  strategy_patch_applied_count: z.number().nullable().optional(),
   invalidated: z.boolean().optional(), invalidated_reason: z.string().optional(),
   revoked_actions: z.array(structuredRecord).optional(),
 })

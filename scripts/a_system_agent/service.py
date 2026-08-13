@@ -292,6 +292,7 @@ from .strategy_handler import (
 )
 from .strategy_editor import (
     apply_strategy_item_edits as _h_apply_strategy_item_edits,
+    preflight_strategy_item_edits as _h_preflight_strategy_item_edits,
 )
 
 
@@ -1825,3 +1826,4 @@ AgentService.get_latest_radar_weekly_report = _h_get_latest_radar_weekly_report
 
 # Strategy item edits（按项编辑）
 AgentService.apply_strategy_item_edits = _h_apply_strategy_item_edits
+AgentService.preflight_strategy_item_edits = _h_preflight_strategy_item_edits

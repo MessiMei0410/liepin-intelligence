@@ -49,6 +49,7 @@ _POOL_SOURCES = {
     "legacy_profile_suggestions",
     "llm_inferred",
     "consultant_calibrated",
+    "consultant_confirmed",
     "company_kb",
 }
 _POOL_PATHS = {"same_layer", "reverse", "adjacent"}

@@ -57,7 +57,8 @@ export function WorkflowStrategy({strategy,channels,gates,coverage,highlights,op
     if(!workflowId||busyEdit)return
     setBusyEdit(true);setEditError('');setReceipt('')
     try{
-      const result=await api.applyStrategyEdits(workflowId,edits)
+      const preflight=await api.preflightStrategyEdits(workflowId,edits)
+      const result=await api.applyStrategyEdits(workflowId,edits,'',preflight.strategy_hash,preflight.preflight_token)
       const applied=(result.applied||[]).map(item=>String(item.summary||'')).filter(Boolean)
       setReceipt(`已保存为策略 revision ${result.revision??'-'}：${applied.join('；')||'编辑已生效'}${result.approval_refreshed?'；寻访审批卡已换新，需重新批准':''}`)
       setEditingGroup('');setConfirmDelete('');setEditingLevels(false)

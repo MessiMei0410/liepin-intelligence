@@ -113,6 +113,12 @@ export const agentConversationReducer = (
           business_focus: action.result.business_focus, workflow_progress: action.result.workflow_progress,
           workflow_id: action.result.workflow_id, pending_intent: action.result.pending_intent,
           action_card: action.result.action_card, model_participation: action.result.model_participation,
+          strategy_patch: action.result.strategy_patch,
+          strategy_patch_applied: action.result.strategy_patch_applied,
+          strategy_patch_ignored: action.result.strategy_patch_ignored,
+          strategy_patch_revision: action.result.strategy_patch_revision,
+          strategy_patch_artifact_id: action.result.strategy_patch_artifact_id,
+          strategy_patch_applied_count: action.result.strategy_patch_applied_count,
           invalidated: action.result.invalidated, invalidated_reason: action.result.invalidated_reason,
           revoked_actions: action.result.revoked_actions,
             }

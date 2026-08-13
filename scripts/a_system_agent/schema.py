@@ -429,7 +429,13 @@ CREATE TABLE IF NOT EXISTS agent_candidate_recalls (
     run_id TEXT NOT NULL,
     workflow_id TEXT,
     job_id INTEGER NOT NULL DEFAULT 0,
+    strategy_hash TEXT NOT NULL DEFAULT '',
+    strategy_artifact_id TEXT,
+    strategy_revision INTEGER,
+    query_plan_hash TEXT NOT NULL DEFAULT '',
     query_cell_id TEXT NOT NULL DEFAULT '',
+    query_family_ids_json TEXT NOT NULL DEFAULT '[]',
+    query_provenance_json TEXT NOT NULL DEFAULT '[]',
     channel TEXT NOT NULL,
     source_candidate_id TEXT NOT NULL DEFAULT '',
     source_query TEXT NOT NULL DEFAULT '',
@@ -982,6 +988,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "agent_analysis_templates", "next_run_at", "TEXT")
     _ensure_column(conn, "agent_analysis_templates", "last_run_at", "TEXT")
     _ensure_column(conn, "agent_analysis_templates", "last_status", "TEXT")
+    _ensure_column(conn, "agent_candidate_recalls", "strategy_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "agent_candidate_recalls", "strategy_artifact_id", "TEXT")
+    _ensure_column(conn, "agent_candidate_recalls", "strategy_revision", "INTEGER")
+    _ensure_column(conn, "agent_candidate_recalls", "query_plan_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "agent_candidate_recalls", "query_family_ids_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "agent_candidate_recalls", "query_provenance_json", "TEXT NOT NULL DEFAULT '[]'")
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_agent_candidate_recalls_strategy
+           ON agent_candidate_recalls(strategy_hash,query_plan_hash,query_cell_id)"""
+    )
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_agent_analysis_templates_due
            ON agent_analysis_templates(enabled, schedule_enabled, next_run_at)"""

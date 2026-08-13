@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { api } from '../api'
 import { WorkflowStrategy } from '../workflows/WorkflowStrategy'
 
@@ -67,6 +67,12 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
 })
+beforeEach(() => {
+  vi.spyOn(api, 'preflightStrategyEdits').mockResolvedValue({
+    ok: true, workflow_id: 'workflow_edit1', strategy_hash: 'strategy_hash_1',
+    preflight_token: 'preflight_1', impact: '只更新策略，不启动寻访',
+  })
+})
 
 describe('组级目标画像与预计质量渲染', () => {
   it('每组关键词显示 targets；空 targets 显示「未提供目标画像」', () => {
@@ -128,9 +134,9 @@ describe('按项编辑交互', () => {
     fireEvent.change(targetsInput, { target: { value: '基站电源方向' } })
     fireEvent.click(screen.getByLabelText('保存关键词组 core_power'))
 
-    expect(apply).toHaveBeenCalledWith('workflow_edit1', [
+    await waitFor(() => expect(apply).toHaveBeenCalledWith('workflow_edit1', [
       { op: 'update_keyword_group', group: 'core_power', terms: ['通信电源', '基站电源'], targets: '基站电源方向' },
-    ])
+    ], '', 'strategy_hash_1', 'preflight_1'))
     expect(await screen.findByText(/已保存为策略 revision 2/)).toBeInTheDocument()
     expect(onEdited).toHaveBeenCalled()
   })
@@ -147,7 +153,7 @@ describe('按项编辑交互', () => {
 
     fireEvent.click(screen.getByLabelText('删除 T1 池公司 台达'))
     fireEvent.click(screen.getByLabelText('确认删除 T1 池公司 台达'))
-    expect(apply).toHaveBeenCalledWith('workflow_edit1', [{ op: 'delete_company', tier: 'T1', name: '台达' }])
+    await waitFor(() => expect(apply).toHaveBeenCalledWith('workflow_edit1', [{ op: 'delete_company', tier: 'T1', name: '台达' }], '', 'strategy_hash_1', 'preflight_1'))
     expect(await screen.findByText(/已保存为策略 revision 1/)).toBeInTheDocument()
   })
 
@@ -158,7 +164,7 @@ describe('按项编辑交互', () => {
     fireEvent.click(screen.getByLabelText('修改职级映射'))
     fireEvent.change(screen.getByLabelText('可接受职级'), { target: { value: 'P6、P7' } })
     fireEvent.click(screen.getByLabelText('保存职级映射'))
-    expect(apply).toHaveBeenCalledWith('workflow_edit1', [{ op: 'update_accepted_levels', accepted_levels: ['P6', 'P7'] }])
+    await waitFor(() => expect(apply).toHaveBeenCalledWith('workflow_edit1', [{ op: 'update_accepted_levels', accepted_levels: ['P6', 'P7'] }], '', 'strategy_hash_1', 'preflight_1'))
     expect(await screen.findByText(/已保存为策略 revision 3/)).toBeInTheDocument()
   })
 

@@ -983,6 +983,7 @@ class RecruitingCapabilityRuntime:
             client=client,
             job=job,
             query_plan=query_plan,
+            strategy_snapshot=approved_snapshot,
             raw_candidates=raw_candidates,
             applied={},
             min_score=quality_min_score,
@@ -1012,6 +1013,7 @@ class RecruitingCapabilityRuntime:
             client=client,
             job=job,
             query_plan=query_plan,
+            strategy_snapshot=approved_snapshot,
             raw_candidates=raw_candidates,
             applied=dry,
             min_score=quality_min_score,
@@ -1020,7 +1022,8 @@ class RecruitingCapabilityRuntime:
         applied = self._run_external_json([self.python, str(MULTICHANNEL), "intake", "--db", str(self.service.db_path), "--client", client, "--job", job, "--input", str(candidates_path), "--apply"], 180, cancel_check=cancel_check)
         attributions = self._persist_sourcing_attributions(
             applied, request.get("strategy") if isinstance(request.get("strategy"), dict) else {},
-            workflow_id, client, job,
+            workflow_id, client, job, run_id=run_id, query_plan=query_plan,
+            strategy_snapshot=approved_snapshot,
         )
         # 入池后补抓：对已入池但还没有完整猎聘履历的人选自动补抓一轮，写入 source_profiles，
         # 使人选详情页与后续 candidate_batch_assessment 能直接拿到完整履历。失败不阻断寻访。
@@ -1060,6 +1063,7 @@ class RecruitingCapabilityRuntime:
             client=client,
             job=job,
             query_plan=query_plan,
+            strategy_snapshot=approved_snapshot,
             raw_candidates=raw_candidates,
             applied=applied,
             min_score=quality_min_score,
@@ -1854,6 +1858,7 @@ class RecruitingCapabilityRuntime:
         client: str,
         job: str,
         query_plan: dict[str, Any],
+        strategy_snapshot: dict[str, Any] | None = None,
         raw_candidates: dict[str, list[Any]],
         applied: dict[str, Any],
         min_score: int,
@@ -1878,11 +1883,16 @@ class RecruitingCapabilityRuntime:
                 normalized(item.get("title") or item.get("current_title")),
             )
 
-        cell_by_query = {
-            (str(cell.get("channel") or ""), normalized(cell.get("query"))): str(cell.get("cell_id") or "")
+        strategy_snapshot = strategy_snapshot if isinstance(strategy_snapshot, dict) else {}
+        cells_by_query = {
+            (str(cell.get("channel") or ""), normalized(cell.get("query"))): cell
             for cell in query_plan.get("cells") or []
             if isinstance(cell, dict)
         }
+        strategy_hash = str(strategy_snapshot.get("strategy_hash") or "")
+        strategy_artifact_id = str(strategy_snapshot.get("strategy_artifact_id") or "")
+        strategy_revision = int(strategy_snapshot.get("strategy_revision") or 0) or None
+        query_plan_hash = str(query_plan.get("plan_hash") or strategy_snapshot.get("query_plan_hash") or "")
         staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
         disposition: dict[tuple[str, ...], str] = {}
         staged_by_identity: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -1968,7 +1978,10 @@ class RecruitingCapabilityRuntime:
                         exclusion_reason = "existing_candidate" if receipt_status == "existing" else "existing_relation"
                     page_number = max(1, int(raw.get("page_number") or raw.get("page") or 1))
                     position_index = max(0, int(raw.get("position_index") or index))
-                    query_cell_id = cell_by_query.get((normalized_channel, normalized(source_query)), "")
+                    query_cell = cells_by_query.get((normalized_channel, normalized(source_query)), {})
+                    query_cell_id = str(query_cell.get("cell_id") or "")
+                    query_family_ids = query_cell.get("query_family_ids") if isinstance(query_cell.get("query_family_ids"), list) else []
+                    query_provenance = query_cell.get("provenance") if isinstance(query_cell.get("provenance"), list) else []
                     recall_identity = "|".join((
                         run_id, normalized_channel, query_cell_id, source_id,
                         str(page_number), str(position_index), normalized(source_query),
@@ -1977,12 +1990,20 @@ class RecruitingCapabilityRuntime:
                     conn.execute(
                         """
                         INSERT INTO agent_candidate_recalls
-                        (recall_id,run_id,workflow_id,job_id,query_cell_id,channel,source_candidate_id,
+                        (recall_id,run_id,workflow_id,job_id,strategy_hash,strategy_artifact_id,
+                         strategy_revision,query_plan_hash,query_cell_id,query_family_ids_json,
+                         query_provenance_json,channel,source_candidate_id,
                          source_query,source_url,page_number,position_index,identity_key,candidate_name,
                          company,title,fit_score,fit_level,duplicate_state,exclusion_reason,detail_status,
                          candidate_id,job_candidate_id,raw_json)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(recall_id) DO UPDATE SET
+                          strategy_hash=excluded.strategy_hash,
+                          strategy_artifact_id=excluded.strategy_artifact_id,
+                          strategy_revision=excluded.strategy_revision,
+                          query_plan_hash=excluded.query_plan_hash,
+                          query_family_ids_json=excluded.query_family_ids_json,
+                          query_provenance_json=excluded.query_provenance_json,
                           fit_score=excluded.fit_score,fit_level=excluded.fit_level,
                           duplicate_state=excluded.duplicate_state,exclusion_reason=excluded.exclusion_reason,
                           detail_status=excluded.detail_status,candidate_id=excluded.candidate_id,
@@ -1990,8 +2011,11 @@ class RecruitingCapabilityRuntime:
                           updated_at=datetime('now','localtime')
                         """,
                         (
-                            recall_id, run_id, workflow_id or None, job_id, query_cell_id,
-                            normalized_channel, source_id, source_query,
+                            recall_id, run_id, workflow_id or None, job_id, strategy_hash,
+                            strategy_artifact_id or None, strategy_revision, query_plan_hash,
+                            query_cell_id, json.dumps(query_family_ids, ensure_ascii=False),
+                            json.dumps(query_provenance, ensure_ascii=False), normalized_channel,
+                            source_id, source_query,
                             str(raw.get("resume_url") or raw.get("source_url") or raw.get("url") or ""),
                             page_number, position_index, identity_key, name, company, title, score,
                             str(raw.get("fit_level") or "") or None, state, exclusion_reason,
@@ -2256,6 +2280,8 @@ class RecruitingCapabilityRuntime:
 
     def _persist_sourcing_attributions(
         self, applied: dict[str, Any], strategy: dict[str, Any], workflow_id: str, client: str, job: str,
+        *, run_id: str = "", query_plan: dict[str, Any] | None = None,
+        strategy_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         staged = applied.get("staged") if isinstance(applied.get("staged"), dict) else {}
         accepted = staged.get("accepted") if isinstance(staged.get("accepted"), list) else []
@@ -2269,7 +2295,13 @@ class RecruitingCapabilityRuntime:
                 query = " ".join(str(item.get("query") or "").split())
                 if query:
                     query_meta[(str(channel), query)] = item
-        strategy_hash = hashlib.sha256(json.dumps(strategy, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() if strategy else ""
+        query_plan = query_plan if isinstance(query_plan, dict) else {}
+        strategy_snapshot = strategy_snapshot if isinstance(strategy_snapshot, dict) else {}
+        approved_strategy_hash = str(strategy_snapshot.get("strategy_hash") or "")
+        strategy_hash = approved_strategy_hash or (
+            hashlib.sha256(json.dumps(strategy, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            if strategy else ""
+        )
         strategy_model = str((strategy.get("generation") or {}).get("model") or "") if isinstance(strategy.get("generation"), dict) else ""
         stored = 0
         channel_new: dict[str, int] = {}
@@ -2288,6 +2320,25 @@ class RecruitingCapabilityRuntime:
                 channel = str(item.get("channel") or item.get("source") or "unknown").lower()
                 query = " ".join(str(item.get("source_query") or "").split()) or "未记录关键词"
                 meta = query_meta.get((channel, query), {})
+                recall = conn.execute(
+                    """
+                    SELECT query_cell_id,query_family_ids_json,query_provenance_json
+                    FROM agent_candidate_recalls
+                    WHERE run_id=? AND job_candidate_id=? AND channel=? AND source_query=?
+                    ORDER BY id LIMIT 1
+                    """,
+                    (run_id, job_candidate_id, channel, query),
+                ).fetchone() if run_id else None
+                provenance = _loads(recall["query_provenance_json"], []) if recall else []
+                primary = provenance[0] if provenance and isinstance(provenance[0], dict) else {}
+                source_round = str(
+                    meta.get("round") or primary.get("tier") or primary.get("group")
+                    or primary.get("kind") or ""
+                )
+                source_purpose = str(
+                    meta.get("purpose") or primary.get("targets") or primary.get("path")
+                    or primary.get("company") or ""
+                )
                 conn.execute(
                     """
                     INSERT INTO agent_sourcing_attributions
@@ -2305,7 +2356,7 @@ class RecruitingCapabilityRuntime:
                     (
                         job_candidate_id, int(receipt.get("candidate_id") or 0) or None,
                         self._job_id(client, job), workflow_id or None, strategy_hash or None, strategy_model or None,
-                        channel, query, str(meta.get("round") or ""), str(meta.get("purpose") or ""),
+                        channel, query, source_round, source_purpose,
                     ),
                 )
                 stored += 1

@@ -996,9 +996,23 @@ class WorkflowEngineTest(AgentDbCase):
             "generation": {"model": "fake-search-model"},
             "channels": {
                 "liepin": [
-                    {"round": "core", "query": "精密机械 运动台", "purpose": "核心能力"}
+                    {"query": "精密机械 运动台"}
                 ]
             },
+        }
+        query_plan = {
+            "plan_hash": "approved-query-plan-hash",
+            "cells": [{
+                "cell_id": "qpc-lineage-test", "channel": "liepin", "query": "精密机械 运动台",
+                "query_family_ids": ["company_keyword:华兴源创"],
+                "provenance": [{
+                    "kind": "company_keyword", "company": "华兴源创", "tier": "T1", "path": "核心同层",
+                }],
+            }],
+        }
+        snapshot = {
+            "strategy_hash": "approved-strategy-hash", "strategy_artifact_id": "artifact-lineage-3",
+            "strategy_revision": 3, "query_plan_hash": query_plan["plan_hash"],
         }
         applied = {
             "staged": {
@@ -1012,8 +1026,19 @@ class WorkflowEngineTest(AgentDbCase):
                 ]
             },
         }
+        self.service.capability_runtime._persist_candidate_recalls(
+            run_id="run-lineage-test", workflow_id="workflow_test_attribution",
+            client="长越科技", job="机械高级工程师", query_plan=query_plan,
+            strategy_snapshot=snapshot,
+            raw_candidates={"liepin": [{
+                "name": "测试人选", "channel": "liepin", "source_query": "精密机械 运动台",
+                "res_id_encode": "lineage-source-1",
+            }]},
+            applied=applied, min_score=0,
+        )
         result = self.service.capability_runtime._persist_sourcing_attributions(
-            applied, strategy, "workflow_test_attribution", "长越科技", "机械高级工程师"
+            applied, strategy, "workflow_test_attribution", "长越科技", "机械高级工程师",
+            run_id="run-lineage-test", query_plan=query_plan, strategy_snapshot=snapshot,
         )
         assert result["stored"] == 1
         conn = self.service._connect()
@@ -1022,7 +1047,9 @@ class WorkflowEngineTest(AgentDbCase):
         ).fetchone()
         conn.close()
         assert row["source_query"] == "精密机械 运动台"
-        assert row["source_round"] == "core"
+        assert row["source_round"] == "T1"
+        assert row["source_purpose"] == "核心同层"
+        assert row["strategy_hash"] == "approved-strategy-hash"
         assert row["strategy_model"] == "fake-search-model"
 
     def test_sourcing_attribution_pairs_same_name_receipts_by_intake_order(self) -> None:
