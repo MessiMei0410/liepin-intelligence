@@ -33,7 +33,7 @@ from .conversation_state import (
 
 # Cross-module references (split from copilot_handler.py)
 from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction
-from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_recap_amounts, _workflow_strategy_question
+from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_batch_stop, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
 from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer
 
 
@@ -961,20 +961,35 @@ def _copilot_impl(
         raw_constraint_changes=intent_understanding.get("raw_constraint_changes"),
     )
     if _is_candidate_list_query(message):
-        # 候选池过滤、比较和名单查询是只读动作。保留解析出的动作/约束，
-        # 但不得伪装成待创建计划或进入写入确认链路。
-        turn_decision.update({
-            "effect": "answer",
-            "authorization": {
-                "mode": "read_only",
-                "workflow_id": None,
-                "version": None,
-                "plan_hash": None,
-                "evidence": list(intent_understanding.get("action_evidence") or []),
-            },
-            "blocked_reason": "",
-            "safe_for_action": True,
-        })
+        if _requests_batch_stop(message):
+            # 分级过滤 + 明确停止措辞：这是内部写库动作，而不是只读名单查询。
+            turn_decision.update({
+                "effect": "execute",
+                "authorization": {
+                    "mode": "explicit_execute",
+                    "workflow_id": None,
+                    "version": None,
+                    "plan_hash": None,
+                    "evidence": list(intent_understanding.get("action_evidence") or [message]),
+                },
+                "blocked_reason": "",
+                "safe_for_action": True,
+            })
+        else:
+            # 候选池过滤、比较和名单查询是只读动作。保留解析出的动作/约束，
+            # 但不得伪装成待创建计划或进入写入确认链路。
+            turn_decision.update({
+                "effect": "answer",
+                "authorization": {
+                    "mode": "read_only",
+                    "workflow_id": None,
+                    "version": None,
+                    "plan_hash": None,
+                    "evidence": list(intent_understanding.get("action_evidence") or []),
+                },
+                "blocked_reason": "",
+                "safe_for_action": True,
+            })
     if clarification_bound:
         turn_decision["observations"] = [
             *(turn_decision.get("observations") or []),
@@ -1425,6 +1440,7 @@ def _copilot_impl(
     # 名单拦截永远执行不到（kimi review #5）。
     candidate_list_answer = ""
     candidate_list_card: dict[str, Any] = {}
+    batch_stop_receipt: dict[str, Any] = {}
     if (
         forced_answer is None
         and not suppress_goal_intent
@@ -1460,46 +1476,96 @@ def _copilot_impl(
                     _conn = _sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
                     _conn.row_factory = _sqlite3.Row
                     try:
-                        _jrow = _conn.execute("SELECT c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?", (list_job_id,)).fetchone()
+                        _jrow = _conn.execute(
+                            "SELECT c.name AS client, j.title AS title FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+                            (list_job_id,),
+                        ).fetchone()
                     finally:
                         _conn.close()
                     _client_name = str(_jrow["client"]) if _jrow is not None else ""
-                    from .candidate_pool_filter import filter_job_candidates, format_grade_list
-                    _filter_result = filter_job_candidates(self.db_path, list_job_id, client=_client_name)
-                    candidate_list_answer = format_grade_list(_filter_result)
-                    # 分级名单同样生成结构化 action_card（前端渲染可点击名单弹窗）
-                    _grade_groups: list[dict[str, Any]] = []
-                    _grade_order = ("A-核心", "A-强", "B-中", "C-弱", "D-无证据", "D-无画像", "X-排除", "禁挖")
-                    for _g in _grade_order:
-                        _items = [c for c in (_filter_result.get("candidates") or []) if c.get("grade") == _g]
-                        if _items:
-                            _grade_groups.append({
-                                "key": _g,
-                                "label": _g,
-                                "priority": _g.startswith("A"),
-                                "candidates": [
-                                    {
-                                        "id": int(c.get("id") or 0),
-                                        "name": c.get("name") or "",
-                                        "company": c.get("company") or "",
-                                        "title": c.get("title") or "",
-                                        "stage": c.get("stage") or "",
-                                        "flow_bucket": c.get("stage") or "",
+                    _job_title = str(_jrow["title"]) if _jrow is not None else ""
+                    from .candidate_pool_filter import filter_job_candidates, format_grade_list, job_filter_domain
+                    _filter_domain = job_filter_domain(_job_title)
+                    if _filter_domain not in {"mechanical", "software"}:
+                        # 未支持的职能域（电气、失效分析等）只返回普通名单，
+                        # 绝不自动批量写库，避免误停整池。
+                        candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
+                    else:
+                        _filter_result = filter_job_candidates(
+                            self.db_path, list_job_id, client=_client_name, domain=_filter_domain
+                        )
+                        candidate_list_answer = format_grade_list(_filter_result)
+                        # 分级名单同样生成结构化 action_card（前端渲染可点击名单弹窗）
+                        _grade_groups: list[dict[str, Any]] = []
+                        _grade_order = (
+                            "A-核心", "A-强", "B-中", "C-弱",
+                            "D-无证据", "D-无画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖",
+                        )
+                        for _g in _grade_order:
+                            _items = [c for c in (_filter_result.get("candidates") or []) if c.get("grade") == _g]
+                            if _items:
+                                _grade_groups.append({
+                                    "key": _g,
+                                    "label": _g,
+                                    "priority": _g.startswith("A"),
+                                    "candidates": [
+                                        {
+                                            "id": int(c.get("id") or 0),
+                                            "name": c.get("name") or "",
+                                            "company": c.get("company") or "",
+                                            "title": c.get("title") or "",
+                                            "stage": c.get("stage") or "",
+                                            "flow_bucket": c.get("stage") or "",
+                                        }
+                                        for c in _items[:200]
+                                    ],
+                                })
+                        candidate_list_card = {
+                            "type": "candidate_list",
+                            "title": f"{_client_name}｜{_job_title}（岗位 {list_job_id}）分级过滤名单",
+                            "context": {"type": "job", "id": list_job_id},
+                            "summary": {
+                                "total": _filter_result.get("total") or 0,
+                                "active": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade", "").startswith(("A", "B", "C"))]),
+                                "stopped": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("X-排除", "禁挖", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符")]),
+                            },
+                            "groups": _grade_groups,
+                        }
+                        if _requests_batch_stop(message):
+                            # 用户明确要求“不匹配的就停止推进”：直接按分级结果批量落库，
+                            # 并附上执行回执。写库失败时降级为只读名单，不让用户空手。
+                            try:
+                                from .batch_stop import apply_batch_stop, batch_stop_summary, build_batch_stop_items
+
+                                _stop_items = build_batch_stop_items(_filter_result)
+                                if _stop_items:
+                                    _stop_result = apply_batch_stop(
+                                        self.db_path,
+                                        list_job_id,
+                                        _stop_items,
+                                        actor="copilot",
+                                        source="copilot_batch_stop",
+                                    )
+                                    _stop_summary = batch_stop_summary(_stop_items)
+                                    _remaining = int(_filter_result.get("total") or 0) - int(_stop_result.get("applied") or 0)
+                                    candidate_list_answer = format_grade_list(_filter_result) + (
+                                        f"\n\n已执行批量停止推进：共 {_stop_result.get('applied')} 人"
+                                        f"（{_stop_summary}）。当前岗位剩余可推进约 {_remaining} 人。"
+                                    )
+                                    batch_stop_receipt = {
+                                        "version": "batch_stop_receipt_v1",
+                                        "state": "已完成",
+                                        "job_id": list_job_id,
+                                        "applied": int(_stop_result.get("applied") or 0),
+                                        "skipped": int(_stop_result.get("skipped") or 0),
+                                        "events": int(_stop_result.get("events") or 0),
+                                        "summary": _stop_summary,
                                     }
-                                    for c in _items[:200]
-                                ],
-                            })
-                    candidate_list_card = {
-                        "type": "candidate_list",
-                        "title": f"{_client_name}｜机械高级工程师（岗位 {list_job_id}）分级过滤名单",
-                        "context": {"type": "job", "id": list_job_id},
-                        "summary": {
-                            "total": _filter_result.get("total") or 0,
-                            "active": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade", "").startswith(("A", "B", "C"))]),
-                            "stopped": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("X-排除", "禁挖", "D-无证据", "D-无画像")]),
-                        },
-                        "groups": _grade_groups,
-                    }
+                            except Exception as _stop_exc:
+                                import logging
+                                logging.getLogger("copilot.batch_stop").exception(
+                                    "batch stop failed for job %s: %s", list_job_id, _stop_exc
+                                )
                     if candidate_list_answer:
                         forced_answer = candidate_list_answer
                 except Exception as _exc:
@@ -1539,6 +1605,29 @@ def _copilot_impl(
             composition_answer = _build_candidate_list_composition_answer(self.db_path, comp_job_id, message)
             if composition_answer:
                 forced_answer = composition_answer
+    # 公司知识库（CKB）直答：问“XX公司是做什么的/公司背景/XX公司情况”时返回画像摘要；
+    # CKB 无画像时 forced_answer 保持 None，走既有 LLM 路径（行为不变）。
+    if forced_answer is None:
+        company_query_name = _company_profile_query_name(message)
+        if company_query_name:
+            company_answer = _format_company_profile_answer(company_query_name)
+            if company_answer:
+                forced_answer = company_answer
+    # 人才情报直答：薪酬对标（“运动控制薪酬水平怎么样”）与人才地图
+    # （“薄膜沉积的人才都在哪些公司”）；未命中/库不可用/无样本时
+    # forced_answer 保持 None，走既有 LLM 路径（行为不变）。
+    if forced_answer is None:
+        salary_kw = _salary_query(message)
+        if salary_kw:
+            salary_answer = _format_salary_benchmark_answer(salary_kw)
+            if salary_answer:
+                forced_answer = salary_answer
+    if forced_answer is None:
+        talent_map_kw = _talent_map_query(message)
+        if talent_map_kw:
+            talent_map_answer = _format_talent_map_answer(talent_map_kw)
+            if talent_map_answer:
+                forced_answer = talent_map_answer
     action_context_rule = action_context_prompts.get(semantic_action)
     if (
         forced_answer is None
@@ -2415,6 +2504,18 @@ def _copilot_impl(
         decision=turn_decision,
         selected=selected,
     )
+    if batch_stop_receipt:
+        execution_receipt = {
+            "version": "execution_receipt_v1",
+            "state": "已完成",
+            "summary": f"批量停止推进 {batch_stop_receipt.get('applied')} 人（{batch_stop_receipt.get('summary')}）",
+            "succeeded": int(batch_stop_receipt.get("applied") or 0),
+            "skipped": int(batch_stop_receipt.get("skipped") or 0),
+            "failed": 0,
+            "verified": True,
+            "scope": {"type": "job", "id": int(batch_stop_receipt.get("job_id") or 0)},
+            "next_step": "查看岗位候选池最新状态",
+        }
     assistant_structured = {
         "references": references,
         "suggested_actions": suggested_actions,
@@ -2447,6 +2548,7 @@ def _copilot_impl(
         "turn_decision": turn_decision,
         "understanding_card": understanding_card,
         "execution_receipt": execution_receipt,
+        "batch_stop_receipt": batch_stop_receipt or None,
         "tool_calls": model_tool_calls,
         "model_participation": {
             "mode": answer_source,
@@ -2613,6 +2715,7 @@ def _copilot_impl(
         "suggested_actions": suggested_actions,
         "understanding_card": understanding_card,
         "execution_receipt": execution_receipt,
+        "batch_stop_receipt": batch_stop_receipt or None,
         "skill_runs": skill_runs,
         "model_participation": assistant_structured["model_participation"],
         "goal_id": goal_workflow["goal"]["goal_id"] if goal_workflow else None,

@@ -5,6 +5,7 @@ import { AgentWorkspace } from '../agent/AgentWorkspace'
 import type { Workbench } from '../api'
 import type { AgentContext, AgentReference } from '../agent/transport'
 import { candidateDetail, mockResponse, plannedWorkflow } from './helpers'
+import { FULL_OBJECT_CLOSED_EVENT } from '../agent/navigation'
 
 const workbench: Workbench = {
   ok: true,
@@ -28,12 +29,16 @@ const streamResponse = (payload: string) => ({
   },
 }) as unknown as Response
 
-const renderWorkspace = (context: AgentContext, options: { onOpenFullObject?: (reference: AgentReference) => void } = {}) => render(<AgentWorkspace dashboard={{}} workbench={workbench} templates={[]} context={context}
+const renderWorkspace = (context: AgentContext, options: { onOpenFullObject?: (reference: AgentReference) => void } = {}) => render(<AgentWorkspace workbench={workbench} templates={[]} context={context}
   onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
   onWorkbenchAction={() => {}} onOpenFullObject={options.onOpenFullObject || (() => {})} />)
 
 describe('Agent workspace', () => {
-  beforeEach(() => localStorage.clear())
+  beforeEach(() => {
+    localStorage.clear()
+    // 任务栏折叠偏好：测试默认展开，任务栏交互断言不受折叠影响。
+    localStorage.setItem('asaTaskRailCollapsed', '0')
+  })
   it('空任务显示今日摘要并可新建任务', async () => {
     const scrollSpy = vi.fn()
     const originalScrollIntoView = window.HTMLElement.prototype.scrollIntoView
@@ -43,16 +48,18 @@ describe('Agent workspace', () => {
         if (String(input).includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
         return mockResponse({})
       }))
-      render(<AgentWorkspace dashboard={{ counts: { active_jobs: 4, candidates: 18 } }} workbench={workbench} templates={[]}
+      render(<AgentWorkspace workbench={workbench} templates={[]}
         context={{ type: 'page', page: 'agent' }} onOpenAnalysis={() => {}} onRunTemplate={() => {}}
         onManageTemplate={() => {}} onCreateTemplate={() => {}}
         onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
       expect(await screen.findByRole('heading', { name: '今天从哪里开始？' })).toBeInTheDocument()
-      expect(screen.getByRole('region', { name: '今日概况' })).toHaveTextContent('3')
+      // 空 lane（待客户/风险）不占位渲染；有数据的 lane 显示真实计数。
+      expect(screen.getByRole('region', { name: '待判断' })).toHaveTextContent('共 3 项')
+      expect(screen.queryByRole('region', { name: '待客户' })).not.toBeInTheDocument()
       expect(scrollSpy).not.toHaveBeenCalled()
       fireEvent.click(screen.getByRole('button', { name: '新任务' }))
-      expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...')).toHaveValue('')
+      expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）')).toHaveValue('')
     } finally {
       window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView
     }
@@ -176,7 +183,7 @@ describe('Agent workspace', () => {
       })
       return mockResponse({})
     }))
-    render(<AgentWorkspace dashboard={{ counts: { active_jobs: 1 } }} jobs={[{ id: 9, client: '示例客户', title: '电源专家', candidate_count: 0, active_candidate_count: 0 }]}
+    render(<AgentWorkspace jobs={[{ id: 9, client: '示例客户', title: '电源专家', candidate_count: 0, active_candidate_count: 0 }]}
       workbench={workbench} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
@@ -198,7 +205,7 @@ describe('Agent workspace', () => {
         primary_action: { type: 'open_candidate', id: String(index + 1), label: '打开人选' },
       })),
     }
-    render(<AgentWorkspace dashboard={{}} workbench={manyPending} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={manyPending} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
@@ -208,7 +215,7 @@ describe('Agent workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: '再显示 20 项' }))
     expect(screen.getByText('待办 24')).toBeInTheDocument()
     expect(screen.queryByText('待办 25')).not.toBeInTheDocument()
-    expect(screen.getByText('显示 24 / 已加载 45 / 共 45 项')).toBeInTheDocument()
+    expect(screen.getByText('共 45 项')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '再显示 20 项' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()
   })
@@ -218,14 +225,13 @@ describe('Agent workspace', () => {
     const loadingWorkbench: Workbench = {
       ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [],
     }
-    render(<AgentWorkspace dashboard={{}} workbench={loadingWorkbench} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={loadingWorkbench} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
     expect(await screen.findByRole('heading', { name: '今天从哪里开始？' })).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '今日概况' })).toHaveTextContent('…')
-    expect(screen.getByRole('region', { name: '今日概况' })).not.toHaveTextContent('0')
-    expect(screen.getAllByText('正在加载…').length).toBeGreaterThan(0)
+    // 加载态：全部 5 个 lane 骨架展示，不出现伪空态文案。
+    expect(screen.getAllByText('正在加载…').length).toBe(5)
     expect(screen.queryByText('当前没有待判断事项')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /查看全部/ })).not.toBeInTheDocument()
   })
@@ -242,20 +248,20 @@ describe('Agent workspace', () => {
         primary_action: { type: 'open_candidate', id: String(index + 1), label: '打开人选' },
       })),
     }
-    render(<AgentWorkspace dashboard={{}} workbench={truncatedWorkbench} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={truncatedWorkbench} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
-    // 服务端只返回 5/6 项待办：头部必须标明“已加载”，不能假装 6 项都在列表里。
-    expect(await screen.findByText('显示 4 / 已加载 5 / 共 6 项')).toBeInTheDocument()
+    // 服务端只返回 5/6 项待办：计数以 summary 真实总数为准，分页承接剩余窗口。
+    expect(await screen.findByText('共 6 项')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '再显示 1 项' }))
     expect(screen.getByText('待办 5')).toBeInTheDocument()
     expect(screen.queryByText('待办 6')).not.toBeInTheDocument()
-    expect(screen.getByText('显示 5 / 已加载 5 / 共 6 项')).toBeInTheDocument()
+    expect(screen.getByText('共 6 项')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()
   })
 
-  it('Agent 首页按五个分组展示工作台，空分组展示真实空态', async () => {
+  it('Agent 首页按分组展示工作台，空分组自动隐藏', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true, sessions: [] })))
     const onAction = vi.fn()
     const fiveLane: Workbench = {
@@ -268,15 +274,16 @@ describe('Agent workspace', () => {
         { item_key: 'analysis:a1', source_revision: 'r4', kind: 'analysis', lane: 'delivered', priority_score: 0, title: '经营概览已生成', subtitle: '经营概览', status_label: '已交付', reason: '', source_label: '分析', inbox_state: 'unread', primary_action: { type: 'open_analysis', id: 'a1', label: '查看分析' } },
       ],
     }
-    render(<AgentWorkspace dashboard={{}} workbench={fiveLane} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={fiveLane} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={onAction} onOpenFullObject={() => {}} />)
 
-    for (const label of ['待判断', '运行中', '待客户', '风险/逾期', '最近交付']) {
+    for (const label of ['待判断', '运行中', '待客户', '最近交付']) {
       expect(await screen.findByRole('region', { name: label })).toBeInTheDocument()
     }
     expect(screen.getByRole('region', { name: '待判断' })).toHaveTextContent('R3 待审批')
-    expect(screen.getByRole('region', { name: '风险/逾期' })).toHaveTextContent('当前没有风险或逾期事项')
+    // 风险/逾期无数据：空分组不占位渲染。
+    expect(screen.queryByRole('region', { name: '风险/逾期' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByText('王先生'))
     expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ item_key: 'candidate:9' }))
   })
@@ -291,14 +298,13 @@ describe('Agent workspace', () => {
       })
       return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 2, updated_at: '2026-08-03' }] })
     }))
-    render(<AgentWorkspace dashboard={{}} workbench={workbench} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={workbench} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
     expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
     expect(screen.getByRole('status', { name: '当前任务焦点' })).toHaveTextContent('士兰微 / 电源专家')
     expect(screen.getByText('会话 ID：task-1')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '复制会话 ID' })).toBeInTheDocument()
   })
 
   it('右键任务卡弹出菜单并复制对应会话 ID', async () => {
@@ -491,6 +497,76 @@ describe('Agent workspace', () => {
     expect(screen.getByLabelText('搜索任务')).toBeInTheDocument()
   })
 
+  it('任务栏默认折叠（无偏好），展开后偏好被记住', async () => {
+    localStorage.removeItem('asaTaskRailCollapsed')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/copilot/sessions')
+      ? mockResponse({ ok: true, sessions: [] })
+      : mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    // 无偏好 → 默认折叠：窄条展开按钮可见，任务列表/搜索不可见。
+    expect(await screen.findByRole('button', { name: '显示任务栏' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('搜索任务')).not.toBeInTheDocument()
+    // 展开后写入偏好，下次进入保持展开。
+    fireEvent.click(screen.getByRole('button', { name: '显示任务栏' }))
+    expect(screen.getByLabelText('搜索任务')).toBeInTheDocument()
+    expect(localStorage.getItem('asaTaskRailCollapsed')).toBe('0')
+  })
+
+  it('空态快捷指令一键发起对应指令', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-quick"}\n\nevent: text\ndata: {"content":"好的，开始过滤"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-quick","answer":"好的，开始过滤"}\n\n',
+      )
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.click(await screen.findByRole('button', { name: /过滤名单/ }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toBe(true))
+    const streamCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/copilot/stream'))
+    const body = JSON.parse(String(streamCall?.[1]?.body || '{}'))
+    expect(body.message).toBe('过滤候选人名单')
+    expect(await screen.findByText('好的，开始过滤')).toBeInTheDocument()
+  })
+
+  it('折叠任务栏显示任务数量角标', async () => {
+    localStorage.removeItem('asaTaskRailCollapsed')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/copilot/sessions')
+      ? mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 2, updated_at: '2026-08-03' }] })
+      : mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByLabelText('1 个任务')).toBeInTheDocument()
+  })
+
+  it('工作台板块可折叠收起，计数保留', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true, sessions: [] })))
+    const singlePending: Workbench = {
+      ...workbench,
+      summary: { pending: 1, running: 0, delivered: 0, total: 1, decision: 1, waiting_client: 0, risk: 0 },
+      items: [{
+        item_key: 'approval:a1', source_revision: 'r1', kind: 'approval', lane: 'decision', priority_score: 1,
+        title: '批准多渠道寻访', subtitle: '电源专家寻访', status_label: 'R3 待审批', reason: '', source_label: '审批', inbox_state: 'unread',
+        primary_action: { type: 'open_workflow', id: 'wf-1', label: '查看并审批' },
+      }],
+    }
+    render(<AgentWorkspace workbench={singlePending} templates={[]} context={{ type: 'page', page: 'agent' }}
+      onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
+      onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
+
+    expect(await screen.findByRole('button', { name: /批准多渠道寻访/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '收起待判断' }))
+    expect(screen.queryByRole('button', { name: /批准多渠道寻访/ })).not.toBeInTheDocument()
+    // 折叠后计数仍在。
+    expect(screen.getByRole('region', { name: '待判断' })).toHaveTextContent('共 1 项')
+    fireEvent.click(screen.getByRole('button', { name: '展开待判断' }))
+    expect(screen.getByRole('button', { name: /批准多渠道寻访/ })).toBeInTheDocument()
+  })
+
   it('支持服务端搜索、内联重命名和二次确认归档任务', async () => {
     const allSessions = [
       { session_id: 'task-1', title: '士兰微寻访', preview: '继续找人', message_count: 2 },
@@ -506,7 +582,7 @@ describe('Agent workspace', () => {
       return mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null })
     })
     vi.stubGlobal('fetch', fetchMock)
-    render(<AgentWorkspace dashboard={{}} workbench={workbench} templates={[]} context={{ type: 'page', page: 'agent' }}
+    render(<AgentWorkspace workbench={workbench} templates={[]} context={{ type: 'page', page: 'agent' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
@@ -589,7 +665,7 @@ describe('Agent workspace', () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
       ? mockResponse({ ok: true, sessions: [] })
       : mockResponse({ ok: true, session_id: 'task-1', title: '任务', archived: false, business_focus: null })))
-    render(<AgentWorkspace dashboard={{}} workbench={workbench} templates={[]} context={{ type: 'job', id: 154, client: '士兰微', job: '电源专家' }}
+    render(<AgentWorkspace workbench={workbench} templates={[]} context={{ type: 'job', id: 154, client: '士兰微', job: '电源专家' }}
       onOpenAnalysis={() => {}} onRunTemplate={() => {}} onManageTemplate={() => {}} onCreateTemplate={() => {}}
       onWorkbenchAction={() => {}} onOpenFullObject={() => {}} />)
 
@@ -670,7 +746,7 @@ describe('Agent workspace', () => {
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(await screen.findByText('模型调用失败')).toBeInTheDocument()
     expect(screen.queryByText('迟到答案')).not.toBeInTheDocument()
@@ -688,7 +764,7 @@ describe('Agent workspace', () => {
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(await screen.findByText('Agent 返回的会话与本轮不一致，已放弃写入')).toBeInTheDocument()
     expect(localStorage.getItem('asaAgentSessionId')).toBe('task-1')
@@ -705,7 +781,7 @@ describe('Agent workspace', () => {
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(await screen.findByText('任务已被归档')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
@@ -737,7 +813,7 @@ describe('Agent workspace', () => {
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     fireEvent.click(await screen.findByRole('button', { name: '停止生成' }))
     expect(await screen.findByText('已停止生成')).toBeInTheDocument()
@@ -755,11 +831,11 @@ describe('Agent workspace', () => {
     renderWorkspace({ type: 'page', page: 'agent' })
 
     expect(await screen.findByText('恢复任务')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...')).toBeDisabled()
+    expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）')).toBeDisabled()
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
 
     resolveRestore(mockResponse({ ok: true, session_id: 'task-1', messages: [], business_focus: null }))
-    await waitFor(() => expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...')).toBeEnabled())
+    await waitFor(() => expect(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）')).toBeEnabled())
   })
 
   it('重命名提交进行中时忽略回车触发的重复提交', async () => {
@@ -857,7 +933,7 @@ describe('Agent workspace', () => {
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标...'), { target: { value: '推进一下' } })
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(await screen.findByText('正在处理：梳理岗位需求')).toBeInTheDocument()
     expect(screen.getByRole('status', { name: '正在处理：梳理岗位需求' })).toHaveClass('agent-thinking')
@@ -957,6 +1033,44 @@ describe('Agent workspace', () => {
     })
   })
 })
+
+  it('名单点人选打开详情后，关闭详情自动恢复名单浮窗', { timeout: 30000 }, async () => {
+    localStorage.clear() // 避免上一个用例留下的 asaAgentSessionId 触发旧任务恢复
+    const listCard = {
+      type: 'candidate_list',
+      title: '岗位 137 候选名单',
+      context: { type: 'job', id: 137 },
+      summary: { total: 1, active: 1 },
+      groups: [{ key: 'active', label: '其余可推进候选', candidates: [{ id: 1203, name: '张雯', company: 'ASM中国', title: '高级机械设计工程师', stage: '已触达' }] }],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        `event: context\ndata: {"session_id":"task-list"}\n\nevent: done\ndata: ${JSON.stringify({ ok: true, session_id: 'task-list', answer: '名单如下', action_card: listCard })}\n\n`,
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onOpenFullObject = vi.fn()
+    renderWorkspace({ type: 'page', page: 'agent' }, { onOpenFullObject })
+
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '给我名单' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toBe(true), { timeout: 5000 })
+    await waitFor(() => expect(screen.queryByText('名单如下')).toBeTruthy(), { timeout: 5000 })
+    // 名单自动弹出
+    fireEvent.click(await screen.findByText('张雯', {}, { timeout: 8000 }))
+    // 名单关闭并打开详情
+    await waitFor(() => expect(screen.queryByText('张雯')).not.toBeInTheDocument())
+    expect(onOpenFullObject).toHaveBeenCalledWith(expect.objectContaining({ type: 'candidate', id: 1203 }))
+    // 详情关闭后名单自动恢复
+    fireEvent(window, new CustomEvent(FULL_OBJECT_CLOSED_EVENT))
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+    // 再点一次关闭按钮，名单正常关闭且不影响后续恢复逻辑
+    fireEvent.click(screen.getByLabelText('关闭名单'))
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+  })
 
 describe('Agent object embed', () => {
   it('展开候选人并通过预检后提交操作', async () => {
@@ -1113,4 +1227,5 @@ describe('Agent object embed', () => {
     expect(await screen.findByText('对象 ID 无效，无法加载详情')).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
 })

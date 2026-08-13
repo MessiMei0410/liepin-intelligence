@@ -43,6 +43,7 @@ _POOL_SOURCES = {
     "legacy_profile_suggestions",
     "llm_inferred",
     "consultant_calibrated",
+    "company_kb",
 }
 _CONFIDENCES = {"high", "medium", "low"}
 _CONSTRAINT_TYPES = {"hard_requirement", "preference", "conditional_acceptance", "exclusion", "target_count", "consultant_wording"}

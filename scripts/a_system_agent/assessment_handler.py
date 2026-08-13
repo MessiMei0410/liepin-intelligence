@@ -137,11 +137,84 @@ def get_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, 
         if int(relation["job_id"] or 0) != int(job_id):
             raise LookupError(f"人选 {candidate_id} 不属于岗位 {job_id}")
         payload = candidate_assessment.get_assessment(conn, int(candidate_id), int(job_id))
+        # 匹配点分析：附带当前有效的人岗匹配评估（agent_candidate_assessments，只读）。
+        # 无 Agent 评估时回退候选人匹配初评（candidate_intelligence：强/弱匹配点 + 评分等级，
+        # 覆盖几乎全部人选）；两者皆无 fit=None，前端不渲染该区块；不伪造、不触发新生成。
+        fit = None
+        fit_row = conn.execute(
+            """
+            SELECT a.* FROM agent_candidate_assessments a
+            JOIN agent_runs r ON r.run_id=a.run_id
+            WHERE a.job_candidate_id=? AND a.is_current=1 AND r.status='completed'
+            ORDER BY a.id DESC LIMIT 1
+            """,
+            (int(candidate_id),),
+        ).fetchone()
+        if fit_row is not None:
+            fit = self._assessment_payload(fit_row)
+            fit["source"] = "agent_assessment"
+        else:
+            intel_row = conn.execute(
+                """
+                SELECT ci.* FROM job_candidates jc
+                JOIN candidate_intelligence ci ON ci.candidate_id = jc.source_candidate_id
+                WHERE jc.id=?
+                ORDER BY CASE WHEN ci.client=jc.raw_client AND ci.position=jc.raw_position THEN 0 ELSE 1 END,
+                         datetime(COALESCE(ci.last_evaluated_at, ci.updated_at)) DESC, ci.id DESC LIMIT 1
+                """,
+                (int(candidate_id),),
+            ).fetchone()
+            if intel_row is not None:
+                intel = dict(intel_row)
+                fit = {
+                    "source": "candidate_intelligence",
+                    "fit_score": intel.get("fit_score"),
+                    "fit_level": intel.get("fit_level"),
+                    "recommendation": intel.get("recommendation_decision"),
+                    "recommendation_label": intel.get("recommendation_decision"),
+                    "criteria": {},
+                    "strengths": _loads(intel.get("strong_matches_json"), []),
+                    "gaps": _loads(intel.get("weak_matches_json"), []),
+                    "risks": _loads(intel.get("risk_json"), []),
+                    "next_action": intel.get("next_action") or "",
+                    "created_at": intel.get("last_evaluated_at") or intel.get("updated_at"),
+                }
         if payload is None:
+            if fit is not None:
+                # 有匹配评估但无判人评估：照常返回 200（assessment 缺省），前端只渲染匹配点分析。
+                return {"ok": True, "candidate_id": int(candidate_id), "job_id": int(job_id), "fit": fit}
             raise LookupError(f"人选 {candidate_id} 在岗位 {job_id} 下还没有判人评估，请先 POST 生成")
-        return {"ok": True, "candidate_id": int(candidate_id), "job_id": int(job_id), **payload}
+        return {"ok": True, "candidate_id": int(candidate_id), "job_id": int(job_id), "fit": fit, **payload}
     finally:
         conn.close()
+
+
+def refresh_candidate_fit_assessment(self, candidate_id: int, job_id: int) -> dict[str, Any]:
+    """匹配点分析「重新评估匹配」：强制重跑 Agent 人岗匹配评估（同步等待，通常 15-30 秒）。
+
+    404：人选/岗位不存在或不匹配（LookupError）；409：模型输出非法或评估未完成（ValueError）。
+    成功返回最新 fit 块，结构同 get_candidate_assessment 的 fit。
+    """
+    conn = self._connect()
+    try:
+        relation = conn.execute(
+            "SELECT id,job_id FROM job_candidates WHERE id=?", (int(candidate_id),)
+        ).fetchone()
+        if relation is None:
+            raise LookupError(f"人选不存在：{candidate_id}")
+        if int(relation["job_id"] or 0) != int(job_id):
+            raise LookupError(f"人选 {candidate_id} 不属于岗位 {job_id}")
+    finally:
+        conn.close()
+    run = self.submit_assessment(int(candidate_id), force=True, trigger="asa_app_manual", wait=True)
+    if run.get("status") != "completed":
+        raise ValueError(f"匹配评估未完成：{run.get('error') or run.get('status') or '未知原因'}")
+    return {
+        "ok": True,
+        "candidate_id": int(candidate_id),
+        "job_id": int(job_id),
+        "fit": run.get("assessment"),
+    }
 
 
 def update_candidate_assessment_advisor_action(

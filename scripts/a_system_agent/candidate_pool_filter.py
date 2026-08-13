@@ -13,7 +13,8 @@
 - B-中：硬证据≥2
 - C-弱：硬证据 1
 - D-无证据：0
-- X-排除：原职位非机械岗（电气/软件/嵌入式/硬件/测试/销售/市场/投资/采购/质量/IT/专利等）
+- X-排除：原职位/当前职位非机械岗，或管理层级明显超出高级工程师（电气/软件/测试/销售/
+  质量/产品经理/副总/总监/经理/部长/主任/装配/报价等）
 - 禁挖：命中 restricted.banned_companies 的公司一律剔除（source=restricted_client）
 """
 
@@ -42,7 +43,72 @@ EXCL_TITLE = [
     "品质", "质量", "客户", "专利", "IT", "行政", "人力", "运营", "供应链",
     "工艺工程师", "封装设计", "设备工程师", "机器学习", "产品经理", "技术支持",
     "财务", "法务", "售后",
+    # 管理层级/职能明显不匹配，或资历明显超出“高级工程师”层级
+    "副总", "总经理", "总监", "部长", "主任", "装配", "报价", "经理",
+    "manager", "ceo", "director",
 ]
+
+
+# 自动化/设备控制软件岗的硬证据词与排除词。
+SOFTWARE_HARD_KEYS = [
+    "软件", "C++", "C/C++", "C#", "Python", "Java", "嵌入式", "运动控制", "伺服",
+    "EtherCAT", "PLC", "RTOS", "实时", "多线程", "上位机", "算法", "控制", "驱动",
+    "固件", "通信", "总线", "CAN", "Ethernet", "开发", "编程", "自动化", "设备软件",
+    "控制系统", "视觉", "Linux", "Windows", "数据库", "界面", "Qt", "工控",
+]
+SOFTWARE_EXCL_TITLE = [
+    "机械", "结构", "电气", "硬件", "工艺", "质量", "品质", "销售", "市场", "采购",
+    "财务", "法务", "行政", "人力", "售后", "客户", "产品经理", "技术支持", "设备工程师",
+    "测试", "投资", "运营", "供应链", "专利", "机器学习",
+    "副总", "总经理", "总监", "部长", "主任", "经理", "manager", "ceo", "director",
+]
+
+
+def job_filter_domain(job_title: str) -> str | None:
+    """按岗位名判定可自动分级/批量停止的职能域；不支持返回 None。"""
+    title = str(job_title or "")
+    if any(token in title for token in ("软件", "嵌入式", "算法", "C++", "C/C++", "开发", "Python", "Java")):
+        return "software"
+    if any(token in title for token in ("机械", "结构", "精密")):
+        return "mechanical"
+    return None
+
+
+_INTAKE_MISMATCH_TOKENS: dict[str, tuple[str, ...]] = {
+    # 只放最明确的职能不符词；管理层级/资历过高、装配、报价、设备工程师、测试等
+    # 边界情形一律留给人工复核，避免入库阶段误杀。
+    "mechanical": (
+        "电气", "软件", "嵌入式", "硬件", "测试", "销售", "市场", "采购", "质量", "品质",
+        "财务", "法务", "行政", "人力", "售后", "客户", "产品经理", "技术支持",
+        "工艺工程师", "封装设计", "机器学习", "专利", "投资", "运营", "供应链",
+    ),
+    "software": (
+        "机械", "结构", "电气", "硬件", "工艺", "质量", "品质", "销售", "市场", "采购",
+        "财务", "法务", "行政", "人力", "售后", "客户", "产品经理", "技术支持",
+        "专利", "投资", "运营", "供应链",
+    ),
+}
+
+
+def intake_mismatch_verdict(job_title: str, candidate_title: str) -> dict[str, Any] | None:
+    """寻访入库预筛：候选当前职位与岗位职能明确不符时返回停止裁定，否则 None。
+
+    返回裁定时表示应把这条关系直接写成 H5 初筛不通过（方向不符），而不是
+    干净进入待复核。仅做保守的“方向不符”，不做资历/薪资/地点判断。
+    """
+    domain = job_filter_domain(job_title)
+    title = str(candidate_title or "").strip()
+    if not domain or not title:
+        return None
+    hits = [token for token in _INTAKE_MISMATCH_TOKENS.get(domain, ()) if token in title]
+    if not hits:
+        return None
+    return {
+        "stage": "H5 最近寻访/初筛不通过",
+        "flow_bucket": "最近寻访",
+        "stop_reason": "direction_mismatch",
+        "reason": f"寻访入库预筛：方向不符（{'、'.join(hits)}）",
+    }
 
 
 def _exp_years(exp: Any) -> int | None:
@@ -114,22 +180,32 @@ def filter_job_candidates(
     *,
     client: str = "",
     hard_keys: list[str] | None = None,
-    max_candidates: int = 200,
+    domain: str | None = None,
+    max_candidates: int = 2000,
     max_salary_k: int | None = None,
     cities: list[str] | None = None,
 ) -> dict[str, Any]:
-    """按岗位硬证据过滤候选池，返回分级名单。
+    """按岗位职能域的硬证据过滤候选池，返回分级名单。
 
+    domain 为 "mechanical" 或 "software"；缺省时按 jobs.title 自动识别。
     max_salary_k: 期望月薪上限(K)，候选人期望薪资上限超过该值 → D-期望超限。
     cities: 期望城市关键词，命中任一即保留；不命中 → D-城市不符。
     两者默认 None 均不过滤，向后兼容。
     """
-    keys = hard_keys or HARD_KEYS_DEFAULT
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     profiles = _candidate_profiles(db_path)
     banned = _banned_companies(db_path, client) if client else []
     try:
+        if not domain:
+            job_row = conn.execute("SELECT title FROM jobs WHERE id=?", (job_id,)).fetchone()
+            domain = job_filter_domain(str(job_row["title"] or "") if job_row else "")
+        if domain == "software":
+            keys = hard_keys or SOFTWARE_HARD_KEYS
+            excl_tokens = SOFTWARE_EXCL_TITLE
+        else:
+            keys = hard_keys or HARD_KEYS_DEFAULT
+            excl_tokens = EXCL_TITLE
         rows = conn.execute(
             """
             SELECT jc.id, jc.person_id, jc.clean_stage, jc.flow_bucket, jc.source_candidate_id,
@@ -183,10 +259,14 @@ def filter_job_candidates(
                 "reason": f"期望城市 {exp_city} 不在允许列表 [{', '.join(cities)}]",
             })
             continue
-        orig_pos = str(prof.get("position") or "").strip()
-        txt = " ".join([orig_pos, str(prof.get("profile_summary") or ""), co]).lower()
+        cur_title = str(r["current_title"] or "").strip()
+        # 画像 position 字段在部分入库批次里被统一写成目标岗位名（机械岗写“机械高级
+        # 工程师”、软件岗写“自动化软件高级工程师”），既不能用于排除，也不能用于证据。
+        # 排除与证据只信任 people.current_title + 简历摘要 + 当前公司。
+        title_text = cur_title.lower()
+        txt = " ".join([cur_title, str(prof.get("profile_summary") or ""), co]).lower()
         hard_hits = [k for k in keys if k.lower() in txt]
-        excl_title = [k for k in EXCL_TITLE if k in orig_pos]
+        excl_title = [k for k in excl_tokens if k.lower() in title_text]
         exp_n = _exp_years(r["experience"]) or _exp_years(prof.get("seniority"))
         edu = r["education"] or ""
         score = len(hard_hits) * 10
@@ -206,10 +286,13 @@ def filter_job_candidates(
 
         if excl_title:
             grade = "X-排除"
-            reason = f"原职位非机械岗:{'、'.join(excl_title)}"
-        elif prec and (semi or mot) and fea:
+            reason = f"当前/原职位不匹配:{'、'.join(excl_title)}"
+        elif domain == "mechanical" and prec and (semi or mot) and fea:
             grade = "A-核心"
             reason = "精密设备+仿真+半导体/运动部件全占"
+        elif domain == "software" and len(hard_hits) >= 5 and score >= 60:
+            grade = "A-核心"
+            reason = f"软件硬证据{len(hard_hits)}项且学历/经验充分"
         elif len(hard_hits) >= 4 and score >= 50:
             grade = "A-强"
             reason = f"硬证据{len(hard_hits)}项"
@@ -233,14 +316,30 @@ def filter_job_candidates(
 
 
 def format_grade_list(result: dict[str, Any]) -> str:
-    """把过滤结果格式化成可读名单文本。"""
-    lines = [f"## 候选池过滤名单（共 {result['total']} 人）"]
-    for grade in ("A-核心", "A-强", "B-中", "C-弱", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖"):
-        group = [c for c in result["candidates"] if c["grade"] == grade]
+    """把过滤结果格式化成可读名单文本，明确区分“可推进”与“建议停止推进”。"""
+    candidates = list(result.get("candidates") or [])
+    keep_grades = ("A-核心", "A-强", "B-中", "C-弱")
+    stop_grades = ("X-排除", "禁挖", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符")
+    keep_count = sum(1 for c in candidates if c.get("grade") in keep_grades)
+    stop_count = sum(1 for c in candidates if c.get("grade") in stop_grades)
+    lines = [f"## 候选池分级名单（共 {result['total']} 人）"]
+    lines.append(f"可推进 {keep_count} 人；建议停止推进 {stop_count} 人。\n")
+
+    def _grade_block(grade: str, group: list[dict[str, Any]]) -> None:
         if not group:
-            continue
-        lines.append(f"\n### {grade}（{len(group)} 人）")
+            return
+        lines.append(f"### {grade}（{len(group)} 人）")
         for c in group:
             ev = "、".join(c["hard_hits"][:6]) if c["hard_hits"] else c["reason"]
-            lines.append(f"- {c['name']} | {c['company'][:20]} | {c['title'][:16]} | {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}")
+            lines.append(
+                f"- {c['name']} | {c['company'][:20]} | {c['title'][:16]} "
+                f"| {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}"
+            )
+
+    lines.append("## 可推进")
+    for grade in keep_grades:
+        _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
+    lines.append("\n## 建议停止推进")
+    for grade in stop_grades:
+        _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
     return "\n".join(lines)

@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from .config import load_config
 
 
-PROMPT_VERSION = "a-system-candidate-v1"
+PROMPT_VERSION = "a-system-candidate-v2"
 
 ASSESSMENT_SYSTEM_PROMPT = """你是 A-System 候选人判断 Agent。你只负责基于证据判断，不执行任何业务动作。
 
@@ -30,7 +30,8 @@ ASSESSMENT_SYSTEM_PROMPT = """你是 A-System 候选人判断 Agent。你只负�
 2. 只能根据给定证据判断；没有证据时必须标记 unknown。
 3. 不得把模型建议描述为已经推进、已经停止或已经触达。
 4. 每个 met/partial/not_met 判断必须提供简短证据；没有证据就使用 unknown。
-5. 保持岗位硬门槛原文，不自行降低要求。
+5. 保持岗位硬门槛原文要求，不自行降低标准。
+6. criterion 必须是单一可判断的要求，不超过 40 字；岗位门槛原文若是复合长句（含多个分号/顿号并列的要求），拆成多条独立 criterion，每条只写一个要求，禁止把整段原文塞进一条。
 
 只返回 JSON 对象，字段为：
 {

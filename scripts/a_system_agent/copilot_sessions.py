@@ -789,9 +789,9 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "understanding_card": structured.get("understanding_card"),
                     "execution_receipt": structured.get("execution_receipt"),
                     "invalidated": bool(structured.get("invalidated")),
-                    "invalidated_reason": structured.get("invalidated_reason") or (
-                        "用户纠正或修改条件" if structured.get("invalidated") else None
-                    ),
+                    "invalidated_reason": str(structured.get("invalidated_reason") or (
+                        "用户纠正或修改条件" if structured.get("invalidated") else ""
+                    )),
                     "revoked_actions": structured.get("revoked_actions") or [],
                     # R9/R12-b：透传持久化的 pending_intent，浮窗恢复会话时可重渲染确认卡
                     #（确认/取消终态是 UI 本地态；过期或已执行的意图确认时会走 409 漂移路径）。

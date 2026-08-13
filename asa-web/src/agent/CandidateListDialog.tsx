@@ -4,16 +4,10 @@ import type { CandidateListCardData } from '../workflows/CandidateListCard'
 import { candidateStageTone } from '../workflows/CandidateListCard'
 import type { DragResizeAnchor } from '../shared/dialogDragResize'
 import { DialogFloating } from '../shared/Dialog'
+import { nativeBridge } from '../shared/nativeBridge'
 
 const MIN_DIALOG_W = 320
 const MIN_DIALOG_H = 240
-
-function nativeBridge(type: string, payload: Record<string, unknown>): boolean {
-  const handler = (window as unknown as { webkit?: { messageHandlers?: { asaNative?: { postMessage: (msg: unknown) => void } } } }).webkit?.messageHandlers?.asaNative
-  if (!handler) return false
-  handler.postMessage({ type, ...payload })
-  return true
-}
 
 export function CandidateListDialog({
   data,
@@ -40,12 +34,14 @@ export function CandidateListDialog({
   const jobId = data.context?.type === 'job' ? Number(data.context.id) : undefined
 
   const detachDialog = (anchor?: DragResizeAnchor): boolean => {
-    const candidates = (groups || []).flatMap(group => group.candidates || []).slice(0, 200)
     const jobId = data.context?.type === 'job' ? Number(data.context.id) : 0
-    if (candidates.length === 0 && !jobId) return false // 无可弹出内容
+    const hasList = groups.some(group => (group.candidates || []).length > 0)
+    if (!hasList && !jobId) return false // 无可弹出内容
     const payload: Record<string, unknown> = { title: data.title || '候选名单' }
-    if (candidates.length) payload.candidates = candidates
-    if (jobId) payload.url = `/asa-app#job=${encodeURIComponent(String(jobId))}`
+    // 有名单数据时弹名单本身（原生注入数据，用同一组件渲染，UI 与应用内一致）；
+    // 仅在没有名单数据时才退回打开岗位页。
+    if (hasList) payload.list = { title: data.title, context: data.context, summary: data.summary, groups }
+    else if (jobId) payload.url = `/asa-app#job=${encodeURIComponent(String(jobId))}&bare=1`
     const pos = anchor ?? (() => {
       const el = dialogRef.current
       const rect = el?.getBoundingClientRect()

@@ -1,6 +1,6 @@
 import AppKit
 
-/// 独立候选名单窗口的数据源：原生 NSTableView 渲染，点选行回调打开主窗口详情。
+/// 独立候选名单窗口的数据源：原生 NSTableView 渲染，点选行回调打开人选详情。
 final class DetachedCandidateDataSource: NSObject, NSTableViewDataSource {
     private let candidates: [[String: Any]]
     init(candidates: [[String: Any]]) {
@@ -27,11 +27,11 @@ final class DetachedCandidateDataSource: NSObject, NSTableViewDataSource {
     }
 }
 
-/// 独立候选名单窗口的 delegate：绘制行样式 + 点击回调。
+/// 独立候选名单窗口的 delegate：绘制行样式 + 点击回调（传出整行数据）。
 final class DetachedCandidateDelegate: NSObject, NSTableViewDelegate {
     private let candidates: [[String: Any]]
-    private let onSelect: (Int) -> Void
-    init(candidates: [[String: Any]], onSelect: @escaping (Int) -> Void) {
+    private let onSelect: ([String: Any]) -> Void
+    init(candidates: [[String: Any]], onSelect: @escaping ([String: Any]) -> Void) {
         self.candidates = candidates
         self.onSelect = onSelect
     }
@@ -79,17 +79,6 @@ final class DetachedCandidateDelegate: NSObject, NSTableViewDelegate {
         guard let tableView = notification.object as? NSTableView else { return }
         let row = tableView.selectedRow
         guard row >= 0 && row < candidates.count else { return }
-        let rawID = candidates[row]["id"]
-        let numericID: Int?
-        if let intValue = rawID as? Int {
-            numericID = intValue
-        } else if let numberValue = rawID as? NSNumber {
-            numericID = numberValue.intValue
-        } else {
-            numericID = nil
-        }
-        if let numericID {
-            onSelect(numericID)
-        }
+        onSelect(candidates[row])
     }
 }

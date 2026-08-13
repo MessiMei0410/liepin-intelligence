@@ -1,12 +1,14 @@
 import { useState, type CSSProperties } from 'react'
 import {
-  Archive, Ban, Check, Circle, CircleCheck, Ellipsis, FileText, GitBranch,
+  Archive, Ban, Check, Circle, CircleCheck, Ellipsis, ExternalLink, FileText, GitBranch,
   ListChecks, LoaderCircle, Pause, Play, RotateCcw, ShieldCheck, TriangleAlert,
   UserRoundSearch, Workflow as WorkflowIcon, X,
 } from 'lucide-react'
 import { api, type Workflow } from '../api'
 import { DialogPanel } from '../shared/Dialog'
 import { humanizeActionError } from '../shared/errors'
+import { nativeBridge } from '../shared/nativeBridge'
+import type { DragResizeAnchor } from '../shared/dialogDragResize'
 import { elapsed } from '../shared/format'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 import { useWorkflowLiveSync } from './useWorkflowLiveSync'
@@ -101,13 +103,23 @@ export function CompactWorkflowDialog({
     ? `已运行 ${elapsed(value.workflow.started_at, value.workflow.finished_at, now)}`
     : live ? '运行中' : mapped.label
 
-  return <DialogPanel panelClassName="compact-workflow-dialog" ariaLabel={`工作流：${value.goal.title}`} onEscape={close} minWidth={320} minHeight={300}>
-    <header className="compact-workflow-head">
+  // 弹出为独立窗口：macOS 宿主 openDetachedDialog 打开可自由拖出屏幕的原生窗口。
+  const detachPanel = (anchor?: DragResizeAnchor): boolean => {
+    if (nativeBridge('openDetachedDialog', { title: value.goal.title, url: `/asa-app#workflow=${encodeURIComponent(value.workflow.workflow_id)}&bare=1`, anchor })) {
+      close()
+      return true
+    }
+    return false
+  }
+
+  return <DialogPanel panelClassName="compact-workflow-dialog" ariaLabel={`工作流：${value.goal.title}`} onEscape={close} onDetach={detachPanel} minWidth={320} minHeight={300}>
+    <header className="compact-workflow-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口">
       <span className="compact-workflow-icon"><WorkflowIcon /></span>
       <div>
         <h2>{value.goal.title}</h2>
         <p>{mapped.label}{activeStep ? ` · ${activeStep.business_label}` : ''}</p>
       </div>
+      <button className="icon-btn candidate-dialog-detach" onClick={() => void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink /></button>
       <button className="icon-btn" onClick={close} title="关闭" aria-label="关闭"><X /></button>
     </header>
 

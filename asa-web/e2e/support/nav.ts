@@ -17,6 +17,42 @@ export const WORKFLOW_ID = 'workflow_bcab82502825'
 // 人选状态随顾问真实使用漂移，用例按「有确认按钮的卡」动态选 pending，不钉人名）。
 export const MAPPING_WORKFLOW_ID = 'workflow_15fc23c21ce8'
 
+// 评估 tab 截图锚点（2026-08-13 改版回归）：
+// #716 王**（job 142 士兰微·电源专家）：判人评估 artifact（五维 + 顾问口径摘要）+ 深度匹配评估
+// （criteria 27 条 = 硬门槛 8 / 核心能力 15 / 软偏好 4，强 6 弱 4），内容最全；
+// #510 张FisherMan（job 111，H5 初筛不通过）：无判人评估，仅候选人匹配初评（candidate_intelligence，
+// 强 4 弱 1），「匹配初评 + 还没做过评估」空态样本。
+// 注意：评估内容随顾问真实使用/批量刷新漂移，锚点若失配按当前库实况换样本。
+export const ASSESSMENT_CANDIDATE_ID = 716
+export const ASSESSMENT_CANDIDATE_NAME = '王**'
+export const ASSESSMENT_EMPTY_CANDIDATE_ID = 510
+export const ASSESSMENT_EMPTY_CANDIDATE_NAME = '张FisherMan'
+
+// 真实 UI 路径进评估 tab：人选列表 tab → 搜索（job_candidates.id 参与索引且全库唯一）→
+// 点行进人选详情 → 切「评估」tab，返回评估区 section。stopped=true 时先切「已停止」范围。
+export async function openCandidateAssessment(
+  page: Page,
+  candidateId: number,
+  candidateName: string,
+  { stopped = false }: { stopped?: boolean } = {},
+): Promise<Locator> {
+  await page.goto('/asa-app')
+  await expect(page.locator('header.topbar')).toContainText('ASA Agent 在线')
+  await page.locator('aside.nav').getByRole('button', { name: '人选列表' }).click()
+  await page.getByRole('searchbox', { name: '搜索候选人' }).fill(String(candidateId))
+  if (stopped) await page.getByRole('button', { name: /^已停止/ }).click()
+  const row = page.getByRole('row', { name: `打开候选人 ${candidateName}` })
+  await expect(row).toBeVisible()
+  await row.click()
+  const panel = page.locator('.candidate-panel')
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('.detail-head h2')).toHaveText(candidateName)
+  await panel.locator('.candidate-tabs').getByRole('button', { name: '评估' }).click()
+  const assessment = panel.locator('section.assessment')
+  await expect(assessment).toBeVisible()
+  return assessment
+}
+
 export async function openJob(page: Page, jobId = JOB_ID): Promise<Locator> {
   await page.goto(`/asa-app#job=${jobId}`)
   const panel = page.locator('.job-detail-panel')

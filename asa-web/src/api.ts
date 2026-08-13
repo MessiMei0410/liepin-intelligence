@@ -554,11 +554,28 @@ export type CandidateAssessmentDoc = {
   };
   consultant_summary?: string; advisor_action?: AssessmentAdvisorAction; advisor_note?: string;
 }
+// 匹配点分析：Core 在评估读取响应里附带当前有效的人岗匹配评估（agent_candidate_assessments，
+// 结构同 assessment_handler._assessment_payload）；无匹配评估时 fit=null，前端不渲染该区块。
+export type AssessmentFitCriterion = {
+  criterion?: string; status?: string; critical?: boolean; reason?: string; evidence?: string[];
+}
+export type CandidateAssessmentFit = {
+  fit_score?: number; fit_level?: string; recommendation?: string; recommendation_label?: string;
+  confidence?: number; evidence_coverage?: number;
+  criteria?: Record<string, AssessmentFitCriterion[]>;
+  strengths?: string[]; gaps?: string[]; created_at?: string;
+  // source: agent_assessment=Agent 人岗匹配评估 / candidate_intelligence=候选人匹配初评（回退来源）。
+  source?: string;
+}
 export type CandidateAssessmentPayload = {
   ok?: boolean; candidate_id?: number; job_id?: number; artifact_id?: string;
   title?: string; content?: string; created_at?: string; updated_at?: string;
   advisor_action?: AssessmentAdvisorAction; advisor_note?: string;
-  assessment?: CandidateAssessmentDoc;
+  assessment?: CandidateAssessmentDoc; fit?: CandidateAssessmentFit | null;
+}
+// 重新评估匹配（POST fit-assessment）响应：fit 为最新 Agent 人岗匹配评估。
+export type FitAssessmentRefreshResult = {
+  ok?: boolean; candidate_id?: number; job_id?: number; fit?: CandidateAssessmentFit | null;
 }
 
 // S6-4 评估校准度量（顾问点头率）：维度×客户聚合；数据不足的分组三个率为 null（前端如实呈现「数据不足」）。
@@ -801,7 +818,8 @@ export const api = {
     write<MappingIcebreakerResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/icebreaker`, {}),
   intakeMappingCandidate: (artifactId: string, index: number) =>
     write<MappingIntakeResult>(`/api/v1/mapping-tasks/${encodeURIComponent(artifactId)}/candidates/${index}/intake`, {}),
-  // S6-1b 判人评估：无评估时 Core 返回 404，此处收敛为 null（其余错误照常抛出，携带 status）。
+  // S6-1b 判人评估：判人评估与匹配评估都无时 Core 返回 404，此处收敛为 null（其余错误照常抛出，携带 status）。
+  // 仅有匹配评估（fit）时返回 200、assessment 缺省，前端只渲染匹配点分析区块。
   // 生成/重生成与顾问动作写回全走 write 幂等封装；409=无简历语料/模型不可用/非法 action（中文 detail 透出）。
   candidateAssessment: async (candidateId: number, jobId: number): Promise<CandidateAssessmentPayload | null> => {
     try {
@@ -815,6 +833,10 @@ export const api = {
     write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments?job_id=${jobId}${force ? '&force=true' : ''}`, {}),
   patchAssessmentAdvisorAction: (candidateId: number, jobId: number, action: AssessmentAdvisorAction, note?: string) =>
     write<CandidateAssessmentPayload>(`/api/v1/candidates/${candidateId}/assessments/${jobId}/advisor-action`, { action, ...(note ? { note } : {}) }, 'PATCH'),
+  // 匹配点分析「重新评估匹配」：强制重跑 Agent 人岗匹配评估（同步等待约 15-30 秒），响应带最新 fit。
+  // 409=模型输出非法或评估未完成（中文 detail 透出）。
+  refreshFitAssessment: (candidateId: number, jobId: number) =>
+    write<FitAssessmentRefreshResult>(`/api/v1/candidates/${candidateId}/fit-assessment?job_id=${jobId}`, {}),
   // S6-4 评估校准度量（只读）：数据不足的分组率为 null，由展示层如实呈现。
   assessmentCalibrationMetrics: () =>
     json<CalibrationMetricsPayload>('/api/v1/assessments/calibration/metrics'),

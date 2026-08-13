@@ -39,7 +39,7 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any, Callable
 
-from . import assessment_calibration, assessment_signals, knowledge_base
+from . import assessment_calibration, assessment_signals, company_kb, knowledge_base
 from .llm import BaseLLM, LLMError
 
 ARTIFACT_TYPE = "candidate_assessment"
@@ -300,14 +300,22 @@ def _conn_db_path(conn: sqlite3.Connection) -> str:
 
 
 def match_graph_hits(companies: list[str], graph: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """把简历里的雇主公司名规范化后命中图谱 key；命中即真实条目（含名称/赛道/主营业务/分类）。"""
+    """把简历里的雇主公司名规范化后命中图谱 key；命中即真实条目（含名称/赛道/主营业务/分类）。
+
+    公司知识库（CKB）补充：图谱未命中的雇主公司，若 CKB 有画像记录，则追加
+    source=company_kb 的补充命中（track=行业、business=主营业务、profile_summary=
+    中文画像摘要），随 graph_hits 一并注入评估上下文；CKB 库缺失/无表/不可用时
+    静默跳过，输出与现状完全一致。证据校验逻辑不变（CKB 命中同为真实知识库条目）。
+    """
     hits: list[dict[str, Any]] = []
     used: set[str] = set()
+    unmatched: list[str] = []
     for company in companies:
         raw = " ".join(str(company or "").split())
         norm = knowledge_base.normalize_client_name(company)
         if not norm:
             continue
+        matched = False
         for name, info in (graph or {}).items():
             if name in used:
                 continue
@@ -326,7 +334,36 @@ def match_graph_hits(companies: list[str], graph: dict[str, dict[str, Any]]) -> 
                     hit["source"] = str(info["source"])
                 hits.append(hit)
                 used.add(name)
+                matched = True
                 break
+        if not matched:
+            unmatched.append(raw)
+    # CKB 补充：图谱未命中的雇主公司查公司知识库画像（只读；库不可用静默跳过）。
+    # 规范化名（去掉公司后缀）更短，LIKE 命中率更高，raw 查不到再用 norm 兜底。
+    if unmatched:
+        seen_ckb: set[str] = set()
+        for raw in unmatched:
+            norm = knowledge_base.normalize_client_name(raw)
+            profile = company_kb.get_profile(raw) or (
+                company_kb.get_profile(norm) if norm and norm != raw else None
+            )
+            if not profile:
+                continue
+            kb_name = str(profile.get("name") or profile.get("company_key") or raw)
+            if kb_name in seen_ckb:
+                continue
+            seen_ckb.add(kb_name)
+            hits.append(
+                {
+                    "company": raw,
+                    "graph_name": kb_name,
+                    "track": str(profile.get("industry") or ""),
+                    "business": str(profile.get("business_desc") or ""),
+                    "categories": [],
+                    "source": "company_kb",
+                    "profile_summary": company_kb.profile_summary(profile),
+                }
+            )
     return hits
 
 

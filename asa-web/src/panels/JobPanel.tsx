@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { ChevronLeft, MessageSquareText, X, ShieldAlert, Route, UserRoundSearch, ChevronRight, CircleCheck, CircleDashed, Check } from 'lucide-react'
+import { ChevronLeft, MessageSquareText, X, ShieldAlert, Route, UserRoundSearch, ChevronRight, CircleCheck, CircleDashed, Check, ExternalLink } from 'lucide-react'
 import { JobDetail } from '../api'
 import { JobProfileInsights } from './JobProfileInsights'
 import { JobBrief } from './JobBrief'
 import { DialogPanel } from '../shared/Dialog'
+import type { DragResizeAnchor } from '../shared/dialogDragResize'
+import { nativeBridge } from '../shared/nativeBridge'
 import { RecommendationMetricsCard } from './RecommendationMetricsCard'
 import { JobWeeklyReport } from './JobWeeklyReport'
 import { SourcingAdjustments } from './SourcingAdjustments'
@@ -54,6 +56,14 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
   const strategyLevels = textList(strategy?.level_mapping.accepted_levels)
   const strategyFallback = String(strategy?.expectation.fallback_plan || '')
   const maxStage = Math.max(1, ...value.stages.map(item => item.count))
+  // 弹出为独立窗口：macOS 宿主 openDetachedDialog 打开可自由拖出屏幕的原生窗口。
+  const detachPanel = (anchor?: DragResizeAnchor): boolean => {
+    if (nativeBridge('openDetachedDialog', { title: value.title, url: `/asa-app#job=${value.id}&bare=1`, anchor })) {
+      close()
+      return true
+    }
+    return false
+  }
   const visibleFollowups = value.followups.slice(0, followupExpanded ? value.followups.length : FOLLOWUP_LIMIT)
   const visibleEvents = value.events.slice(0, eventExpanded ? value.events.length : EVENT_LIMIT)
   const visibleExperiments = value.search_experiments.slice(0, experimentExpanded ? value.search_experiments.length : EXPERIMENT_LIMIT)
@@ -64,13 +74,14 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
     ['学历', position.education || profile.education_requirement || '待确认'], ['经验', position.experience || profile.experience_requirement || '待确认'],
   ]
   return (
-    <DialogPanel panelClassName="detail-panel job-detail-panel" onEscape={close}>
-        <header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动">
+    <DialogPanel panelClassName="detail-panel job-detail-panel" onEscape={close} onDetach={detachPanel}>
+        <header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口">
           <button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft /></button>
           <div><h2>{value.title}</h2><p>{value.client} · {String(position.department || position.team || value.location || '岗位详情')} · 岗位 #{value.id}</p></div>
           <div className="detail-actions">
             <button className="button" onClick={() => openAgentWorkspace({ type: 'job', id: value.id, client: value.client, job: value.title })}><MessageSquareText />交给 Agent</button>
             {value.priority?.includes('P0') && <span className="tag warn">P0 最急</span>}
+            <button className="icon-btn candidate-dialog-detach" onClick={() => void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink /></button>
             <button className="icon-btn" onClick={close} title="关闭" aria-label="关闭"><X /></button>
           </div>
         </header>

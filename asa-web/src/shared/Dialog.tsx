@@ -14,6 +14,7 @@
 import { forwardRef, useEffect, useRef, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { attachDialogDrag, attachDialogResize, type DragResizeAnchor } from './dialogDragResize'
+import { isBareDetached } from './nativeBridge'
 import { useDialogFocus } from './useDialogFocus'
 
 const cx = (...parts: Array<string | false | undefined>): string => parts.filter(Boolean).join(' ')
@@ -179,9 +180,10 @@ export const DialogFloating = forwardRef<HTMLElement, DialogFloatingProps>(funct
   }, [])
 
   // 统一拖动/缩放：header 拖动，右下角 .overlay-resize-handle 缩放；拖出边界可 detach。
+  // 纯净模式（独立窗口）下页面填满窗口，拖动/缩放交给原生标题栏，不再挂载。
   useEffect(() => {
     const el = innerRef.current
-    if (!el) return undefined
+    if (!el || isBareDetached()) return undefined
     const header = el.querySelector<HTMLElement>('header')
     const cleanupDrag = attachDialogDrag(el, {
       header,
@@ -230,6 +232,8 @@ export interface DialogPanelProps {
   ariaLabel?: string
   /** Esc 回调：模态框（审批/产物/结果卡）打开时自动忽略，避免误关背后面板。 */
   onEscape?: () => void
+  /** 拖出视口边界时调用；返回 true 表示已接管（如弹出独立窗口），不再继续拖动。 */
+  onDetach?: (anchor?: DragResizeAnchor) => boolean
   /** 面板内容；第一个 <header> 作为拖动把手。 */
   children: ReactNode
   minWidth?: number
@@ -241,9 +245,11 @@ export interface DialogPanelProps {
  * 右下角注入统一 resize 手柄。拖动/缩放直接写 DOM style，不经 React state。
  * 拖动忽略表单控件/按钮/链接；模态框（.action-dialog-backdrop 等）打开时面板不抢拖动。
  */
-export function DialogPanel({ panelClassName, ariaLabel, onEscape, children, minWidth = 320, minHeight = 240 }: DialogPanelProps) {
+export function DialogPanel({ panelClassName, ariaLabel, onEscape, onDetach, children, minWidth = 320, minHeight = 240 }: DialogPanelProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLElement>(null)
+  const onDetachRef = useRef(onDetach)
+  useEffect(() => { onDetachRef.current = onDetach })
 
   useEffect(() => {
     if (!onEscape) return undefined
@@ -260,11 +266,13 @@ export function DialogPanel({ panelClassName, ariaLabel, onEscape, children, min
   useEffect(() => {
     const panel = panelRef.current
     const overlay = overlayRef.current
-    if (!panel || !overlay) return undefined
+    // 纯净模式（独立窗口）下不挂拖动/缩放，渲染也不包 overlay（见下方 return）。
+    if (!panel || !overlay || isBareDetached()) return undefined
     const header = panel.querySelector<HTMLElement>('header')
     const cleanupDrag = attachDialogDrag(panel, {
       header,
       moveElement: overlay,
+      detach: anchor => onDetachRef.current?.(anchor) ?? false,
       shouldIgnore: target => {
         const el = target as HTMLElement | null
         if (!el) return true

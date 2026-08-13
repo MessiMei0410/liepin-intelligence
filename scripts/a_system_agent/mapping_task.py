@@ -49,6 +49,7 @@ from html import unescape
 from typing import Any, Callable
 
 from . import knowledge_base, strategy_v2
+from .candidate_pool_filter import intake_mismatch_verdict
 from .workflow import _mask_candidate_name
 
 ARTIFACT_TYPE = "mapping_task"
@@ -1789,6 +1790,34 @@ def intake_candidate(
     title = str(candidate.get("current_role") or "").strip()
     location = str(team.get("location") or "").strip()
 
+    verdict = intake_mismatch_verdict(job_title, title)
+    if verdict:
+        stage = verdict["stage"]
+        flow_bucket = verdict["flow_bucket"]
+        clean_reason = verdict["reason"]
+        stop_reason = verdict["stop_reason"]
+        raw_status = "screen_rejected"
+        event_type = "resume_review_completed"
+        event_status = "stop"
+        event_summary = f"{verdict['reason']}：{name}｜{company}｜{title}（任务卡 {artifact_id}）"
+        candidate_status = "screen_rejected"
+        candidate_notes = f"{stage}｜{verdict['reason']}｜mapping={artifact_id}"
+        intelligence_next = verdict["reason"]
+        intelligence_decision = "screen_rejected"
+    else:
+        stage = "S1 新增寻访/待复核"
+        flow_bucket = "待复核"
+        clean_reason = "Mapping 直挖入库，待完整简历复核"
+        stop_reason = None
+        raw_status = "mapping_intake"
+        event_type = "mapping_intake"
+        event_status = "pending_review"
+        event_summary = f"Mapping 直挖入库：{name}｜{company}｜{title}（任务卡 {artifact_id}）"
+        candidate_status = "new"
+        candidate_notes = f"S1 新增寻访/待复核｜mapping={artifact_id}"
+        intelligence_next = "沿来源链接打开公开资料，按岗位硬门槛人工复核"
+        intelligence_decision = "pending_review"
+
     # 禁挖名单入库前再校验一次（restricted 只白名单出库）
     if banned is None:
         restricted, _restricted_trace = knowledge_base.load_restricted_constraints(client, kb_dir=kb_dir)
@@ -1847,8 +1876,8 @@ def intake_candidate(
                 "client": client,
                 "position": job_title,
                 "search_date": today,
-                "status": "new",
-                "notes": f"S1 新增寻访/待复核｜mapping={artifact_id}",
+                "status": candidate_status,
+                "notes": candidate_notes,
                 "iteration": int(iteration_row[0]) if iteration_row else 1,
                 "created_at": now,
                 "updated_at": now,
@@ -1905,7 +1934,7 @@ def intake_candidate(
                 "fit_level": "unrated",
                 "evidence_json": "{}",
                 "risk_json": "{}",
-                "next_action": "沿来源链接打开公开资料，按岗位硬门槛人工复核",
+                "next_action": intelligence_next,
                 "last_evaluated_at": now,
                 "model_version": "mapping-task-s5",
                 "created_at": now,
@@ -1913,7 +1942,7 @@ def intake_candidate(
                 "strong_matches_json": "[]",
                 "weak_matches_json": "[]",
                 "verification_questions_json": "[]",
-                "recommendation_decision": "pending_review",
+                "recommendation_decision": intelligence_decision,
             },
         )
     if _table_exists(conn, "source_profiles"):
@@ -1998,11 +2027,12 @@ def intake_candidate(
                 "person_id": person_id,
                 "raw_client": client,
                 "raw_position": job_title,
-                "raw_status": "mapping_intake",
-                "raw_stage": "S1 新增寻访/待复核",
-                "clean_stage": "S1 新增寻访/待复核",
-                "flow_bucket": "待复核",
-                "clean_reason": "Mapping 直挖入库，待完整简历复核",
+                "raw_status": raw_status,
+                "raw_stage": stage,
+                "clean_stage": stage,
+                "flow_bucket": flow_bucket,
+                "clean_reason": clean_reason,
+                "stop_reason": stop_reason,
                 "recent_hunting": 1,
                 "search_date": today,
                 "updated_at": now,
@@ -2019,10 +2049,10 @@ def intake_candidate(
             "job_candidate_id": job_candidate_id,
             "person_id": person_id,
             "job_id": job_id,
-            "event_type": "mapping_intake",
-            "event_status": "pending_review",
+            "event_type": event_type,
+            "event_status": event_status,
             "event_time": now,
-            "summary": f"Mapping 直挖入库：{name}｜{company}｜{title}（任务卡 {artifact_id}）",
+            "summary": event_summary,
             "raw_json": _dumps(
                 {
                     "mapping_artifact": str(artifact_id),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .policy import is_stopped
@@ -7,6 +8,8 @@ from .policy import is_stopped
 
 STATUS_VALUE = {"met": 1.0, "partial": 0.5, "not_met": 0.0, "unknown": None}
 GROUP_WEIGHTS = {"hard_requirements": 60.0, "core_abilities": 25.0, "soft_preferences": 15.0}
+
+_CLAUSE_SPLIT_RE = re.compile(r"[；;\n]+")
 
 
 def _clean_list(value: Any) -> list[str]:
@@ -18,6 +21,19 @@ def _clean_list(value: Any) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result[:12]
+
+
+def _split_expected(items: list[str]) -> list[str]:
+    """把岗位侧条目按分号/换行拆成原子要求。
+
+    历史策略数据存在整段 JD（多个分号并列的要求）塞成一条的情况，逐条注入会把
+    超长原文带进 criteria，无法逐条判断也无法展示。拆分是确定性的，只影响新评估。
+    """
+    result: list[str] = []
+    for item in items:
+        parts = [part for part in _CLAUSE_SPLIT_RE.split(item) if part]
+        result.extend(parts if parts else [item])
+    return result[:30]
 
 
 def _criterion_text(item: Any) -> str:
@@ -83,17 +99,17 @@ def normalize_assessment(raw: dict[str, Any], context: dict[str, Any]) -> dict[s
     groups = {
         "hard_requirements": _normalize_group(
             criteria_raw.get("hard_requirements"),
-            _clean_list(position.get("hard_requirements")),
+            _split_expected(_clean_list(position.get("hard_requirements"))),
             critical=True,
         ),
         "core_abilities": _normalize_group(
             criteria_raw.get("core_abilities"),
-            _clean_list(position.get("ability_keywords")),
+            _split_expected(_clean_list(position.get("ability_keywords"))),
             critical=False,
         ),
         "soft_preferences": _normalize_group(
             criteria_raw.get("soft_preferences"),
-            _clean_list(position.get("soft_preferences")),
+            _split_expected(_clean_list(position.get("soft_preferences"))),
             critical=False,
         ),
     }

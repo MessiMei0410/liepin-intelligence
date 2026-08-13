@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CandidateAssessment } from '../panels/CandidateAssessment'
 import { mockResponse } from './helpers'
@@ -7,6 +7,20 @@ import { mockResponse } from './helpers'
 // S6-1b 判人评估区（CandidateAssessment）：404 空态 + 做评估、两维全字段渲染、证据列表、
 // 置信度 tag、顾问三动作 PATCH 体与状态回显、改判 note、null 占位维度不渲染。
 // fetch 全 mock（禁 any），按 URL + method 路由到各端点响应。
+// 2026-08-13 简洁化重构：明细/证据默认收进原生 <details>，断言前先点开 summary 展开（jsdom 29 支持 summary 点击切换 open）。
+
+// 点开一个 <details> 的 summary，并如实断言「默认收起 → 点击后展开」。
+const expandDetails = (summary: HTMLElement) => {
+  const details = summary.closest('details') as HTMLElement
+  expect(details).not.toBeNull()
+  expect(details).not.toHaveAttribute('open')
+  fireEvent.click(summary)
+  expect(details).toHaveAttribute('open')
+  return details
+}
+// 证据区整包一层 <details>（summary「证据 · N 条」），先展开再看三桶/按维度明细。
+const expandEvidence = (evidence: HTMLElement) =>
+  expandDetails(within(evidence).getByText(/^证据 · \d+ 条$/))
 
 const ASSESSMENT_URL = '/api/v1/candidates/1/assessments?job_id=154'
 const ADVISOR_URL = '/api/v1/candidates/1/assessments/154/advisor-action'
@@ -136,9 +150,10 @@ describe('判人评估区（CandidateAssessment）', () => {
   it('两维全字段渲染：结论/晋升速度/技术栈演进/分段表/逐次移动/当前这单判定/顾问口径摘要', async () => {
     stubFetch()
     renderAssessment()
-    // 职业轨迹
+    // 职业轨迹：标题/置信度/verdict 默认可见；facts 与分段表收进「明细」<details>，先展开再断言
     const trajectory = await screen.findByRole('region', { name: '职业轨迹' })
     expect(within(trajectory).getByText('从消费电子硬件转到模拟芯片原厂，技术市场线一路上行')).toBeInTheDocument()
+    expandDetails(within(trajectory).getByText('明细'))
     expect(within(trajectory).getByText('偏快')).toBeInTheDocument()
     expect(within(trajectory).getByText('上升')).toBeInTheDocument()
     const jhwt = within(trajectory).getByText('杰华特微电子股份有限公司').closest('tr')
@@ -150,9 +165,10 @@ describe('判人评估区（CandidateAssessment）', () => {
     expect(lixun).toHaveTextContent('硬件工程师')
     expect(lixun).toHaveTextContent('腰部')
     expect(lixun).toHaveTextContent('推测') // tier_source=inferred → 推测 tag
-    // 跳槽质量史
+    // 跳槽质量史：moves 与当前这单判定同样在「明细」里，先展开
     const moves = screen.getByRole('region', { name: '跳槽质量史' })
     expect(within(moves).getByText('两次跳槽均为上升，平台与职责同步抬升')).toBeInTheDocument()
+    expandDetails(within(moves).getByText('明细'))
     expect(within(moves).getByText('立讯精密 → 晶丰明源')).toBeInTheDocument()
     expect(within(moves).getByText('消费电子整机转芯片原厂')).toBeInTheDocument()
     expect(within(moves).getByText('晶丰明源 → 杰华特')).toBeInTheDocument()
@@ -179,6 +195,8 @@ describe('判人评估区（CandidateAssessment）', () => {
     stubFetch()
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    // 证据区整包 <details> 默认收起，先展开再断言三桶内容
+    expandEvidence(evidence)
     const items = within(evidence).getAllByRole('listitem')
     expect(items).toHaveLength(3)
     expect(items[0]).toHaveTextContent('简历')
@@ -264,6 +282,19 @@ describe('判人评估区（CandidateAssessment）', () => {
     expect(screen.queryByText(/percentile|motivation|risks/)).not.toBeInTheDocument()
   })
 
+  it('维度明细默认收起：默认只露标题/置信度 tag/verdict，点击「明细」展开分段表', async () => {
+    stubFetch()
+    renderAssessment()
+    const trajectory = await screen.findByRole('region', { name: '职业轨迹' })
+    // 摘要层默认可见：标题 + 置信度 tag + verdict 全文
+    expect(within(trajectory).getByText('确定')).toBeInTheDocument()
+    expect(within(trajectory).getByText(/技术市场线一路上行/)).toBeInTheDocument()
+    // 明细（facts + 分段表）收进 <details>，默认收起、点击展开
+    const details = expandDetails(within(trajectory).getByText('明细'))
+    expect(within(details).getByText('偏快')).toBeInTheDocument()
+    expect(within(details).getByText('杰华特微电子股份有限公司')).toBeInTheDocument()
+  })
+
   it('某一维为 null 时只渲染另一维', async () => {
     const partial = {
       ...assessmentPayload,
@@ -343,6 +374,8 @@ describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）',
     stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
     renderAssessment()
     const block = await screen.findByRole('region', { name: '在同龄人里的位置' })
+    // 落位/得分/参照系明细收进「明细」<details>，先展开再断言
+    expandDetails(within(block).getByText('明细'))
     expect(within(block).getByText('前 25%')).toBeInTheDocument()
     expect(within(block).getByText(/参照系：同方向（技术市场）±3年/)).toBeInTheDocument()
     expect(within(block).getByText(/样本 N=/)).toHaveTextContent('样本 N=10')
@@ -369,7 +402,9 @@ describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）',
     stubFetch(url => (url === ASSESSMENT_URL ? { body: insufficient } : undefined))
     renderAssessment()
     const block = await screen.findByRole('region', { name: '在同龄人里的位置' })
+    // 样本不足 tag 在头部默认可见；参照系备注与 N 在「明细」里，先展开
     expect(within(block).getByText('推测 · 参照样本不足')).toBeInTheDocument()
+    expandDetails(within(block).getByText('明细'))
     expect(within(block).getByText('参照样本不足，结论按推测口径')).toBeInTheDocument()
     expect(within(block).getByText(/样本 N=/)).toHaveTextContent('样本 N=3')
   })
@@ -378,6 +413,8 @@ describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）',
     stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
     renderAssessment()
     const block = await screen.findByRole('region', { name: '动机与时机' })
+    // 信号列表收进「明细」<details>，先展开再断言
+    expandDetails(within(block).getByText('明细'))
     expect(within(block).getByText(/当前任职已 65 个月/)).toBeInTheDocument()
     expect(within(block).getByText(/公司完成新一轮融资/)).toBeInTheDocument()
     const link = within(block).getByRole('link', { name: '来源' })
@@ -421,6 +458,8 @@ describe('判人评估区 S6-3 三块（分位/动机/需要核实的问题）',
     expect(within(block).getByText('硬条件差距')).toBeInTheDocument()
     expect(within(block).getByText(/9 个月简历空窗/)).toBeInTheDocument()
     expect(within(block).getByText(/多相控制器/)).toBeInTheDocument()
+    // 条目列表默认可见；每条目的证据明细收进「证据明细」<details>，先展开再断言
+    expandDetails(within(block).getByText('证据明细'))
     expect(within(block).getByText('2020.01-至今 某公司 · 工程师')).toBeInTheDocument()
     expect(within(block).getByText(/不构成任何决策建议/)).toBeInTheDocument()
   })
@@ -501,7 +540,8 @@ describe('判人评估区加载 / 重试 / 长引用', () => {
     stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, assessment: doc } } : undefined))
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
-    // S6-5 起默认三桶视图，按维度分组需显式切换
+    // 证据区默认收起，先展开；S6-5 起默认三桶视图，按维度分组需显式切换
+    expandEvidence(evidence)
     const user = userEvent.setup()
     await user.click(within(evidence).getByRole('button', { name: '按维度' }))
     expect(within(evidence).getByText(/职业轨迹/)).toBeInTheDocument()
@@ -526,6 +566,7 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     stubFetch()
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    expandEvidence(evidence)
     expect(within(evidence).getByText(/归桶口径/)).toBeInTheDocument()
     const direct = bucketGroup(evidence, '直接证据')
     expect(within(direct).getAllByRole('listitem')).toHaveLength(2)
@@ -539,6 +580,7 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     stubFetch()
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    expandEvidence(evidence)
     const unknown = bucketGroup(evidence, '未知项')
     expect(within(unknown).queryAllByRole('listitem')).toHaveLength(0)
     expect(within(unknown).getByText('本桶暂无条目。')).toBeInTheDocument()
@@ -560,6 +602,7 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, assessment: doc } } : undefined))
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    expandEvidence(evidence)
     const unknown = bucketGroup(evidence, '未知项')
     const items = within(unknown).getAllByRole('listitem')
     expect(items).toHaveLength(2)
@@ -572,6 +615,7 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     stubFetch(url => (url === ASSESSMENT_URL ? { body: s63Payload } : undefined))
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    expandEvidence(evidence)
     const unknown = bucketGroup(evidence, '未知项')
     const items = within(unknown).getAllByRole('listitem')
     expect(items).toHaveLength(2)
@@ -587,6 +631,7 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     stubFetch()
     renderAssessment()
     const evidence = await screen.findByRole('region', { name: '证据' })
+    expandEvidence(evidence)
     const user = userEvent.setup()
     const bucketsButton = within(evidence).getByRole('button', { name: '三桶视图' })
     const dimensionsButton = within(evidence).getByRole('button', { name: '按维度' })
@@ -602,3 +647,251 @@ describe('判人评估区三桶证据卡（S6-5 直接证据/合理推断/未知
     expect(bucketsButton).toHaveAttribute('aria-pressed', 'true')
   })
 })
+
+
+// 匹配点分析（人岗匹配评估，2026-08-13 简洁化）：速读摘要行（小号内联评分/等级/推进建议/标准满足度）、
+// 强/弱匹配点两栏各露前 2 条（其余收进 details）、逐条标准分组全部默认收起（点击展开看状态标签与证据）；
+// 无判人评估仅有匹配评估时也渲染；candidate_intelligence 初评来源显示「匹配初评」。
+const fitBlock = {
+  source: 'agent_assessment',
+  fit_score: 88,
+  fit_level: 'A-优先推进',
+  recommendation: 'priority_review',
+  recommendation_label: '建议优先复核',
+  confidence: 0.8,
+  evidence_coverage: 0.75,
+  criteria: {
+    hard_requirements: [
+      { criterion: '本科及以上，电力电子/电气工程相关专业', status: 'met', critical: true, reason: '硕士 电力电子', evidence: ['2022.06 硕士毕业'] },
+      { criterion: '模块电源3年以上研发经验', status: 'partial', critical: true, reason: '约2.5年', evidence: [] },
+    ],
+    core_abilities: [
+      { criterion: '掌握多相Buck与TLVR工作模态', status: 'not_met', critical: false, reason: '', evidence: [] },
+    ],
+    soft_preferences: [],
+  },
+  strengths: ['26年电源研发经验', '直接匹配VPD/VRM核心技术'],
+  gaps: ['未明确提及LTspice工具使用'],
+  created_at: '2026-08-10 09:00:00',
+}
+
+describe('匹配点分析（人岗匹配评估）', () => {
+  it('速读摘要行 + 强弱匹配两栏 + criteria 分组默认收起、点击展开看状态与证据', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, fit: fitBlock } } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    // 速读摘要行：小号内联评分 / 等级 / 推进建议 / 证据覆盖 / 满足度统计，全部默认可见
+    expect(within(block).getByText('88')).toBeInTheDocument()
+    expect(within(block).getByText('A-优先推进')).toBeInTheDocument()
+    expect(within(block).getByText(/推进建议：/)).toHaveTextContent('推进建议：建议优先复核')
+    expect(within(block).getByText(/证据覆盖：/)).toHaveTextContent('证据覆盖：75%')
+    expect(within(block).getByText(/标准满足度：/)).toHaveTextContent('1 满足 · 1 部分 · 1 不满足 · 0 待核验')
+    expect(within(block).getByText('深度评估')).toBeInTheDocument()
+    // 强/弱匹配点两栏（各不超过 2 条时全露）
+    expect(within(block).getByText(/强匹配点/)).toBeInTheDocument()
+    expect(within(block).getByText('26年电源研发经验')).toBeInTheDocument()
+    expect(within(block).getByText(/弱匹配点/)).toBeInTheDocument()
+    expect(within(block).getByText('未明确提及LTspice工具使用')).toBeInTheDocument()
+    // 逐条标准分组（含硬门槛）默认全部收起，summary 带满足计数；空分组（软偏好）不渲染
+    const hardGroup = expandDetails(within(block).getByText('硬门槛'))
+    expect(within(block).getByText('满足 1/2')).toBeInTheDocument()
+    expect(within(block).getByText('核心能力')).toBeInTheDocument()
+    expect(within(block).queryByText('软偏好')).not.toBeInTheDocument()
+    // 展开分组后可见状态标签与证据明细
+    expect(within(hardGroup).getByText('满足')).toBeInTheDocument()
+    expect(within(hardGroup).getByText('部分满足')).toBeInTheDocument()
+    expect(within(hardGroup).getByText(/2022\.06 硕士毕业/)).toBeInTheDocument()
+    const coreGroup = expandDetails(within(block).getByText('核心能力'))
+    expect(within(coreGroup).getByText('不满足')).toBeInTheDocument()
+  })
+
+  it('长标准文本默认截断、点击展开全文', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, fit: fitBlock } } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    // 标准条目在默认收起的分组里，先展开分组
+    expandDetails(within(block).getByText('硬门槛'))
+    const text = within(block).getByRole('button', { name: /本科及以上，电力电子/ })
+    expect(text).not.toHaveClass('open')
+    const user = userEvent.setup()
+    await user.click(text)
+    expect(text).toHaveClass('open')
+    await user.click(text)
+    expect(text).not.toHaveClass('open')
+  })
+
+  it('强/弱匹配点默认只露前 2 条，完整列表收进 details 点击展开', async () => {
+    const manyFit = {
+      ...fitBlock,
+      strengths: ['26年电源研发经验', '直接匹配VPD/VRM核心技术', '车规级量产经验', '头部原厂客户资源'],
+      gaps: ['未明确提及LTspice工具使用', '英语读写未体现', '团队管理幅度待核'],
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, fit: manyFit } } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    // 前 2 条直接可见
+    expect(within(block).getByText('26年电源研发经验')).toBeInTheDocument()
+    expect(within(block).getByText('直接匹配VPD/VRM核心技术')).toBeInTheDocument()
+    expect(within(block).getByText('未明确提及LTspice工具使用')).toBeInTheDocument()
+    expect(within(block).getByText('英语读写未体现')).toBeInTheDocument()
+    // 第 3 条起收进「全部…」折叠明细，默认收起、点击展开
+    const moreStrengths = expandDetails(within(block).getByText('全部强匹配点 · 4 条'))
+    expect(within(moreStrengths).getByText('车规级量产经验')).toBeInTheDocument()
+    expect(within(moreStrengths).getByText('头部原厂客户资源')).toBeInTheDocument()
+    const moreGaps = expandDetails(within(block).getByText('全部弱匹配点 · 3 条'))
+    expect(within(moreGaps).getByText('团队管理幅度待核')).toBeInTheDocument()
+  })
+
+  it('顾问动作栏位于匹配点分析之后、五维判语之前', async () => {
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: { ...assessmentPayload, fit: fitBlock } } : undefined))
+    renderAssessment()
+    const match = await screen.findByRole('region', { name: '匹配点分析' })
+    const actions = screen.getByLabelText('顾问动作')
+    const trajectory = screen.getByRole('region', { name: '职业轨迹' })
+    expect(match.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(actions.compareDocumentPosition(trajectory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('仅有匹配评估（无判人评估）：空态上方仍渲染匹配点分析，初评来源如实标注', async () => {
+    const fitOnly = {
+      ok: true, candidate_id: 1, job_id: 154,
+      fit: { ...fitBlock, source: 'candidate_intelligence', criteria: {}, evidence_coverage: undefined },
+    }
+    stubFetch(url => (url === ASSESSMENT_URL ? { body: fitOnly } : undefined))
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    expect(within(block).getByText('匹配初评')).toBeInTheDocument()
+    expect(within(block).getByText('88')).toBeInTheDocument()
+    expect(within(block).getByText('26年电源研发经验')).toBeInTheDocument()
+    expect(within(block).queryByText(/标准满足度/)).not.toBeInTheDocument()
+    // 判人评估空态入口仍在
+    expect(screen.getByText('还没做过评估')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '做评估' })).toBeInTheDocument()
+  })
+
+  it('无匹配评估（fit=null）：不渲染匹配点分析区块，判人评估照常', async () => {
+    stubFetch()
+    renderAssessment()
+    await screen.findByRole('region', { name: '职业轨迹' })
+    expect(screen.queryByRole('region', { name: '匹配点分析' })).not.toBeInTheDocument()
+  })
+})
+
+
+describe('评估 tab 异步写回防护', () => {
+  // 回归：重新评估/顾问动作的写响应不含 fit 块，直接覆盖会让匹配点分析消失；应合并上一份 payload 的 fit。
+  it('重新评估成功后仍保留匹配点分析（写响应缺 fit 时合并上一份）', async () => {
+    const withFit = { ...assessmentPayload, fit: fitBlock }
+    stubFetch((url, init) => {
+      if (String(url).startsWith(ASSESSMENT_URL) && init?.method === 'POST') return { body: assessmentPayload }
+      if (url === ASSESSMENT_URL) return { body: withFit }
+      return undefined
+    })
+    renderAssessment()
+    expect(await screen.findByRole('region', { name: '匹配点分析' })).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '重新评估' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('评估已重新生成')
+    expect(screen.getByRole('region', { name: '匹配点分析' })).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: '匹配点分析' })).getByText('88')).toBeInTheDocument()
+  })
+
+  // 回归：生成请求在途时切换人选，晚到的旧响应不得覆盖当前人选数据。
+  it('生成在途切换人选：晚到的旧生成响应被丢弃，不串台', async () => {
+    let resolvePost!: (value: Response) => void
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.startsWith('/api/v1/candidates/1/assessments') && init?.method === 'POST') {
+        return new Promise<Response>(resolve => { resolvePost = resolve })
+      }
+      if (url === ASSESSMENT_URL) return mockResponse({ ...assessmentPayload, fit: fitBlock })
+      if (url === '/api/v1/candidates/2/assessments?job_id=200') return mockResponse({ detail: '还没有判人评估' }, false, 404)
+      return mockResponse(assessmentPayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<CandidateAssessment candidateId={1} jobId={154}/>)
+    await screen.findByRole('region', { name: '匹配点分析' })
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '重新评估' }))
+    // POST 在途时切到人选 2（404 空态）
+    rerender(<CandidateAssessment candidateId={2} jobId={200}/>)
+    expect(await screen.findByText('还没做过评估')).toBeInTheDocument()
+    // 旧 POST 晚到：不得覆盖人选 2 的空态
+    resolvePost(mockResponse({ ...assessmentPayload, fit: fitBlock }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByText('还没做过评估')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '匹配点分析' })).not.toBeInTheDocument()
+  })
+})
+
+
+  it('生成在途显示进度提示条，完成后消失', async () => {
+    let resolvePost!: (value: Response) => void
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.startsWith(ASSESSMENT_URL) && init?.method === 'POST') {
+        return new Promise<Response>(resolve => { resolvePost = resolve })
+      }
+      if (url === ASSESSMENT_URL) return mockResponse(assessmentPayload)
+      return mockResponse(assessmentPayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderAssessment()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '重新评估' }))
+    expect(await screen.findByText(/正在重新生成评估/)).toBeInTheDocument()
+    resolvePost(mockResponse(assessmentPayload))
+    expect(await screen.findByRole('status')).toHaveTextContent('评估已重新生成')
+    expect(screen.queryByText(/正在重新生成评估/)).not.toBeInTheDocument()
+  })
+
+
+  it('重新评估匹配：POST fit-assessment 后合并最新 fit，不闪加载态', async () => {
+    const updatedFit = { ...fitBlock, fit_score: 91, created_at: '2026-08-13 22:30:00' }
+    let resolvePost!: (value: Response) => void
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url === '/api/v1/candidates/1/fit-assessment?job_id=154' && init?.method === 'POST') {
+        return new Promise<Response>(resolve => { resolvePost = resolve })
+      }
+      if (url === ASSESSMENT_URL) return mockResponse({ ...assessmentPayload, fit: fitBlock })
+      return mockResponse(assessmentPayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    expect(within(block).getByText('88')).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(within(block).getByRole('button', { name: '重新评估匹配' }))
+    // POST 在途：进度提示条可见
+    expect(await screen.findByText(/正在重新生成匹配评估/)).toBeInTheDocument()
+    resolvePost(mockResponse({ ok: true, candidate_id: 1, job_id: 154, fit: updatedFit }))
+    expect(await screen.findByRole('status')).toHaveTextContent('匹配评估已重新生成')
+    // 新评分合并进当前视图，判人评估内容不受影响
+    expect(within(screen.getByRole('region', { name: '匹配点分析' })).getByText('91')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '职业轨迹' })).toBeInTheDocument()
+    expect(screen.queryByText('评估加载中')).not.toBeInTheDocument()
+  })
+
+  it('初评来源按钮文案为「生成深度评估」，409 失败给出错误反馈', async () => {
+    const fitOnly = {
+      ok: true, candidate_id: 1, job_id: 154,
+      fit: { ...fitBlock, source: 'candidate_intelligence', criteria: {}, evidence_coverage: undefined },
+    }
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url === '/api/v1/candidates/1/fit-assessment?job_id=154' && init?.method === 'POST') {
+        return mockResponse({ detail: '匹配评估未完成：模型没有返回合法 JSON' }, false, 409)
+      }
+      if (url === ASSESSMENT_URL) return mockResponse(fitOnly)
+      return mockResponse(fitOnly)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderAssessment()
+    const block = await screen.findByRole('region', { name: '匹配点分析' })
+    const user = userEvent.setup()
+    await user.click(within(block).getByRole('button', { name: '生成深度评估' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('模型没有返回合法 JSON')
+    // 失败保留初评内容
+    expect(within(screen.getByRole('region', { name: '匹配点分析' })).getByText('88')).toBeInTheDocument()
+  })

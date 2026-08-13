@@ -52,7 +52,8 @@ test('待审批工作流在轻量浮层直接决策', async ({ page }) => {
   test.slow()
   await page.goto(`/asa-app#workflow=${APPROVAL_WORKFLOW_ID}`)
   const compact = page.locator('.compact-workflow-dialog')
-  await expect(compact).toBeVisible()
+  // 详情响应约 29MB：全量 e2e 共享隔离 Core 时负载更高，首屏等待放宽到 30s（2026-08-13 全量超时实测）。
+  await expect(compact).toBeVisible({ timeout: 30_000 })
   await expect(compact.locator('.compact-workflow-head h2')).toContainText('长越科技')
 
   // 待审批动作钉在首层：R3 单次授权，文案来自 Core 状态映射。

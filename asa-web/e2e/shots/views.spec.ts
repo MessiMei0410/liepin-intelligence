@@ -49,7 +49,7 @@ test('Agent 首页', async ({ page }) => {
   await page.goto('/asa-app')
   await expect(page.locator('header.topbar')).toContainText('ASA Agent 在线')
   await expect(page.getByRole('heading', { name: '今天从哪里开始？' })).toBeVisible()
-  await expect(page.getByRole('region', { name: '今日概况' })).toBeVisible()
+  await expect(page.getByRole('region', { name: '快捷指令' })).toBeVisible()
   await expect(page.locator('.agent-home-band').first()).toBeVisible()
   await expectStableViewport(page)
   await expect(page).toHaveScreenshot('agent-home.png')
@@ -77,6 +77,8 @@ test('Agent 对话工作区', async ({ page }) => {
     } })
     return route.fulfill({ json: { ok: true, sessions: [{ session_id: 'agent-shot-task', title: '复盘岗位寻访进度', preview: '建议先复核待确认人选', message_count: 2 }] } })
   })
+  // 任务栏默认折叠：截图用例依赖展开态任务列表，显式设置偏好（浮窗 390px 下无副作用，仍走抽屉）。
+  await page.addInitScript(() => localStorage.setItem('asaTaskRailCollapsed', '0'))
   await page.goto('/asa-app')
   if ((page.viewportSize()?.width || 0) < 500) await page.getByRole('button', { name: '任务历史' }).click()
   await page.locator('.agent-task-main').filter({ hasText: '复盘岗位寻访进度' }).click()

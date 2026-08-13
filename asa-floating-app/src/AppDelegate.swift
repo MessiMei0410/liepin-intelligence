@@ -21,8 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var detachedWindow: NSWindow?
     private var detachedWebView: WKWebView?
     private var detachedListWindow: NSWindow?
-    private var detachedListDataSource: DetachedCandidateDataSource?
-    private var detachedListDelegate: DetachedCandidateDelegate?
+    private var detachedListWebView: WKWebView?
+    /// 名单窗口待注入的名单 JSON（页面 didFinish 后写入 window.__DETACHED_LIST__）。
+    private var pendingDetachedListJSON: String?
     private var collapsedButton: DraggableDotButton!
     private var statusItem: NSStatusItem!
     private var statusTimer: Timer?
@@ -56,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let compatibilityCopilotEnabled = CommandLine.arguments.contains("--compat-copilot")
 
     private func webSurfaceName(for target: WKWebView) -> String {
-        target === mainWebView || target === detachedWebView ? "agent" : "copilot"
+        target === mainWebView || target === detachedWebView || target === detachedListWebView ? "agent" : "copilot"
     }
 
     private func loggableWebLocation(_ url: URL?) -> String {
@@ -1554,16 +1555,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     /// 将 WebView 内的弹窗"弹出"为独立的 macOS 窗口（普通级别，可自由拖出屏幕）。
     /// body: { title, url } —— url 为 asa-app 详情页 hash 链接（如 /asa-app#candidate=137）
     /// 或   { title, candidates: [{id,name,company,title,stage}] } —— 名单数据，原生渲染列表。
-    private func openDetachedDialog(_ body: [String: Any]) {
+    private func openDetachedDialog(_ body: [String: Any], source: WKWebView?) {
         let title = body["title"] as? String ?? "ASA"
         let anchor: DetachedAnchor? = parseAnchor(body["anchor"])
-        if let urlString = body["url"] as? String, !urlString.isEmpty,
+        if let list = body["list"] as? [String: Any] {
+            presentDetachedCandidateList(title: title, list: list, anchor: anchor, sourceWindow: source?.window)
+        } else if let urlString = body["url"] as? String, !urlString.isEmpty,
            let url = URL(string: urlString, relativeTo: serviceBaseURL)?.absoluteURL,
            webSecurityPolicy.isTrustedServiceURL(url) {
             let appURL = canonicalAgentURL(from: url)
-            presentDetachedWindow(title: title, webURL: appURL, anchor: anchor)
+            presentDetachedWindow(title: title, webURL: appURL, anchor: anchor, sourceWindow: source?.window)
         } else if let candidates = body["candidates"] as? [[String: Any]], !candidates.isEmpty {
-            presentDetachedCandidateList(title: title, candidates: candidates, anchor: anchor)
+            // 旧版前端只发扁平 candidates：包一层 groups 走同一条 Web 名单窗口路径。
+            let list: [String: Any] = ["title": title, "groups": [["key": "all", "label": title, "candidates": candidates]]]
+            presentDetachedCandidateList(title: title, list: list, anchor: anchor, sourceWindow: source?.window)
         }
     }
 
@@ -1580,15 +1585,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return DetachedAnchor(x: CGFloat(x), y: CGFloat(y), edge: dict["edge"] as? String ?? "center")
     }
 
-    /// 独立窗口的初始位置：优先锚点（浮窗视口坐标 → 屏幕坐标换算），否则屏幕中心。
-    /// 锚点相对浮窗 panel 的 frame 换算到屏幕坐标系；edge 决定窗口靠锚点哪一侧展开。
-    private func anchorFrame(for anchor: DetachedAnchor?, size: NSSize) -> NSRect? {
-        guard let anchor, panel.isVisible else { return nil }
-        let panelFrame = panel.frame
-        // 浮窗内容坐标 → panel 内容坐标（面板顶部有标题栏，粗略加 30px）
-        let contentX = panelFrame.minX + anchor.x
-        let contentY = panelFrame.maxY - anchor.y - 30
-        let screen = panel.screen ?? NSScreen.main
+    /// 独立窗口的初始位置：优先锚点（源窗口视口坐标 → 屏幕坐标换算），否则屏幕中心。
+    /// 锚点相对发消息的源窗口（主窗口/浮窗/独立窗口）frame 换算到屏幕坐标系；edge 决定窗口靠锚点哪一侧展开。
+    /// 注意不能假设浮窗 panel 存在：正常启动只创建主窗口，panel 为 nil，直接引用会闪退。
+    private func anchorFrame(for anchor: DetachedAnchor?, size: NSSize, sourceWindow: NSWindow?) -> NSRect? {
+        guard let anchor, let sourceWindow, sourceWindow.isVisible else { return nil }
+        let sourceFrame = sourceWindow.frame
+        // WebView 内容坐标 → 源窗口屏幕坐标（窗口顶部有标题栏，粗略减 30px）
+        let contentX = sourceFrame.minX + anchor.x
+        let contentY = sourceFrame.maxY - anchor.y - 30
+        let screen = sourceWindow.screen ?? NSScreen.main
         guard let screenFrame = screen?.visibleFrame else { return nil }
         let w = min(size.width, screenFrame.width * 0.9)
         let h = min(size.height, screenFrame.height * 0.9)
@@ -1613,7 +1619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return NSRect(x: x, y: y, width: w, height: h)
     }
 
-    private func presentDetachedWindow(title: String, webURL: URL, anchor: DetachedAnchor?) {
+    private func presentDetachedWindow(title: String, webURL: URL, anchor: DetachedAnchor?, sourceWindow: NSWindow?) {
         if detachedWindow == nil {
             let rect = NSRect(x: 0, y: 0, width: 760, height: 640)
             let window = NSWindow(
@@ -1628,6 +1634,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             window.minSize = NSSize(width: 480, height: 360)
             let config = webConfiguration()
             let web = WKWebView(frame: rect, configuration: config)
+            // 与主窗口一致：/asa-app 按 UA 放行，缺了会被 Core 当作禁用的浏览器入口。
+            web.customUserAgent = "ASAApp/\(appVersion)"
             web.navigationDelegate = self
             web.uiDelegate = self
             web.autoresizingMask = [.width, .height]
@@ -1640,7 +1648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         detachedWindow?.title = title
         let wasVisible = detachedWindow?.isVisible ?? false
         if !wasVisible {
-            if let frame = anchorFrame(for: anchor, size: NSSize(width: 760, height: 640)) {
+            if let frame = anchorFrame(for: anchor, size: NSSize(width: 760, height: 640), sourceWindow: sourceWindow) {
                 detachedWindow?.setFrame(frame, display: true)
             } else {
                 detachedWindow?.center()
@@ -1652,8 +1660,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
-    private func presentDetachedCandidateList(title: String, candidates: [[String: Any]], anchor: DetachedAnchor?) {
-        // 名单数据在原生层渲染为独立列表窗口，点击人选打开主窗口详情。
+    /// 独立名单窗口：WKWebView 加载 /asa-app#candidate_list=bare，页面加载完成后注入名单 JSON，
+    /// 由前端同一个名单组件渲染，UI 与应用内完全一致；点人选在同窗口打开纯净详情页（bare=1）。
+    private func presentDetachedCandidateList(title: String, list: [String: Any], anchor: DetachedAnchor?, sourceWindow: NSWindow?) {
         if detachedListWindow == nil {
             let rect = NSRect(x: 0, y: 0, width: 480, height: 600)
             let window = NSWindow(
@@ -1666,46 +1675,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("ASA Detached Candidate List")
             window.minSize = NSSize(width: 380, height: 300)
+            let web = WKWebView(frame: rect, configuration: webConfiguration())
+            // 与主窗口一致：/asa-app 按 UA 放行，缺了会被 Core 当作禁用的浏览器入口。
+            web.customUserAgent = "ASAApp/\(appVersion)"
+            web.navigationDelegate = self
+            web.uiDelegate = self
+            web.autoresizingMask = [.width, .height]
+            window.contentView = web
             window.delegate = self
             detachedListWindow = window
+            detachedListWebView = web
         }
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 600))
-        scroll.hasVerticalScroller = true
-        scroll.autoresizingMask = [.width, .height]
-        let tableView = NSTableView(frame: scroll.bounds)
-        tableView.autoresizingMask = [.width, .height]
-        tableView.rowHeight = 52
-        tableView.allowsColumnReordering = false
-        tableView.headerView = nil
-
-        let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
-        nameColumn.width = 140
-        nameColumn.minWidth = 110
-        let detailColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("detail"))
-        detailColumn.width = 300
-        detailColumn.minWidth = 220
-        tableView.addTableColumn(nameColumn)
-        tableView.addTableColumn(detailColumn)
-
-        let dataSource = DetachedCandidateDataSource(candidates: candidates)
-        let delegate = DetachedCandidateDelegate(candidates: candidates) { [weak self] candidateID in
-            guard let self else { return }
-            var components = URLComponents(url: self.serviceBaseURL.appendingPathComponent("asa-app"), resolvingAgainstBaseURL: false)
-            components?.fragment = "candidate=\(candidateID)"
-            if let url = components?.url {
-                self.loadWorkbenchURL(url.absoluteString)
-            }
+        if let data = try? JSONSerialization.data(withJSONObject: list),
+           let json = String(data: data, encoding: .utf8) {
+            pendingDetachedListJSON = json
         }
-        detachedListDataSource = dataSource
-        detachedListDelegate = delegate
-        tableView.dataSource = dataSource
-        tableView.delegate = delegate
-        scroll.documentView = tableView
-        detachedListWindow?.contentView = scroll
+        var components = URLComponents(url: serviceBaseURL.appendingPathComponent("asa-app"), resolvingAgainstBaseURL: false)
+        components?.fragment = "candidate_list=1&bare=1"
+        if let url = components?.url {
+            detachedListWebView?.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 20))
+        }
         detachedListWindow?.title = title
         let wasVisible = detachedListWindow?.isVisible ?? false
         if !wasVisible {
-            if let frame = anchorFrame(for: anchor, size: NSSize(width: 480, height: 600)) {
+            if let frame = anchorFrame(for: anchor, size: NSSize(width: 480, height: 600), sourceWindow: sourceWindow) {
                 detachedListWindow?.setFrame(frame, display: true)
             } else {
                 detachedListWindow?.center()
@@ -1967,8 +1960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             if window === detachedWindow {
                 detachedWebView?.stopLoading()
             } else if window === detachedListWindow {
-                detachedListDataSource = nil
-                detachedListDelegate = nil
+                detachedListWebView?.stopLoading()
             }
         }
     }
@@ -1988,7 +1980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             decisionHandler(.allow)
             return
         }
-        let surface: ASAWebSurface = (webView === mainWebView || webView === detachedWebView) ? .agent : .copilot
+        let surface: ASAWebSurface = (webView === mainWebView || webView === detachedWebView || webView === detachedListWebView) ? .agent : .copilot
         if webSecurityPolicy.allowsNavigation(to: url, on: surface) {
             webLogger.info("navigation allow surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(url), privacy: .public)")
             if webView === mainWebView {
@@ -2014,6 +2006,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webLogger.info("navigation finish surface=\(self.webSurfaceName(for: webView), privacy: .public) url=\(self.loggableWebLocation(webView.url), privacy: .public)")
+        // 独立名单窗口：页面加载完成后注入名单 JSON，前端轮询读取并渲染。
+        if webView === detachedListWebView, let json = pendingDetachedListJSON {
+            webView.evaluateJavaScript("window.__DETACHED_LIST__ = \(json);") { _, _ in }
+        }
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -2078,8 +2074,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard message.frameInfo.isMainFrame,
               webSecurityPolicy.isTrustedOrigin(scheme: origin.protocol, host: origin.host, port: origin.port),
               let sourceWebView = message.webView else { return }
-        let surface: ASAWebSurface = (sourceWebView === mainWebView || sourceWebView === detachedWebView) ? .agent : .copilot
-        guard sourceWebView === mainWebView || sourceWebView === webView || sourceWebView === detachedWebView,
+        let surface: ASAWebSurface = (sourceWebView === mainWebView || sourceWebView === detachedWebView || sourceWebView === detachedListWebView) ? .agent : .copilot
+        guard sourceWebView === mainWebView || sourceWebView === webView || sourceWebView === detachedWebView || sourceWebView === detachedListWebView,
               webSecurityPolicy.allowsBridgeAction(type, on: surface) else { return }
         if type == "screenshot" {
             startScreenshotCapture()
@@ -2114,7 +2110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         } else if type == "hideFloating" {
             collapsePanel()
         } else if type == "openDetachedDialog" {
-            openDetachedDialog(body)
+            openDetachedDialog(body, source: sourceWebView)
         } else if type == "openExternal", let urlString = body["url"] as? String,
                   let url = URL(string: urlString), webSecurityPolicy.allowsExternalURL(url) {
             openExternalURL(url)

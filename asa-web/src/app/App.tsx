@@ -14,9 +14,11 @@ import { Diagnostics } from './Diagnostics'
 import { AnalysisWorkspace } from '../pages/AnalysisWorkspace'
 import { AnalysisTemplateDialog } from '../components/AnalysisTemplateDialog'
 import { AgentWorkspace } from '../agent/AgentWorkspace'
-import { AGENT_NAVIGATE_EVENT } from '../agent/navigation'
+import { AGENT_NAVIGATE_EVENT, notifyFullObjectClosed } from '../agent/navigation'
 import type { AgentContext, AgentReference } from '../agent/transport'
 import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
+import { isBareDetached } from '../shared/nativeBridge'
+import { BareCandidateList } from '../agent/BareCandidateList'
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
@@ -50,6 +52,7 @@ export function App() {
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
   const [sourcingCandidatesWorkflowId, setSourcingCandidatesWorkflowId] = useState('')
+  const [bareList, setBareList] = useState(false)
   const [workbench, setWorkbench] = useState<Workbench>()
   const [templates, setTemplates] = useState<AnalysisTemplate[]>([])
   const [analysisCatalog, setAnalysisCatalog] = useState<AnalysisCatalogItem[]>([])
@@ -207,7 +210,7 @@ export function App() {
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
 
   const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
@@ -216,14 +219,14 @@ export function App() {
     await refreshCandidateList()
   }
   const openJob = async (id: number) => {
-    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const openWorkflow = async (id: string) => {
     try {
-      setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
+      setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false)
       const resolved = await resolveWorkflowRevision(id, api.workflow)
       setWorkflow(resolved.value)
-      const nextHash = `workflow=${encodeURIComponent(resolved.id)}`
+      const nextHash = `workflow=${encodeURIComponent(resolved.id)}${isBareDetached() ? '&bare=1' : ''}`
       if (resolved.id !== id) history.replaceState(null, '', `${location.pathname}${location.search}#${nextHash}`)
       else location.hash = nextHash
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
@@ -253,6 +256,9 @@ export function App() {
       const workflowId = hash.get('workflow')
       const jobId = Number(hash.get('job'))
       const sourcingCandidatesId = hash.get('sourcing_candidates')
+      const candidateList = hash.get('candidate_list')
+      if (candidateList) { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(true); return }
+      setBareList(false)
       if (sourcingCandidatesId) { openSourcingCandidates(sourcingCandidatesId); return }
       if (analysisId) { void openAnalysis(analysisId); return }
       if (candidateId) { void openCandidate(candidateId); return }
@@ -324,7 +330,12 @@ export function App() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setAnalysisBusy('') }
   }
-  const closeOverlay = () => { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); history.replaceState(null, '', `${location.pathname}${location.search}`) }
+  const closeOverlay = () => {
+    // 纯净模式（独立窗口）：优先退回上一页（如从名单点进详情），无历史再清空。
+    if (isBareDetached() && history.length > 1) { history.back(); return }
+    setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false); history.replaceState(null, '', `${location.pathname}${location.search}`)
+    notifyFullObjectClosed()
+  }
   const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
   const workflowJobId = Number(workflowContext?.id || 0)
   const workflowJob = jobs.find(item => item.id === workflowJobId)
@@ -359,6 +370,30 @@ export function App() {
   if (error && !boot) return <Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} />
 
   const pageTitle = sourcingCandidatesWorkflowId ? '寻访候选人名单' : analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
+  const todayLabel = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())
+  // 导航角标：岗位看板显示开放岗位数、人选进度显示待处理数，其余 tab 无角标。
+  const tabBadge = (id: Tab) => {
+    if (id === 'jobs') {
+      const count = dashboard?.counts?.active_jobs
+      return count ? <em className="nav-badge" aria-label={`${count} 个开放岗位`}>{count > 99 ? '99+' : count}</em> : null
+    }
+    if (id === 'progress') {
+      const count = dashboard?.counts?.pending_candidates
+      return count ? <em className="nav-badge" aria-label={`${count} 个待处理人选`}>{count > 99 ? '99+' : count}</em> : null
+    }
+    return null
+  }
+  // 错误/通知 toast 8 秒后自动消失，避免常驻遮挡。
+  useEffect(() => {
+    if (!error) return
+    const timer = window.setTimeout(() => setError(''), 8000)
+    return () => window.clearTimeout(timer)
+  }, [error])
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(''), 8000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
   const navigateTab = (id: Tab) => {
     setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)
@@ -377,23 +412,35 @@ export function App() {
     } else if (reference.type === 'workflow') void openWorkflow(String(reference.id))
   }
 
+  // 纯净模式（独立窗口，hash 带 bare=1）：只渲染目标页面，不带 Agent 主界面/导航/侧栏。
+  if (isBareDetached()) {
+    return <div className="shell bare-shell">
+      {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
+      {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
+      {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+      {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
+      {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
+      {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
+    </div>
+  }
+
   return <div className={`shell ${tab === 'agent' && !analysis ? 'agent-mode' : ''}`}>
     <aside className="nav">
       <div className="brand"><span>ASA</span><strong>Agent</strong><small>Recruiting Workbench</small></div>
-      <nav>{tabs.map(([id, label, icon]) => <button key={id} className={!analysis && tab === id ? 'active' : ''} onClick={() => navigateTab(id)}>{icon}<span>{label}</span></button>)}</nav>
+      <nav>{tabs.map(([id, label, icon]) => <button key={id} className={!analysis && tab === id ? 'active' : ''} onClick={() => navigateTab(id)}>{icon}<span>{label}</span>{tabBadge(id)}</button>)}</nav>
       <div className="nav-status"><Wifi/><span>Core 在线</span></div>
       <a className="legacy" href="/admin/legacy" target="_blank">审计与旧版</a>
     </aside>
     <main className="main">
       <header className="topbar">
-        <div><h1>{pageTitle}</h1><p>{boot?.core?.status === 'connected' ? 'ASA Agent 在线 · Core 已连接 · v3 实时数据' : 'ASA Agent 正在连接 Core'}</p></div>
+        <div><h1>{pageTitle}</h1><p>{boot?.core?.status === 'connected' ? <>{todayLabel} · ASA Agent 在线 · Core 已连接<span className="topbar-extra"> · v3 实时数据</span></> : 'ASA Agent 正在连接 Core'}</p></div>
         {!analysis && tab !== 'agent' && <button className="button copilot-launch" title="交给 Agent" aria-label="交给 Agent" onClick={()=>openAgent(activeContext)}><MessageSquareText/><span>Agent</span></button>}
       </header>
       {coreOffline && <div className="core-offline-banner" role="alert"><span>ASA Core 连接中断，检查本机服务后可点击重连</span><button className="button" onClick={() => void probeCore()}>重连</button></div>}
       <div className="content">
         {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
         {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace dashboard={dashboard} jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}

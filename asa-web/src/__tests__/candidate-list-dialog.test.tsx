@@ -69,4 +69,33 @@ describe('CandidateListDialog', () => {
     fireEvent.click(screen.getByText('打开岗位查看完整名单'))
     expect(onOpenJob).toHaveBeenCalledWith(137)
   })
+
+  it('弹出独立窗口只带名单数据（有候选人时不带岗位 url）', () => {
+    const messages: Array<Record<string, unknown>> = []
+    const w = window as unknown as { webkit?: unknown }
+    w.webkit = { messageHandlers: { asaNative: { postMessage: (msg: Record<string, unknown>) => messages.push(msg) } } }
+    const onClose = vi.fn()
+    render(<CandidateListDialog data={data} onOpenCandidate={() => {}} onOpenJob={() => {}} onClose={onClose} />)
+    fireEvent.click(screen.getByLabelText('弹出为独立窗口'))
+    expect(messages).toHaveLength(1)
+    expect(messages[0].type).toBe('openDetachedDialog')
+    const list = messages[0].list as { groups?: unknown[] } | undefined
+    expect(Array.isArray(list?.groups)).toBe(true)
+    expect('url' in messages[0]).toBe(false)
+    expect(onClose).toHaveBeenCalled()
+    delete w.webkit
+  })
+
+  it('无候选数据时弹出独立窗口退回岗位页 url', () => {
+    const messages: Array<Record<string, unknown>> = []
+    const w = window as unknown as { webkit?: unknown }
+    w.webkit = { messageHandlers: { asaNative: { postMessage: (msg: Record<string, unknown>) => messages.push(msg) } } }
+    const empty: CandidateListCardData = { type: 'candidate_list', title: '空名单', context: { type: 'job', id: 137 }, groups: [] }
+    render(<CandidateListDialog data={empty} onOpenCandidate={() => {}} onOpenJob={() => {}} onClose={() => {}} />)
+    fireEvent.click(screen.getByLabelText('弹出为独立窗口'))
+    expect(messages).toHaveLength(1)
+    expect(messages[0].url).toBe('/asa-app#job=137&bare=1')
+    expect('list' in messages[0]).toBe(false)
+    delete w.webkit
+  })
 })

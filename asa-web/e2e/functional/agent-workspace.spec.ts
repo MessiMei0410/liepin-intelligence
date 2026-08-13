@@ -133,7 +133,8 @@ test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {
   })
   expect(layout.cardWidth).toBeGreaterThan(200)
   expect(Math.abs(layout.cardWidth - layout.contentWidth)).toBeLessThanOrEqual(1)
-  expect(layout.gridColumn).toBe('2')
+  // 消息行 3 列（角色 | 时间 | 内容），卡片在内容列。
+  expect(layout.gridColumn).toBe('3')
 })
 
 test('岗位详情的“交给 Agent”显式附着岗位上下文', async ({ page }) => {
@@ -148,7 +149,11 @@ test('Agent 任务可搜索、改名、归档并解除业务焦点', async ({ pa
   let archived = false
   let focus: Record<string, unknown> | null = { context: { type: 'job', id: 154 }, client: '士兰微', job: { title: '电源专家' } }
   const patches: Array<Record<string, unknown>> = []
-  await page.addInitScript(() => localStorage.setItem('asaAgentSessionId', 'agent-manage-task'))
+  await page.addInitScript(() => {
+    localStorage.setItem('asaAgentSessionId', 'agent-manage-task')
+    // 任务栏默认折叠：e2e 任务管理断言依赖展开态，显式设置偏好。
+    localStorage.setItem('asaTaskRailCollapsed', '0')
+  })
   await page.route('**/api/v1/copilot/sessions**', async route => {
     const request = route.request()
     const url = new URL(request.url())

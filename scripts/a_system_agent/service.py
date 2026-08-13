@@ -203,6 +203,7 @@ from .assessment_handler import (
     _current_assessed_candidates as _h_current_assessed_candidates,
     generate_candidate_assessment as _h_generate_candidate_assessment,
     get_candidate_assessment as _h_get_candidate_assessment,
+    refresh_candidate_fit_assessment as _h_refresh_candidate_fit_assessment,
     update_candidate_assessment_advisor_action as _h_update_candidate_assessment_advisor_action,
     assessment_calibration_metrics as _h_assessment_calibration_metrics,
     generate_assessment_calibration_report as _h_generate_assessment_calibration_report,
@@ -1735,6 +1736,7 @@ AgentService.get_dashboard = _h_get_dashboard
 AgentService._current_assessed_candidates = _h_current_assessed_candidates
 AgentService.generate_candidate_assessment = _h_generate_candidate_assessment
 AgentService.get_candidate_assessment = _h_get_candidate_assessment
+AgentService.refresh_candidate_fit_assessment = _h_refresh_candidate_fit_assessment
 AgentService.update_candidate_assessment_advisor_action = _h_update_candidate_assessment_advisor_action
 AgentService.assessment_calibration_metrics = _h_assessment_calibration_metrics
 AgentService.generate_assessment_calibration_report = _h_generate_assessment_calibration_report

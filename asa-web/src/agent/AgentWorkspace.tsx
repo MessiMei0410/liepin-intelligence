@@ -1,6 +1,6 @@
-import { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, BookPlus, Building2, ClipboardCopy, FileText, History, LoaderCircle, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
-import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, Dashboard, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
+import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
+import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
+import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
 import { AgentPageContextBar } from './AgentPageContextBar'
@@ -11,6 +11,7 @@ import { CandidateListDialog } from './CandidateListDialog'
 import { useDialogFocus } from '../shared/useDialogFocus'
 import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { updateCandidateListDialogData } from './candidateListDialogUpdate'
+import { FULL_OBJECT_CLOSED_EVENT } from './navigation'
 import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
@@ -23,6 +24,49 @@ const KnowledgeProposalsPanel = lazy(() => import('../panels/KnowledgeProposals'
 const CompanyCalibrationPanel = lazy(() => import('../panels/CompanyCalibration').then(module => ({ default: module.CompanyCalibrationPanel })))
 // 与 api.agentSession 默认 limit 对齐：拉满即视为历史被截断。
 const SESSION_MESSAGE_LIMIT = 100
+
+// 任务相对时间：刚刚/N 分钟前/N 小时前/N 天前，超过 7 天显示日期。
+const relativeTime = (value?: string) => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const diff = Date.now() - date.getTime()
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
+  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(date)
+}
+
+// 跨天日期分隔标签：与上一条消息不同天时显示 今天/昨天/M月d日 周X。
+const dayLabelFor = (value?: string, previous?: string) => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const prev = previous ? new Date(previous) : null
+  if (prev && !Number.isNaN(prev.getTime()) && date.toDateString() === prev.toDateString()) return ''
+  const now = new Date()
+  if (date.toDateString() === now.toDateString()) return '今天'
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (date.toDateString() === yesterday.toDateString()) return '昨天'
+  return new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(date)
+}
+
+// 消息时间戳：同日仅显示时刻，跨天补日期，避免会话时间线模糊。
+const formatMessageTime = (value: string) => {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: sameDay ? undefined : 'numeric',
+    day: sameDay ? undefined : 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date)
+}
 
 const uploadedAttachments = (context?: AgentContext): Array<Partial<UploadedAgentAttachment>> => (
   Array.isArray(context?.uploaded_attachments)
@@ -134,8 +178,8 @@ const messageReferences = (message: AgentMessage): AgentReference[] => {
   return refs.filter(item => !genericReferenceLabel(item.label) || !refs.some(other => other !== item && other.type === item.type && !genericReferenceLabel(other.label)))
 }
 
-export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, context, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onWorkbenchAction, onOpenFullObject }: {
-  dashboard?: Dashboard; jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext;
+export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onWorkbenchAction, onOpenFullObject }: {
+  jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
   onManageTemplate: (template: AnalysisTemplate) => void; onCreateTemplate: () => void;
   onWorkbenchAction: (item: WorkbenchItem) => void; onOpenFullObject: (reference: AgentReference) => void;
@@ -152,11 +196,28 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const [attachmentDragActive, setAttachmentDragActive] = useState(false)
   const [lastTurn, setLastTurn] = useState<AgentTurn>()
   const [candidateListDialog, setCandidateListDialog] = useState<CandidateListCardData | null>(null)
+  // 名单浮窗层级高于详情面板（--z-float 60 > --z-overlay 50），不关闭会盖在详情上方吞掉
+  // 滚轮/指针事件。打开详情前暂存名单并关闭，详情关闭后自动恢复，避免"点个人选名单就没了"。
+  const candidateListStashRef = useRef<CandidateListCardData | null>(null)
+  useEffect(() => {
+    const restore = () => {
+      if (!candidateListStashRef.current) return
+      setCandidateListDialog(candidateListStashRef.current)
+      candidateListStashRef.current = null
+    }
+    window.addEventListener(FULL_OBJECT_CLOSED_EVENT, restore)
+    return () => window.removeEventListener(FULL_OBJECT_CLOSED_EVENT, restore)
+  }, [])
   const [refreshingCardJob, setRefreshingCardJob] = useState<number | null>(null)
   const [cardRefreshError, setCardRefreshError] = useState('')
   const [historyOpen, setHistoryOpen] = useState(false)
   const [modelAuditOpen, setModelAuditOpen] = useState(false)
-  const [taskRailCollapsed, setTaskRailCollapsed] = useState(false)
+  // 任务栏折叠偏好持久化：默认折叠（无偏好即折叠），用户展开后记住选择。
+  const [taskRailCollapsed, setTaskRailCollapsed] = useState(() => localStorage.getItem('asaTaskRailCollapsed') !== '0')
+  const setRailCollapsed = (collapsed: boolean) => {
+    setTaskRailCollapsed(collapsed)
+    localStorage.setItem('asaTaskRailCollapsed', collapsed ? '1' : '0')
+  }
   const [taskQuery, setTaskQuery] = useState('')
   const [renamingId, setRenamingId] = useState('')
   const [renameValue, setRenameValue] = useState('')
@@ -172,7 +233,6 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const [turnProgress, setTurnProgress] = useState('')
   const [historyTruncated, setHistoryTruncated] = useState(false)
   const [searchUnavailable, setSearchUnavailable] = useState(false)
-  const [sessionIdCopied, setSessionIdCopied] = useState(false)
   const [taskMenu, setTaskMenu] = useState<{ sessionId: string; x: number; y: number } | undefined>(undefined)
   const [interactionError, setInteractionError] = useState('')
   const [structuredActionBusy, setStructuredActionBusy] = useState('')
@@ -415,12 +475,10 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
       if (generation === generationRef.current) setTurnProgress('')
     }
   }
-  const submit = (event?: FormEvent) => {
-    event?.preventDefault()
+  const sendMessage = (message: string) => {
     const readyAttachments = attachments.flatMap(item => item.state === 'ready' && item.attachment ? [item.attachment] : [])
     const uploadInProgress = attachments.some(item => item.state === 'uploading')
     const uploadFailed = attachments.some(item => item.state === 'error')
-    const message = draft.trim() || (readyAttachments.length ? `请读取并分析附件：${readyAttachments.map(item => item.file_name).join('、')}` : '')
     if (!message || loading || restoring || uploadInProgress || uploadFailed) return
     if (isArchiveAllTasksCommand(message)) {
       setDraft(''); setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('')
@@ -435,6 +493,66 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     attachmentGenerationRef.current += 1; attachmentsRef.current = []; setAttachmentNotice('')
     setDraft(''); setAttachments([]); void runTurn(createAgentTurn(sessionId, message, contextWithAttachments))
   }
+  const submit = (event?: FormEvent) => {
+    event?.preventDefault()
+    const readyAttachments = attachments.flatMap(item => item.state === 'ready' && item.attachment ? [item.attachment] : [])
+    const message = draft.trim() || (readyAttachments.length ? `请读取并分析附件：${readyAttachments.map(item => item.file_name).join('、')}` : '')
+    sendMessage(message)
+  }
+  // 空态快捷指令：直接以指令文本发起会话，聚焦输入框便于即时微调。
+  const runQuickCommand = (command: string) => {
+    if (loading || restoring) return
+    setDraft(command)
+    sendMessage(command)
+  }
+  // 打开工作台自动聚焦输入框：首次挂载与会话恢复完成后各聚焦一次，之后不抢焦点。
+  const composerFocusedRef = useRef(false)
+  useEffect(() => {
+    if (composerFocusedRef.current || restoring) return
+    composerFocusedRef.current = true
+    composerRef.current?.focus()
+  }, [restoring])
+  // 输入框随内容自动增高（上限 160px，超出滚动），发送清空后回落初始高度。
+  useEffect(() => {
+    const el = composerRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+  }, [draft])
+  // Cmd/Ctrl+K 随时聚焦输入框（消息流滚动后快速回到输入）。
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        composerRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // 消息复制：复制助手消息原文（markdown 原样），短时反馈"已复制"。
+  const [copiedMessageKey, setCopiedMessageKey] = useState('')
+  const copyMessage = async (key: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedMessageKey(key)
+      window.setTimeout(() => setCopiedMessageKey(current => current === key ? '' : current), 1600)
+    } catch {
+      // 剪贴板不可用时静默：复制是辅助能力，不打断对话。
+    }
+  }
+  // 消息流滚动远离底部时显示"回到底部"。
+  const messagesRef = useRef<HTMLDivElement>(null)
+  const [showJumpBottom, setShowJumpBottom] = useState(false)
+  useEffect(() => {
+    const el = messagesRef.current
+    if (!el) return
+    const onScroll = () => setShowJumpBottom(el.scrollHeight - el.scrollTop - el.clientHeight > 240)
+    onScroll()
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+  const jumpToBottom = () => endRef.current?.scrollIntoView({ behavior: 'smooth' })
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() }
   }
@@ -509,9 +627,8 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     if (!id || !navigator.clipboard?.writeText) return
     try {
       await navigator.clipboard.writeText(id)
-      setSessionIdCopied(true)
     } catch {
-      setSessionIdCopied(false)
+      // 复制失败保持静默：任务右键菜单中的低频操作，无需打断用户。
     }
   }
   useEffect(() => {
@@ -599,16 +716,21 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
 
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
-      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title={sessionIdCopied ? '会话 ID 已复制' : '复制会话 ID'} aria-label={sessionIdCopied ? '会话 ID 已复制' : '复制会话 ID'} onClick={() => void copySessionId(sessionId)}><ClipboardCopy/></button>}<button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => setHistoryOpen(true)}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
+      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
       {contextConflict && <div className="agent-context-conflict" role="alert"><span>你正带着新的业务上下文进入，当前任务焦点为 {contextConflict.label}</span><div><button className="button primary" onClick={resolveConflictWithNewTask}>以新上下文新建任务</button><button className="button" onClick={resolveConflictKeepCurrent}>继续当前任务</button></div></div>}
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
-      <div className="agent-messages">
+      <div ref={messagesRef} className="agent-messages">
         {historyTruncated && <p className="agent-truncated">仅显示最近 100 条消息</p>}
-        {!messages.length && !restoring && <AgentHome dashboard={dashboard} jobs={jobs} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} />}
+        {!messages.length && !restoring && <AgentHome jobs={jobs} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} onQuickCommand={runQuickCommand} />}
         {restoring && <div className="agent-loading"><LoaderCircle className="spin"/>恢复任务</div>}
-        {messages.map((message, index) => <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`} key={`${index}:${message.created_at || ''}`}>
-          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span><div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.content
+        {messages.map((message, index) => {
+          const messageKey = `${index}:${message.created_at || ''}`
+          const dayLabel = dayLabelFor(message.created_at, messages[index - 1]?.created_at)
+          return <Fragment key={messageKey}>
+            {dayLabel && <div className="agent-day-divider" role="separator"><span>{dayLabel}</span></div>}
+            <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`}>
+          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span>{message.created_at && <time className="agent-message-time" dateTime={message.created_at}>{formatMessageTime(message.created_at)}</time>}{message.role === 'assistant' && message.content && <button className={`agent-message-copy ${copiedMessageKey === `${index}:${message.created_at || ''}` ? 'copied' : ''}`} aria-label="复制消息内容" title="复制消息内容" onClick={() => void copyMessage(`${index}:${message.created_at || ''}`, message.content)}>{copiedMessageKey === `${index}:${message.created_at || ''}` ? <span>已复制</span> : <ClipboardCopy size={11}/>}</button>}<div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.content
             ? <AgentMessageContent content={message.content}/>
             : loading && index === messages.length - 1
               ? <AgentThinking label={turnProgress ? `正在处理：${turnProgress}` : 'ASA 正在思考'}/>
@@ -665,9 +787,12 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
             </div>
           )}
           {message.role === 'assistant' && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
-        </div>)}
+          </div>
+          </Fragment>
+        })}
         {(error || (phase === 'stopped' && lastTurn)) && <div className="agent-error"><span>{error || '已停止生成'}</span>{lastTurn && <button className="button" onClick={retry}>重试</button>}</div>}
         <div ref={endRef}/>
+        {showJumpBottom && <button className="agent-jump-bottom" aria-label="回到底部" title="回到底部" onClick={jumpToBottom}><ChevronDown size={13}/><span>回到底部</span></button>}
       </div>
       <div className="agent-composer-stack">
         <AgentPageContextBar onOpenFullObject={onOpenFullObject} onBridgeContextChange={setBridgeContext}/>
@@ -676,14 +801,14 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
           {attachmentNotice && <p className="agent-attachment-notice" role="alert">{attachmentNotice}</p>}
           <input ref={attachmentInputRef} className="agent-attachment-input" type="file" multiple accept={AGENT_ATTACHMENT_ACCEPT} aria-label="选择附件" onChange={event => { addAttachments(Array.from(event.target.files || [])); event.target.value = '' }}/>
           <button className="icon-btn agent-attach" type="button" disabled={restoring || loading || attachments.length >= AGENT_ATTACHMENT_MAX_COUNT} aria-label="添加附件" title="添加附件" onClick={() => attachmentInputRef.current?.click()}><Paperclip/></button>
-          <textarea ref={composerRef} rows={1} value={draft} onChange={event => setDraft(event.target.value)} onPaste={onAttachmentPaste} onKeyDown={keyDown} disabled={restoring} placeholder="告诉 ASA 你要推进的目标..." aria-label="Agent 消息"/>
+          <textarea ref={composerRef} rows={1} value={draft} onChange={event => setDraft(event.target.value)} onPaste={onAttachmentPaste} onKeyDown={keyDown} disabled={restoring} placeholder="告诉 ASA 你要推进的目标…（或点上方快捷指令）" aria-label="Agent 消息"/>
           <button className="icon-btn agent-send" type={loading ? 'button' : 'submit'} disabled={restoring || (!loading && (attachments.some(item => item.state !== 'ready') || (!draft.trim() && !attachments.some(item => item.state === 'ready'))))} onClick={loading ? stop : undefined} aria-label={loading ? '停止生成' : '发送'} title={loading ? '停止生成' : '发送'}>{loading ? <Square/> : <Send/>}</button>
         </form>
       </div>
       <ModelAuditPanel open={modelAuditOpen} onClose={() => setModelAuditOpen(false)}/>
     </section>
-    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setTaskRailCollapsed(false)}><PanelRightOpen/></button> : <><header><div><History/><b>任务</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setTaskRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><button className="button primary agent-new-task" aria-label="在任务栏新建任务" onClick={newTask}><Plus/>新任务</button><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 112; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
-      {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{item.preview}</span><small>{item.message_count} 条消息</small></button>}
+    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 112; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
+      {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{item.preview}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></button>}
       <div className="agent-task-actions"><button className="icon-btn" disabled={!!taskBusy} aria-label={`重命名任务：${item.title}`} title="重命名任务" onClick={() => { setRenamingId(item.session_id); setRenameValue(item.title); setArchiveConfirmId(''); setTaskError('') }}><Pencil/></button>{archiveConfirmId === item.session_id ? <button className="button danger" disabled={taskBusy === item.session_id} aria-label={`确认归档任务：${item.title}`} onClick={() => void archiveTask(item)}>确认归档</button> : <button className="icon-btn" disabled={!!taskBusy} aria-label={`归档任务：${item.title}`} title="归档任务" onClick={() => { setArchiveConfirmId(item.session_id); setRenamingId(''); setTaskError('') }}><Archive/></button>}</div>
     </article>)}{!visibleSessions.length && <p>{taskQuery ? '没有匹配任务' : '暂无历史任务'}</p>}</div></>}</aside>
     {taskMenu && <div className="agent-task-menu-backdrop" role="presentation" onClick={() => setTaskMenu(undefined)} onContextMenu={event => { event.preventDefault(); setTaskMenu(undefined) }}>
@@ -701,9 +826,17 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
         data={candidateListDialog}
         onOpenCandidate={jobCandidateId => {
           const candidate = (candidateListDialog.groups || []).flatMap(group => group.candidates || []).find(item => item.id === jobCandidateId)
+          // 暂存名单，详情关闭后恢复（见 candidateListStashRef）。
+          candidateListStashRef.current = candidateListDialog
+          setCandidateListDialog(null)
           onOpenFullObject({ type: 'candidate', id: jobCandidateId, label: candidate?.name || '人选' })
         }}
-        onOpenJob={jobId => onOpenFullObject({ type: 'job', id: jobId, label: candidateListDialog.title })}
+        onOpenJob={jobId => {
+          // 岗位详情同样是 overlay，同样暂存后关闭。
+          candidateListStashRef.current = candidateListDialog
+          setCandidateListDialog(null)
+          onOpenFullObject({ type: 'job', id: jobId, label: candidateListDialog.title })
+        }}
         onClose={() => setCandidateListDialog(null)}
         onRefresh={() => void refreshCandidateList(candidateListDialog)}
         refreshing={refreshingCardJob === Number(candidateListDialog.context?.id)}
@@ -721,33 +854,47 @@ const agentHomeLanes: Array<{ lane: WorkbenchLane; label: string; empty: string 
   { lane: 'delivered', label: '最近交付', empty: '最近还没有交付物' },
 ]
 
+// 空态快捷指令：一句话触发 Copilot 常用能力，点击即以该指令发起新会话。
+const agentHomeQuickCommands: Array<{ label: string; command: string; icon: React.ReactNode }> = [
+  { label: '今日待办', command: '今天有哪些待办？', icon: <ListChecks/> },
+  { label: '过滤名单', command: '过滤候选人名单', icon: <Filter/> },
+  { label: '人才地图', command: '查一下人才地图', icon: <Map/> },
+  { label: '薪酬对标', command: '薪酬对标一下', icon: <Banknote/> },
+  { label: '推荐报告', command: '生成推荐报告', icon: <FileText/> },
+  { label: '继续寻访', command: '继续寻访', icon: <RefreshCw/> },
+]
+
 function AgentHomeLane({ lane, label, empty, workbench, loading, onAction }: {
   lane: WorkbenchLane; label: string; empty: string; workbench: Workbench; loading: boolean;
   onAction: (item: WorkbenchItem) => void;
 }) {
   const [visibleLimit, setVisibleLimit] = useState(4)
+  const [collapsed, setCollapsed] = useState(false)
   const items = workbench.items.filter(item => item.lane === lane)
   const visibleItems = items.slice(0, visibleLimit)
   const total = workbenchLaneCount(workbench, lane)
-  // 服务端序列化窗口有上限（analytics.workbench 统一封顶 300）。始终同时展示当前渲染数、
-  // 已加载窗口和真实总数，避免局部列表被误解为完整待办。
-  const summaryLabel = loading
-    ? '加载中…'
-    : `显示 ${visibleItems.length} / 已加载 ${items.length} / 共 ${total} 项`
+  // 服务端序列化窗口有上限（analytics.workbench 统一封顶 300）；总数以 summary 为准，
+  // 超出窗口时由"共 N 项 + 再显示"分页自然承接，不再展示调试式加载窗口细节。
+  const summaryLabel = loading ? '加载中…' : `共 ${total} 项`
   const hasMore = visibleItems.length < items.length
   const nextBatchSize = Math.min(20, items.length - visibleItems.length)
-  return <section className="agent-home-band" aria-label={label}><header><h3>{label}</h3><span>{summaryLabel}</span></header>{visibleItems.map(item => <button key={item.item_key} onClick={() => onAction(item)}><span><b>{item.title}</b><small>{item.reason || item.subtitle}</small></span><em>{item.status_label}</em></button>)}{(hasMore || visibleLimit > 4) && <div className="agent-home-pagination">{hasMore && <button className="agent-home-more" onClick={() => setVisibleLimit(value => Math.min(items.length, value + 20))}>再显示 {nextBatchSize} 项</button>}{visibleLimit > 4 && <button className="agent-home-collapse" onClick={() => setVisibleLimit(4)}>收起</button>}</div>}{!items.length && <p>{loading ? '正在加载…' : empty}</p>}</section>
+  return <section className={`agent-home-band ${collapsed ? 'lane-collapsed' : ''}`} aria-label={label}><header><button className="agent-home-lane-toggle" aria-label={`${collapsed ? '展开' : '收起'}${label}`} aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}><ChevronDown size={12}/><h3>{label}</h3></button><span>{summaryLabel}</span></header>{!collapsed && <>{visibleItems.map(item => <button key={item.item_key} onClick={() => onAction(item)}><span><b>{item.title}</b><small>{item.reason || item.subtitle}</small></span><em>{item.status_label}</em></button>)}{(hasMore || visibleLimit > 4) && <div className="agent-home-pagination">{hasMore && <button className="agent-home-more" onClick={() => setVisibleLimit(value => Math.min(items.length, value + 20))}>再显示 {nextBatchSize} 项</button>}{visibleLimit > 4 && <button className="agent-home-collapse" onClick={() => setVisibleLimit(4)}>收起</button>}</div>}{!items.length && <p>{loading ? '正在加载…' : empty}</p>}</>}</section>
 }
 
-function AgentHome({ dashboard, jobs, workbench, templates, onAction, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate }: {
-  dashboard?: Dashboard; jobs: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; onAction: (item: WorkbenchItem) => void;
+function AgentHome({ jobs, workbench, templates, onAction, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onQuickCommand }: {
+  jobs: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; onAction: (item: WorkbenchItem) => void;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
   onManageTemplate: (template: AnalysisTemplate) => void; onCreateTemplate: () => void;
+  onQuickCommand: (command: string) => void;
 }) {
   const [radarOpen, setRadarOpen] = useState(false)
   const [knowledgeOpen, setKnowledgeOpen] = useState(false)
   const [calibrationOpen, setCalibrationOpen] = useState(false)
   // App 层在首次成功拉取前注入 version='loading' 占位；此时未知是否为空，不得渲染成“没有待办”。
   const workbenchLoading = workbench.version === 'loading'
-  return <div className="agent-home"><header><h2>今天从哪里开始？</h2><p>ASA 已连接岗位、人选和工作流上下文。</p></header><section className="agent-home-summary" aria-label="今日概况">{agentHomeLanes.map(config => <div key={config.lane}><span>{config.label}</span><b>{workbenchLoading ? '…' : workbenchLaneCount(workbench, config.lane)}</b></div>)}<div><span>开放岗位</span><b>{dashboard?.counts?.active_jobs ?? '-'}</b></div></section>{agentHomeLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => <div className="agent-analysis-row" key={item.template_id}><button onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span><em>{item.last_run_id ? '查看' : '运行'}</em></button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>)}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
+  // 空 lane 不占位渲染：加载完成后仅展示有真实待办的板块；计数以 summary 为准（不受 300 窗口截断影响）。
+  const visibleLanes = workbenchLoading
+    ? agentHomeLanes
+    : agentHomeLanes.filter(config => workbenchLaneCount(workbench, config.lane) > 0)
+  return <div className="agent-home"><header><h2>今天从哪里开始？</h2><p>ASA 已连接岗位、人选和工作流上下文。</p></header><section className="agent-home-quick" aria-label="快捷指令">{agentHomeQuickCommands.map(item => <button key={item.command} title={item.command} onClick={() => onQuickCommand(item.command)}>{item.icon}<b>{item.label}</b><small>{item.command}</small></button>)}</section>{visibleLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => <div className="agent-analysis-row" key={item.template_id}><button onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span><em>{item.last_run_id ? '查看' : '运行'}</em></button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>)}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
 }

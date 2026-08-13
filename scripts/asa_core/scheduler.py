@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -56,6 +58,7 @@ class Scheduler:
         self._executors: dict[str, ExecutorFn] = {
             "db_maintenance": Scheduler._exec_db_maintenance,
             "followup_reminder": Scheduler._exec_followup_reminder,
+            "company_kb_refresh": Scheduler._exec_company_kb_refresh,
         }
         if executor_registry:
             self._executors.update(executor_registry)
@@ -276,3 +279,43 @@ class Scheduler:
             logger.info("followup_reminder: 超过 %d 天未跟进的候选人 %d 条（列 %s）", days, count, follow_col)
         finally:
             conn.close()
+
+    @staticmethod
+    def _exec_company_kb_refresh(scheduler: "Scheduler", task: dict) -> None:
+        """公司知识库（CKB）每日刷新：build → extract(增量) → migrate(同步生产库)。
+
+        三个管道脚本位于 liepin-intelligence/scripts/company_kb/，顺序执行，
+        任一失败即中止并记 error；输出只记尾部摘要，不落盘。
+        """
+        repo = Path.home() / "Documents/Codex/2026-06-18/liepin-intelligence"
+        steps = [
+            ("build_company_kb.py", []),
+            ("extract_company_profiles.py", ["--workers", "8"]),
+            ("migrate_to_prod.py", []),
+        ]
+        for script_name, extra_args in steps:
+            script = repo / "scripts" / "company_kb" / script_name
+            if not script.exists():
+                logger.error("company_kb_refresh: 脚本缺失 %s，中止", script)
+                return
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(script), *extra_args],
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,
+                    cwd=str(repo),
+                )
+            except subprocess.TimeoutExpired:
+                logger.error("company_kb_refresh: %s 超时(>1h)，中止", script_name)
+                return
+            lines = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
+            tail = lines[-2:] if lines else ["(无输出)"]
+            if proc.returncode != 0:
+                err_tail = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()][-3:]
+                logger.error(
+                    "company_kb_refresh: %s 失败 rc=%s | %s",
+                    script_name, proc.returncode, err_tail or tail,
+                )
+                return
+            logger.info("company_kb_refresh: %s 完成 | %s", script_name, " / ".join(tail))

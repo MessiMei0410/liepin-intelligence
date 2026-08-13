@@ -49,6 +49,7 @@ _POOL_SOURCES = {
     "legacy_profile_suggestions",
     "llm_inferred",
     "consultant_calibrated",
+    "company_kb",
 }
 _POOL_PATHS = {"same_layer", "reverse", "adjacent"}
 _POOL_TIERS = {"T1", "T2", "T3"}
@@ -1064,6 +1065,22 @@ def build_strategy_v2(
             )
         else:
             assembly_trace.append("图谱召回公司已在池内，step2 不重复并入")
+
+    # 公司知识库（CKB）补充：图谱未命中（仍为 llm_inferred）的目标公司，若 CKB 有画像
+    # 记录，则把来源升级为 source=company_kb 留痕（数据结构/键不变，仅 source 升级）；
+    # CKB 库缺失/无表/不可用时静默跳过，行为与现状一致。
+    from . import company_kb
+
+    ckb_confirmed = 0
+    for entry in step2:
+        for company in entry.get("companies") or []:
+            if not isinstance(company, dict) or company.get("source") != "llm_inferred":
+                continue
+            if company_kb.get_profile(str(company.get("name") or "")):
+                company["source"] = "company_kb"
+                ckb_confirmed += 1
+    if ckb_confirmed:
+        assembly_trace.append(f"step2 公司知识库画像确认 {ckb_confirmed} 家（llm_inferred→company_kb）")
 
     # 客户级禁挖名单是硬边界，统一过滤所有来源的目标公司，不能只限制图谱来源。
     # 名称匹配支持法定名/简称；仅保留计数留痕，不把受限公司字面量写入策略对象以外的表面。

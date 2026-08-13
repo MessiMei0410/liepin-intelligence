@@ -12,6 +12,8 @@ from ._shared import (
     _is_short_ack,
     _table_exists,
 )
+from . import company_kb
+from . import talent_intel
 from .llm import LLMError
 from .privacy import sanitize_payload
 from .conversation_state import (
@@ -248,6 +250,193 @@ def _is_explicit_question(message: str) -> bool:
     )
 
 
+# 公司知识库（CKB）直答：顾问问“XX公司是做什么的/公司背景/XX公司情况”时，
+# 直接从公司知识库返回画像摘要；CKB 无画像时返回空串，走既有 LLM 路径（行为不变）。
+_COMPANY_QUERY_LEADINS = (
+    "我想了解下", "我想了解一下", "我想知道", "我想了解", "我想问", "请问",
+    "介绍一下", "介绍下", "帮我看一下", "帮我看看", "帮我查一下", "帮我查查",
+    "查一下", "查查", "看看", "了解一下", "了解下", "说说", "讲一下", "讲下",
+    "你知道",
+)
+_COMPANY_QUERY_RE = re.compile(
+    r"([一-龥A-Za-z0-9（）()·]{2,30}?)公司(?:是做什么的?|是干什么的?|是干嘛的?|做什么业务|怎么样|如何|什么情况|什么背景|的背景|的情况|的简介|背景|情况|简介)"
+)
+_COMPANY_QUERY_PLAIN_RE = re.compile(
+    r"([一-龥A-Za-z0-9（）()·]{2,30}?)(?:是做什么的|是干什么的|是干嘛的)"
+)
+# 无“公司”字样的问法：“苏州迈为科技怎么样/迈为科技如何/芯源微什么情况”。
+# 公司特征词后缀（长的在前）+ 评价/询问词；提取的是完整候选名，最终由 CKB 命中与否裁决。
+_COMPANY_QUERY_BARE_RE = re.compile(
+    r"([一-龥A-Za-z0-9（）()·]{2,30}?"
+    r"(?:自动化|半导体|微电子|光电|光学|激光|精密|智能|科技|技术|电子|设备|装备|机电|材料|能源|医疗|通讯|通信|工业|机器|系统|股份|集团|实业|网络|信息|软件|芯片|集成|显示|器件|新材|制造|仪器|微纳|测控|数控|检测|微))"
+    r"(?:怎么样|如何|什么情况|啥情况|的情况|的背景|怎么样呀|如何呀)"
+)
+# 纯短名公司：“倍福怎么样/ASMPT如何”——无特征词后缀，提取由 CKB 命中裁决（未命中走 LLM 回退，无害）
+_COMPANY_QUERY_BARE_SHORT_RE = re.compile(
+    r"([一-龥A-Za-z0-9]{2,6}?)(?:怎么样|如何|啥情况)"
+)
+# 代词/泛指词：命中即非公司查询（宁缺勿误伤对话）
+_COMPANY_QUERY_STOP_TOKENS = (
+    "岗位", "职位", "人选", "候选人", "简历", "项目", "需求", "流程", "方案",
+    "这个", "那个", "这家", "那家", "哪家", "什么", "这块", "这种", "这些", "那些",
+    "我们", "你们", "他们", "咱们", "咱", "贵司", "贵公司", "我司", "自家",
+    "别人", "人家", "公司内部", "行业",
+)
+
+
+def _company_profile_query_name(message: str) -> str:
+    """识别公司查询意图并提取公司名；非公司查询返回空串。
+
+    提取只做候选名召回，最终是否有答案取决于 CKB 是否命中画像——未命中时
+    调用方保持现状路径，因此这里宁宽勿漏。
+    """
+    text = " ".join(str(message or "").split())
+    if not text:
+        return ""
+    match = (
+        _COMPANY_QUERY_RE.search(text)
+        or _COMPANY_QUERY_PLAIN_RE.search(text)
+        or _COMPANY_QUERY_BARE_RE.search(text)
+        or _COMPANY_QUERY_BARE_SHORT_RE.search(text)
+    )
+    if not match:
+        return ""
+    name = match.group(1).strip()
+    # 剥掉常见引导语（“我想知道微导纳米公司怎么样” → 微导纳米）
+    leadin_pattern = "|".join(re.escape(item) for item in _COMPANY_QUERY_LEADINS)
+    name = re.sub(rf"^(?:{leadin_pattern})", "", name).strip("，,。.?？!！ ")
+    if len(name) < 2 or any(token in name for token in _COMPANY_QUERY_STOP_TOKENS):
+        return ""
+    return name
+
+
+def _format_company_profile_answer(name: str) -> str:
+    """公司查询直答：返回 CKB 画像摘要；无画像返回空串（回退既有 LLM 路径）。"""
+    profile = company_kb.get_profile(name)
+    if not profile:
+        return ""
+    summary = company_kb.profile_summary(profile)
+    if not summary:
+        return ""
+    lines = [
+        f"## {profile['name']} 公司画像（公司知识库）",
+        "",
+        summary,
+        "",
+        f"证据 {profile['evidence_count']} 条 / 来源 {profile['source_count']} 个，置信度 {profile['confidence']:.2f}。",
+    ]
+    return "\n".join(lines)
+
+
+# 人才情报直答：顾问问“XX方向薪酬水平/XX人才都在哪些公司”时，直接读生产库
+# recalls 统计直答；库不可用/无样本时返回空串，走既有 LLM 路径（行为不变）。
+_SALARY_QUERY_TOKENS = ("薪酬", "薪资", "待遇", "工资", "多少钱", "薪资水平", "收入")
+# 指向具体人选/岗位上下文（谈薪、岗位预算）的提问不走对标直答
+_SALARY_QUERY_STOP_TOKENS = ("这个", "我的", "候选人", "人选", "岗位薪酬")
+_TALENT_MAP_QUERY_TOKENS = ("人才地图", "人都在哪", "人才", "分布", "哪些公司", "在哪", "的人")
+_TALENT_MAP_QUERY_STOP_TOKENS = ("这个", "我的", "候选人", "人选")
+# 方向词清理：剥掉疑问/通用修饰后，剩余即方向关键词（长的在前）
+_INTEL_QUERY_NOISE_RE = re.compile(
+    r"(?:怎么样|如何|是多少|多少|是什么|情况|水平|区间|范围|大概|大约|一般|"
+    r"市面上|市场上|市场|现在|目前|请问|一下|给我|帮我|看看|查看|查查)"
+)
+_INTEL_QUERY_SUFFIX_RE = re.compile(
+    r"(?:方向|岗位|职位|技术|工程师|行业|领域|背景|的|都|也|呢|啊|呀|吧|在|有|人|里|做|是)"
+)
+# 方向词前缀动词（“做薄膜沉积的/查一下运动控制”）→ 剥掉
+_INTEL_QUERY_PREFIX_RE = re.compile(r"^(?:做|搞|找|找找|查|查查|看|看看|搜|搜搜|挖|挖挖|招|招招)")
+
+
+def _extract_direction_keyword(text: str, token_pattern: str) -> str:
+    """剥掉引导语/意图词/疑问修饰，提取方向关键词；不足 2 字返回空串。"""
+    kw = text
+    leadin_pattern = "|".join(re.escape(item) for item in _COMPANY_QUERY_LEADINS)
+    kw = re.sub(rf"^(?:{leadin_pattern})", "", kw)
+    kw = re.sub(token_pattern, " ", kw)
+    kw = _INTEL_QUERY_NOISE_RE.sub(" ", kw)
+    kw = _INTEL_QUERY_SUFFIX_RE.sub(" ", kw)
+    # 剥前缀动词（循环剥, 如“做薄膜沉积”→“薄膜沉积”）
+    while True:
+        new = _INTEL_QUERY_PREFIX_RE.sub("", kw)
+        if new == kw:
+            break
+        kw = new
+    kw = re.sub(r"[\s?？!！。,.，、：:；;]+", "", kw)
+    return kw if len(kw) >= 2 else ""
+
+
+def _salary_query(message: str) -> str:
+    """识别薪酬对标提问并提取方向关键词；非方向性薪酬提问返回空串。
+
+    “运动控制方向薪酬水平怎么样” → “运动控制”；
+    “这个候选人的期望薪资”/“岗位薪酬预算”等指向具体人选/岗位的返回空串，
+    交给既有谈薪/事实路径处理。
+    """
+    text = " ".join(str(message or "").split())
+    if not text or any(token in text for token in _SALARY_QUERY_STOP_TOKENS):
+        return ""
+    if not any(token in text for token in _SALARY_QUERY_TOKENS):
+        return ""
+    return _extract_direction_keyword(text, r"(?:薪资水平|薪酬|薪资|待遇|工资|多少钱|收入)")
+
+
+def _talent_map_query(message: str) -> str:
+    """识别人才地图提问并提取方向关键词；非方向性提问返回空串。
+
+    “薄膜沉积的人才都在哪些公司” → “薄膜沉积”。
+    """
+    text = " ".join(str(message or "").split())
+    if not text or any(token in text for token in _TALENT_MAP_QUERY_STOP_TOKENS):
+        return ""
+    if not any(token in text for token in _TALENT_MAP_QUERY_TOKENS):
+        return ""
+    return _extract_direction_keyword(
+        text,
+        r"(?:人才地图|人都在哪|人都去哪|在哪些公司|哪些公司|在哪些|哪些|人才|分布|在哪|哪里|哪儿|集中|公司)",
+    )
+
+
+def _format_salary_benchmark_answer(kw: str) -> str:
+    """薪酬对标直答：返回样本统计；无样本/库不可用返回空串（回退既有 LLM 路径）。"""
+    data = talent_intel.salary_benchmark(kw)
+    if not data:
+        return ""
+    lines = [f"== {kw} 薪酬对标（{data['n']} 样本）=="]
+    lines.append(
+        f"月薪 P25 {data['p25']:.0f}k / 中位 {data['p50']:.0f}k / P75 {data['p75']:.0f}k"
+        f"（区间 {data['min']:.0f}–{data['max']:.0f}k），年化约 {data['annual_万']:.0f} 万"
+    )
+    companies = data.get("companies") or []
+    if companies:
+        lines.append("样本公司：" + "、".join(f"{name}({cnt})" for name, cnt in companies[:8]))
+    return "\n".join(lines)
+
+
+def _format_talent_map_answer(kw: str) -> str:
+    """人才地图直答：返回目标公司列表；无目标公司/库不可用返回空串（回退既有 LLM 路径）。"""
+    data = talent_intel.talent_map(kw)
+    if not data or not data.get("companies"):
+        return ""
+    lines = [f"== {kw} 人才地图（{len(data['companies'])} 家公司，{data['total']} 人）=="]
+    for item in data["companies"][:15]:
+        seg = f"- {item['name']}：{item['n']} 人"
+        details: list[str] = []
+        if item.get("exp_median") is not None:
+            details.append(f"经验中位 {item['exp_median']:.0f} 年")
+        edu = item.get("edu") or []
+        if edu:
+            details.append("学历 " + "、".join(f"{name}{cnt}" for name, cnt in edu[:3]))
+        city = item.get("city") or []
+        if city:
+            details.append("城市 " + "、".join(f"{name}({cnt})" for name, cnt in city[:3]))
+        if item.get("salary_min") is not None and item.get("salary_max") is not None:
+            details.append(f"月薪 {item['salary_min']:.0f}–{item['salary_max']:.0f}k")
+        if details:
+            seg += "（" + "；".join(details) + "）"
+        lines.append(seg)
+    return "\n".join(lines)
+
+
 # 查询型名单请求：顾问直接要"名单/列表/筛出人选"，应当直答候选池，
 # 而不是建一个等待确认的执行计划（2026-08-10 长越机械人选名单卡在 create_plan）。
 _QUERY_LIST_MARKERS = (
@@ -318,18 +507,44 @@ def _is_candidate_list_query(message: str) -> bool:
 def _requests_grade_filter(message: str) -> bool:
     """判断消息是否请求“分级过滤”（按硬性证据输出 A/B/C 名单）。
 
-    与普通名单直答的区别：含“过滤/分级/按证据/按硬性门槛/筛一下再给”
+    与普通名单直答的区别：含“过滤/分级/匹配度/按证据/按硬性门槛/筛一下再给”
     等明确分级意图时升级为 candidate_pool_filter；仅“给名单/列一下”
     维持普通候选名单。
+
+    2026-08-13 修复：原正则要求“过滤…名单”落在 20 字窗口内，导致
+    “把所有候选人过滤一下，再看下匹配度，不匹配的就停止推进，然后再给我名单”
+    这类长句被漏判为普通名单。改为“分级意图词 + 名单意图词”组合判定，
+    距离无关，同时保留原有精确 token 兜底。
     """
     text = " ".join(str(message or "").split())
     if not text or _is_explicit_question(text):
         return False
-    return bool(
-        re.search(r"(?:过滤|筛选|分级|分层|重新过滤|再筛|筛一?下).{0,20}(?:名单|列表|给我|输出)", text)
-        or re.search(r"(?:名单|列表|给我).{0,20}(?:过滤|筛选|分级|按证据|按硬)", text)
-        or any(token in text for token in ("按硬性", "按证据", "按匹配度", "分级过滤", "筛选出", "过滤出"))
+    grade_tokens = (
+        "过滤", "筛选", "分级", "分层", "重新过滤", "再筛", "筛一下",
+        "匹配度", "按硬性", "按证据", "不匹配",
     )
+    list_tokens = ("名单", "列表", "给我", "输出")
+    if any(token in text for token in grade_tokens) and any(token in text for token in list_tokens):
+        return True
+    return any(token in text for token in ("分级过滤", "筛选出", "过滤出", "按匹配度"))
+
+
+_BATCH_STOP_MARKERS = (
+    "停止推进", "停止", "停掉", "不匹配的就停止", "不匹配的停止",
+    "不匹配的停掉", "筛掉不匹配", "把不匹配的停", "淘汰",
+)
+
+
+def _requests_batch_stop(message: str) -> bool:
+    """判断消息是否为“分级过滤 + 停止推进”的批量落库指令。
+
+    必须在 _requests_grade_filter 之上叠加明确的停止措辞，避免普通“给名单”
+    被误判成批量写库。该函数只做意图判定，不执行写库。
+    """
+    if not _requests_grade_filter(message):
+        return False
+    text = " ".join(str(message or "").split())
+    return any(marker in text for marker in _BATCH_STOP_MARKERS)
 
 
 def _format_candidate_list_answer(db_path: str, job_id: int, message: str) -> str:

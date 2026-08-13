@@ -311,6 +311,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/{candidate_id}/fit-assessment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Candidate Fit Assessment Refresh */
+        post: operations["candidate_fit_assessment_refresh_api_v1_candidates__candidate_id__fit_assessment_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/{candidate_id}/assessments/{job_id}/advisor-action": {
         parameters: {
             query?: never;
@@ -3116,6 +3133,45 @@ export interface operations {
             query: {
                 job_id: number;
                 force?: boolean;
+            };
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                candidate_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candidate_fit_assessment_refresh_api_v1_candidates__candidate_id__fit_assessment_post: {
+        parameters: {
+            query: {
+                job_id: number;
             };
             header: {
                 "Idempotency-Key": string;

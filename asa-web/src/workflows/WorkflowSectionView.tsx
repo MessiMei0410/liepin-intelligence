@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import {
-  ChevronLeft, CircleDashed, FileText, Workflow as WorkflowIcon, X,
+  ChevronLeft, CircleDashed, ExternalLink, FileText, Workflow as WorkflowIcon, X,
 } from 'lucide-react'
 import type { Job, Workflow } from '../api'
 import { DialogPanel } from '../shared/Dialog'
 import { date } from '../shared/format'
+import { nativeBridge } from '../shared/nativeBridge'
+import type { DragResizeAnchor } from '../shared/dialogDragResize'
 import { recordValue } from '../shared/records'
 import { SectionHead } from '../shared/primitives'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
@@ -71,13 +73,23 @@ export function WorkflowSectionView({ value, jobs, section, back, close, reload,
   const total = value.progress?.total ?? value.steps.length
   const percent = Math.max(0, Math.min(100, Math.round((value.progress?.ratio ?? completed / Math.max(1, total)) * 100)))
 
-  return <DialogPanel panelClassName="compact-workflow-dialog workflow-section-dialog" ariaLabel={`${meta.label}：${value.goal.title}`} onEscape={back} minWidth={320} minHeight={300}>
-    <header className="compact-workflow-head">
+  // 弹出为独立窗口：macOS 宿主 openDetachedDialog 打开可自由拖出屏幕的原生窗口。
+  const detachPanel = (anchor?: DragResizeAnchor): boolean => {
+    if (nativeBridge('openDetachedDialog', { title: value.goal.title, url: `/asa-app#workflow=${encodeURIComponent(value.workflow.workflow_id)}&bare=1`, anchor })) {
+      close()
+      return true
+    }
+    return false
+  }
+
+  return <DialogPanel panelClassName="compact-workflow-dialog workflow-section-dialog" ariaLabel={`${meta.label}：${value.goal.title}`} onEscape={back} onDetach={detachPanel} minWidth={320} minHeight={300}>
+    <header className="compact-workflow-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口">
       <button className="icon-btn" onClick={back} title="返回步骤摘要" aria-label="返回"><ChevronLeft /></button>
       <div>
         <h2>{meta.label}</h2>
         <p>{value.goal.title} · {mapped.label}</p>
       </div>
+      <button className="icon-btn candidate-dialog-detach" onClick={() => void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink /></button>
       <button className="icon-btn" onClick={close} title="关闭" aria-label="关闭"><X /></button>
     </header>
 

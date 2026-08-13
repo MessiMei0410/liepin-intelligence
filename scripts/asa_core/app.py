@@ -464,6 +464,16 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         scheduler = Scheduler(db_path)
         scheduler.start()
         app.state.scheduler = scheduler
+        # 注册 CKB 公司知识库每日刷新（幂等：已存在则不重复建）
+        try:
+            existing_names = {t["name"] for t in scheduler.list_tasks()}
+            if "CKB公司知识库每日刷新" not in existing_names:
+                scheduler.create_task(
+                    "CKB公司知识库每日刷新", "company_kb_refresh", "30 4 * * *"
+                )
+                print("已注册 CKB 公司知识库每日刷新任务（每日 04:30）", flush=True)
+        except Exception as e:
+            print(f"注册 CKB 刷新任务失败（不影响启动）: {e}", flush=True)
         try:
             yield
         finally:
@@ -608,6 +618,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def candidate_assessment_get(candidate_id: int, job_id: int = Query(...)) -> dict[str, Any]:
         # S6-1：读取同人同岗判人评估；人选/岗位不存在或不匹配、尚无评估 → 404（LookupError 全局映射）
         return core.get_candidate_assessment(candidate_id, job_id)
+
+    @app.post("/api/v1/candidates/{candidate_id}/fit-assessment")
+    def candidate_fit_assessment_refresh(candidate_id: int, body: WriteEnvelope, job_id: int = Query(...), idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 匹配点分析「重新评估匹配」：强制重跑 Agent 人岗匹配评估（同步等待，通常 15-30 秒）。
+        # 走 execute_idempotent 幂等 + 审计，重放返回首次响应；404=人选/岗位不存在或不匹配；
+        # 409=模型输出非法或评估未完成。简历更新后用此入口刷新匹配结论。
+        return idem("candidate.fit_assessment_refresh", body, idempotency_key, "job_candidate", f"{candidate_id}:{job_id}",
+                    lambda: core.refresh_candidate_fit_assessment(candidate_id, job_id))
 
     @app.patch("/api/v1/candidates/{candidate_id}/assessments/{job_id}/advisor-action")
     def candidate_assessment_advisor_action(candidate_id: int, job_id: int, body: AssessmentAdvisorActionPatch, idempotency_key: str = Header(alias="Idempotency-Key")):
