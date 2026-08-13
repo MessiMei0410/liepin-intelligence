@@ -126,10 +126,28 @@ def record_copilot_event(self, session_id: str, event: str, payload: dict[str, A
     conn = self._connect()
     try:
         _ensure_copilot_events_table(self, conn)
-        conn.execute(
-            "INSERT INTO agent_copilot_events (session_id,event,payload_json) VALUES (?,?,?)",
-            (session_id, event, _dumps(payload)),
-        )
+        duplicate_strategy_receipt = False
+        if event == "copilot_strategy_applied" and (payload.get("artifact_id") or payload.get("revision") is not None):
+            for row in conn.execute(
+                """
+                SELECT payload_json FROM agent_copilot_events
+                WHERE session_id=? AND event=? ORDER BY id DESC LIMIT 50
+                """,
+                (session_id, event),
+            ).fetchall():
+                previous = _loads(row["payload_json"], {}) or {}
+                if (
+                    str(previous.get("workflow_id") or "") == str(payload.get("workflow_id") or "")
+                    and previous.get("revision") == payload.get("revision")
+                    and str(previous.get("artifact_id") or "") == str(payload.get("artifact_id") or "")
+                ):
+                    duplicate_strategy_receipt = True
+                    break
+        if not duplicate_strategy_receipt:
+            conn.execute(
+                "INSERT INTO agent_copilot_events (session_id,event,payload_json) VALUES (?,?,?)",
+                (session_id, event, _dumps(payload)),
+            )
         # 不新增交互接口：复用浮窗原有事件通道，将修订结果写回产生该确认卡的
         # assistant structured_json。仅匹配同一 session 内的策略卡，避免跨工作流串写。
         if event in {"copilot_strategy_applied", "copilot_strategy_reverted"} and _table_exists(conn, "agent_copilot_messages"):
@@ -142,14 +160,16 @@ def record_copilot_event(self, session_id: str, event: str, payload: dict[str, A
             ).fetchall()
             if event == "copilot_strategy_applied":
                 workflow_id = str(payload.get("workflow_id") or "").strip()
-                revised_workflow_id = str(payload.get("revised_workflow_id") or "").strip()
                 for row in rows:
                     structured = _loads(row["structured_json"], {}) or {}
                     patch = structured.get("strategy_patch") if isinstance(structured.get("strategy_patch"), dict) else {}
-                    if workflow_id and revised_workflow_id and str(patch.get("workflow_id") or "") == workflow_id:
+                    if workflow_id and str(patch.get("workflow_id") or "") == workflow_id:
                         structured.update({
                             "strategy_patch_applied": True,
-                            "strategy_patch_revised_workflow_id": revised_workflow_id,
+                            "strategy_patch_revised_workflow_id": str(payload.get("revised_workflow_id") or "").strip() or None,
+                            "strategy_patch_revision": payload.get("revision"),
+                            "strategy_patch_artifact_id": payload.get("artifact_id"),
+                            "strategy_patch_applied_count": payload.get("applied"),
                         })
                         conn.execute(
                             "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
@@ -174,7 +194,7 @@ def record_copilot_event(self, session_id: str, event: str, payload: dict[str, A
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True}
+    return {"ok": True, "idempotent_replay": duplicate_strategy_receipt}
 
 
 def _maybe_summarize_copilot_conversation(self, session_id: str) -> dict[str, Any] | None:

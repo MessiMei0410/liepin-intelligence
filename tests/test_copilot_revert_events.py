@@ -272,7 +272,7 @@ class CopilotEventTest(unittest.TestCase):
 
         result = record_copilot_event(service, "sess-1", "strategy_patch_applied", payload)
 
-        assert result == {"ok": True}
+        assert result == {"ok": True, "idempotent_replay": False}
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -322,6 +322,50 @@ class CopilotEventTest(unittest.TestCase):
         assert structured["strategy_patch_revised_workflow_id"] == "workflow_def456"
         assert structured["strategy_patch_reverted"] is True
         assert structured["strategy_patch_restored_workflow_id"] == "workflow_abc123"
+
+    def test_strategy_apply_receipt_retry_is_idempotent_and_still_repairs_session_state(self) -> None:
+        db_path = self.tmp / "agent.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(_PATCH_SCHEMA)
+        conn.execute(
+            """
+            INSERT INTO agent_copilot_messages
+            (session_id,context_type,context_id,role,content,structured_json)
+            VALUES ('sess-1','workflow','workflow_abc123','assistant','策略建议',?)
+            """,
+            (json.dumps({"strategy_patch": {"workflow_id": "workflow_abc123", "changes": []}}),),
+        )
+        conn.commit()
+        conn.close()
+        service = _StubService(db_path, _StubLLM(None))
+        payload = {
+            "workflow_id": "workflow_abc123", "revision": 3,
+            "artifact_id": "artifact_3", "applied": 2,
+        }
+
+        first = record_copilot_event(service, "sess-1", "copilot_strategy_applied", payload)
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE agent_copilot_messages SET structured_json=?", (json.dumps({"strategy_patch": {"workflow_id": "workflow_abc123", "changes": []}}),))
+        conn.commit()
+        conn.close()
+        replay = record_copilot_event(service, "sess-1", "copilot_strategy_applied", payload)
+
+        assert first == {"ok": True, "idempotent_replay": False}
+        assert replay == {"ok": True, "idempotent_replay": True}
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_copilot_events WHERE session_id='sess-1' AND event='copilot_strategy_applied'"
+            ).fetchone()[0]
+            structured = json.loads(conn.execute(
+                "SELECT structured_json FROM agent_copilot_messages WHERE session_id='sess-1'"
+            ).fetchone()[0])
+        finally:
+            conn.close()
+        assert count == 1
+        assert structured["strategy_patch_applied"] is True
+        assert structured["strategy_patch_revision"] == 3
+        assert structured["strategy_patch_artifact_id"] == "artifact_3"
 
 
 # ---------------------------------------------------------------------------

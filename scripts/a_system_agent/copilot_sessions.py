@@ -4,7 +4,7 @@ All functions receive 'self' (AgentService instance) as first parameter where pr
 """
 
 from __future__ import annotations
-import json, re
+import json, re, sqlite3
 from datetime import datetime
 from typing import Any
 
@@ -142,20 +142,27 @@ def _mentioned_candidate_options(self, message: str) -> list[dict[str, Any]]:
         return []
     conn = self._connect()
     try:
-        rows = conn.execute(
-            """
-            SELECT jc.id,p.display_name,c.name AS client,j.title AS job,
-                   COALESCE(jc.clean_stage,jc.flow_bucket,jc.raw_status,'') AS status,
-                   COALESCE(jc.updated_at,'') AS updated_at
-            FROM job_candidates jc
-            JOIN people p ON p.id=jc.person_id
-            LEFT JOIN jobs j ON j.id=jc.job_id
-            LEFT JOIN clients c ON c.id=j.client_id
-            WHERE length(trim(COALESCE(p.display_name,''))) >= 2
-            ORDER BY COALESCE(jc.updated_at,'') DESC,jc.id DESC
-            LIMIT 500
-            """
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """
+                SELECT jc.id,p.display_name,c.name AS client,j.title AS job,
+                       COALESCE(jc.clean_stage,jc.flow_bucket,jc.raw_status,'') AS status,
+                       COALESCE(jc.updated_at,'') AS updated_at
+                FROM job_candidates jc
+                JOIN people p ON p.id=jc.person_id
+                LEFT JOIN jobs j ON j.id=jc.job_id
+                LEFT JOIN clients c ON c.id=j.client_id
+                WHERE length(trim(COALESCE(p.display_name,''))) >= 2
+                ORDER BY COALESCE(jc.updated_at,'') DESC,jc.id DESC
+                LIMIT 500
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # 精简测试库、迁移中的旧库或局部模块不可用时，候选人提及识别降级为空。
+            # 不应让可独立回答的岗位/策略上下文因为辅助表缺失而整轮失败。
+            if "no such table" not in str(exc).lower():
+                raise
+            rows = []
     finally:
         conn.close()
     matches = []
@@ -804,6 +811,9 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "strategy_patch": structured.get("strategy_patch"),
                     "strategy_patch_applied": bool(structured.get("strategy_patch_applied")),
                     "strategy_patch_revised_workflow_id": structured.get("strategy_patch_revised_workflow_id"),
+                    "strategy_patch_revision": structured.get("strategy_patch_revision"),
+                    "strategy_patch_artifact_id": structured.get("strategy_patch_artifact_id"),
+                    "strategy_patch_applied_count": structured.get("strategy_patch_applied_count"),
                     "strategy_patch_reverted": bool(structured.get("strategy_patch_reverted")),
                     "strategy_patch_restored_workflow_id": structured.get("strategy_patch_restored_workflow_id"),
                     "created_at": row["created_at"],

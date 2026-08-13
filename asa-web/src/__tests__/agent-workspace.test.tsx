@@ -153,6 +153,37 @@ describe('Agent workspace', () => {
     expect(await screen.findByRole('region', { name: '候选人执行回执' })).toHaveTextContent('已完成服务端回查')
   })
 
+  it('done 事件到达后挂载策略建议卡并默认选中全部建议', async () => {
+    const strategyPatch = {
+      workflow_id: 'workflow-strategy-1',
+      workflow_title: '长越科技｜机械高级工程师｜第 2 轮',
+      strategy_hash: 'strategy-hash-1',
+      changes: [
+        { type: 'add_keyword', value: '精密运动平台', clause: '新增关键词「精密运动平台」' },
+        { type: 'add_company', value: 'ASMPT', clause: '新增对标公司「ASMPT」' },
+        { type: 'add_filter', value: '排除纯销售背景', clause: '新增过滤条件「排除纯销售背景」' },
+      ],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        `event: context\ndata: {"session_id":"task-strategy"}\n\nevent: text\ndata: {"content":"建议补充以下策略项"}\n\nevent: done\ndata: ${JSON.stringify({ ok: true, session_id: 'task-strategy', answer: '建议补充以下策略项', strategy_patch: strategyPatch })}\n\n`,
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'workflow', id: 'workflow-strategy-1' })
+
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '把这些建议沉淀进策略' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    const card = await screen.findByRole('region', { name: '寻访策略建议' })
+    expect(within(card).getAllByRole('checkbox')).toHaveLength(3)
+    expect(within(card).getAllByRole('checkbox').every(input => (input as HTMLInputElement).checked)).toBe(true)
+    expect(within(card).getByRole('button', { name: '检查写入内容' })).toBeEnabled()
+  })
+
   it('附件读取失败时阻止发送，移除失败项后恢复文本发送', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/attachments')
       ? mockResponse({ detail: 'Office 文件结构损坏' }, false, 422)

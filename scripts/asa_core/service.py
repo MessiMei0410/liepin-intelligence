@@ -1586,8 +1586,8 @@ class CoreService:
                     (candidate_id,),
                 ).fetchall():
                     recall = _row(row)
-                    recall["query_family_ids"] = _loads(recall.pop("query_family_ids_json", "[]"), [])
-                    recall["query_provenance"] = _loads(recall.pop("query_provenance_json", "[]"), [])
+                    recall["query_family_ids"] = json_value(recall.pop("query_family_ids_json", "[]"), [])
+                    recall["query_provenance"] = json_value(recall.pop("query_provenance_json", "[]"), [])
                     sourcing_recalls.append(recall)
             item["sourcing_recalls"] = sourcing_recalls
             report_rows = conn.execute(

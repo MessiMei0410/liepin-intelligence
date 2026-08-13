@@ -93,4 +93,38 @@ describe('App Core 离线横幅', () => {
     expect(screen.getByText(/部分模块加载失败。人选模块：candidate query failed/)).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'ASA Core 无法连接' })).not.toBeInTheDocument()
   })
+
+  it('首次启动失败进入诊断页后可重连恢复，不改变 Hook 调用顺序', async () => {
+    let bootstrapAttempts = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url === '/api/v1/bootstrap') {
+        bootstrapAttempts += 1
+        if (bootstrapAttempts === 1) throw new Error('bootstrap unavailable')
+        return mockResponse({ ok: true, core: { status: 'connected' } })
+      }
+      if (url === '/api/v1/dashboard') {
+        if (bootstrapAttempts === 1) throw new Error('core unavailable')
+        return mockResponse({ ok: true, counts: {} })
+      }
+      if (url.startsWith('/api/v1/jobs') || url.startsWith('/api/v1/candidates')) {
+        if (bootstrapAttempts === 1) throw new Error('core unavailable')
+        return mockResponse({ items: [], total: 0 })
+      }
+      if (url.startsWith('/api/v1/workbench')) return mockResponse({ ok: true, version: 'v1', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] })
+      if (url.startsWith('/api/v1/analytics/')) return mockResponse({ ok: true, items: [] })
+      if (url.startsWith('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({ ok: true })
+    }))
+
+    render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByRole('heading', { name: 'ASA Core 无法连接' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(screen.getByRole('heading', { name: '今天从哪里开始？' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'ASA Core 无法连接' })).not.toBeInTheDocument()
+  })
 })

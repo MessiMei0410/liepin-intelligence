@@ -1466,6 +1466,16 @@ def _build_strategy_patch(
         step_output = _loads(row["output_json"], {}) or {}
         v2 = step_output.get("strategy_v2") if isinstance(step_output.get("strategy_v2"), dict) else {}
         existing = _strategy_v2_existing_values(v2)
+        strategy_hash = ""
+        workflow_engine = getattr(self, "workflow_engine", None)
+        if workflow_engine is not None:
+            conn = self._connect()
+            try:
+                strategy_hash = str(
+                    workflow_engine._sourcing_strategy_snapshot(conn, workflow_id).get("strategy_hash") or ""
+                )
+            finally:
+                conn.close()
         extracted = self.llm.extract_strategy_patch({"message": message, "answer": answer})
         if not extracted:
             return None
@@ -1481,6 +1491,7 @@ def _build_strategy_patch(
             "source": "copilot",
             "workflow_id": workflow_id,
             "workflow_title": str(row["title"] or workflow_id),
+            "strategy_hash": strategy_hash,
             "changes": changes,
             "instruction_prefix": instruction_prefix,
             "instruction_suffix": _STRATEGY_PATCH_INSTRUCTION_SUFFIX,

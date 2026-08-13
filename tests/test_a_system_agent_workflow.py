@@ -1017,7 +1017,7 @@ class WorkflowEngineTest(AgentDbCase):
         applied = {
             "staged": {
                 "accepted": [
-                    {"name": "测试人选", "channel": "liepin", "source_query": "精密机械 运动台"}
+                    {"name": "测试人选", "channel": "liepin", "source_query": "精密机械 运动台", "res_id_encode": "lineage-source-1"}
                 ]
             },
             "intake": {
