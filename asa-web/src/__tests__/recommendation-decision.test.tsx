@@ -66,6 +66,35 @@ describe('顾问确认推荐（recommendation-decision）', () => {
 
   const decisionCall = () => fetchMock.mock.calls.find(([input]) => String(input).includes(decisionCommitUrl))
 
+  it('候选人详情展示精确的寻访执行、策略修订和查询单元', () => {
+    const value: CandidateDetail = {
+      ...recommendationCandidate(),
+      sourcing_recalls: [
+        {
+          recall_id: 'recall-1',
+          run_id: 'run-lineage-7',
+          workflow_id: 'wf-lineage-7',
+          strategy_hash: 'strategy-hash-7',
+          strategy_artifact_id: 'artifact-strategy-7',
+          strategy_revision: 7,
+          query_plan_hash: 'query-plan-hash-7',
+          query_cell_id: 'cell-core-peer-2',
+          query_family_ids: ['keyword_group:power'],
+          query_provenance: [{ tier: 'T1', group: '核心同层', targets: '服务器电源' }],
+          channel: '猎聘',
+          source_query: '前端工程师',
+          page_number: 1,
+          position_index: 2,
+          created_at: '2026-08-14 03:00:00',
+        },
+      ],
+    }
+
+    render(<CandidatePanel value={value} close={() => undefined} changed={() => undefined} />)
+
+    expect(screen.getByText('执行 run-lineage-7 · 策略 revision 7 · 单元 cell-core-peer-2')).toBeInTheDocument()
+  })
+
   it('推荐对话框展示评估依据与风险提示（来自既有候选人字段）', async () => {
     const { dialog } = await openDialog()
     expect(within(dialog).getByText('8 年 · 本科')).toBeInTheDocument()
