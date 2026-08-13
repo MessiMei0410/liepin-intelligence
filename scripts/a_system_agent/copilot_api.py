@@ -302,6 +302,7 @@ def copilot_stream_generator(
         "context": result.get("context") or {},
         "references": result.get("references") or [],
         "suggested_actions": result.get("suggested_actions") or [],
+        "understanding_card": result.get("understanding_card"),
     })
     answer = str(result.get("answer") or "")
     for offset in range(0, len(answer), 80):

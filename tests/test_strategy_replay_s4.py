@@ -35,12 +35,10 @@ REAL_KB_DIR = Path("/Users/messi/Documents/ASA/knowledge_base")
 
 # 基线：2026-07-23 实跑生成（确定性模式 deterministic_fallback；口径见脚本 docstring §指标口径）。
 # case_silan_tme：L1，参考池 15 家（T1 4 + T2 11），Agent 池 23 家（kb_profile 15 + kb_graph 8）；
-# case_changyue_equipment：L3 裸跑（case meta 声明锚点全缺），参考池 20 家，Agent 池 8 家全偏，
-# 三指标为 0 是真实基线而非评测 bug——门槛锚定「不许倒退」，改进落地后按上面流程抬升基线。
-# 二期扩展（2026-08-05）：新增 evidence_coverage / noise_rate / recommendation_rate_proxy 三指标，
-# 首次以当日真实回放值入基线（非历史目标值）——silan evidence=1.0（31/31 要素有依据来源）、
-# noise=0.3478（=1-0.6522）、推荐 proxy=0.6522（15/23）；changyue evidence=1.0（10/10）、
-# noise=1.0、推荐 proxy=0.0。方向按 replay.METRIC_DIRECTIONS：noise_rate 越低越好（≤ 基线），
+# case_changyue_equipment：L3 JD + 2026-08-12 顾问确认的长川系禁挖约束，参考池 20 家、
+# Agent 池 31 家；原型补齐客户/友商锚点，禁挖约束作为策略负向规则保留，不进入渠道执行面。
+# 二期扩展（2026-08-05）：新增 evidence_coverage / noise_rate / recommendation_rate_proxy 三指标。
+# 2026-08-12 基线按实际回放更新；方向按 replay.METRIC_DIRECTIONS：noise_rate 越低越好（≤ 基线），
 # 其余越高越好（≥ 基线）；recommendation_rate_proxy 为 proxy 口径，非顾问确认真实推荐率。
 REPLAY_BASELINE = {
     "case_silan_tme": {
@@ -53,13 +51,13 @@ REPLAY_BASELINE = {
         "recommendation_rate_proxy": 0.6522,
     },
     "case_changyue_equipment": {
-        "pool_recall": 0.0,
-        "pool_precision": 0.0,
-        "keyword_coverage": 0.0,
-        "anchor_completeness": 0.375,
+        "pool_recall": 0.95,
+        "pool_precision": 0.6129,
+        "keyword_coverage": 1.0,
+        "anchor_completeness": 0.875,
         "evidence_coverage": 1.0,
-        "noise_rate": 1.0,
-        "recommendation_rate_proxy": 0.0,
+        "noise_rate": 0.3871,
+        "recommendation_rate_proxy": 0.6129,
     },
 }
 
@@ -103,17 +101,17 @@ class ReplayBaselineTest(unittest.TestCase):
         result = self.results["case_changyue_equipment"]
         assert result["input_level"] == "L3"
         assert result["generation_mode"] == "deterministic_fallback"
-        # case meta 声明：友商/客户锚点全部缺失（L3 裸跑口径）
-        assert result["missing_anchors"] == ["customer_of_customer", "competitive_landscape"]
+        # 岗位原型补齐了客户/友商锚点；case 的 restricted 约束仅进入负向规则。
+        assert result["missing_anchors"] == []
         pool = result["details"]["pool"]
         assert pool["reference_size"] == 20
-        assert pool["agent_size"] == 8
-        # 锚点明细：产品/技术线锚定正确、场景/赛道锚定偏差（0.5）、两锚点缺失
+        assert pool["agent_size"] == 31
+        # 锚点明细：客户/友商/产品线均来自受控知识来源，场景仍有 0.5 偏差。
         anchors = result["details"]["anchors"]["anchors"]
         assert anchors["product_tech_line"]["score"] == 1.0
+        assert anchors["customer_of_customer"]["score"] == 1.0
+        assert anchors["competitive_landscape"]["score"] == 1.0
         assert anchors["scenario_track"]["score"] == 0.5
-        assert anchors["customer_of_customer"]["score"] == 0.0
-        assert anchors["competitive_landscape"]["score"] == 0.0
 
 
 class ReplayNormalizationTest(unittest.TestCase):

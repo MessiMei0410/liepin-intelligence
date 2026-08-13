@@ -4,7 +4,7 @@ All functions receive 'self' (AgentService instance) as first parameter where pr
 """
 
 from __future__ import annotations
-import json, re, sqlite3
+import hashlib, json, re, sqlite3
 from typing import Any
 
 from ._shared import (
@@ -35,6 +35,348 @@ from .conversation_state import (
 from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction
 from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_recap_amounts, _workflow_strategy_question
 from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer
+
+
+_STRUCTURED_ACTION_SEMANTICS: dict[str, tuple[str, str]] = {
+    "view_a_candidates": ("candidate_review", "ask"),
+    "compare_top_candidates": ("candidate_review", "ask"),
+    "continue_sourcing": ("candidate_sourcing", "propose"),
+    "relax_search": ("strategy_revision", "propose"),
+    "generate_contact_queue": ("candidate_outreach", "propose"),
+    "generate_contact_script": ("candidate_outreach", "ask"),
+    "confirm_advance": ("candidate_review", "propose"),
+    "confirm_stop": ("candidate_review", "propose"),
+    "end_round": ("job_archive", "propose"),
+}
+
+_STRUCTURED_ACTION_COMMANDS: dict[str, str] = {
+    "view_a_candidates": "按证据分级过滤名单，只看 A 级人选",
+    "compare_top_candidates": "比较前5人",
+    "continue_sourcing": "按当前条件继续搜候选人",
+    "relax_search": "采用 ASA 放宽方案继续寻访",
+    "generate_contact_queue": "生成触达队列",
+    "generate_contact_script": "生成沟通话术",
+    "confirm_advance": "确认推进这个候选人",
+    "confirm_stop": "确认停止推进这个候选人",
+    "end_round": "结束当前寻访轮次",
+}
+
+
+def _structured_action_command(payload: Any) -> str:
+    action_type = str(payload.get("type") or "").strip() if isinstance(payload, dict) else ""
+    return _STRUCTURED_ACTION_COMMANDS.get(action_type, "")
+
+
+def _candidate_intent_understanding(
+    payload: Any, *, selected: dict[str, Any], selected_facts: dict[str, Any], message: str,
+) -> dict[str, Any] | None:
+    intent = dict(payload) if isinstance(payload, dict) else {}
+    action = str(intent.get("action") or "").strip()
+    if action not in {"advance", "contact", "recommend", "stop", "read_no_reply"}:
+        return None
+    candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    target_id = selected.get("id") if selected.get("type") == "candidate" else candidate.get("id")
+    needs_clarification = not target_id
+    return {
+        "version": "copilot_understanding_v1",
+        "speech_act": "propose",
+        "action": "candidate_review",
+        "topic": f"candidate_{action}",
+        "objective": str(intent.get("reason") or message)[:500],
+        "target": {
+            "type": "candidate", "id": target_id,
+            "client": str(selected_facts.get("client") or ""),
+            "label": str(candidate.get("name") or job.get("title") or ""),
+        },
+        "constraints": [], "fact_updates": [],
+        "action_evidence": [{"source": "core_candidate_intent", "action": action}],
+        "refers_to_previous": False,
+        "confidence": float(intent.get("confidence") or 1.0),
+        "needs_clarification": needs_clarification,
+        "missing_fields": ["唯一候选人"] if needs_clarification else [],
+        "clarification_question": "请先选择唯一候选人。" if needs_clarification else "",
+        "source_message": message,
+        "raw_constraint_changes": [],
+        "safe_for_action": not needs_clarification,
+    }
+
+
+def _correction_understanding(message: str, selected: dict[str, Any], selected_facts: dict[str, Any]) -> dict[str, Any]:
+    candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    return {
+        "version": "copilot_understanding_v1", "speech_act": "correct", "action": "none",
+        "topic": "correction", "objective": message[:500],
+        "target": {
+            "type": str(selected.get("type") or "global"), "id": selected.get("id"),
+            "client": str(selected_facts.get("client") or ""),
+            "label": str(candidate.get("name") or job.get("title") or ""),
+        },
+        "constraints": [], "fact_updates": [], "action_evidence": [],
+        "refers_to_previous": True, "confidence": 1.0, "needs_clarification": False,
+        "missing_fields": [], "clarification_question": "", "source_message": message,
+        "raw_constraint_changes": [], "safe_for_action": False,
+    }
+
+
+def _structured_action_understanding(
+    payload: Any,
+    *,
+    selected: dict[str, Any],
+    selected_facts: dict[str, Any],
+    message: str,
+) -> dict[str, Any] | None:
+    """Consume action JSON as authoritative input; button labels are display-only."""
+    action_payload = dict(payload) if isinstance(payload, dict) else {}
+    action_type = str(action_payload.get("type") or "").strip()
+    semantic = _STRUCTURED_ACTION_SEMANTICS.get(action_type)
+    if not semantic:
+        return None
+    target_payload = action_payload.get("target")
+    target_payload = dict(target_payload) if isinstance(target_payload, dict) else {}
+    selected_type = str(selected.get("type") or "global")
+    selected_id = selected.get("id")
+    target_type = str(target_payload.get("type") or selected_type or "global")
+    target_id = target_payload.get("id") if target_payload.get("id") is not None else selected_id
+    target_conflict = bool(
+        selected_type in {"job", "candidate", "workflow"}
+        and selected_id is not None
+        and (target_type != selected_type or str(target_id) != str(selected_id))
+    )
+    constraints: list[dict[str, str]] = []
+    for item in action_payload.get("constraints") or []:
+        if isinstance(item, dict):
+            quote = str(item.get("quote") or item.get("value") or "").strip()
+            kind = str(item.get("kind") or "other").strip()
+        else:
+            quote, kind = str(item or "").strip(), "other"
+        if quote:
+            constraints.append({"quote": quote[:500], "kind": kind[:48] or "other"})
+    job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+    candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+    target = {
+        "type": target_type,
+        "id": target_id,
+        "client": str(target_payload.get("client") or selected_facts.get("client") or ""),
+        "label": str(
+            target_payload.get("label")
+            or candidate.get("name")
+            or job.get("title")
+            or (selected_facts.get("workflow") or {}).get("title")
+            or ""
+        ),
+    }
+    needs_clarification = target_conflict or target_type not in {"job", "candidate", "workflow", "queue"}
+    objective_by_type = {
+        "view_a_candidates": "查看当前岗位的 A 级人选",
+        "compare_top_candidates": "比较当前岗位前 5 名人选",
+        "continue_sourcing": "按当前条件继续寻访",
+        "relax_search": "采用 ASA 建议放宽寻访条件",
+        "generate_contact_queue": "生成当前范围的触达队列",
+        "generate_contact_script": "生成当前范围的触达话术",
+        "confirm_advance": "确认推进当前人选",
+        "confirm_stop": "确认停止推进当前人选",
+        "end_round": "结束当前寻访轮次",
+    }
+    # The visible label is presentation-only.  Derive the objective from the
+    # typed action so changing button copy cannot change routing semantics.
+    objective = objective_by_type.get(action_type, "").strip() or str(message).strip()[:500]
+    understanding = {
+        "version": "copilot_understanding_v1",
+        "speech_act": semantic[1],
+        "action": semantic[0],
+        "topic": action_type,
+        "objective": objective,
+        "target": target,
+        "constraints": constraints[-12:],
+        "fact_updates": [],
+        "action_evidence": [{"source": "structured_action", "action_id": action_payload.get("action_id"), "type": action_type}],
+        "refers_to_previous": True,
+        "confidence": 1.0 if not needs_clarification else 0.0,
+        "needs_clarification": needs_clarification,
+        "missing_fields": ["唯一目标对象"] if needs_clarification else [],
+        "clarification_question": "结构化动作的目标与当前对象不一致，请重新选择对象。" if target_conflict else (
+            "请先选择唯一的岗位、人选或工作流。" if needs_clarification else ""
+        ),
+        "source_message": message,
+        "raw_constraint_changes": [],
+        "safe_for_action": not needs_clarification,
+        "structured_action": action_payload,
+    }
+    return understanding
+
+
+def _understanding_card(
+    understanding: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    selected: dict[str, Any],
+    focus: dict[str, Any] | None,
+    message: str,
+) -> dict[str, Any] | None:
+    """Return a compact, UI-safe explanation only when a turn needs review."""
+    action = str(understanding.get("action") or "none")
+    target = dict(understanding.get("target") or {})
+    changes = list(decision.get("constraint_changes") or [])
+    effective = list(decision.get("effective_constraints") or [])
+    conflicts = list((focus or {}).get("conflicts") or []) if isinstance(focus, dict) else []
+    ambiguity_options: list[dict[str, Any]] = []
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            continue
+        conflict_type = str(conflict.get("type") or "")
+        option_type = {
+            "ambiguous_job": "job",
+            "ambiguous_client": "client",
+            "context_client_mismatch": "client",
+            "ambiguous_candidate": "candidate",
+        }.get(conflict_type, "global")
+        for option in conflict.get("candidates") or []:
+            if isinstance(option, dict) and option.get("id"):
+                ambiguity_options.append({
+                    "type": option_type,
+                    "id": option.get("id"),
+                    "client": option.get("client"),
+                    "label": option.get("job") or option.get("name") or "未命名对象",
+                    "status": option.get("status"),
+                    "updated_at": option.get("updated_at"),
+                })
+    needs = bool(understanding.get("needs_clarification") or conflicts)
+    needs = needs or bool(changes) or action != "none" or str(decision.get("effect") or "") in {"create_plan", "start_plan", "revise_plan", "clarify"}
+    if not needs:
+        return None
+    operation = {
+        "candidate_sourcing": "寻访/补池",
+        "candidate_review": "评估/复核",
+        "candidate_outreach": "触达/推进",
+        "recommendation": "推荐报告",
+        "salary": "谈薪",
+        "strategy_revision": "调整寻访策略",
+        "candidate_pool_filter": "过滤候选池",
+        "none": "查询/说明",
+    }.get(action, action)
+    target_label = str(target.get("label") or "").strip()
+    if not target_label:
+        target_label = str((focus or {}).get("job", {}).get("title") or (focus or {}).get("client") or "当前上下文") if isinstance(focus, dict) else "当前上下文"
+    return {
+        "version": "understanding_card_v1",
+        "show": True,
+        "message": message,
+        "target": {"type": target.get("type") or selected.get("type") or "global", "id": target.get("id") or selected.get("id"), "label": target_label},
+        "action": action,
+        "action_label": operation,
+        "objective": str(understanding.get("objective") or message)[:500],
+        "confidence": float(understanding.get("confidence") or 0),
+        "inherited_constraints": [str((item or {}).get("quote") or item) for item in effective if isinstance(item, dict)],
+        "constraint_changes": changes,
+        "missing_fields": list(understanding.get("missing_fields") or []),
+        "clarification_question": str(understanding.get("clarification_question") or ""),
+        "blocked_reason": str(decision.get("blocked_reason") or ""),
+        "effect": str(decision.get("effect") or "answer"),
+        "safe_for_action": bool(decision.get("safe_for_action")),
+        "candidate_options": ambiguity_options[:3],
+        "next_step": "请确认范围后继续" if needs else "",
+    }
+
+
+def _normalize_action_suggestions(actions: Any, *, understanding: dict[str, Any], decision: dict[str, Any], selected: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(actions if isinstance(actions, list) else []):
+        if not isinstance(item, dict):
+            continue
+        action = dict(item)
+        action.setdefault("capability_id", action.get("type") or str(understanding.get("action") or "none"))
+        action.setdefault("target", dict(understanding.get("target") or selected))
+        action.setdefault("constraints", list(decision.get("effective_constraints") or []))
+        action.setdefault("risk_level", "R1" if decision.get("effect") == "answer" else "R2")
+        action.setdefault("preflight_required", action.get("type") not in {"open_candidate", "open_job", "open_workflow"})
+        action.setdefault("confirmation_required", action.get("preflight_required", False))
+        action.setdefault("post_check", "result" if action.get("preflight_required") else "none")
+        if not action.get("action_id"):
+            identity = {
+                "type": action.get("type"),
+                "capability_id": action.get("capability_id"),
+                "target": action.get("target"),
+                "constraints": action.get("constraints"),
+            }
+            digest = hashlib.sha256(
+                json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:16]
+            action["action_id"] = f"action_{digest}"
+        normalized.append(action)
+    return normalized[:6]
+
+
+def _execution_receipt(
+    *,
+    workflow: dict[str, Any] | None,
+    skill_runs: list[dict[str, Any]],
+    decision: dict[str, Any],
+    selected: dict[str, Any],
+) -> dict[str, Any] | None:
+    workflow = dict(workflow or {})
+    status = str(workflow.get("status") or "")
+    if workflow:
+        state = {
+            "planned": "已生成建议", "queued": "已建立工作流", "running": "执行中",
+            "waiting_approval": "等待确认", "waiting_external": "执行中",
+            "completed": "已完成", "partial": "部分完成", "blocked": "部分完成",
+            "failed": "失败", "cancelled": "已结束", "superseded": "已失效", "paused": "已暂停",
+        }.get(status, "已建立工作流")
+        terminal = status in {"completed", "partial"}
+        return {
+            "version": "execution_receipt_v1", "state": state,
+            "workflow_id": workflow.get("workflow_id"),
+            "summary": str(workflow.get("current_stage") or state),
+            "verified": bool(workflow.get("workflow_id")) and terminal and bool(
+                workflow.get("result") or workflow.get("post_check") or workflow.get("verification")
+            ),
+            "scope": dict(selected),
+            "next_step": "请在工作流卡中确认本次执行" if status in {"planned", "waiting_approval"} else "查看工作流最新状态",
+        }
+    if skill_runs:
+        normalized_runs = [item for item in skill_runs if isinstance(item, dict)]
+
+        def _run_status(item: dict[str, Any]) -> str:
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            return str(item.get("status") or result.get("status") or result.get("batch_status") or "").lower()
+
+        skipped_statuses = {"skipped", "resume_skipped", "not_applicable", "no_op"}
+        failed_statuses = {"failed", "error", "blocked", "partial_failed", "preflight_unavailable"}
+        skipped = sum(1 for item in normalized_runs if item.get("skipped") is True or _run_status(item) in skipped_statuses)
+        failed = sum(
+            1 for item in normalized_runs
+            if item.get("ok") is False or _run_status(item) in failed_statuses
+        )
+        succeeded = sum(
+            1 for item in normalized_runs
+            if item.get("ok") is True
+            and _run_status(item) not in skipped_statuses | failed_statuses
+        )
+        reasons = [
+            str(item.get("error") or (item.get("result") or {}).get("error") or (item.get("result") or {}).get("reason") or "")[:240]
+            for item in normalized_runs
+            if item.get("ok") is False or _run_status(item) in skipped_statuses | failed_statuses
+        ]
+        reasons = [reason for reason in reasons if reason]
+        verified = bool(normalized_runs) and all(
+            bool((item.get("result") or {}).get("verified") or item.get("verified"))
+            for item in normalized_runs
+            if item.get("ok") is True and _run_status(item) not in skipped_statuses
+        ) and not failed
+        return {
+            "version": "execution_receipt_v1",
+            "state": "已完成" if not failed else "部分完成" if succeeded else "失败",
+            "summary": f"已完成 {succeeded} 项，跳过 {skipped} 项，失败 {failed} 项",
+            "succeeded": succeeded, "failed": failed, "skipped": skipped,
+            "reasons": reasons[:6],
+            "verified": verified, "scope": dict(selected), "next_step": "查看结果并选择下一步",
+        }
+    return None if str(decision.get("effect") or "answer") == "answer" else {
+        "version": "execution_receipt_v1", "state": "已生成建议", "summary": "尚未执行写入或外部动作",
+        "verified": False, "scope": dict(selected), "next_step": "确认范围后继续",
+    }
 
 
 def _sourcing_strategy_gate(
@@ -240,6 +582,14 @@ def _copilot_impl(
     if not message:
         raise ValueError("请输入问题")
     raw_context = dict(context or {})
+    display_message = message
+    structured_command = _structured_action_command(raw_context.get("structured_action"))
+    continuation_turn = bool(raw_context.get("clarification_binding") or structured_command)
+    # Structured buttons carry the semantic command in JSON.  Use a stable
+    # internal command for all routing/skill rules; retain the visible label
+    # separately for transcript/audit persistence.
+    if structured_command:
+        message = structured_command
     floating_compact = str(raw_context.get("display_mode") or "").strip() == "floating_compact"
     selected = self._normalize_copilot_context(raw_context)
     selected, focus_conflicts = self._copilot_context_from_focus(session_id, message, selected)
@@ -283,16 +633,67 @@ def _copilot_impl(
         ),
         "",
     )
-    intent_understanding = _interpret_copilot_message(
-        self,
-        message,
-        selected,
-        selected_facts,
-        existing_focus,
-        conversation_history,
-        last_assistant_message,
-        confirmation_plan_ref,
+    structured_action = raw_context.get("structured_action")
+    intent_understanding = _structured_action_understanding(
+        structured_action,
+        selected=selected,
+        selected_facts=selected_facts,
+        message=display_message,
     )
+    if intent_understanding is None:
+        intent_understanding = _candidate_intent_understanding(
+            raw_context.get("candidate_intent"),
+            selected=selected,
+            selected_facts=selected_facts,
+            message=display_message,
+        )
+    if intent_understanding is None and raw_context.get("correction_turn"):
+        intent_understanding = _correction_understanding(display_message, selected, selected_facts)
+    if intent_understanding is None:
+        intent_understanding = _interpret_copilot_message(
+            self,
+            message,
+            selected,
+            selected_facts,
+            existing_focus,
+            conversation_history,
+            last_assistant_message,
+            confirmation_plan_ref,
+        )
+    clarification_bound = False
+    if raw_context.get("clarification_binding") and isinstance(existing_focus, dict):
+        conflict_target_types = {
+            "ambiguous_job": "job",
+            "ambiguous_candidate": "candidate",
+            "ambiguous_client": "client",
+            "context_client_mismatch": "client",
+        }
+        allowed_targets = {
+            (conflict_target_types.get(str(conflict.get("type") or ""), "global"), str(option.get("id")))
+            for conflict in (existing_focus.get("conflicts") or [])
+            if isinstance(conflict, dict)
+            for option in (conflict.get("candidates") or [])
+            if isinstance(option, dict) and option.get("id")
+        }
+        selected_key = (str(selected.get("type") or ""), str(selected.get("id") or ""))
+        previous_understanding = existing_focus.get("understanding") if isinstance(existing_focus.get("understanding"), dict) else {}
+        deferred_understanding = previous_understanding.get("deferred_understanding") if isinstance(previous_understanding.get("deferred_understanding"), dict) else {}
+        if deferred_understanding:
+            previous_understanding = deferred_understanding
+        previous_action = str(previous_understanding.get("action") or "none")
+        if selected_key in allowed_targets and previous_action != "none":
+            intent_understanding = {
+                **previous_understanding,
+                "target": {"type": selected_key[0], "id": selected.get("id"), "label": ""},
+                "needs_clarification": False,
+                "missing_fields": [],
+                "clarification_question": "",
+                "confidence": max(float(previous_understanding.get("confidence") or 0), 0.9),
+                "safe_for_action": False,
+                "clarification_binding": True,
+            }
+            focus_conflicts = []
+            clarification_bound = True
     # 谈薪复述卡确认：上一条 assistant 出了创建前复述卡，本轮是明确确认。
     salary_confirmation_resolved: dict[str, Any] = {}
     pending_salary_card = _latest_assistant_plan_confirmation(self, session_id)
@@ -333,6 +734,7 @@ def _copilot_impl(
     if ambiguous_job_scope:
         # Do not let an otherwise valid budget/detail fact inherit the visible
         # page job when the same sentence explicitly names more than one job.
+        deferred_understanding = dict(intent_understanding)
         intent_understanding.update({
             "speech_act": "other",
             "action": "none",
@@ -345,6 +747,7 @@ def _copilot_impl(
             "missing_fields": ["唯一岗位"],
             "clarification_question": "请补充唯一的岗位名称或岗位编号。",
             "safe_for_action": False,
+            "deferred_understanding": deferred_understanding,
         })
     if salary_confirmation_resolved and not ambiguous_job_scope:
         # 复述卡已确认：按原目标真正走 create_plan（由后续创建路径生成 planned 计划）。
@@ -428,6 +831,14 @@ def _copilot_impl(
                     named_job = named_jobs[0]
                     new_scope = {"type": "job", "id": named_job.get("id")}
                     new_label = f"岗位「{named_job.get('client') or ''} {named_job.get('job') or ''}」".replace("  ", " ")
+                    # 这是用户对旧对象的显式纠正，且目标唯一。让本轮 scope 和后续
+                    # 会话焦点一起切到新岗位，避免冲突保护逻辑保留旧岗位事实。
+                    selected = {
+                        "type": "job", "id": int(named_job["id"]),
+                        "page": "positions", "filters": {},
+                    }
+                    selected_facts = self._copilot_context_facts(selected)
+                    focus_conflicts = []
             if scope_target is not None and new_scope.get("type") and new_scope.get("id") not in (None, ""):
                 intent_understanding["fact_scope_correction"] = {
                     "previous_type": previous_type,
@@ -511,12 +922,37 @@ def _copilot_impl(
         (pending_plan_state.get("goal") or {}).get("context")
         if pending_plan_state else {}
     )
-    previous_constraints = (
-        pending_goal_context.get("constraint_ledger")
-        or pending_goal_context.get("locked_constraints")
-        or ((existing_focus or {}).get("constraint_ledger") if isinstance(existing_focus, dict) else [])
-        or ((existing_focus or {}).get("constraints") if isinstance(existing_focus, dict) else [])
-    )
+    def _same_constraint_scope(source: dict[str, Any]) -> bool:
+        if not source:
+            return False
+        source_context = source.get("context") if isinstance(source.get("context"), dict) else source
+        source_type = str(source_context.get("type") or "")
+        source_id = source_context.get("id")
+        grounding = source.get("goal_grounding") if isinstance(source.get("goal_grounding"), dict) else {}
+        if grounding.get("job_id") not in (None, ""):
+            source_type, source_id = "job", grounding.get("job_id")
+        if source.get("job_id") not in (None, ""):
+            source_type, source_id = "job", source.get("job_id")
+        try:
+            return source_type == str(selected.get("type") or "") and int(source_id) == int(selected.get("id"))
+        except (TypeError, ValueError):
+            return False
+
+    focus_constraint_source = existing_focus if isinstance(existing_focus, dict) else {}
+    if _same_constraint_scope(pending_goal_context):
+        previous_constraints = (
+            pending_goal_context.get("constraint_ledger")
+            or pending_goal_context.get("locked_constraints")
+            or []
+        )
+    elif _same_constraint_scope(focus_constraint_source):
+        previous_constraints = (
+            focus_constraint_source.get("constraint_ledger")
+            or focus_constraint_source.get("constraints")
+            or []
+        )
+    else:
+        previous_constraints = []
     turn_decision = build_turn_decision(
         intent_understanding,
         message=message,
@@ -524,6 +960,26 @@ def _copilot_impl(
         pending_plan_ref=pending_plan_ref,
         raw_constraint_changes=intent_understanding.get("raw_constraint_changes"),
     )
+    if _is_candidate_list_query(message):
+        # 候选池过滤、比较和名单查询是只读动作。保留解析出的动作/约束，
+        # 但不得伪装成待创建计划或进入写入确认链路。
+        turn_decision.update({
+            "effect": "answer",
+            "authorization": {
+                "mode": "read_only",
+                "workflow_id": None,
+                "version": None,
+                "plan_hash": None,
+                "evidence": list(intent_understanding.get("action_evidence") or []),
+            },
+            "blocked_reason": "",
+            "safe_for_action": True,
+        })
+    if clarification_bound:
+        turn_decision["observations"] = [
+            *(turn_decision.get("observations") or []),
+            {"type": "clarification_binding", "value": {"type": selected.get("type"), "id": selected.get("id")}},
+        ]
     intent_understanding["safe_for_action"] = bool(turn_decision.get("safe_for_action"))
     intent_understanding["constraint_changes"] = list(turn_decision.get("constraint_changes") or [])
     intent_understanding["effective_constraints"] = list(turn_decision.get("effective_constraints") or [])
@@ -1439,23 +1895,26 @@ def _copilot_impl(
             )
             conn = self._connect()
             try:
+                message_rows = [] if continuation_turn else [
+                    (session_id, context_type, context_id, "user", display_message, _dumps(persisted_payload))
+                ]
+                message_rows.append(
+                    (
+                        session_id, context_type, context_id, "assistant", answer,
+                        _dumps({
+                            "references": references, "suggested_actions": suggested_actions,
+                            "skill_runs": [], "business_focus": business_focus,
+                            "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
+                        }),
+                    )
+                )
                 conn.executemany(
                     """
                     INSERT INTO agent_copilot_messages
                     (session_id,context_type,context_id,role,content,structured_json)
                     VALUES (?,?,?,?,?,?)
                     """,
-                    [
-                        (session_id, context_type, context_id, "user", message, _dumps(persisted_payload)),
-                        (
-                            session_id, context_type, context_id, "assistant", answer,
-                            _dumps({
-                                "references": references, "suggested_actions": suggested_actions,
-                                "skill_runs": [], "business_focus": business_focus,
-                                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
-                            }),
-                        ),
-                    ],
+                    message_rows,
                 )
                 conn.commit()
             finally:
@@ -1650,23 +2109,26 @@ def _copilot_impl(
             )
             conn = self._connect()
             try:
+                message_rows = [] if continuation_turn else [
+                    (session_id, context_type, context_id, "user", display_message, _dumps(selected_payload))
+                ]
+                message_rows.append(
+                    (
+                        session_id, context_type, context_id, "assistant", answer,
+                        _dumps({
+                            "references": references, "suggested_actions": suggested_actions,
+                            "skill_runs": [], "business_focus": business_focus,
+                            "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
+                        }),
+                    )
+                )
                 conn.executemany(
                     """
                     INSERT INTO agent_copilot_messages
                     (session_id,context_type,context_id,role,content,structured_json)
                     VALUES (?,?,?,?,?,?)
                     """,
-                    [
-                        (session_id, context_type, context_id, "user", message, _dumps(selected_payload)),
-                        (
-                            session_id, context_type, context_id, "assistant", answer,
-                            _dumps({
-                                "references": references, "suggested_actions": suggested_actions,
-                                "skill_runs": [], "business_focus": business_focus,
-                                "model_participation": {"mode": "rules", "label": "规则生成", "model": None},
-                            }),
-                        ),
-                    ],
+                    message_rows,
                 )
                 conn.commit()
             finally:
@@ -1921,6 +2383,12 @@ def _copilot_impl(
             answer = rule_evidence or "当前查询已完成，但暂时没有生成可用结论。"
         answer_source = "model_tools" if model_tool_calls else "model"
     references = _dedupe_copilot_references(references)
+    suggested_actions = _normalize_action_suggestions(
+        suggested_actions,
+        understanding=intent_understanding,
+        decision=turn_decision,
+        selected=selected,
+    )
     persisted_payload = _persistable_attachment_payload(selected_payload)
     focus_context = (
         (goal_workflow.get("goal") or {}).get("context")
@@ -1929,6 +2397,23 @@ def _copilot_impl(
     business_focus = self._persist_copilot_focus(
         session_id, message, focus_context,
         structured=persisted_payload, conflicts=focus_conflicts,
+    )
+    understanding_card = _understanding_card(
+        intent_understanding,
+        turn_decision,
+        selected=selected,
+        focus={**(business_focus or {}), "conflicts": focus_conflicts or (business_focus or {}).get("conflicts") or []},
+        message=message,
+    )
+    receipt_workflow = (
+        goal_workflow.get("workflow")
+        if goal_workflow else current_workflow_context.get("workflow") or None
+    )
+    execution_receipt = _execution_receipt(
+        workflow=receipt_workflow,
+        skill_runs=skill_runs,
+        decision=turn_decision,
+        selected=selected,
     )
     assistant_structured = {
         "references": references,
@@ -1960,6 +2445,8 @@ def _copilot_impl(
         "intent_understanding": intent_understanding,
         "fact_receipt": fact_receipt or None,
         "turn_decision": turn_decision,
+        "understanding_card": understanding_card,
+        "execution_receipt": execution_receipt,
         "tool_calls": model_tool_calls,
         "model_participation": {
             "mode": answer_source,
@@ -2058,23 +2545,26 @@ def _copilot_impl(
                 except Exception:
                     # 结果卡生成失败不应阻塞主回复。
                     pass
+        message_rows = [] if continuation_turn else [
+            (session_id, context_type, context_id, "user", display_message, _dumps(persisted_payload))
+        ]
+        message_rows.append(
+            (
+                session_id,
+                context_type,
+                context_id,
+                "assistant",
+                answer,
+                _dumps(assistant_structured),
+            )
+        )
         conn.executemany(
             """
             INSERT INTO agent_copilot_messages
             (session_id,context_type,context_id,role,content,structured_json)
             VALUES (?,?,?,?,?,?)
             """,
-            [
-                (session_id, context_type, context_id, "user", message, _dumps(persisted_payload)),
-                (
-                    session_id,
-                    context_type,
-                    context_id,
-                    "assistant",
-                    answer,
-                    _dumps(assistant_structured),
-                ),
-            ],
+            message_rows,
         )
         conn.commit()
     finally:
@@ -2121,6 +2611,8 @@ def _copilot_impl(
         "context": {"type": context_type, "id": context_id},
         "references": references,
         "suggested_actions": suggested_actions,
+        "understanding_card": understanding_card,
+        "execution_receipt": execution_receipt,
         "skill_runs": skill_runs,
         "model_participation": assistant_structured["model_participation"],
         "goal_id": goal_workflow["goal"]["goal_id"] if goal_workflow else None,

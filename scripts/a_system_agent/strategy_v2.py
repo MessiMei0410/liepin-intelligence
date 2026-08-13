@@ -53,6 +53,8 @@ _POOL_SOURCES = {
 _POOL_PATHS = {"same_layer", "reverse", "adjacent"}
 _POOL_TIERS = {"T1", "T2", "T3"}
 _CONFIDENCES = {"high", "medium", "low"}
+_COMPANY_SUFFIXES = ("股份有限公司", "有限责任公司", "有限公司", "集团公司", "集团", "公司")
+_COMPANY_BRACKETS = re.compile(r"（[^）]*）|\([^)]*\)|【[^】]*】|\[[^]]*\]")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_KB_CANDIDATES = (
@@ -561,6 +563,34 @@ def _graph_company_is_explicitly_excluded(company_name: str, fragment: dict[str,
     return False
 
 
+def _company_name_is_banned(company_name: str, banned_companies: list[str]) -> bool:
+    """Match customer-level do-not-source companies across legal-name aliases."""
+    def normalize(value: Any) -> str:
+        text = _COMPANY_BRACKETS.sub("", str(value or ""))
+        text = "".join(text.split()).lower()
+        text = re.sub(r"(?:及其|及)?子公司$", "", text)
+        changed = True
+        while changed and text:
+            changed = False
+            for suffix in _COMPANY_SUFFIXES:
+                if text.endswith(suffix) and len(text) > len(suffix):
+                    text = text[: -len(suffix)]
+                    changed = True
+        return text
+
+    candidate = normalize(company_name)
+    if not candidate:
+        return False
+    for banned in banned_companies:
+        blocked = normalize(banned)
+        if not blocked:
+            continue
+        shorter, longer = sorted((candidate, blocked), key=len)
+        if shorter == longer or (len(shorter) >= 3 and shorter in longer):
+            return True
+    return False
+
+
 def _brief_items(value: Any, *, limit: int = 6) -> list[str]:
     """把顾问简报里的输入压成短、稳定、可展示的事实片段。"""
     if isinstance(value, str):
@@ -919,6 +949,7 @@ def build_strategy_v2(
     profile_match: dict[str, Any] | None = None,
     graph_pool: list[dict[str, Any]] | None = None,
     restricted_rules: list[dict[str, Any]] | None = None,
+    banned_companies: list[str] | None = None,
     negative_checklist: list[dict[str, Any]] | None = None,
     canonical_position: dict[str, Any] | None = None,
     skill_ontology: dict[str, Any] | None = None,
@@ -1033,6 +1064,25 @@ def build_strategy_v2(
             )
         else:
             assembly_trace.append("图谱召回公司已在池内，step2 不重复并入")
+
+    # 客户级禁挖名单是硬边界，统一过滤所有来源的目标公司，不能只限制图谱来源。
+    # 名称匹配支持法定名/简称；仅保留计数留痕，不把受限公司字面量写入策略对象以外的表面。
+    banned = [str(name).strip() for name in banned_companies or [] if str(name or "").strip()]
+    if banned:
+        blocked_count = 0
+        filtered_step2: list[dict[str, Any]] = []
+        for entry in step2:
+            companies = [
+                company
+                for company in entry["companies"]
+                if not _company_name_is_banned(str(company.get("name") or ""), banned)
+            ]
+            blocked_count += len(entry["companies"]) - len(companies)
+            if companies:
+                filtered_step2.append({**entry, "companies": companies})
+        step2 = filtered_step2
+        if blocked_count:
+            assembly_trace.append(f"step2 已按客户级禁挖约束剔除 {blocked_count} 家目标公司")
 
     step3_raw = fragment.get("step3_level_mapping") if isinstance(fragment.get("step3_level_mapping"), dict) else {}
     archetype_levels = ((archetype or {}).get("level_mapping") or {})

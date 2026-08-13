@@ -3582,6 +3582,11 @@ class RecruitingCapabilityRuntime:
             profile_match=knowledge_base.profile_matched_info(profile_match),
             graph_pool=graph_pool,
             restricted_rules=knowledge_base.restricted_negative_rules(restricted_info),
+            banned_companies=(
+                (restricted_info.get("constraints") or {}).get("banned_companies")
+                if isinstance(restricted_info, dict) and isinstance(restricted_info.get("constraints"), dict)
+                else []
+            ),
             negative_checklist=negative_checklist,
             canonical_position=payload["canonical_position"],
             skill_ontology=skill_ontology,

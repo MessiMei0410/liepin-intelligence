@@ -100,6 +100,52 @@ describe('Agent workspace', () => {
     expect(screen.getByLabelText('消息附件')).toHaveTextContent('探针台CPO方向新增需求.xlsx')
   })
 
+  it('实时展示理解卡并通过显式对象上下文继续歧义指令', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-clarify"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-clarify","answer":"请选择岗位","understanding_card":{"show":true,"message":"过滤这两个岗位候选池","action":"candidate_review","action_label":"评估/复核","confidence":0.82,"target":{"type":"global","label":"当前上下文"},"candidate_options":[{"type":"job","id":9,"client":"长越科技","label":"机械高级工程师","status":"open","updated_at":"2026-08-12"}]}}\n\n',
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '过滤这两个岗位候选池' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(await screen.findByRole('region', { name: 'ASA 理解卡' })).toHaveTextContent('评估/复核')
+    fireEvent.click(screen.getByRole('button', { name: /长越科技机械高级工程师/ }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toHaveLength(2))
+    const secondBody = JSON.parse(String(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))[1][1]?.body || '{}'))
+    expect(secondBody.message).toBe('过滤这两个岗位候选池')
+    expect(secondBody.context).toMatchObject({ type: 'job', id: 9, clarification_binding: true })
+    expect(screen.getAllByText('过滤这两个岗位候选池')).toHaveLength(1)
+  })
+
+  it('候选人待确认卡携带一次性预检信息直达确认端点', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-candidate"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-candidate","answer":"确认推进","pending_intent":{"kind":"candidate_action","action":"advance","action_label":"复核通过","intent_hash":"hash-1","preflight_token":"token-1","message":"这个人选复核通过","candidate":{"id":558,"name":"王先生","client":"士兰微","job":"电源专家","stage":"S1 待复核"}}}\n\n',
+      )
+      if (url.endsWith('/api/v1/copilot/intents/confirm')) return mockResponse({ ok: true, answer: '已确认并同步到 ASA：王先生复核通过。' })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'candidate', id: 558 })
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '这个人选复核通过' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认执行' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/intents/confirm'))).toBe(true))
+    const confirmCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/copilot/intents/confirm'))
+    expect(JSON.parse(String(confirmCall?.[1]?.body || '{}'))).toMatchObject({
+      intent_hash: 'hash-1', candidate_id: 558, preflight_token: 'token-1', session_id: 'task-candidate',
+      intent: { kind: 'candidate_action', action: 'advance' },
+    })
+    expect(await screen.findByRole('region', { name: '候选人执行回执' })).toHaveTextContent('已完成服务端回查')
+  })
+
   it('附件读取失败时阻止发送，移除失败项后恢复文本发送', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/attachments')
       ? mockResponse({ detail: 'Office 文件结构损坏' }, false, 422)
@@ -424,6 +470,8 @@ describe('Agent workspace', () => {
     expect(screen.queryByRole('button', { name: '查看审批' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '收起长越科技｜自动化软件高级工程师｜第4轮寻访' }))
     fireEvent.click(screen.getByRole('button', { name: '确认计划并准备' }))
+    expect(fetch).not.toHaveBeenCalledWith('/api/v1/workflows/wf-1/start', expect.anything())
+    fireEvent.click(await screen.findByRole('button', { name: '确认开始' }))
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
       '/api/v1/workflows/wf-1/start',
       expect.objectContaining({ method: 'POST', body: expect.stringContaining('hash-1') }),

@@ -43,4 +43,29 @@ describe('Agent conversation state machine', () => {
     expect(lateDone.error).toBe('模型调用失败')
     expect(lateDone.messages[1].content).toBe('')
   })
+
+  it('纠正回合按 revoked action ids 立即失效历史行动卡', () => {
+    const prior = {
+      ...initialAgentConversationState,
+      phase: 'idle' as const,
+      messages: [{
+        role: 'assistant' as const,
+        content: '旧计划',
+        suggested_actions: [{ action_id: 'action-old', type: 'continue_sourcing' }],
+      }],
+    }
+    const streaming = agentConversationReducer(prior, {
+      type: 'turn_started', requestId: 'request-correction', message: '刚才不对', context: { type: 'job', id: 154 }, retry: false,
+    })
+    const completed = agentConversationReducer(streaming, {
+      type: 'turn_done', requestId: 'request-correction',
+      result: {
+        session_id: 'task-1', answer: '已重算',
+        revoked_actions: [{ action_ids: ['action-old'], reason: '用户纠正或修改条件' }],
+      },
+    })
+
+    expect(completed.messages[0].invalidated).toBe(true)
+    expect(completed.messages[0].invalidated_reason).toContain('纠正')
+  })
 })

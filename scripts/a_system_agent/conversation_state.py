@@ -53,6 +53,11 @@ _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "candidate_review": (
         r"(?:帮我|请|开始|重新|批量)?.{0,12}(?:评估|复核|分析|筛选|判断).{0,30}(?:人选|候选人|简历|匹配度)",
         r"(?:人选|候选人|简历).{0,24}(?:评估|复核|分析|筛选|判断)",
+        r"(?:过滤|筛选|分级|分层|按证据|按硬性|按匹配度).{0,40}(?:候选池|候选人|人选|名单|列表|输出)",
+        r"(?:候选池|候选人|人选|名单|列表).{0,40}(?:过滤|筛选|分级|分层|按证据|按硬性|按匹配度)",
+        r"(?:比较|对比|排序).{0,30}(?:前|top|TOP)?\s*\d*\s*(?:位|个|名)?(?:候选池|候选人|人选)",
+        r"(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d+\s*(?:位|个|名|人)",
+        r"(?:候选池|候选人|人选).{0,30}(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d*",
     ),
     "job_publish": (
         r"(?:发布|上架|发到猎聘|准备发布).{0,24}(?:岗位|职位)",
@@ -296,7 +301,7 @@ def action_evidence_for_turn(
     action = _clean(understanding.get("action"), 48).lower()
     speech_act = _clean(understanding.get("speech_act"), 24).lower()
     pending = dict(pending_plan_ref or {})
-    if not text or _looks_like_question(text) or speech_act in {"ask", "inform", "discuss", "other"}:
+    if not text or _looks_like_question(text):
         return []
     if _looks_like_observation(text) and not re.search(r"(?:帮我|请|给我|继续|再找|重新|开始|执行|启动)", text):
         return []
@@ -338,7 +343,12 @@ def enrich_turn_understanding(
     evidence = action_evidence_for_turn(result, message=message, pending_plan_ref=pending_plan_ref)
 
     if speech_act in {"ask", "inform", "discuss", "other"}:
-        action = "none"
+        # 模型有时会把“按证据分级过滤候选池”标成 other。只有确定性
+        # 动作证据存在时才提升为命令；观察句仍保持 no-action。
+        if evidence and action != "none":
+            speech_act = "propose"
+        else:
+            action = "none"
     elif not evidence and speech_act in {"propose", "execute"}:
         if fact_updates or _looks_like_observation(message):
             speech_act = "inform"
@@ -416,6 +426,7 @@ def build_context_state(
     revision = int(state.get("revision") or 0) + 1
     active_context = _normalized_context(context, business_focus)
     facts = [dict(item) for item in state.get("facts") or [] if isinstance(item, dict)]
+    observations = [dict(item) for item in state.get("observations") or [] if isinstance(item, dict)]
     corrections = [dict(item) for item in state.get("corrections") or [] if isinstance(item, dict)]
     new_fact_kinds: list[str] = []
 
@@ -425,6 +436,19 @@ def build_context_state(
         kind = _clean(update.get("kind"), 48) or "other"
         quote = _clean(update.get("quote"))
         if not quote:
+            continue
+        # 观察是对执行结果的未验证陈述，不能进入事实账本或约束推理。
+        if kind == "workflow_observation":
+            observations.append({
+                "id": _stable_id("observation", quote, now),
+                "kind": kind,
+                "quote": quote,
+                "value": _clean(update.get("value") or quote),
+                "scope": _fact_scope(kind, active_context),
+                "verified": False,
+                "source": "user_observation",
+                "at": now,
+            })
             continue
         scope = _fact_scope(kind, active_context)
         key = _stable_id(kind, scope.get("type"), scope.get("id"))
@@ -534,11 +558,15 @@ def build_context_state(
                 active_goal["workflow_id"] = workflow_intent.get("workflow_id")
     elif effect == "cancel_plan":
         pending_plan = {}
-    if new_fact_kinds and pending_plan.get("workflow_id") and not plan_refreshed:
-        # 本轮写入了新事实，而待确认计划仍基于之前的信息：标记过期原因，
-        # 由消费侧（计划锚点/短确认）决定要求重新确认，而不是直接启动。
+    if (new_fact_kinds or decision.get("constraint_changes")) and pending_plan.get("workflow_id") and not plan_refreshed:
+        # 本轮写入了新事实或纠正了约束，而待确认计划仍基于之前的信息：
+        # 标记过期原因，由消费侧（计划锚点/短确认）要求重算，不能直接启动旧计划。
         stale_reasons = [item for item in str(pending_plan.get("stale_reason") or "").split(",") if item]
-        stale_reasons = list(dict.fromkeys([*stale_reasons, *(f"{kind}_updated" for kind in new_fact_kinds)]))
+        stale_reasons = list(dict.fromkeys([
+            *stale_reasons,
+            *(f"{kind}_updated" for kind in new_fact_kinds),
+            *("constraints_updated" for _ in decision.get("constraint_changes") or []),
+        ]))
         pending_plan = dict(pending_plan)
         pending_plan["stale_reason"] = ",".join(stale_reasons)
         pending_plan["last_referenced_at"] = pending_plan.get("updated_at") or now
@@ -562,6 +590,7 @@ def build_context_state(
         "revision": revision,
         "active_context": active_context,
         "facts": facts[-32:],
+        "observations": observations[-24:],
         "corrections": corrections[-24:],
         "constraints": constraints[-24:],
         "active_goal": active_goal,

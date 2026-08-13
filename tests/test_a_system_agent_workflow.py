@@ -2577,14 +2577,17 @@ class WorkflowEngineTest(AgentDbCase):
         try:
             pending = service.copilot("Leo 发的图片你看下", context=base_context)
             self.assertIn("需要打开当前微信图片", pending["answer"])
+            action = pending["suggested_actions"][0]
             self.assertEqual(
-                pending["suggested_actions"][0],
+                {key: action[key] for key in ("type", "id", "label")},
                 {
                     "type": "native_action",
                     "id": "recognizeWeChatImage",
                     "label": "打开并识别当前图片",
                 },
             )
+            self.assertTrue(action["confirmation_required"])
+            self.assertTrue(action["preflight_required"])
             self.assertEqual(llm.copilot_payloads, [])
 
             analyzed_context = dict(base_context)

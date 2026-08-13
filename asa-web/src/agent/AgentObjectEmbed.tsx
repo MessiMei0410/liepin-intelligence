@@ -71,6 +71,7 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
   const [workflow, setWorkflow] = useState<WorkflowValue>()
   const [workflowSummary, setWorkflowSummary] = useState<Record<string, unknown> | null>(null)
   const [pending, setPending] = useState<{ action: CandidateAction; token: string; impact: string }>()
+  const [workflowPending, setWorkflowPending] = useState<{ id: string; planRef: Record<string, unknown> }>()
   const actionDialogRef = useDialogFocus<HTMLElement>(Boolean(pending))
   const [note, setNote] = useState('')
   const [reason, setReason] = useState('other')
@@ -182,9 +183,15 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
     const version = Number(planRef.version)
     const planHash = compactText(planRef.plan_hash)
     const payload = Number.isFinite(version) && planHash ? { expected_plan_version: version, expected_plan_hash: planHash } : {}
-    setBusy(`workflow:${type}`); setError('')
+    setWorkflowPending({ id: workflowId, planRef: payload })
+  }
+  const confirmWorkflowStart = async () => {
+    if (!workflowPending || busy) return
+    setBusy('workflow:start'); setError('')
     try {
-      await api.workflowAction(workflowId, 'start', payload)
+      await api.workflowAction(workflowPending.id, 'start', workflowPending.planRef)
+      setWorkflow({ ...(await api.workflow(workflowPending.id)) })
+      setWorkflowPending(undefined)
     } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
     finally { setBusy('') }
   }
@@ -272,6 +279,11 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
       <header><span className={`action-dialog-icon ${pending.action === 'stop' ? 'danger' : ''}`}>{pending.action === 'stop' ? <Ban/> : <Check/>}</span><div><small>写入预检通过</small><h3 id="agent-action-title">{actionLabels[pending.action]}</h3></div><button className="icon-btn" aria-label="关闭" onClick={() => setPending(undefined)}>×</button></header>
       <div className="action-dialog-body"><p>{pending.impact}</p>{pending.action === 'stop' && <label><span>停止原因</span><select value={reason} onChange={event => setReason(event.target.value)}>{stopReasons.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}<label><span>备注</span><textarea value={note} onChange={event => setNote(event.target.value)} /></label>{error && <div className="action-dialog-error">{error}</div>}</div>
       <footer><button className="button" onClick={() => setPending(undefined)}>取消</button><button className={`button ${pending.action === 'stop' ? 'danger-fill' : 'primary'}`} disabled={busy === 'commit'} onClick={() => void commit()}>{busy === 'commit' && <LoaderCircle className="spin"/>}确认执行</button></footer>
+    </section></div>}
+    {workflowPending && <div className="action-dialog-backdrop" role="presentation"><section className="action-dialog agent-action-dialog" role="alertdialog" aria-modal="true" aria-labelledby="workflow-action-title">
+      <header><span className="action-dialog-icon"><Activity/></span><div><small>执行预检</small><h3 id="workflow-action-title">确认开始执行</h3></div><button className="icon-btn" aria-label="关闭" onClick={() => setWorkflowPending(undefined)}>×</button></header>
+      <div className="action-dialog-body"><p>将按当前计划启动工作流。外部寻访仍需单次审批，确认前不会开始执行。</p>{error && <div className="action-dialog-error">{error}</div>}</div>
+      <footer><button className="button" onClick={() => setWorkflowPending(undefined)}>取消</button><button className="button primary" disabled={busy === 'workflow:start'} onClick={() => void confirmWorkflowStart()}>{busy === 'workflow:start' && <LoaderCircle className="spin"/>}确认开始</button></footer>
     </section></div>}
   </article>
 }

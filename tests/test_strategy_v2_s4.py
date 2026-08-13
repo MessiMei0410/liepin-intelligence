@@ -379,6 +379,36 @@ class StrategyV2SchemaTest(unittest.TestCase):
         assert v2["step2_source_distribution"] == {"client_doc": 1}
         assert any("图谱公司命中显式排除规则" in line for line in v2["classification_trace"])
 
+    def test_customer_banned_companies_filter_every_target_pool_source(self) -> None:
+        v2 = strategy_v2.build_strategy_v2(
+            {"channels": {}},
+            self._classification(),
+            llm_fragment={
+                "step2_target_pool": [{
+                    "path": "same_layer",
+                    "tier": "T1",
+                    "companies": [
+                        {"name": "长川科技", "source": "client_doc", "confidence": "high"},
+                        {"name": "可用公司", "source": "client_doc", "confidence": "high"},
+                    ],
+                    "rationale": "测试目标池",
+                }],
+            },
+            graph_pool=[
+                {"name": "杭州长川科技股份有限公司", "confidence": "medium"},
+                {"name": "另一家可用公司", "confidence": "medium"},
+            ],
+            banned_companies=["长川科技及其子公司"],
+        )
+
+        companies = [
+            company["name"]
+            for entry in v2["step2_target_pool"]
+            for company in entry["companies"]
+        ]
+        assert companies == ["可用公司", "另一家可用公司"]
+        assert any("客户级禁挖约束剔除 2 家" in line for line in v2["classification_trace"])
+
     def test_extract_strategy_v2_from_v1_metadata_returns_none(self) -> None:
         assert strategy_v2.extract_strategy_v2({"plan": {"channels": {}}}) is None
         assert strategy_v2.extract_strategy_v2('{"plan": {}}') is None

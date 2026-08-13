@@ -826,6 +826,10 @@ export const api = {
   disputeJobProfileItem: (jobId: number, item: { item_type: string; item_key: string; item_label?: string; note?: string }) =>
     write<JobProfileFeedbackResult>(`/api/v1/jobs/${jobId}/profile-insights/feedback`, { ...item }),
   workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
+  confirmCopilotIntent: (payload: {
+    intent: { kind: 'candidate_action'; action: string; message?: string } & Record<string, unknown>
+    intent_hash: string; candidate_id: number; preflight_token: string; message?: string; session_id?: string
+  }) => write<Record<string, unknown>>('/api/v1/copilot/intents/confirm', payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
   preflight: (candidate_id: number, action: string) => {

@@ -970,6 +970,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/memories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Memories */
+        get: operations["memories_api_v1_memories_get"];
+        put?: never;
+        /** Memory Store */
+        post: operations["memory_store_api_v1_memories_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memories/{memory_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Memory Revoke */
+        delete: operations["memory_revoke_api_v1_memories__memory_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scheduler/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Scheduler Tasks */
+        get: operations["scheduler_tasks_api_v1_scheduler_tasks_get"];
+        put?: never;
+        /** Scheduler Task Create */
+        post: operations["scheduler_task_create_api_v1_scheduler_tasks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/scheduler/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Scheduler Task Delete */
+        delete: operations["scheduler_task_delete_api_v1_scheduler_tasks__task_id__delete"];
+        options?: never;
+        head?: never;
+        /** Scheduler Task Patch */
+        patch: operations["scheduler_task_patch_api_v1_scheduler_tasks__task_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/scheduler/tasks/{task_id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Scheduler Task Run */
+        post: operations["scheduler_task_run_api_v1_scheduler_tasks__task_id__run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/analytics/catalog": {
         parameters: {
             query?: never;
@@ -2238,6 +2326,35 @@ export interface components {
              */
             trigger: string;
         };
+        /** MemoryStore */
+        MemoryStore: {
+            /** Request Id */
+            request_id: string;
+            /**
+             * Scope Type
+             * @default global
+             */
+            scope_type: string;
+            /** Scope Id */
+            scope_id?: string | null;
+            /**
+             * Memory Type
+             * @default fact
+             */
+            memory_type: string;
+            /** Content */
+            content: string;
+            /**
+             * Source Type
+             * @default copilot
+             */
+            source_type: string;
+            /**
+             * Confidence
+             * @default 1
+             */
+            confidence: number;
+        };
         /** PackageFeedbackCreate */
         PackageFeedbackCreate: {
             /** Request Id */
@@ -2296,6 +2413,31 @@ export interface components {
         RadarWeeklyReportCreate: {
             /** Request Id */
             request_id: string;
+        };
+        /** SchedulerTaskCreate */
+        SchedulerTaskCreate: {
+            /** Request Id */
+            request_id: string;
+            /** Name */
+            name: string;
+            /** Task Type */
+            task_type: string;
+            /** Cron Expr */
+            cron_expr: string;
+            /** Params */
+            params?: {
+                [key: string]: unknown;
+            };
+        };
+        /** SchedulerTaskPatch */
+        SchedulerTaskPatch: {
+            /** Request Id */
+            request_id: string;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "pause" | "resume";
         };
         /** SourcingAdjustmentDecision */
         SourcingAdjustmentDecision: {
@@ -4309,6 +4451,277 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    memories_api_v1_memories_get: {
+        parameters: {
+            query?: {
+                query?: string;
+                scope_type?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    memory_store_api_v1_memories_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemoryStore"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    memory_revoke_api_v1_memories__memory_id__delete: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                memory_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scheduler_tasks_api_v1_scheduler_tasks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    scheduler_task_create_api_v1_scheduler_tasks_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SchedulerTaskCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scheduler_task_delete_api_v1_scheduler_tasks__task_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteEnvelope"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scheduler_task_patch_api_v1_scheduler_tasks__task_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SchedulerTaskPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    scheduler_task_run_api_v1_scheduler_tasks__task_id__run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

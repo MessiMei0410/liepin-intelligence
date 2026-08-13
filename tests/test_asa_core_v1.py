@@ -1186,9 +1186,24 @@ def test_explicit_copilot_review_failure_updates_candidate_and_audit(db_path: Pa
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["candidate_action"]["action"] == "stop"
-        assert body["candidate_action"]["stage"] == "H5 最近寻访/初筛不通过"
-        assert "已同步到 ASA" in body["answer"]
+        assert body["pending_intent"]["action"] == "stop"
+        assert "未确认前不会写入 ASA" in body["answer"]
+        confirm = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": f"{request_id}-confirm"},
+            json={
+                "request_id": f"{request_id}-confirm",
+                "intent": {"kind": "candidate_action", "action": "stop", "message": body["pending_intent"]["message"]},
+                "intent_hash": body["pending_intent"]["intent_hash"],
+                "candidate_id": 558,
+                "preflight_token": body["pending_intent"]["preflight_token"],
+                "message": body["pending_intent"]["message"],
+                "session_id": "floating-review-stop-test",
+            },
+        )
+        assert confirm.status_code == 200, confirm.json()
+        assert confirm.json()["candidate_action"]["action"] == "stop"
+        assert "已确认并同步到 ASA" in confirm.json()["answer"]
         detail = client.get("/api/v1/candidates/558").json()["candidate"]
         assert detail["is_stopped"] is True
         assert detail["clean_stage"] == "H5 最近寻访/初筛不通过"
@@ -1197,16 +1212,17 @@ def test_explicit_copilot_review_failure_updates_candidate_and_audit(db_path: Pa
     event = conn.execute(
         "SELECT event_status,summary FROM candidate_events WHERE job_candidate_id=558 AND event_type='resume_review_completed' ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    audit = conn.execute(
-        "SELECT operation,surface,result FROM audit_events WHERE target_type='job_candidate' AND target_id='558' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
+    audits = [tuple(row) for row in conn.execute(
+        "SELECT operation,surface,result FROM audit_events WHERE target_type='job_candidate' AND target_id='558' ORDER BY id DESC LIMIT 2"
+    ).fetchall()]
     feedback = conn.execute(
         "SELECT signal_type,weight FROM agent_sourcing_feedback WHERE job_candidate_id=558 ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
     assert event[0] == "stop"
     assert "复核不通过" in event[1]
-    assert audit == ("candidate.commit", "asa_copilot", "success")
+    assert ("copilot.intent_confirm", "asa_web", "success") in audits
+    assert ("candidate.commit", "asa_copilot", "success") in audits
     assert feedback == ("stopped", -2.0)
 
 
@@ -1251,9 +1267,24 @@ def test_explicit_copilot_candidate_actions_write_real_business_state(
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["candidate_action"]["action"] == action
-        assert body["candidate_action"]["stage"] == expected_stage
-        assert "已同步到 ASA" in body["answer"]
+        assert body["pending_intent"]["action"] == action
+        assert "未确认前不会写入 ASA" in body["answer"]
+        confirm = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": f"{request_id}-confirm"},
+            json={
+                "request_id": f"{request_id}-confirm",
+                "intent": {"kind": "candidate_action", "action": action, "message": body["pending_intent"]["message"]},
+                "intent_hash": body["pending_intent"]["intent_hash"],
+                "candidate_id": 558,
+                "preflight_token": body["pending_intent"]["preflight_token"],
+                "message": body["pending_intent"]["message"],
+                "session_id": f"floating-{action}-test",
+            },
+        )
+        assert confirm.status_code == 200, confirm.json()
+        assert confirm.json()["candidate_action"]["action"] == action
+        assert "已确认并同步到 ASA" in confirm.json()["answer"]
         detail = client.get("/api/v1/candidates/558").json()["candidate"]
         assert detail["clean_stage"] == expected_stage
 
@@ -1262,19 +1293,22 @@ def test_explicit_copilot_candidate_actions_write_real_business_state(
     feedback = conn.execute(
         "SELECT signal_type,weight FROM agent_sourcing_feedback WHERE job_candidate_id=558 ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    stored_answer = conn.execute(
-        "SELECT content FROM agent_copilot_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+    stored_answer, stored_structured = conn.execute(
+        "SELECT content,structured_json FROM agent_copilot_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
         (f"floating-{action}-test",),
-    ).fetchone()[0]
+    ).fetchone()
     conn.close()
     assert candidate_status == expected_status
     assert "query=电气/硬件" in candidate_notes
-    assert "ASA Copilot 指令" in candidate_notes
+    assert "ASA Copilot 确认指令" in candidate_notes
     assert feedback == (signal_type, weight)
-    assert "已同步到 ASA" in stored_answer
+    assert "未确认前不会写入 ASA" in stored_answer
+    restored = json.loads(stored_structured)
+    assert restored["pending_intent"] is None
+    assert restored["execution_receipt"]["state"] == "已完成"
 
 
-def test_copilot_read_no_reply_updates_note_and_timeline_without_reconfirmation(db_path: Path) -> None:
+def test_copilot_read_no_reply_requires_confirmation_before_write(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
         "UPDATE job_candidates SET clean_stage='S3 已联系/待回复',flow_bucket='联系推进',raw_status='contacted' WHERE id=558"
@@ -1300,13 +1334,23 @@ def test_copilot_read_no_reply_updates_note_and_timeline_without_reconfirmation(
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["candidate_update"]["update_type"] == "read_no_reply"
-        assert body["candidate_update"]["stage"] == "S3 已联系/待回复"
-        assert "已更新" in body["answer"]
-        assert "已读未回复" in body["answer"]
-        assert "请确认" not in body["answer"]
-        assert "打开人选备注" not in body["answer"]
-        assert body["suggested_actions"] == []
+        pending = body["pending_intent"]
+        assert pending["kind"] == "candidate_update"
+        assert pending["action"] == "read_no_reply"
+        assert "未确认前不会写入 ASA" in body["answer"]
+        confirm_id = f"confirm-read-no-reply-{uuid.uuid4().hex[:8]}"
+        confirmed = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": confirm_id},
+            json={
+                "request_id": confirm_id, "session_id": "floating-read-no-reply-test",
+                "intent": {"kind": pending["kind"], "action": pending["action"]},
+                "intent_hash": pending["intent_hash"], "candidate_id": 558,
+                "preflight_token": pending["preflight_token"], "message": pending["message"],
+            },
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["candidate_action"]["update_type"] == "read_no_reply"
 
     conn = sqlite3.connect(db_path)
     candidate = conn.execute("SELECT status,notes FROM candidates WHERE id=1176").fetchone()
@@ -1326,12 +1370,86 @@ def test_copilot_read_no_reply_updates_note_and_timeline_without_reconfirmation(
     assert relation == ("S3 已联系/待回复", "contacted")
     assert event[0] == "read_no_reply"
     assert "已读未回复" in event[1]
-    assert audit == ("candidate.note", "asa_copilot", "success")
-    assert "请确认" not in stored[0]
-    assert json.loads(stored[1])["suggested_actions"] == []
+    assert audit == ("copilot.intent_confirm", "asa_web", "success")
+    assert "未确认前不会写入 ASA" in stored[0]
+    assert json.loads(stored[1])["pending_intent"] is None
 
 
-def test_copilot_read_no_reply_note_never_downgrades_later_stage(db_path: Path) -> None:
+def test_copilot_correction_revokes_pending_preflight_token(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE job_candidates SET clean_stage='S1 新增寻访/待复核',flow_bucket='待复核',raw_status='search_shortlisted' WHERE id=558")
+    conn.commit()
+    conn.close()
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        first_id = f"copilot-revoke-{uuid.uuid4().hex[:8]}"
+        first = client.post(
+            "/api/v1/copilot/messages",
+            headers={"Idempotency-Key": first_id},
+            json={"request_id": first_id, "session_id": "revoke-pending-test", "message": "这个人选复核通过", "context": {"type": "candidate", "id": 558}},
+        ).json()
+        pending = first["pending_intent"]
+        correction_id = f"copilot-correct-{uuid.uuid4().hex[:8]}"
+        corrected = client.post(
+            "/api/v1/copilot/messages",
+            headers={"Idempotency-Key": correction_id},
+            json={"request_id": correction_id, "session_id": "revoke-pending-test", "message": "刚才不对，先不要推进", "context": {"type": "candidate", "id": 558}},
+        )
+        assert corrected.status_code == 200
+        restored = client.get("/api/v1/copilot/sessions/revoke-pending-test").json()
+        old_message = next(item for item in restored["messages"] if item.get("pending_intent"))
+        assert old_message["invalidated"] is True
+        assert old_message["invalidated_reason"] == "用户纠正或修改条件"
+        assert old_message["pending_intent"]["invalidated"] is True
+        confirm_id = f"confirm-revoked-{uuid.uuid4().hex[:8]}"
+        stale = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": confirm_id},
+            json={
+                "request_id": confirm_id, "session_id": "revoke-pending-test",
+                "intent": {"kind": pending["kind"], "action": pending["action"]},
+                "intent_hash": pending["intent_hash"], "candidate_id": 558,
+                "preflight_token": pending["preflight_token"], "message": pending["message"],
+            },
+        )
+        assert stale.status_code == 409
+
+
+def test_structured_candidate_action_uses_preflight_without_parsing_label(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE job_candidates SET clean_stage='S1 新增寻访/待复核',flow_bucket='待复核',raw_status='search_shortlisted' WHERE id=558")
+    conn.commit()
+    before = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=558").fetchone()[0]
+    conn.close()
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        request_id = f"structured-advance-{uuid.uuid4().hex[:8]}"
+        response = client.post(
+            "/api/v1/copilot/messages",
+            headers={"Idempotency-Key": request_id},
+            json={
+                "request_id": request_id,
+                "session_id": "structured-candidate-action",
+                "message": "完全无关的显示文案",
+                "context": {
+                    "type": "candidate", "id": 558,
+                    "structured_action": {
+                        "action_id": "action-advance-558", "type": "confirm_advance",
+                        "target": {"type": "candidate", "id": 558},
+                        "preflight_required": True, "confirmation_required": True,
+                    },
+                },
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["pending_intent"]["action"] == "advance"
+        assert body["pending_intent"]["preflight_token"]
+    conn = sqlite3.connect(db_path)
+    after = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=558").fetchone()[0]
+    conn.close()
+    assert after == before
+
+
+def test_copilot_read_no_reply_confirmation_never_downgrades_later_stage(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
         "UPDATE job_candidates SET clean_stage='S7 已推荐客户/待反馈',flow_bucket='客户推荐',raw_status='recommended' WHERE id=558"
@@ -1353,7 +1471,20 @@ def test_copilot_read_no_reply_note_never_downgrades_later_stage(db_path: Path) 
             },
         )
         assert response.status_code == 200
-        assert response.json()["candidate_update"]["stage"] == "S7 已推荐客户/待反馈"
+        pending = response.json()["pending_intent"]
+        confirm_id = f"confirm-read-no-reply-later-{uuid.uuid4().hex[:8]}"
+        confirmed = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": confirm_id},
+            json={
+                "request_id": confirm_id, "session_id": "floating-read-no-reply-later-stage-test",
+                "intent": {"kind": pending["kind"], "action": pending["action"]},
+                "intent_hash": pending["intent_hash"], "candidate_id": 558,
+                "preflight_token": pending["preflight_token"], "message": pending["message"],
+            },
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["candidate_action"]["stage"] == "S7 已推荐客户/待反馈"
 
     conn = sqlite3.connect(db_path)
     relation = conn.execute("SELECT clean_stage,raw_status FROM job_candidates WHERE id=558").fetchone()
@@ -1510,8 +1641,23 @@ def test_floating_compat_copilot_review_failure_uses_core_write_path(db_path: Pa
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["candidate_action"]["action"] == "stop"
-        assert "已同步到 ASA" in body["answer"]
+        assert body["pending_intent"]["action"] == "stop"
+        assert "未确认前不会写入 ASA" in body["answer"]
+        confirm = client.post(
+            "/api/v1/copilot/intents/confirm",
+            headers={"Idempotency-Key": f"compat-confirm-{uuid.uuid4().hex[:8]}"},
+            json={
+                "request_id": f"compat-confirm-{uuid.uuid4().hex[:8]}",
+                "intent": {"kind": "candidate_action", "action": "stop", "message": body["pending_intent"]["message"]},
+                "intent_hash": body["pending_intent"]["intent_hash"],
+                "candidate_id": 558,
+                "preflight_token": body["pending_intent"]["preflight_token"],
+                "message": body["pending_intent"]["message"],
+                "session_id": "floating-compat-review-stop-test",
+            },
+        )
+        assert confirm.status_code == 200, confirm.json()
+        assert "已确认并同步到 ASA" in confirm.json()["answer"]
         assert client.get("/api/v1/candidates/558").json()["candidate"]["is_stopped"] is True
 
 

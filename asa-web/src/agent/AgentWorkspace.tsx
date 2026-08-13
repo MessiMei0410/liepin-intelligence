@@ -15,6 +15,7 @@ import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
+import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
 
 const ACTIVE_SESSION_KEY = 'asaAgentSessionId'
 const RadarPage = lazy(() => import('../pages/Radar').then(module => ({ default: module.RadarPage })))
@@ -173,6 +174,8 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const [searchUnavailable, setSearchUnavailable] = useState(false)
   const [sessionIdCopied, setSessionIdCopied] = useState(false)
   const [taskMenu, setTaskMenu] = useState<{ sessionId: string; x: number; y: number } | undefined>(undefined)
+  const [interactionError, setInteractionError] = useState('')
+  const [structuredActionBusy, setStructuredActionBusy] = useState('')
   const [contextConflict, setContextConflict] = useState<{ incoming: AgentContext; restored?: AgentContext; label: string }>()
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const generationRef = useRef(0)
@@ -197,6 +200,7 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const attachmentsRef = useRef<QueuedAgentAttachment[]>([])
   const attachmentGenerationRef = useRef(0)
   const { messages, phase, error } = conversation
@@ -354,11 +358,11 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     setAttachedContext(contextConflict.restored || { type: 'page', page: 'agent' })
     setContextConflict(undefined)
   }
-  const runTurn = async (turn: AgentTurn, retrying = false) => {
+  const runTurn = async (turn: AgentTurn, retrying = false, continuation = false) => {
     const controller = new AbortController()
     const generation = generationRef.current
-    controllerRef.current = controller; setLastTurn(turn); setTurnProgress('')
-    dispatch({ type: 'turn_started', requestId: turn.requestId, message: turn.message, context: turn.context, retry: retrying })
+    controllerRef.current = controller; setLastTurn(turn); setTurnProgress(''); setInteractionError('')
+    dispatch({ type: 'turn_started', requestId: turn.requestId, message: turn.message, context: turn.context, retry: retrying, continuation })
     let completed = false
     let streamFailed = false
     let contextSessionId = ''
@@ -442,6 +446,64 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
     if (!conversation.activeRequestId) return
     controllerRef.current?.abort()
     dispatch({ type: 'turn_stopped', requestId: conversation.activeRequestId })
+  }
+  const selectAmbiguousObject = (card: Record<string, unknown>, option: Record<string, unknown>) => {
+    const message = String(card.message || '').trim()
+    const type = String(option.type || '').trim()
+    const id = option.id
+    if (!message || !type || id === undefined || id === null || loading) return
+    const explicitContext: AgentContext = {
+      type, id: typeof id === 'number' || typeof id === 'string' ? id : String(id), client: String(option.client || ''),
+      ...(type === 'job' ? { job: String(option.label || '') } : { candidate: String(option.label || '') }),
+      clarification_binding: true,
+    }
+    // 继续原始回合：对象绑定是澄清结果，不重复把原指令插入 transcript。
+    void runTurn(createAgentTurn(sessionId, message, explicitContext), false, true)
+  }
+  const runStructuredAction = async (action: Record<string, unknown>) => {
+    const type = String(action.type || '').trim()
+    const target = action.target && typeof action.target === 'object' ? action.target as Record<string, unknown> : {}
+    const id = action.id ?? target.id
+    const actionId = String(action.action_id || `${type}:${String(id || '')}`)
+    setInteractionError('')
+    setStructuredActionBusy(actionId)
+    try {
+      if (['open_candidate', 'open_job', 'open_workflow'].includes(type) && id !== undefined && id !== null) {
+        onOpenFullObject({ type: type.replace('open_', ''), id: String(id), label: String(action.label || action.title || '打开对象') })
+        return
+      }
+      if (type === 'open_analysis' && id !== undefined && id !== null) { onOpenAnalysis(String(id)); return }
+      if (type === 'start_workflow' && id !== undefined && id !== null) {
+        // 写入/外部动作统一回到 Agent 预检链，按钮本身不直接启动工作流。
+        const planRef = action.plan_ref && typeof action.plan_ref === 'object' ? action.plan_ref as Record<string, unknown> : {}
+        const label = String(action.label || '开始执行本次任务')
+        const continuation = createAgentTurn(sessionId, `请预检并确认：${label}`, {
+          type: 'workflow', id: String(id), clarification_binding: true,
+          plan_ref: planRef, constraints: action.constraints || [], confirmation_requested: true,
+        })
+        void runTurn(continuation, false)
+        return
+      }
+      if (type === 'floating_action') {
+        await api.floatingAction(String(id || action.action || ''), { target, constraints: action.constraints || [] })
+        return
+      }
+      if (['view_a_candidates', 'compare_top_candidates', 'continue_sourcing', 'relax_search', 'generate_contact_queue', 'generate_contact_script', 'confirm_advance', 'confirm_stop', 'end_round'].includes(type)) {
+        const label = String(action.label || '继续当前动作')
+        const actionContext: AgentContext = {
+          ...attachedContext, ...(target.type ? target : {}),
+          structured_action: {
+            action_id: actionId, capability_id: action.capability_id || type, type,
+            target, constraints: action.constraints || [], risk_level: action.risk_level,
+            preflight_required: action.preflight_required === true,
+            confirmation_required: action.confirmation_required === true,
+            post_check: action.post_check,
+          },
+        }
+        await runTurn(createAgentTurn(sessionId, label, actionContext), false, true)
+      }
+    } catch (value) { setInteractionError(value instanceof Error ? value.message : String(value)) }
+    finally { setStructuredActionBusy('') }
   }
   const copySessionId = async (id: string) => {
     if (!id || !navigator.clipboard?.writeText) return
@@ -545,13 +607,19 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
         {historyTruncated && <p className="agent-truncated">仅显示最近 100 条消息</p>}
         {!messages.length && !restoring && <AgentHome dashboard={dashboard} jobs={jobs} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} />}
         {restoring && <div className="agent-loading"><LoaderCircle className="spin"/>恢复任务</div>}
-        {messages.map((message, index) => <div className={`agent-message ${message.role}`} key={`${index}:${message.created_at || ''}`}>
+        {messages.map((message, index) => <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`} key={`${index}:${message.created_at || ''}`}>
           <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span><div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.content
             ? <AgentMessageContent content={message.content}/>
             : loading && index === messages.length - 1
               ? <AgentThinking label={turnProgress ? `正在处理：${turnProgress}` : 'ASA 正在思考'}/>
               : null}</div>
           {message.role === 'user' && uploadedAttachments(message.context).length > 0 && <div className="agent-message-attachments" aria-label="消息附件">{uploadedAttachments(message.context).map((item, attachmentIndex) => <span key={`${item.attachment_id || item.file_name}:${attachmentIndex}`}><FileText/><b>{item.file_name || '附件'}</b><small>{item.status || '已读取'}</small></span>)}</div>}
+          {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
+          {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
+          {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
+          {message.role === 'assistant' && !message.invalidated && !message.pending_intent && <SuggestedActionBar actions={message.suggested_actions} busy={structuredActionBusy} onAction={action => void runStructuredAction(action)}/>}
+          {message.role === 'assistant' && <ExecutionReceipt receipt={message.execution_receipt}/>}
+          {message.role === 'assistant' && interactionError && index === messages.length - 1 && <p className="agent-card-error" role="alert">{interactionError}</p>}
           {message.role === 'assistant' && message.action_card && (message.action_card as SourcingResultCardData).type === 'sourcing_result' && (
             <SourcingResultCard
               data={message.action_card as SourcingResultCardData}
@@ -563,6 +631,15 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
               onAction={(actionType, context)=>{
                 if(actionType==='review_candidates' && context?.type==='workflow'){
                   onOpenFullObject({type:'workflow',id:context.id,label:'寻访结果'})
+                } else if(actionType==='archive' && context?.type==='workflow') {
+                  void (async () => {
+                    try {
+                      setStructuredActionBusy(`archive:${context.id}`)
+                      await api.workflowAction(String(context.id), 'archive')
+                      await api.workflow(String(context.id))
+                    } catch (value) { setInteractionError(value instanceof Error ? value.message : String(value)) }
+                    finally { setStructuredActionBusy('') }
+                  })()
                 } else if(actionType==='discuss_strategy' || actionType==='continue_sourcing'){
                   const workflowId = (message.action_card as SourcingResultCardData).summary?.workflow_id
                   if(workflowId) window.dispatchEvent(new CustomEvent('asa:open-agent',{detail:{type:'workflow',id:workflowId,mode:'strategy_revision'}}))
@@ -599,7 +676,7 @@ export function AgentWorkspace({ dashboard, jobs = [], workbench, templates, con
           {attachmentNotice && <p className="agent-attachment-notice" role="alert">{attachmentNotice}</p>}
           <input ref={attachmentInputRef} className="agent-attachment-input" type="file" multiple accept={AGENT_ATTACHMENT_ACCEPT} aria-label="选择附件" onChange={event => { addAttachments(Array.from(event.target.files || [])); event.target.value = '' }}/>
           <button className="icon-btn agent-attach" type="button" disabled={restoring || loading || attachments.length >= AGENT_ATTACHMENT_MAX_COUNT} aria-label="添加附件" title="添加附件" onClick={() => attachmentInputRef.current?.click()}><Paperclip/></button>
-          <textarea rows={1} value={draft} onChange={event => setDraft(event.target.value)} onPaste={onAttachmentPaste} onKeyDown={keyDown} disabled={restoring} placeholder="告诉 ASA 你要推进的目标..." aria-label="Agent 消息"/>
+          <textarea ref={composerRef} rows={1} value={draft} onChange={event => setDraft(event.target.value)} onPaste={onAttachmentPaste} onKeyDown={keyDown} disabled={restoring} placeholder="告诉 ASA 你要推进的目标..." aria-label="Agent 消息"/>
           <button className="icon-btn agent-send" type={loading ? 'button' : 'submit'} disabled={restoring || (!loading && (attachments.some(item => item.state !== 'ready') || (!draft.trim() && !attachments.some(item => item.state === 'ready'))))} onClick={loading ? stop : undefined} aria-label={loading ? '停止生成' : '发送'} title={loading ? '停止生成' : '发送'}>{loading ? <Square/> : <Send/>}</button>
         </form>
       </div>

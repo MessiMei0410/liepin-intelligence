@@ -135,6 +135,49 @@ def _copilot_context_facts(self, context: dict[str, Any]) -> dict[str, Any]:
     return self._copilot_focus_context_facts(context)
 
 
+def _mentioned_candidate_options(self, message: str) -> list[dict[str, Any]]:
+    """Return relationship-scoped candidate matches without mutating focus."""
+    text = " ".join(str(message or "").split())
+    if not text:
+        return []
+    conn = self._connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT jc.id,p.display_name,c.name AS client,j.title AS job,
+                   COALESCE(jc.clean_stage,jc.flow_bucket,jc.raw_status,'') AS status,
+                   COALESCE(jc.updated_at,'') AS updated_at
+            FROM job_candidates jc
+            JOIN people p ON p.id=jc.person_id
+            LEFT JOIN jobs j ON j.id=jc.job_id
+            LEFT JOIN clients c ON c.id=j.client_id
+            WHERE length(trim(COALESCE(p.display_name,''))) >= 2
+            ORDER BY COALESCE(jc.updated_at,'') DESC,jc.id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    matches = []
+    names_in_text = {
+        str(row["display_name"] or "").strip()
+        for row in rows
+        if str(row["display_name"] or "").strip() and str(row["display_name"] or "").strip() in text
+    }
+    for row in rows:
+        name = str(row["display_name"] or "").strip()
+        if name and name in names_in_text and not any(
+            other != name and len(other) > len(name) and name in other
+            for other in names_in_text
+        ):
+            matches.append({
+                "id": int(row["id"]), "name": name,
+                "client": str(row["client"] or ""), "job": str(row["job"] or ""),
+                "status": str(row["status"] or ""), "updated_at": str(row["updated_at"] or ""),
+            })
+    return matches[:3]
+
+
 def _copilot_context_from_focus(
     self, session_id: str, message: str, selected: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -148,6 +191,7 @@ def _copilot_context_from_focus(
         selected_facts,
         message,
     )
+    current_candidates = _mentioned_candidate_options(self, message)
     conflicts: list[dict[str, Any]] = []
     if len(current_clients) > 1:
         conflicts.append({"type": "ambiguous_client", "candidates": current_clients[:5]})
@@ -156,11 +200,16 @@ def _copilot_context_from_focus(
             {
                 "type": "ambiguous_job",
                 "candidates": [
-                    {"id": item.get("id"), "client": item.get("client"), "job": item.get("job")}
+                    {
+                        "id": item.get("id"), "client": item.get("client"), "job": item.get("job"),
+                        "status": item.get("status"), "updated_at": item.get("updated_at"),
+                    }
                     for item in current_jobs[:5]
                 ],
             }
         )
+    if len(current_candidates) > 1:
+        conflicts.append({"type": "ambiguous_candidate", "candidates": current_candidates})
     # A uniquely named/numbered job outranks a stale client/page focus. Do this
     # before the client mismatch check so cross-client references resolve to the
     # job the consultant actually named.
@@ -178,6 +227,12 @@ def _copilot_context_from_focus(
 
     if conflicts:
         return dict(selected), conflicts
+
+    if len(current_candidates) == 1:
+        return {
+            "type": "candidate", "id": int(current_candidates[0]["id"]),
+            "page": selected.get("page") or "candidates", "filters": {},
+        }, []
 
     if selected_facts and current_clients and selected_facts.get("client") not in current_clients:
         conflicts.append({
@@ -433,6 +488,29 @@ def _persist_copilot_focus(
     previous = self.get_copilot_focus(session_id) or {}
     structured = dict(structured or {})
     conflicts = list(conflicts or [])
+    # 歧义澄清期间只登记冲突和待恢复理解，不移动既有任务焦点。
+    # 这样“这个岗位/按刚才那批”在用户选择前不会把页面上下文写成新对象。
+    if conflicts and isinstance(previous, dict) and isinstance(previous.get("context"), dict):
+        preserved = dict(previous)
+        preserved["conflicts"] = conflicts[-8:]
+        incoming_understanding = structured.get("intent_understanding")
+        if isinstance(incoming_understanding, dict):
+            preserved["understanding"] = dict(incoming_understanding)
+        preserved["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                UPDATE agent_copilot_focus
+                   SET focus_json=?, conflicts_json=?, updated_at=datetime('now','localtime')
+                 WHERE session_id=?
+                """,
+                (_dumps(preserved), _dumps(conflicts[-8:]), session_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return preserved
     facts = self._copilot_context_facts(selected)
     mentioned_clients = self._mentioned_client_names(message)
     resolution_selected = selected
@@ -708,6 +786,13 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "workflow_progress": structured.get("workflow_progress"),
                     "business_focus": structured.get("business_focus"),
                     "turn_decision": structured.get("turn_decision"),
+                    "understanding_card": structured.get("understanding_card"),
+                    "execution_receipt": structured.get("execution_receipt"),
+                    "invalidated": bool(structured.get("invalidated")),
+                    "invalidated_reason": structured.get("invalidated_reason") or (
+                        "用户纠正或修改条件" if structured.get("invalidated") else None
+                    ),
+                    "revoked_actions": structured.get("revoked_actions") or [],
                     # R9/R12-b：透传持久化的 pending_intent，浮窗恢复会话时可重渲染确认卡
                     #（确认/取消终态是 UI 本地态；过期或已执行的意图确认时会走 409 漂移路径）。
                     "pending_intent": structured.get("pending_intent"),

@@ -9,6 +9,7 @@ from a_system_agent.conversation_state import (
     deterministic_context_summary,
     enrich_turn_understanding,
 )
+from a_system_agent.copilot_routing import _execution_receipt
 from a_system_agent.turn_decision import build_turn_decision
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment
 
@@ -134,6 +135,38 @@ def test_candidate_match_opinion_does_not_become_review_or_recommendation() -> N
         assert understanding["speech_act"] == "inform"
         assert understanding["action"] == "none"
         assert build_turn_decision(understanding, message=message)["safe_for_action"] is False
+
+
+def test_execution_receipt_counts_skipped_failed_and_real_verification() -> None:
+    receipt = _execution_receipt(
+        workflow=None,
+        skill_runs=[
+            {"ok": True, "result": {"status": "completed", "verified": True}},
+            {"ok": True, "result": {"status": "skipped", "reason": "already handled"}},
+            {"ok": False, "error": "server check failed"},
+            {"result": {"status": "unknown"}},
+        ],
+        decision={"effect": "answer"},
+        selected={"type": "job", "id": 10},
+    )
+
+    assert receipt is not None
+    assert receipt["state"] == "部分完成"
+    assert receipt["succeeded"] == 1
+    assert receipt["skipped"] == 1
+    assert receipt["failed"] == 1
+    assert receipt["verified"] is False
+    assert receipt["reasons"] == ["already handled", "server check failed"]
+
+
+def test_failed_or_cancelled_workflow_receipt_is_not_verified() -> None:
+    for status in ("blocked", "failed", "cancelled", "superseded"):
+        receipt = _execution_receipt(
+            workflow={"workflow_id": f"workflow_{status}", "status": status, "current_stage": status},
+            skill_runs=[], decision={"effect": "answer"}, selected={"type": "job", "id": 10},
+        )
+        assert receipt is not None
+        assert receipt["verified"] is False
 
 
 def test_context_state_keeps_fact_goal_correction_and_pending_plan_separate() -> None:
@@ -349,7 +382,9 @@ class CopilotContextReplayTest(AgentDbCase):
         state = self.service.get_copilot_context_state(session_id)
         assert state["active_goal"]["action"] == "candidate_sourcing"
         assert state["pending_plan"]["workflow_id"] == first["workflow_id"]
-        assert {item["kind"] for item in state["facts"]} >= {"job_budget", "workflow_observation"}
+        assert {item["kind"] for item in state["facts"]} >= {"job_budget"}
+        assert "workflow_observation" not in {item["kind"] for item in state["facts"]}
+        assert {item["kind"] for item in state["observations"]} >= {"workflow_observation"}
 
     def test_pure_candidate_result_observation_is_short_and_does_not_query_or_create(self) -> None:
         result = self.service.copilot(
@@ -459,8 +494,8 @@ class CopilotContextReplayTest(AgentDbCase):
 
         assert result["workflow_id"] is None
         assert result["intent_understanding"]["action"] == "none"
-        assert "岗位预算补充" in result["answer"]
-        assert "不创建谈薪任务" in result["answer"]
+        assert result["fact_receipt"]["kind"] == "job_budget"
+        assert result["fact_receipt"]["scope"] == "job:10"
         state = self.service.get_copilot_context_state("short_budget_fact")
         facts = [item for item in state["facts"] if item["kind"] == "job_budget"]
         assert facts == [{
@@ -485,8 +520,8 @@ class CopilotContextReplayTest(AgentDbCase):
         assert result["workflow_id"] is None
         assert result["intent_understanding"]["action"] == "none"
         assert result["turn_decision"]["effect"] == "answer"
-        assert "张航的薪资事实" in result["answer"]
-        assert "岗位预算补充" not in result["answer"]
+        assert result["fact_receipt"]["kind"] == "candidate_compensation"
+        assert result["fact_receipt"]["scope"] == "candidate:30"
         assert self._workflow_count() == initial_count
 
         state = self.service.get_copilot_context_state("candidate_budget_fact")
@@ -503,7 +538,7 @@ class CopilotContextReplayTest(AgentDbCase):
         )
 
         assert result["workflow_id"] is None
-        assert "薪资事实" in result["answer"]
+        assert result["fact_receipt"]["kind"] == "candidate_compensation"
         state = self.service.get_copilot_context_state("candidate_total_package_fact")
         facts = [item for item in state["facts"] if item["kind"] == "candidate_compensation"]
         assert len(facts) == 1
@@ -518,8 +553,8 @@ class CopilotContextReplayTest(AgentDbCase):
         )
 
         assert result["workflow_id"] is None
-        assert "薪资事实" in result["answer"]
-        assert "岗位预算补充" not in result["answer"]
+        assert result["fact_receipt"]["kind"] == "candidate_compensation"
+        assert result["fact_receipt"]["scope"] == "candidate:30"
         state = self.service.get_copilot_context_state("mixed_job_candidate_budget_fact")
         assert [item["kind"] for item in state["facts"]] == ["candidate_compensation"]
         assert state["facts"][0]["scope"] == {"type": "candidate", "id": 30}
@@ -546,7 +581,8 @@ class CopilotContextReplayTest(AgentDbCase):
 
         assert result["workflow_id"] is None
         assert result["intent_understanding"]["action"] == "none"
-        assert "岗位细节补充" in result["answer"]
+        assert result["fact_receipt"]["kind"] == "job_requirement"
+        assert result["fact_receipt"]["scope"] == "job:10"
         state = self.service.get_copilot_context_state("compact_job_details")
         facts = [item for item in state["facts"] if item["kind"] == "job_requirement"]
         assert len(facts) == 1
@@ -562,8 +598,8 @@ class CopilotContextReplayTest(AgentDbCase):
 
         assert result["workflow_id"] is None
         assert result["intent_understanding"]["action"] == "none"
-        assert "匹配度的判断" in result["answer"]
-        assert "不自动复核或生成推荐材料" in result["answer"]
+        assert result["fact_receipt"]["kind"] == "workflow_observation"
+        assert result["fact_receipt"]["scope"] == "candidate:30"
 
     def test_two_explicit_jobs_are_ambiguous_and_do_not_receive_a_fact(self) -> None:
         conn = self.service._connect()
@@ -741,6 +777,108 @@ class CopilotContextReplayTest(AgentDbCase):
         assert "软件高级工程师" in result["answer"]
         assert all(item.get("id") != 10 for item in result["references"] if item.get("type") == "job")
 
+    def test_compare_top_candidates_is_a_read_only_review_action(self) -> None:
+        initial_count = self._workflow_count()
+
+        result = self.service.copilot(
+            "比较前5人",
+            session_id="compare_top_candidates",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        assert result["workflow_id"] is None
+        assert self._workflow_count() == initial_count
+        assert result["intent_understanding"]["action"] == "candidate_review"
+        assert result["intent_understanding"]["action_evidence"] == ["比较前5人"]
+        assert result["turn_decision"]["effect"] == "answer"
+        assert result["turn_decision"]["authorization"]["mode"] == "read_only"
+        assert result["action_card"]["type"] == "candidate_list"
+
+    def test_structured_action_is_authoritative_over_button_label(self) -> None:
+        result = self.service.copilot(
+            "这是一段故意误导的按钮文案",
+            session_id="structured_action_authority",
+            context={
+                "type": "job", "id": 10, "page": "positions",
+                "structured_action": {
+                    "action_id": "action_test_compare",
+                    "capability_id": "compare_top_candidates",
+                    "type": "compare_top_candidates",
+                    "target": {"type": "job", "id": 10, "client": "长越科技", "label": "机械高级工程师"},
+                    "constraints": [{"kind": "quantity", "quote": "前5人"}],
+                    "preflight_required": False,
+                },
+            },
+        )
+
+        understanding = result["intent_understanding"]
+        assert understanding["action"] == "candidate_review"
+        assert understanding["topic"] == "compare_top_candidates"
+        assert understanding["objective"] == "比较当前岗位前 5 名人选"
+        assert understanding["constraints"] == [{"kind": "quantity", "quote": "前5人"}]
+        assert result["workflow_id"] is None
+
+    def test_ambiguous_candidate_name_returns_options_without_mutating_focus_or_workflow(self) -> None:
+        conn = self.service._connect()
+        try:
+            conn.execute("INSERT INTO jobs VALUES (11,1,'软件高级工程师','杭州','已发布','','','','','控制软件核心岗','2026-08-11')")
+            conn.execute("INSERT INTO people VALUES (21,'张航','另一家公司','软件工程师','杭州','本科','6年')")
+            conn.execute("INSERT INTO job_candidates VALUES (31,11,21,'长越科技','软件高级工程师','new','','X1 待复核','正式流程','2026-08-12','41')")
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = self.service.copilot(
+            "评估张航",
+            session_id="ambiguous_candidate_name",
+            context={"type": "page", "page": "candidates"},
+        )
+
+        card = result["understanding_card"]
+        assert result["workflow_id"] is None
+        assert result.get("pending_intent") is None
+        assert result.get("business_focus", {}).get("context", {}).get("type") in {None, "global", "page"}
+        assert card["candidate_options"] and len(card["candidate_options"]) == 2
+        assert {item["id"] for item in card["candidate_options"]} == {30, 31}
+
+    def test_unique_candidate_name_binds_relationship_context(self) -> None:
+        result = self.service.copilot(
+            "评估张航",
+            session_id="unique_candidate_name",
+            context={"type": "page", "page": "candidates"},
+        )
+
+        assert result["context"] == {"type": "candidate", "id": 30}
+        assert result["intent_understanding"]["target"]["type"] == "candidate"
+        assert result["intent_understanding"]["target"]["id"] == 30
+
+    def test_switching_jobs_does_not_inherit_previous_job_constraints(self) -> None:
+        conn = self.service._connect()
+        try:
+            conn.execute(
+                "INSERT INTO jobs VALUES (11,1,'软件高级工程师','杭州','已发布','','','','','控制软件核心岗','2026-08-11')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        session_id = "cross_job_constraint_scope"
+        self.service.copilot(
+            "给机械高级工程师补充10位候选人，必须三次电源经验",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        switched = self.service.copilot(
+            "给软件高级工程师补充8位候选人",
+            session_id=session_id,
+            context={"type": "job", "id": 11, "page": "positions"},
+        )
+
+        effective = [item["quote"] for item in switched["turn_decision"]["effective_constraints"]]
+        assert switched["context"] == {"type": "job", "id": 11}
+        assert effective == ["给软件高级工程师补充8位候选人"]
+        assert all("三次电源" not in item for item in effective)
+
     def test_ambiguous_client_only_list_request_does_not_pick_first_job(self) -> None:
         conn = self.service._connect()
         try:
@@ -793,8 +931,8 @@ class CopilotContextReplayTest(AgentDbCase):
 
         assert result["workflow_id"] is None
         assert result["intent_understanding"]["action"] == "none"
-        assert "薪资事实" in result["answer"]
-        assert "不能继续推进" not in result["answer"]
+        assert result["fact_receipt"]["kind"] == "candidate_compensation"
+        assert result["fact_receipt"]["scope"] == "candidate:30"
         state = self.service.get_copilot_context_state("stopped_candidate_compensation_fact")
         assert any(item["kind"] == "candidate_compensation" for item in state["facts"])
 
@@ -1043,7 +1181,6 @@ class CopilotContextReplayTest(AgentDbCase):
         assert receipt["object"] == "张航"
         assert receipt["scope"] == "candidate:30"
         assert receipt["impact"] == "仅更新上下文，不启动工作流"
-        assert "张航的薪资事实" in result["answer"]
 
     def test_non_fact_turn_has_no_fact_receipt(self) -> None:
         result = self.service.copilot(

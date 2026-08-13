@@ -34,12 +34,17 @@ const messageSchema = z.object({
   context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(),
   suggested_actions: z.array(structuredRecord).optional(),
+  understanding_card: structuredRecord.nullable().optional(),
+  execution_receipt: structuredRecord.nullable().optional(),
   business_focus: structuredRecord.nullable().optional(),
   workflow_id: z.string().nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(),
   pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
+  invalidated: z.boolean().optional(),
+  invalidated_reason: z.string().optional(),
+  revoked_actions: z.array(structuredRecord).optional(),
   created_at: z.string().optional(),
 })
 

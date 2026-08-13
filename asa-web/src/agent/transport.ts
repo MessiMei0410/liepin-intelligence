@@ -18,6 +18,8 @@ export type AgentTurnResult = {
   context?: AgentContext
   references?: AgentReference[]
   suggested_actions?: Array<Record<string, unknown>>
+  understanding_card?: Record<string, unknown> | null
+  execution_receipt?: Record<string, unknown> | null
   business_focus?: Record<string, unknown> | null
   workflow_id?: string | null
   workflow_progress?: Record<string, unknown> | null
@@ -29,6 +31,9 @@ export type AgentTurnResult = {
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
+  invalidated?: boolean
+  invalidated_reason?: string
+  revoked_actions?: Array<Record<string, unknown>>
 }
 
 export type AgentSseEvent =
@@ -62,7 +67,11 @@ const doneEventSchema = z.object({
   goal: structuredRecord.nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  understanding_card: structuredRecord.nullable().optional(),
+  execution_receipt: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
+  invalidated: z.boolean().optional(), invalidated_reason: z.string().optional(),
+  revoked_actions: z.array(structuredRecord).optional(),
 })
 const errorEventSchema = z.object({ error: z.string() })
 

@@ -53,8 +53,19 @@ LIFECYCLE_EVENT_TYPES: dict[str, dict[str, Any]] = {
     "offer_declined": {"label": "Offer 已拒绝", "statuses": ("declined",), "default_status": "declined", "followup_task": "offer_followup", "followup_days": 1},
     "onboarded": {"label": "确认入职", "statuses": ("recorded",), "default_status": "recorded", "followup_task": "onboarding_followup", "followup_days": 7},
 }
-READ_ONLY_COPILOT_ACTIONS = {"open_candidate", "open_job", "open_queue", "open_analysis"}
-NON_BUSINESS_COPILOT_ACTIONS = {*READ_ONLY_COPILOT_ACTIONS, "native_action", "floating_action", "open_workflow"}
+READ_ONLY_COPILOT_ACTIONS = {
+    "open_candidate", "open_job", "open_queue", "open_analysis",
+    "view_a_candidates", "compare_top_candidates",
+}
+NON_BUSINESS_COPILOT_ACTIONS = {
+    *READ_ONLY_COPILOT_ACTIONS, "native_action", "floating_action", "open_workflow",
+    "continue_sourcing", "relax_search", "generate_contact_queue",
+    "generate_contact_script", "confirm_advance", "confirm_stop", "end_round",
+}
+STRUCTURED_CANDIDATE_ACTIONS = {
+    "confirm_advance": "advance",
+    "confirm_stop": "stop",
+}
 IDEMPOTENCY_LEASE_MINUTES = 5
 
 
@@ -103,6 +114,16 @@ def _candidate_action_card(intent: dict[str, Any]) -> dict[str, Any]:
         "preflight": {"required": True, "expires_at": intent.get("expires_at")},
         "post_check": "candidate_stage",
     }
+
+
+_COPILOT_CORRECTION_RE = re.compile(
+    r"(?:不是(?:这个意思|这样)|刚才(?:不对|错了|理解错了)|纠正(?:一下|下)?|更正(?:一下|下)?|改成|改为|调整为|去掉|删除|移除|不再要求|不用卡)",
+    re.IGNORECASE,
+)
+
+
+def _is_copilot_correction(message: str) -> bool:
+    return bool(_COPILOT_CORRECTION_RE.search(" ".join(str(message or "").split())))
 
 
 def _is_sourcing_result_action_card(card: Any) -> bool:
@@ -374,94 +395,95 @@ class CoreService:
         if not self.agent_service:
             raise RuntimeError("copilot service unavailable")
         raw_context = dict(context or {})
+        correction_turn = _is_copilot_correction(message)
+        if correction_turn:
+            raw_context["correction_turn"] = True
+        revoked_snapshot = self._invalidate_copilot_pending_actions(session_id, message) if correction_turn and session_id else []
         analysis_request = self._copilot_analysis_request(message, raw_context)
         if analysis_request:
             return self._run_copilot_analysis(
                 message, session_id=session_id, context=raw_context,
                 catalog_id=analysis_request[0], scope=analysis_request[1],
             )
-        action = _explicit_candidate_action(message)
+        structured_action = raw_context.get("structured_action") if isinstance(raw_context.get("structured_action"), dict) else {}
+        structured_candidate_action = STRUCTURED_CANDIDATE_ACTIONS.get(str(structured_action.get("type") or ""))
+        parsed_intent = (
+            {
+                "kind": "candidate_action", "action": structured_candidate_action,
+                "tier": "confirm", "confidence": 1.0,
+                "reason": "顾问点击了结构化候选人动作",
+            }
+            if structured_candidate_action else parse_candidate_intent(message)
+        )
+        action = str(parsed_intent.get("action") or "") if parsed_intent.get("kind") == "candidate_action" else ""
         candidate_id = 0
         if str(raw_context.get("type") or "").strip() == "candidate":
             try:
                 candidate_id = int(raw_context.get("id") or 0)
             except (TypeError, ValueError):
                 candidate_id = 0
+        if not candidate_id:
+            candidate_name = str((raw_context.get("candidate") or "")).strip()
+            if not candidate_name:
+                lookup_conn = connect(self.db_path)
+                try:
+                    name_rows = lookup_conn.execute(
+                        "SELECT DISTINCT p.display_name FROM people p WHERE length(trim(COALESCE(p.display_name,'')))>=2 LIMIT 500"
+                    ).fetchall()
+                finally:
+                    lookup_conn.close()
+                names = {
+                    str(row["display_name"] or "").strip()
+                    for row in name_rows
+                    if str(row["display_name"] or "").strip() in message
+                }
+                names = {
+                    name for name in names
+                    if not any(other != name and len(other) > len(name) and name in other for other in names)
+                }
+                if len(names) == 1:
+                    candidate_name = next(iter(names))
+            if candidate_name:
+                lookup_conn = connect(self.db_path)
+                try:
+                    rows = lookup_conn.execute(
+                        "SELECT jc.id FROM job_candidates jc JOIN people p ON p.id=jc.person_id WHERE p.display_name=? ORDER BY jc.updated_at DESC,jc.id DESC LIMIT 2",
+                        (candidate_name,),
+                    ).fetchall()
+                finally:
+                    lookup_conn.close()
+                if len(rows) == 1:
+                    candidate_id = int(rows[0]["id"])
 
         action_result: dict[str, Any] | None = None
-        candidate_update_result: dict[str, Any] | None = None
-        action_blocked = ""
         detail: dict[str, Any] = {}
-        if action and candidate_id:
-            detail = self.candidate(candidate_id)["candidate"]
-            if detail["is_stopped"] and action != "stop":
-                action_blocked = "该人选已经停止推进，不能直接执行新的推进动作；如需重启，请先做人工状态纠正。"
-            elif _candidate_action_already_applied(detail, action):
-                action_result = {
-                    "ok": True,
-                    "candidate_id": candidate_id,
-                    "action": action,
-                    "stage": detail.get("clean_stage"),
-                    "already_applied": True,
-                }
-            else:
-                normalized = re.sub(r"\s+", " ", str(message or "")).strip()
-                request_seed = f"{session_id}|{candidate_id}|{action}|{normalized}"
-                request_hash = hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:20]
-                request_id = f"copilot_candidate_{request_hash}"
-
-                def commit_action() -> dict[str, Any]:
-                    preflight = self.candidate_preflight(candidate_id, action)
-                    return self.candidate_commit(
-                        candidate_id,
-                        action,
-                        f"ASA Copilot 指令：{normalized[:160]}",
-                        preflight["token"],
-                    )
-
-                action_result, _ = self.execute_idempotent(
-                    operation="candidate.commit",
-                    request_id=request_id,
-                    idempotency_key=request_id,
-                    payload={"candidate_id": candidate_id, "action": action, "message": normalized},
-                    target_type="job_candidate",
-                    target_id=str(candidate_id),
-                    action=commit_action,
-                    actor="user",
-                    surface="asa_copilot",
-                )
         update_type = _explicit_candidate_update(message)
-        if update_type and candidate_id:
-            detail = self.candidate(candidate_id)["candidate"]
-            normalized = re.sub(r"\s+", " ", str(message or "")).strip()
-            request_seed = f"{session_id}|{candidate_id}|{update_type}|{normalized}"
-            request_hash = hashlib.sha256(request_seed.encode("utf-8")).hexdigest()[:20]
-            request_id = f"copilot_candidate_note_{request_hash}"
 
-            def record_update() -> dict[str, Any]:
-                return self.record_candidate_update(candidate_id, update_type)
-
-            candidate_update_result, _ = self.execute_idempotent(
-                operation="candidate.note",
-                request_id=request_id,
-                idempotency_key=request_id,
-                payload={"candidate_id": candidate_id, "update_type": update_type, "message": normalized},
-                target_type="job_candidate",
-                target_id=str(candidate_id),
-                action=record_update,
-                actor="user",
-                surface="asa_copilot",
-            )
-
-        # R9：直写层未命中时走分层解析的确认层。新识别出的意图不直写，
-        # 产出 pending_intent（含签名 + preflight token），由确认端点执行。
+        # 所有候选人状态动作统一走确认层。明确短句和扩展表达都只产出
+        # pending_intent（含签名 + preflight token），由确认端点执行。
         pending_intent: dict[str, Any] | None = None
         pending_blocked = ""
         pending_unresolved = False
         confirm_intent: dict[str, Any] = {}
-        if not action and not update_type:
-            parsed_intent = parse_candidate_intent(message)
-            if parsed_intent.get("tier") == "confirm" and parsed_intent.get("kind") == "candidate_action":
+        if update_type and candidate_id:
+            detail = self.candidate(candidate_id)["candidate"]
+            try:
+                preflight = self.candidate_update_preflight(candidate_id, update_type)
+            except ValueError as exc:
+                pending_blocked = str(exc)
+            else:
+                pending_message = re.sub(r"\s+", " ", str(message or "")).strip()
+                pending_intent = {
+                    "kind": "candidate_update", "action": update_type,
+                    "action_label": CANDIDATE_UPDATE_LABELS[update_type], "target_scope": "current_candidate",
+                    "confidence": 1.0, "reason": "顾问要求记录候选人跟进状态",
+                    "candidate": {"id": candidate_id, "name": detail["name"], "stage": detail.get("clean_stage"), "job": detail.get("job"), "client": detail.get("client")},
+                    "confirm_text": f"将记录 {detail['name']} {CANDIDATE_UPDATE_LABELS[update_type]}，确认？",
+                    "intent_hash": intent_signature("candidate_update", update_type, candidate_id, pending_message),
+                    "preflight_token": preflight["token"], "expires_at": preflight["expires_at"], "message": pending_message,
+                }
+        elif parsed_intent.get("kind") == "candidate_action":
+            if parsed_intent.get("tier") in {"direct", "confirm"}:
                 confirm_intent = parsed_intent
                 pending_action = str(parsed_intent["action"])
                 if not candidate_id:
@@ -472,7 +494,13 @@ class CoreService:
                     if detail["is_stopped"] and pending_action != "stop":
                         pending_blocked = "该人选已经停止推进，不能直接执行新的推进动作；如需重启，请先做人工状态纠正。"
                     elif _candidate_action_already_applied(detail, pending_action):
-                        pass  # 已处于目标状态：无需确认，按普通问答处理
+                        action_result = {
+                            "ok": True,
+                            "candidate_id": candidate_id,
+                            "action": pending_action,
+                            "stage": detail.get("clean_stage"),
+                            "already_applied": True,
+                        }
                     else:
                         try:
                             preflight = self.candidate_preflight(candidate_id, pending_action)
@@ -502,11 +530,20 @@ class CoreService:
                             }
 
         agent_context = dict(raw_context)
+        if candidate_id and str(agent_context.get("type") or "") not in {"candidate", "workflow"}:
+            agent_context.update({"type": "candidate", "id": candidate_id, "candidate": candidate_name})
         if confirm_intent:
             # 该消息是候选人写入指令（待确认），抑制工作流级意图路由，
             # 防止同一条消息既产生确认卡片又建立/启动工作流。
             agent_context["suppress_goal_intent"] = True
+            agent_context["candidate_intent"] = confirm_intent
         result = self.agent_service.copilot(message, session_id=session_id, context=agent_context)
+        if revoked_snapshot:
+            card = result.get("understanding_card")
+            if isinstance(card, dict):
+                card["revoked_understanding"] = revoked_snapshot[:3]
+                card["important_correction"] = True
+            result["revoked_actions"] = revoked_snapshot[:6]
         workflow_card = _workflow_action_card(result)
         if workflow_card:
             result["action_card"] = workflow_card
@@ -518,24 +555,6 @@ class CoreService:
                 f"已同步到 ASA：{detail['name']} {action_label}，"
                 f"当前阶段为“{action_result.get('stage') or detail.get('clean_stage') or '已更新'}”。"
             )
-        elif candidate_update_result:
-            update_label = CANDIDATE_UPDATE_LABELS.get(update_type or "", "跟进情况")
-            result["candidate_update"] = candidate_update_result
-            result["suggested_actions"] = []
-            result["answer"] = (
-                f"已更新：{detail.get('name') or '当前人选'}的{update_label}已写入备注和业务时间线，"
-                f"当前阶段保持“{candidate_update_result.get('stage') or detail.get('clean_stage') or '已更新'}”。"
-            )
-        elif action_blocked:
-            result["answer"] = f"这条指令未写入 ASA：{action_blocked}"
-            result["write_blocked"] = True
-        elif action:
-            result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
-            result["write_blocked"] = True
-        elif update_type:
-            result["answer"] = "这条跟进记录尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
-            result["suggested_actions"] = []
-            result["write_blocked"] = True
         elif pending_intent:
             result["pending_intent"] = pending_intent
             result["action_card"] = _candidate_action_card(pending_intent)
@@ -543,6 +562,13 @@ class CoreService:
             result["answer"] = f"{pending_intent['confirm_text']}\n\n未确认前不会写入 ASA。"
         elif pending_blocked:
             result["answer"] = f"这条指令未写入 ASA：{pending_blocked}"
+            result["write_blocked"] = True
+        elif action:
+            result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
+            result["write_blocked"] = True
+        elif update_type:
+            result["answer"] = "这条跟进记录尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
+            result["suggested_actions"] = []
             result["write_blocked"] = True
         elif pending_unresolved:
             result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
@@ -567,6 +593,9 @@ class CoreService:
                     "suggested_actions": result.get("suggested_actions") or [],
                     "skill_runs": result.get("skill_runs") or [],
                     "business_focus": result.get("business_focus") or {},
+                    "understanding_card": result.get("understanding_card"),
+                    "execution_receipt": result.get("execution_receipt"),
+                    "pending_intent": result.get("pending_intent"),
                     "action_card": result.get("action_card"),
                     "action_cards": result.get("action_cards") or [],
                 })
@@ -586,8 +615,6 @@ class CoreService:
                             "pending_approvals": result.get("approvals") or [],
                         },
                     })
-                if candidate_update_result:
-                    structured["candidate_update"] = candidate_update_result
                 if pending_intent:
                     structured["pending_intent"] = pending_intent
                 with transaction(self.db_path) as conn:
@@ -603,6 +630,102 @@ class CoreService:
                         (result["answer"], json.dumps(structured, ensure_ascii=False), result_session_id),
                     )
         return result
+
+    def _invalidate_copilot_pending_actions(self, session_id: str, message: str) -> list[dict[str, Any]]:
+        """撤销依赖旧约束的待执行动作，并把旧理解保留为可审计快照。"""
+        if not session_id:
+            return []
+        revoked: list[dict[str, Any]] = []
+        with transaction(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id,structured_json FROM agent_copilot_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC",
+                (session_id,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    structured = json.loads(row["structured_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(structured, dict):
+                    continue
+                pending = structured.get("pending_intent")
+                actions = structured.get("suggested_actions")
+                card = structured.get("understanding_card")
+                action_card = structured.get("action_card")
+                card_actions = action_card.get("next_actions") if isinstance(action_card, dict) else []
+                executable_actions = isinstance(actions, list) and any(
+                    isinstance(item, dict) and (
+                        item.get("confirmation_required") is True
+                        or str(item.get("type") or "") in {"start_workflow", "floating_action", "workflow_approval"}
+                    )
+                    for item in actions
+                )
+                executable_card = isinstance(card_actions, list) and any(
+                    isinstance(item, dict) and str(item.get("type") or "") in {
+                        "start_workflow", "workflow_approval", "confirm_candidate_intent",
+                    }
+                    for item in card_actions
+                )
+                executable = isinstance(pending, dict) or executable_actions or executable_card or (
+                    isinstance(card, dict) and (
+                        card.get("needs_clarification") is True
+                        or card.get("confirmation_required") is True
+                        or card.get("execution_required") is True
+                    )
+                )
+                if not executable or structured.get("invalidated"):
+                    continue
+                revoked.append({
+                    "message_id": row["id"],
+                    "action_ids": [
+                        str(item.get("action_id"))
+                        for item in [*(actions or []), *(card_actions or [])]
+                        if isinstance(item, dict) and item.get("action_id")
+                    ],
+                    "action": (pending or {}).get("action") if isinstance(pending, dict) else None,
+                    "workflow_id": (
+                        (action_card.get("context") or {}).get("id")
+                        if isinstance(action_card, dict) and isinstance(action_card.get("context"), dict)
+                        else None
+                    ),
+                    "target": (pending or {}).get("candidate") if isinstance(pending, dict) else (card or {}).get("target") if isinstance(card, dict) else None,
+                    "reason": "用户纠正或修改条件",
+                })
+                if isinstance(pending, dict):
+                    revoked_token = str(pending.get("preflight_token") or "")
+                    if revoked_token:
+                        with self._preflight_lock:
+                            self._preflight_tokens.pop(revoked_token, None)
+                structured["invalidated"] = True
+                structured["invalidated_at"] = datetime.now().isoformat(timespec="seconds")
+                structured["invalidated_by"] = str(message or "")[:240]
+                if isinstance(pending, dict):
+                    pending["invalidated"] = True
+                    pending["invalidated_reason"] = "用户纠正或修改条件"
+                    structured["pending_intent"] = pending
+                if isinstance(card, dict):
+                    card["invalidated"] = True
+                    card["invalidated_reason"] = "用户纠正或修改条件"
+                    structured["understanding_card"] = card
+                if isinstance(actions, list):
+                    structured["suggested_actions"] = [
+                        {**item, "invalidated": True, "invalidated_reason": "用户纠正或修改条件"}
+                        if isinstance(item, dict) else item for item in actions
+                    ]
+                if isinstance(action_card, dict):
+                    action_card["invalidated"] = True
+                    action_card["invalidated_reason"] = "用户纠正或修改条件"
+                    if isinstance(card_actions, list):
+                        action_card["next_actions"] = [
+                            {**item, "invalidated": True, "invalidated_reason": "用户纠正或修改条件"}
+                            if isinstance(item, dict) else item for item in card_actions
+                        ]
+                    structured["action_card"] = action_card
+                conn.execute(
+                    "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
+                    (json.dumps(structured, ensure_ascii=False), row["id"]),
+                )
+        return revoked
 
     def _copilot_analysis_request(
         self, message: str, context: dict[str, Any]
@@ -707,7 +830,9 @@ class CoreService:
         payload_intent = dict(intent or {})
         kind = str(payload_intent.get("kind") or "")
         confirmed_action = str(payload_intent.get("action") or "")
-        if kind != "candidate_action" or confirmed_action not in CANDIDATE_ACTION_LABELS:
+        if kind not in {"candidate_action", "candidate_update"} or (
+            confirmed_action not in CANDIDATE_ACTION_LABELS and confirmed_action not in CANDIDATE_UPDATE_LABELS
+        ):
             raise ValueError("不支持确认的意图类型，请回到会话重新发起")
         try:
             target_id = int(candidate_id)
@@ -728,12 +853,13 @@ class CoreService:
             # candidate_commit 内部重新校验 preflight token 与候选人当前
             # 状态：确认期间被停止的人选对任何动作（含重复停止）都会在此
             # 抛 ValueError → 409，沿用既有“已停止的再停止→409”语义。
-            return self.candidate_commit(
-                target_id,
-                confirmed_action,
-                f"ASA Copilot 确认指令：{normalized[:160]}",
-                preflight_token,
-            )
+            if kind == "candidate_update":
+                with self._preflight_lock:
+                    grant = self._preflight_tokens.pop(preflight_token, None)
+                if not grant or grant[0] != target_id or grant[1] != confirmed_action or grant[2] <= datetime.now():
+                    raise ValueError("preflight token is invalid, expired, or already used")
+                return self.record_candidate_update(target_id, confirmed_action)
+            return self.candidate_commit(target_id, confirmed_action, f"ASA Copilot 确认指令：{normalized[:160]}", preflight_token)
 
         action_result, _ = self.execute_idempotent(
             operation="candidate.commit",
@@ -747,14 +873,41 @@ class CoreService:
             surface="asa_copilot",
         )
         detail = self.candidate(target_id)["candidate"]
-        action_label = CANDIDATE_ACTION_LABELS[confirmed_action]
+        action_label = (CANDIDATE_ACTION_LABELS | CANDIDATE_UPDATE_LABELS)[confirmed_action]
+        answer = (
+            f"已确认并同步到 ASA：{detail['name']} {action_label}，"
+            f"当前阶段为\u201c{action_result.get('stage') or detail.get('clean_stage') or '已更新'}\u201d。"
+        )
+        execution_receipt = {
+            "version": "execution_receipt_v1", "state": "已完成", "summary": answer,
+            "succeeded": 1, "skipped": 0, "failed": 0, "verified": True,
+            "scope": {"type": "candidate", "id": target_id}, "next_step": "查看候选人最新状态",
+        }
+        if session_id:
+            with transaction(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id,structured_json FROM agent_copilot_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC",
+                    (session_id,),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        structured = json.loads(row["structured_json"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    pending = structured.get("pending_intent") if isinstance(structured, dict) else None
+                    if isinstance(pending, dict) and secrets.compare_digest(str(pending.get("intent_hash") or ""), str(intent_hash)):
+                        structured["pending_intent"] = None
+                        structured["execution_receipt"] = execution_receipt
+                        conn.execute(
+                            "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
+                            (json.dumps(structured, ensure_ascii=False), row["id"]),
+                        )
+                        break
         return {
             "ok": True,
             "candidate_action": action_result,
-            "answer": (
-                f"已确认并同步到 ASA：{detail['name']} {action_label}，"
-                f"当前阶段为\u201c{action_result.get('stage') or detail.get('clean_stage') or '已更新'}\u201d。"
-            ),
+            "answer": answer,
+            "execution_receipt": execution_receipt,
         }
 
     def copilot_stream(self, message: str, *, session_id: str = "", context: dict[str, Any] | None = None):
@@ -788,6 +941,9 @@ class CoreService:
                 "suggested_actions": result.get("suggested_actions") or [],
                 "skill_runs": result.get("skill_runs") or [],
                 "business_focus": result.get("business_focus") or {},
+                "understanding_card": result.get("understanding_card"),
+                "execution_receipt": result.get("execution_receipt"),
+                "pending_intent": result.get("pending_intent"),
                 "action_card": result.get("action_card"),
                 "action_cards": result.get("action_cards") or [],
             })
@@ -2312,6 +2468,20 @@ class CoreService:
             "candidate": {"id": candidate_id, "name": detail["name"], "stage": detail.get("clean_stage")},
             "impact": "候选人关系状态将更新，并写入业务时间线和统一审计。",
         }
+
+    def candidate_update_preflight(self, candidate_id: int, update_type: str) -> dict[str, Any]:
+        if update_type not in CANDIDATE_UPDATE_LABELS:
+            raise ValueError("unsupported candidate update")
+        detail = self.candidate(candidate_id)["candidate"]
+        if detail["is_stopped"]:
+            raise ValueError("该人选关系已停止推进，不能新增跟进记录")
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=5)
+        with self._preflight_lock:
+            now = datetime.now()
+            self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
+            self._preflight_tokens[token] = (candidate_id, update_type, expires)
+        return {"ok": True, "token": token, "expires_at": expires.isoformat(timespec="seconds"), "action": update_type, "candidate": {"id": candidate_id, "name": detail["name"]}}
 
     def candidate_commit(self, candidate_id: int, action: str, note: str, preflight_token: str, *, reason: str = "") -> dict[str, Any]:
         with self._preflight_lock:
