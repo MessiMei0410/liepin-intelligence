@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: |
-          pip install pytest fastapi uvicorn pydantic httpx openpyxl
+          pip install pytest fastapi uvicorn pydantic httpx openpyxl python-docx
       - name: Run backend tests
         # 仓库根运行（pytest.ini 含 pythonpath=scripts，tests/ 在根目录）。
         # --ignore：31 个文件硬编码本机绝对路径（/Users/messi/... 1.3GB 正式库、build_talent_workbench.py
