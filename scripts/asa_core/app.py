@@ -1398,7 +1398,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.post("/api/v1/recommendation-packages/{package_id}/feedback")
     def recommendation_package_feedback_create(package_id: str, body: PackageFeedbackCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
-        # 客户反馈记录：关联推荐包版本并回写候选人事件时间线（candidate_events）。
+        # 客户反馈记录：关联推荐包版本，回写候选人事件时间线（candidate_events），
+        # 并同事务双写旧 client_feedback_events（P3-b 旧报表口径统一，旧读方零改动）。
         # 走 execute_idempotent 幂等 + 审计，重放返回首次响应；表级 UNIQUE(package_id, request_id) 兜底；
         # 404=推荐包不存在；409=反馈类型非法/内容为空。
         return idem("recommendation_package.feedback", body, idempotency_key, "recommendation_package", package_id,
