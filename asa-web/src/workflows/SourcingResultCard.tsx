@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Archive, CheckCircle, ExternalLink, MessageSquareText, Search, Trophy, UserRoundSearch, X, AlertTriangle } from 'lucide-react'
 import { candidateRecommendationLabel, candidateRecommendationTone } from '../shared/candidateRecommendation'
+import { mapWorkflowStatus } from '../workflow/statusMapping'
 
 export type SourcingResultCandidate = {
   job_candidate_id: number
@@ -104,16 +105,19 @@ export function SourcingResultCard({
     ))
   }, [summary.next_actions, onAction, data.context, actionsDisabled])
 
-  const isBlocked = summary.status === 'blocked' || (summary.business_outcome && summary.business_outcome !== 'completed_target_met')
+  // 头部状态与 WorkflowPanel 同口径：(status, business_outcome) → mapWorkflowStatus，
+  // 技术失败（red）与业务未达标（amber）明确区分，failed 无结论时不再落入绿色「已完成」。
+  const statusMapping = mapWorkflowStatus({ status: summary.status || 'completed', business_outcome: summary.business_outcome })
+  const statusTone = statusMapping.tone === 'green' ? 'green' : statusMapping.tone === 'red' ? 'red' : statusMapping.tone === 'muted' ? 'muted' : 'amber'
 
   return (
     <div className={`sourcing-result-card ${compact ? 'compact' : ''}`} role="region" aria-label={data.title}>
       <div className="sourcing-result-head">
         <div>
           <h3>{data.title}</h3>
-          <span className={`sourcing-result-status ${isBlocked ? 'amber' : 'green'}`}>
-            {isBlocked ? <AlertTriangle size={14} /> : <Trophy size={14} />}
-            {isBlocked ? '本轮完成，未达目标' : '本轮寻访已完成'}
+          <span className={`sourcing-result-status ${statusTone}`}>
+            {statusTone === 'green' ? <Trophy size={14} /> : <AlertTriangle size={14} />}
+            {statusMapping.label}
           </span>
         </div>
         {onClose && (

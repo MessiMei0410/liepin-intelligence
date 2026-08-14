@@ -104,6 +104,9 @@ def test_normalize_stop_reason_rules() -> None:
     # A 系统行内复核旧码别名归一到统一枚举
     assert normalize_stop_reason("salary_high", "备注") == ("salary_mismatch", "备注")
     assert normalize_stop_reason("duplicate", "") == ("duplicate_candidate", "")
+    # Agent 对话内决策台旧码别名归一（存量数据兼容）
+    assert normalize_stop_reason("salary_too_high", "备注") == ("salary_mismatch", "备注")
+    assert normalize_stop_reason("low_interest", "") == ("low_intent", "")
     assert normalize_stop_reason("随便填的", "") == ("other", "停止原因：随便填的")
     code, note = normalize_stop_reason("随便填的", "已有备注")
     assert code == "other"

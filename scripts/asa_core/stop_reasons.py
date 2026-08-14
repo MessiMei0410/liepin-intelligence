@@ -29,6 +29,9 @@ UNLABELED_STOP_REASON_LABEL = "未标注"
 STOP_REASON_ALIASES: dict[str, str] = {
     "salary_high": "salary_mismatch",
     "duplicate": "duplicate_candidate",
+    # Agent 对话内决策台曾使用的旧码（已对齐标准枚举；别名兜底存量数据）。
+    "salary_too_high": "salary_mismatch",
+    "low_interest": "low_intent",
 }
 
 

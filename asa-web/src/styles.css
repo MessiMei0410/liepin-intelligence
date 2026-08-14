@@ -1054,6 +1054,8 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .sourcing-result-status{display:inline-flex;align-items:center;gap:5px;margin-top:5px;font-size:11px;font-weight:650;padding:3px 8px;border-radius:4px}
 .sourcing-result-status.green{background:var(--green-soft);color:var(--green)}
 .sourcing-result-status.amber{background:var(--amber-soft);color:var(--amber)}
+.sourcing-result-status.red{background:var(--red-soft);color:var(--red)}
+.sourcing-result-status.muted{background:#eef0ec;color:var(--muted)}
 .sourcing-result-stats{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}
 .sourcing-result-stat{padding:14px 10px;text-align:center}
 .sourcing-result-stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums;color:#20231f}

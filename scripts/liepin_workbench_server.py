@@ -2622,9 +2622,9 @@ function renderFocusBar(){
   const latestProgress = [...state.messages].reverse().find(item => item?.workflow_progress)?.workflow_progress || {};
   const workflow = focus?.current_workflow || focus?.pending_workflow || {};
   const workflowStatus = String(latestProgress?.workflow_id === workflow?.workflow_id ? latestProgress.status : workflow?.status || '');
-  const statusLabels = {planned:'待确认',queued:'准备中',running:'执行中',waiting_approval:'等待外部寻访授权',waiting_external:'等待渠道结果',blocked:'已阻塞',failed:'技术失败',completed:'已完成',cancelled:'已取消',superseded:'已被修订'};
+  const statusLabels = {planned:'计划就绪',queued:'正在排队',running:'执行中',waiting_approval:'等待审批',waiting_external:'等待外部结果',blocked:'已阻塞',failed:'执行失败',completed:'已完成',cancelled:'已取消',paused:'已暂停',superseded:'已被修订版替代'};
   const planVersion = Number(workflow?.version || 0);
-  const planText = workflow?.workflow_id ? `v${planVersion || 1} · ${statusLabels[workflowStatus] || workflowStatus || '状态同步中'}` : '无待确认计划';
+  const planText = workflow?.workflow_id ? `v${planVersion || 1} · ${statusLabels[workflowStatus] || '状态待同步'}` : '无待确认计划';
   node.className = `task-ribbon ${conflict ? 'conflict' : ''}`;
   node.innerHTML = `<div class="task-ribbon-item"><span class="task-ribbon-label">任务</span><span class="task-ribbon-value">${esc(taskTitle || '未建立')}</span></div><div class="task-ribbon-item task-ribbon-page"><span class="task-ribbon-label">页面</span><span class="task-ribbon-value">${esc(pageTitle || '未连接')}</span></div><span class="task-ribbon-plan">${esc(planText)}</span>${conflict ? '<span class="task-ribbon-conflict">页面对象与当前任务不一致，请确认本轮要操作的对象。</span>' : ''}`;
 }
@@ -2832,7 +2832,7 @@ function renderWorkflowCard(message, index){
   const completed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
   const percent = Math.round((completed / total) * 100);
   const status = String(progress.status || 'queued');
-  const statusLabels = {planned:'待开始',queued:'排队中',running:'执行中',waiting_approval:'待审批',waiting_external:'等待渠道回执',blocked:'已阻塞',failed:'技术失败',completed:'已完成',cancelled:'已取消',superseded:'已被新修订替代'};
+  const statusLabels = {planned:'计划就绪',queued:'正在排队',running:'执行中',waiting_approval:'等待审批',waiting_external:'等待外部结果',blocked:'已阻塞',failed:'执行失败',completed:'已完成',cancelled:'已取消',paused:'已暂停',superseded:'已被修订版替代'};
   const approvals = Array.isArray(progress.pending_approvals) ? progress.pending_approvals : [];
   const approvalHtml = approvals.map((approval, approvalIndex) => {
     const preflight = approval.preflight || {};
@@ -3619,45 +3619,49 @@ async function runFloatingAction(type, id, planRef=null){
 async function monitorWorkflow(workflowId, timeoutMs=120000, messageIndex=-1){
   const started = Date.now();
   let lastSignature = '';
+  // 状态/终态文案与前端 statusMapping.ts 同口径；轮询走 /summary 轻量路由（R7 基线）。
+  const statusLabels = {planned:'计划就绪',queued:'正在排队',running:'执行中',waiting_approval:'等待审批',waiting_external:'等待外部结果',blocked:'已阻塞',failed:'执行失败',completed:'已完成',cancelled:'已取消',paused:'已暂停',superseded:'已被修订版替代'};
+  const outcomeLabels = {completed_target_met:'本轮完成，达成目标人数',completed_needs_review:'本轮完成，合格人数不足，有待复核人选',completed_pool_insufficient:'本轮完成，合格人数不足',failed_technical:'技术失败（执行过程中断，未完成本轮寻访）'};
   while (Date.now() - started < timeoutMs) {
-    const payload = await api(`/api/v1/workflows/${encodeURIComponent(workflowId)}`);
-    const workflow = payload.workflow || {};
-    const steps = Array.isArray(payload.steps) ? payload.steps : [];
-    const active = steps.find(step => ['running','waiting_approval','waiting_external'].includes(step.status))
-      || steps.find(step => step.status === 'pending');
-    const completed = steps.filter(step => step.status === 'completed').length;
-    const status = String(workflow.status || 'queued');
-    const signature = `${status}|${completed}|${active?.id || ''}`;
+    const payload = await api(`/api/v1/workflows/${encodeURIComponent(workflowId)}/summary`);
+    const status = String(payload.status || 'queued');
+    const outcome = String(payload.business_outcome || '');
+    const progress = payload.progress || {};
+    const total = Math.max(0, Number(progress.total || 0));
+    const completed = Math.max(0, Number(progress.completed || 0));
+    const nextStep = payload.next_step || {};
+    const signature = `${status}|${outcome}|${completed}|${nextStep.id || ''}`;
     if (signature !== lastSignature) {
       lastSignature = signature;
-      const label = active?.business_label || workflow.current_stage || '准备执行';
-      document.getElementById('chatStatus').textContent = `目标 ${status} · ${completed}/${steps.length} · ${label}`;
+      const label = String(nextStep.business_label || payload.current_stage || '准备执行');
+      document.getElementById('chatStatus').textContent = `目标${statusLabels[status] || '状态待同步'} · ${completed}/${total} · ${label}`;
       if (messageIndex >= 0 && state.messages[messageIndex]) {
-        state.messages[messageIndex].workflow_progress = {workflow_id:workflowId, status, completed, total:steps.length, label, pending_approvals:(payload.approvals || []).filter(item => item.status === 'pending')};
+        state.messages[messageIndex].workflow_progress = {workflow_id:workflowId, status, business_outcome:payload.business_outcome || null, completed, total, label, pending_approvals:(payload.pending_approvals || []).filter(item => item.status === 'pending')};
         renderMessages();
       }
     }
     if (['waiting_approval','waiting_external','blocked','failed','completed','cancelled'].includes(status)) {
-      const failed = steps.find(step => step.status === 'failed');
+      const failedEvent = (Array.isArray(payload.recent_events) ? payload.recent_events : []).find(item => item.status === 'failed');
       const messages = {
-        waiting_approval: `目标已执行 ${completed}/${steps.length} 步，正在等待人工审批。`,
-        waiting_external: `目标已执行 ${completed}/${steps.length} 步，正在等待外部页面完成。`,
-        blocked: `目标执行到 ${completed}/${steps.length} 步后被阻塞。`,
-        failed: `目标执行失败：${failed?.error || payload.goal?.error || '请查看计划详情。'}`,
-        completed: `目标已完成，共执行 ${steps.length} 步。`,
+        waiting_approval: `目标已执行 ${completed}/${total} 步，正在等待人工审批。`,
+        waiting_external: `目标已执行 ${completed}/${total} 步，正在等待外部页面完成。`,
+        blocked: outcomeLabels[outcome] || `目标执行到 ${completed}/${total} 步后被阻塞，待处理。`,
+        failed: `目标执行失败：${failedEvent?.summary || '请查看计划详情。'}`,
+        completed: outcomeLabels[outcome] || `目标已完成，共执行 ${total} 步。`,
         cancelled: '目标已取消。',
       };
       if (messageIndex >= 0 && state.messages[messageIndex]) {
-        state.messages[messageIndex].content += `\n\n${messages[status] || `目标状态：${status}`}`;
-      } else state.messages.push({role:'assistant', content:messages[status] || `目标状态：${status}`});
+        state.messages[messageIndex].content += `\n\n${messages[status] || `目标状态：${statusLabels[status] || '状态待同步'}`}`;
+      } else state.messages.push({role:'assistant', content:messages[status] || `目标状态：${statusLabels[status] || '状态待同步'}`});
       renderMessages();
       await loadState();
       return payload;
     }
     await new Promise(resolve => setTimeout(resolve, 1200));
   }
-  if (messageIndex >= 0 && state.messages[messageIndex]) state.messages[messageIndex].content += '\n\n目标仍在后台执行，可点击“查看计划”继续跟踪。';
-  else state.messages.push({role:'assistant', content:'目标仍在后台执行，可点击“查看计划”继续跟踪。'});
+  const timeoutNote = '目标仍在后台执行；对话中的进度快照可能不是最新，打开工作流面板查看最新状态。';
+  if (messageIndex >= 0 && state.messages[messageIndex]) state.messages[messageIndex].content += `\n\n${timeoutNote}`;
+  else state.messages.push({role:'assistant', content:timeoutNote});
   renderMessages();
   return null;
 }

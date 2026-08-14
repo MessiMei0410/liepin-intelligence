@@ -40,7 +40,12 @@ NON_BUSINESS_COPILOT_ACTIONS = {
 def _without_workflow_source_claim(answer: Any) -> str:
     """Do not let an Agent-mode analysis imply sourcing ran without a workflow."""
     text = str(answer or "")
-    if re.search(r"(?:寻访|搜索).{0,8}(?:已启动|已开始|已经开始|已执行)", text):
+    # 两种语序都要拦截：“寻访已启动”与“已启动寻访/我已经开始搜索人选”。
+    if re.search(
+        r"(?:寻访|搜索).{0,8}(?:已启动|已开始|已经开始|已执行)"
+        r"|(?:已启动|已开始|已经开始|已执行).{0,6}(?:寻访|搜索)",
+        text,
+    ):
         return "已完成查询和分析，尚未创建寻访工作流，因此没有启动寻访。"
     return text
 
@@ -388,6 +393,8 @@ class CopilotBridgeMixin:
                         "workflow_progress": {
                             "workflow_id": workflow_card["context"]["id"],
                             "status": (result.get("workflow") or {}).get("status") or "queued",
+                            "business_outcome": (result.get("workflow") or {}).get("business_outcome")
+                                or (result.get("goal") or {}).get("business_outcome"),
                             "completed": (result.get("progress") or {}).get("completed") or 0,
                             "total": (result.get("progress") or {}).get("total") or len(result.get("plan_summary") or []),
                             "label": (result.get("workflow") or {}).get("current_stage") or "准备执行",

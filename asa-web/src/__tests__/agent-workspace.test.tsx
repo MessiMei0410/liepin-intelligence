@@ -1367,7 +1367,7 @@ describe('Agent object embed', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('计划已确认并进入执行队列；外部寻访仍需 R3 单次审批。')
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '确认计划并准备' })).not.toBeInTheDocument()
-    expect(screen.getByText('排队中')).toBeInTheDocument()
+    expect(screen.getByText('正在排队')).toBeInTheDocument()
   })
 
   it('工作流审批写入失败时保留待审批入口', async () => {
@@ -1464,7 +1464,7 @@ describe('Agent object embed', () => {
       onOpenFull={() => {}}
     />)
 
-    await vi.waitFor(() => expect(screen.getByText('等待渠道回执')).toBeInTheDocument())
+    await vi.waitFor(() => expect(screen.getByText('等待外部结果')).toBeInTheDocument())
     await vi.advanceTimersByTimeAsync(3000)
     await vi.waitFor(() => expect(screen.getByText('已完成')).toBeInTheDocument())
     expect(screen.getByText('3 / 3 步')).toBeInTheDocument()
