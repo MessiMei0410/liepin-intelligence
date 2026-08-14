@@ -389,3 +389,4 @@
 - `/api/v1/workflows/{workflow_id}/candidates` 将对应 Mapping 关系纳入结果分页，但只在 Mapping 任务卡 artifact 属于当前工作流时纳入；结果的 `attribution.source_type` 明确为 `mapping`，不产生 Liepin/X-SaaS 的 query、round 或 recall 归因。
 - Agent 工作流人选卡和候选详情来源追踪均显示“Mapping 直挖”及任务卡/候选索引回执；关系复用、未评估和停止状态沿用数据库原事实，不做前端乐观推断。
 - 验证：工作流候选分页与详情 lineage 专项测试通过，既有前端 L1、契约测试及隔离功能 E2E 继续作为回归门禁。
+- 收官复核（2026-08-14，中断后重跑完整门禁）：前端 L1 `ci:fast` 614/614（含候选详情推荐路径的 Mapping“非查询召回”边界文案断言 `recommendation-decision` 12/12）、Python 契约 58/58、后端工作流读取契约 9/9、浮窗上下文+寻访调整契约 6/6、串行隔离 functional E2E 27/27 全部通过；正式库 mtime 停在当日上午受控迁移时点，复核全程未触碰正式库。
