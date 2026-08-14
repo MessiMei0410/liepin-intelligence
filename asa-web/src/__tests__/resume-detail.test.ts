@@ -1,6 +1,6 @@
 /* eslint-disable no-irregular-whitespace -- 测试夹具保留真实简历中的全角空格（如“薪　　资：”） */
 import { describe, it, expect } from 'vitest'
-import { parseEducationDetails, parseProjectDetails, parseWorkDetails } from '../panels/resumeDetail'
+import { extractResumeSection, filterResumeChromeLines, parseEducationDetails, parseProjectDetails, parseWorkDetails } from '../panels/resumeDetail'
 
 const RICH = `在职，看看新机会
 男49岁苏州-工业园区本科工作26年保密中共党员
@@ -408,4 +408,103 @@ English
     ])
   })
 
+})
+
+// 真实复现数据：job_candidate 976（长越科技 机械高级工程师），猎聘搜索卡级摘要，
+// 只有 full_text，work_text/project_text/education_text 全空。
+const SEARCH_CARD = `阮**
+在职，急寻新工作
+男29岁苏州本科工作7年保密群众
+机械工程师深圳市智信精密仪器股份有限公司
+立即沟通
+金领券3.4折开抢
+已售出11.3万个
+求职意向
+机械工程师
+22-25k×12薪
+苏州
+全部行业
+附件简历｜对方已上传附件简历，快去索要吧~
+向TA索要
+工作经历
+深圳市智信精密仪器股份有限公司
+（2024.01 - 至今, 2年7个月）
+工业自动化500-999人
+机械工程师
+本科毕业后4年7个月未填写工作经历
+教育经历
+常州大学怀德学院
+·
+机械设计制造及其自动化
+·
+本科
+2015.09 - 2019.06
+统招
+语言能力
+普通话
+自我评价
+1、【资深机械设计经验】…`
+
+describe('摘要级履历（猎聘搜索卡）', () => {
+  it('无职责描述的工作段保留：公司 · 职位 · 期间正常解析', () => {
+    const blocks = parseWorkDetails(SEARCH_CARD)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toMatchObject({
+      company: '深圳市智信精密仪器股份有限公司',
+      period: '2024.01 - 至今, 2年7个月',
+      role: '机械工程师',
+    })
+    expect(blocks[0].description).toEqual([])
+  })
+
+  it('「本科毕业后X年X个月未填写工作经历」占位行不会成为 role', () => {
+    const blocks = parseWorkDetails(SEARCH_CARD)
+    expect(blocks[0].role).toBe('机械工程师')
+    expect(blocks[0].role).not.toContain('未填写')
+  })
+
+  it('education_text 为空时从 full_text 切出教育经历章节', () => {
+    const section = extractResumeSection(SEARCH_CARD, 'education')
+    expect(section).toContain('常州大学怀德学院')
+    expect(section).not.toContain('语言能力')
+    expect(parseEducationDetails(section)).toEqual([
+      { school: '常州大学怀德学院', major: '机械设计制造及其自动化', degree: '本科', period: '2015.09 - 2019.06', details: ['统招'] },
+    ])
+  })
+
+  it('无项目经历章节时 extractResumeSection 返回空串', () => {
+    expect(extractResumeSection(SEARCH_CARD, 'project')).toBe('')
+    expect(parseProjectDetails(extractResumeSection(SEARCH_CARD, 'project'))).toEqual([])
+  })
+
+  it('项目经历章节能从 full_text 切出并解析', () => {
+    const text = `${SEARCH_CARD}\n项目经历\n输送线项目\n（2023.01 - 2024.01）\n项目职务：\n机械工程师\n自我评价\n补充`
+    const section = extractResumeSection(text, 'project')
+    expect(section).toContain('输送线项目')
+    expect(section).not.toContain('自我评价')
+    const projects = parseProjectDetails(section)
+    expect(projects).toHaveLength(1)
+    expect(projects[0]).toMatchObject({ title: '输送线项目', period: '2023.01 - 2024.01', role: '机械工程师' })
+  })
+
+  it('猎聘页面 chrome 行被过滤，正文保留', () => {
+    const filtered = filterResumeChromeLines(SEARCH_CARD)
+    for (const junk of ['立即沟通', '金领券', '已售出', '向TA索要', '对方已上传附件简历']) {
+      expect(filtered).not.toContain(junk)
+    }
+    expect(filtered).toContain('深圳市智信精密仪器股份有限公司')
+    expect(filtered).toContain('常州大学怀德学院')
+    expect(filtered).toContain('1、【资深机械设计经验】…')
+  })
+
+  it('反馈提示行也被过滤', () => {
+    const filtered = filterResumeChromeLines(`工作经历
+某公司
+（2020.01 - 至今）
+本次搜索匹配到的简历不够精准？点击这里进行反馈
+简历不匹配`)
+    expect(filtered).not.toContain('点击这里进行反馈')
+    expect(filtered).not.toContain('简历不匹配')
+    expect(filtered).toContain('某公司')
+  })
 })
