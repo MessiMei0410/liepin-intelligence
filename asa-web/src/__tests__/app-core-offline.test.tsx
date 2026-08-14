@@ -119,6 +119,8 @@ describe('App Core 离线横幅', () => {
 
     render(<App />)
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    // 诊断页为懒加载 chunk，假定时器下直接等模块 promise 落地再渲染断言
+    await act(async () => { await import('../app/Diagnostics') })
     expect(screen.getByRole('heading', { name: 'ASA Core 无法连接' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '重新连接' }))
