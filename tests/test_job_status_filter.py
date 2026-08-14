@@ -49,9 +49,11 @@ def test_sync_embedded_keyword_list_matches_canonical() -> None:
         assert sync.job_status_intake_blocked(status) == job_status_intake_blocked(status), status
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试用独立
+    # action_id/source_id 入库（process_action 按 source_id 判重），互不冲突。
+    target = tmp_path_factory.mktemp("job-status-filter") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -71,6 +73,14 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 def _insert_job(conn: sqlite3.Connection, client: str, title: str, status: str) -> int:
     conn.execute("INSERT OR IGNORE INTO clients (name) VALUES (?)", (client,))
     client_id = int(conn.execute("SELECT id FROM clients WHERE name = ?", (client,)).fetchone()["id"])
+    # 共享副本：jobs 有 UNIQUE(client_id,title)；同名岗位已存在时复用（刷新状态），
+    # 避免前序测试提交的同名岗位触发唯一约束冲突。
+    existing = conn.execute(
+        "SELECT id FROM jobs WHERE client_id=? AND title=?", (client_id, title)
+    ).fetchone()
+    if existing is not None:
+        conn.execute("UPDATE jobs SET status=? WHERE id=?", (status, existing["id"]))
+        return int(existing["id"])
     job_id = int(conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM jobs").fetchone()[0])
     conn.execute(
         """
@@ -161,7 +171,14 @@ def test_intake_not_downgraded_when_job_status_active(db_path: Path) -> None:
     try:
         _insert_job(conn, "状态过滤客户", "推进中岗位", "已发布/推进中")
         conn.commit()
-        result = _process(conn, _intake_action("状态过滤客户", "推进中岗位"))
+        # 共享副本按 source_id 判重：用独立 source_id 避免命中前序测试已入库的 intake
+        result = _process(
+            conn,
+            _intake_action(
+                "状态过滤客户", "推进中岗位",
+                action_id="status-filter-active", source_id="status-filter:status-filter-active",
+            ),
+        )
         conn.commit()
         assert result["status"] == "written"
         assert result["resolve_status"] == "created_or_reused"
@@ -177,7 +194,10 @@ def test_explicit_pool_only_still_wins_regardless_of_job_status(db_path: Path) -
         conn.commit()
         result = _process(
             conn,
-            _intake_action("状态过滤客户", "推进中岗位", pool_only=True),
+            _intake_action(
+                "状态过滤客户", "推进中岗位", pool_only=True,
+                action_id="status-filter-pool", source_id="status-filter:status-filter-pool",
+            ),
         )
         conn.commit()
         assert result["resolve_status"] == "pool_intake"

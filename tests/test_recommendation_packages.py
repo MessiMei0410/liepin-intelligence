@@ -12,9 +12,11 @@ from asa_core.app import create_app
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：候选 559 的推荐包按 job_candidate_id 幂等复用（already_confirmed
+    # 不重复生成），各测试断言均限定在自身记录，共享安全。
+    target = tmp_path_factory.mktemp("recommendation-packages") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

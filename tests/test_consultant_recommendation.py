@@ -12,9 +12,11 @@ from asa_core.app import create_app
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。候选 559/560 的推荐确认
+    # 幂等复用（already_confirmed 不重复生成）；metrics 测试先复位 559 阶段再操作。
+    target = tmp_path_factory.mktemp("consultant-recommendation") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -23,6 +25,19 @@ def db_path(tmp_path: Path) -> Path:
         destination.close()
         source.close()
     return target
+
+
+def _reactivate_559(db_path: Path) -> None:
+    """共享副本中前序测试可能把 559 置为停止：metrics 测试需要 559 可 preflight。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE job_candidates SET clean_stage='S1 新增寻访/待复核',flow_bucket='待复核',"
+            "raw_status='search_shortlisted' WHERE id=559"
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _preflight(client: TestClient, candidate_id: int, request_id: str = "cr-preflight-1") -> dict:
@@ -145,6 +160,7 @@ def test_consultant_recommendation_rejects_stopped_candidate(db_path: Path) -> N
 
 
 def test_consultant_recommendation_metrics(db_path: Path) -> None:
+    _reactivate_559(db_path)  # 前序测试把 559 置为停止，这里复位后再 preflight/commit
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         for index, candidate_id in enumerate((559, 560), start=1):
             token = _preflight(client, candidate_id, f"cr-preflight-metric-{index}")["token"]

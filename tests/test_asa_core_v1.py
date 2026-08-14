@@ -703,9 +703,11 @@ def test_agent_mode_action_card_persistence_preserves_strategy_patch(db_path: Pa
         assert stored["action_card"] == card
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试用独立
+    # request_id/session_id，候选人 558 相关测试均先自行复位状态，共享安全。
+    target = tmp_path_factory.mktemp("core-v1") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
