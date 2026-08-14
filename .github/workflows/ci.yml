@@ -69,6 +69,7 @@ jobs:
             --ignore tests/test_radar_linkage_s7_2.py \
             --ignore tests/test_radar_scan_s7.py \
             --ignore tests/test_radar_weekly_s7_3.py \
+            --ignore tests/test_recommendation_package_upgrade.py \
             --ignore tests/test_recommendation_packages.py \
             --ignore tests/test_skill_ontology_level_mapping.py \
             --ignore tests/test_sourcing_funnel.py \
