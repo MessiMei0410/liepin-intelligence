@@ -55,10 +55,19 @@
    - 指标 = 有依据要素数 / 要素总数；details.evidence.breakdown 给三类分项。
 ⑤ 噪音率（noise_rate）= 1 - pool_precision，显式输出（precision 语义不变）；
    方向为「越低越好」（METRIC_DIRECTIONS 登记，回归门槛与 --compare 据此判定）。
-⑥ 推荐率 proxy（recommendation_rate_proxy，明确标注为 proxy）
-   - 回放 case 无「顾问确认可推荐」结果数据，真实推荐率无法确定性回放，故输出 proxy 不伪造口径：
-     Agent T1/T2 池中「命中 case 参考池 且 source ≠ llm_inferred」的公司占比——
-     即「既有历史校准背书、又可直接进入寻访」的公司比例。顾问确认口径接入后替换本 proxy。
+⑥ 推荐率（指标键 recommendation_rate_proxy；真实顾问确认口径优先，proxy 显式回落）
+   - 真实口径（P3-d，2026-08-14 接入）：case 带顾问确认数据时优先采用——
+     case 文件可选字段 advisor_confirmed_recommendable_companies（士兰微顶层 / 长越岗位级，
+     字符串或 {"name": ...} 条目均可），名单公司经同一套归一规则与 Agent T1/T2 池匹配；
+     指标 = 命中确认名单的 Agent 公司数 / Agent 池公司数，
+     details.pool.recommendation_basis 标注 "advisor_confirmed"，输出标注「真实顾问确认口径」。
+   - proxy 回落（无确认数据时显式回落，不伪造）：Agent T1/T2 池中
+     「命中 case 参考池 且 source ≠ llm_inferred」的公司占比——即「既有历史校准背书、
+     又可直接进入寻访」的公司比例；recommendation_basis 标注 "proxy"，
+     输出显式标注「proxy 非真实口径」。既有 case 无该字段时行为与接入前完全一致。
+   - 指标键 recommendation_rate_proxy 与 METRIC_DIRECTIONS（higher）保持不变，
+     --compare 回归门槛语义不变；某 case 从 proxy 切换到真实口径属口径升级，
+     指标数值不可与旧 proxy 基线直接比，需按基线更新手册人工复核后更新基线。
 
 公司名归一规则（①的匹配基础，company_keys/companies_match）：
 - 大小写不敏感、去全部空白；全角/半角括号内容作为别名键（如 MPS（芯源系统）→ {mps, 芯源系统}）；
@@ -316,6 +325,22 @@ def _clean_anchor_values(text: Any) -> list[str]:
     return [part.strip() for part in re.split(r"[/／、;；,，]+", cleaned) if part.strip()]
 
 
+# 指标⑥真实口径的 case 可选字段名（士兰微顶层 / 长越岗位级；缺省 → 显式回落 proxy）
+ADVISOR_CONFIRMED_FIELD = "advisor_confirmed_recommendable_companies"
+
+
+def _normalize_advisor_confirmed(entries: Any) -> list[str]:
+    """顾问确认可推荐公司名单归一：接受字符串或 {"name": ...} 条目，去泛化/去重；无数据返回 []。"""
+    if not isinstance(entries, list):
+        return []
+    names = [
+        str(item.get("name") or "") if isinstance(item, dict) else str(item or "")
+        for item in entries
+    ]
+    concrete, _generic = _dedup_companies(names)
+    return concrete
+
+
 def extract_reference(case_id: str, doc: dict[str, Any]) -> dict[str, Any]:
     """抽取 case 参考答案：目标池（T1/T2 具体公司）、有效关键词组、四锚点。
 
@@ -352,6 +377,7 @@ def extract_reference(case_id: str, doc: dict[str, Any]) -> dict[str, Any]:
                 for group in groups if isinstance(group, dict)
             ],
             "anchors": reference_anchors,
+            "advisor_confirmed": _normalize_advisor_confirmed(doc.get(ADVISOR_CONFIRMED_FIELD)),
         }
 
     if case_id == CASE_CHANGYUE:
@@ -394,6 +420,7 @@ def extract_reference(case_id: str, doc: dict[str, Any]) -> dict[str, Any]:
                 for group in groups if isinstance(group, dict)
             ],
             "anchors": reference_anchors,
+            "advisor_confirmed": _normalize_advisor_confirmed(position.get(ADVISOR_CONFIRMED_FIELD)),
             "position_title": position["title"],
         }
 
@@ -453,8 +480,15 @@ def evaluate_pool(
     agent_pool: list[dict[str, Any]],
     reference_pool: list[str],
     graph_keys: list[tuple[str, set[str]]],
+    advisor_confirmed: list[str] | None = None,
 ) -> dict[str, Any]:
-    """指标①：目标池重合度（recall/precision + 未命中明细）。"""
+    """指标①：目标池重合度（recall/precision + 未命中明细）；并算指标⑥推荐率。
+
+    指标⑥口径（见模块 docstring ⑥）：advisor_confirmed 非空 → 真实顾问确认口径
+    （命中确认名单的 Agent 公司占比，basis="advisor_confirmed"）；否则显式回落 proxy
+    （命中参考池且 source ≠ llm_inferred 的 Agent 公司占比，basis="proxy"）。
+    recommendation_rate 为当前生效口径的指标值；proxy 两个字段始终按原口径计算保留。
+    """
     matched_ref: set[int] = set()
     matched_agent: set[int] = set()
     for index, reference in enumerate(reference_pool):
@@ -469,11 +503,32 @@ def evaluate_pool(
         if any(companies_match(agent["name"], reference, graph_keys) for reference in reference_pool):
             matched_agent.add(agent_index)
     total_ref, total_agent = len(reference_pool), len(agent_pool)
-    # 指标⑥ proxy：命中参考池且来源非 llm_inferred 的 Agent 公司（口径见模块 docstring ⑥）
+    # 指标⑥ proxy 口径始终计算（回落兜底 + 留痕对比）
     recommendable = [
         agent_pool[i] for i in sorted(matched_agent)
         if str(agent_pool[i].get("source") or "") != "llm_inferred"
     ]
+    proxy_rate = round(len(recommendable) / total_agent, 4) if total_agent else 0.0
+    confirmed = [str(name) for name in advisor_confirmed or [] if str(name or "").strip()]
+    if confirmed:
+        # 真实顾问确认口径优先：确认名单公司与 Agent 池按同一套归一规则匹配
+        confirmed_hits = [
+            agent for agent in agent_pool
+            if any(companies_match(agent["name"], name, graph_keys) for name in confirmed)
+        ]
+        confirmed_missing = [
+            name for name in confirmed
+            if not any(companies_match(name, agent["name"], graph_keys) for agent in agent_pool)
+        ]
+        recommendation_rate = round(len(confirmed_hits) / total_agent, 4) if total_agent else 0.0
+        recommendation_basis = "advisor_confirmed"
+        recommendation_hits = len(confirmed_hits)
+    else:
+        confirmed_hits = []
+        confirmed_missing = []
+        recommendation_rate = proxy_rate
+        recommendation_basis = "proxy"
+        recommendation_hits = len(recommendable)
     return {
         "recall": round(len(matched_ref) / total_ref, 4) if total_ref else 0.0,
         "precision": round(len(matched_agent) / total_agent, 4) if total_agent else 0.0,
@@ -484,8 +539,13 @@ def evaluate_pool(
             {"name": agent_pool[i]["name"], "source": agent_pool[i].get("source", ""), "tier": agent_pool[i].get("tier", "")}
             for i in range(total_agent) if i not in matched_agent
         ],
-        "recommendation_proxy": round(len(recommendable) / total_agent, 4) if total_agent else 0.0,
+        "recommendation_proxy": proxy_rate,
         "recommendation_proxy_hits": len(recommendable),
+        "recommendation_rate": recommendation_rate,
+        "recommendation_basis": recommendation_basis,
+        "recommendation_hits": recommendation_hits,
+        "advisor_confirmed_size": len(confirmed),
+        "advisor_confirmed_missing": confirmed_missing,
     }
 
 
@@ -686,7 +746,7 @@ def run_replay(case_id: str, kb_dir: str | Path | None = None) -> dict[str, Any]
         for company in entry.get("companies") or []
         if str(entry.get("tier") or "") in {"T1", "T2"} and isinstance(company, dict)
     ]
-    pool_metrics = evaluate_pool(agent_pool, reference["pool"], graph_keys)
+    pool_metrics = evaluate_pool(agent_pool, reference["pool"], graph_keys, reference.get("advisor_confirmed"))
     keyword_metrics = evaluate_keywords(v2.get("step4_keyword_groups") or [], reference["keyword_groups"])
     anchor_metrics = evaluate_anchors(v2.get("anchors") or {}, reference["anchors"])
     evidence_metrics = evaluate_evidence(agent_pool, v2)
@@ -707,11 +767,13 @@ def run_replay(case_id: str, kb_dir: str | Path | None = None) -> dict[str, Any]
             "pool_precision": pool_metrics["precision"],
             "keyword_coverage": keyword_metrics["coverage"],
             "anchor_completeness": anchor_metrics["score"],
-            # 二期扩展指标（口径见模块 docstring ④⑤⑥；recommendation_rate_proxy 为 proxy 非真实口径）
+            # 二期扩展指标（口径见模块 docstring ④⑤⑥）；⑥ 真实顾问确认口径优先、proxy 显式回落，
+            # 生效口径见 recommendation_basis（"advisor_confirmed" / "proxy"）
             "evidence_coverage": evidence_metrics["coverage"],
             "noise_rate": round(1.0 - pool_metrics["precision"], 4),
-            "recommendation_rate_proxy": pool_metrics["recommendation_proxy"],
+            "recommendation_rate_proxy": pool_metrics["recommendation_rate"],
         },
+        "recommendation_basis": pool_metrics["recommendation_basis"],
         "details": {
             "pool": pool_metrics,
             "pool_generic_excluded": reference["pool_generic_excluded"],
@@ -776,11 +838,21 @@ def render_text(report: dict[str, Any]) -> str:
             f" 约束 {evidence['breakdown']['constraints']['backed']}/{evidence['breakdown']['constraints']['total']}）"
         )
         lines.append(f"  ⑤ 噪音率        {_fmt(metrics['noise_rate'])}（= 1 - precision，越低越好）")
-        lines.append(
-            f"  ⑥ 推荐率 proxy  {_fmt(metrics['recommendation_rate_proxy'])}"
-            f"（proxy 口径：参考池命中且非 llm_inferred 的 Agent 公司 "
-            f"{pool['recommendation_proxy_hits']}/{pool['agent_size']} 家；非顾问确认真实推荐率）"
-        )
+        if case.get("recommendation_basis") == "advisor_confirmed":
+            lines.append(
+                f"  ⑥ 推荐率        {_fmt(metrics['recommendation_rate_proxy'])}"
+                f"（真实顾问确认口径：顾问确认可推荐名单 {pool['advisor_confirmed_size']} 家，"
+                f"命中 Agent 池 {pool['recommendation_hits']}/{pool['agent_size']} 家）"
+            )
+            missing_confirmed = pool.get("advisor_confirmed_missing") or []
+            if missing_confirmed:
+                lines.append(f"    - 顾问确认名单未被 Agent 池覆盖（{len(missing_confirmed)}）：{'、'.join(missing_confirmed)}")
+        else:
+            lines.append(
+                f"  ⑥ 推荐率 proxy  {_fmt(metrics['recommendation_rate_proxy'])}"
+                f"（proxy 非真实口径：参考池命中且非 llm_inferred 的 Agent 公司 "
+                f"{pool['recommendation_proxy_hits']}/{pool['agent_size']} 家；无顾问确认数据，显式回落 proxy）"
+            )
         lines.append("  未命中明细：")
         missed = pool["missed_reference"]
         lines.append(f"    - case 池未覆盖公司（{len(missed)}）：{'、'.join(missed) if missed else '无'}")

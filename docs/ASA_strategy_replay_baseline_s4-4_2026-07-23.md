@@ -63,10 +63,13 @@
     有依据 = source ∈ {client_doc, jd, consultant, kb_profile, restricted_client}；
   - step4 关键词组无 source 字段，无法确定性判定来源，显式不计入。
 - **⑤ 噪音率（noise_rate）**：= 1 − pool_precision，显式输出；precision 语义不变。方向：越低越好。
-- **⑥ 推荐率 proxy（recommendation_rate_proxy）**：回放 case 无「顾问确认可推荐」结果数据，
-  真实推荐率无法确定性回放，故输出 proxy 并明确标注，不伪造口径：
-  Agent T1/T2 池中「命中 case 参考池 且 source ≠ llm_inferred」的公司占比。
-  顾问确认口径接入后应替换本 proxy。
+- **⑥ 推荐率（recommendation_rate_proxy，真实口径优先 + proxy 显式回落）**：P3-d（2026-08-14）
+  起支持双口径——case 文件带可选字段 `advisor_confirmed_recommendable_companies`
+  （士兰微顶层 / 长越岗位级）时采用真实顾问确认口径（命中确认名单的 Agent 公司占比，
+  `recommendation_basis="advisor_confirmed"`）；无该字段时显式回落 proxy 并标注：
+  Agent T1/T2 池中「命中 case 参考池 且 source ≠ llm_inferred」的公司占比
+  （`recommendation_basis="proxy"`）。当前两个定稿 case 均无顾问确认字段，
+  仍走 proxy，下表数值口径不变。
 
 ### 首版基线数值（2026-08-05 实跑，首次以当日真实值入基线，非历史目标值）
 
