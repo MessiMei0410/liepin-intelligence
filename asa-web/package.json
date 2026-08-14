@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "generate:api": "openapi-typescript http://127.0.0.1:8765/openapi.json -o src/generated/api.d.ts",
+    "generate:api": "openapi-typescript http://127.0.0.1:8765/openapi.json -o src/generated/api.d.ts && curl -fsS http://127.0.0.1:8765/openapi.json -o scripts/openapi.snapshot.json",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
     "format": "prettier --write .",

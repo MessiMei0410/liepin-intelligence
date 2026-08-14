@@ -102,11 +102,17 @@ jobs:
         run: cd asa-web && npm run typecheck
       - name: Lint
         run: cd asa-web && npm run lint
+      - name: Contract tests (Python)
+        # asa-web/tests 的 Python 契约测试（候选确认层正则锚点/doctor/backup/opencli）。
+        # opencli 相关测试模块顶层依赖本机 scripts/xsaas_candidate_search.py，
+        # 本机路径缺失时模块级 SkipTest 自动跳过，CI 上不会 ImportError 变红。
+        run: cd asa-web && python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Run frontend tests
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: cd asa-web && npx vitest run
       - name: Build
         run: cd asa-web && npm run build
       - name: API contract drift
-        # Core 不可达时脚本自身 exit 0（打印警告跳过），不会误伤无 Core 的 CI。
-        run: cd asa-web && npm run check:api-drift
+        # 严格模式（CI 无 Core）：Core 不可达时回退仓库快照 scripts/openapi.snapshot.json
+        # 比对，快照缺失或漂移都会让 CI 红；本地 Core 可达时仍与实时契约比对。
+        run: cd asa-web && ASA_API_DRIFT_STRICT=1 npm run check:api-drift
