@@ -67,8 +67,8 @@
     "只命中技能标签但无项目证据时必须标记待核验，不得直接判定满足硬门槛",
     "纯软件/纯测试背景无硬件项目经历的人选不进入优先池"
   ],
-  "skills_ontology_nodes": [],
-  "skills_ontology_note": "FPGA/嵌入式硬件族尚未纳入 kb_skill_ontology_semiconductor_v1；技能词来自真实岗位缺口，本体扩族后回填 canonical 词",
+  "skills_ontology_nodes": ["FPGA", "Verilog", "时序约束", "高速接口", "原型验证", "仿真验证", "嵌入式硬件", "原理图设计", "板级调试", "FPGA器件"],
+  "skills_ontology_note": "FPGA/嵌入式硬件族（fpga）已纳入 kb_skill_ontology_semiconductor_v1（P3-c，2026-08-14）；以上为回填的 canonical 词，技能词来自真实岗位缺口",
   "level_mapping": {
     "level_band": "manager",
     "job_title_range": "资深工程师/技术主管",

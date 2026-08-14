@@ -69,8 +69,8 @@
     "只命中技能标签但无质量项目证据时必须标记待核验，不得直接判定满足硬门槛",
     "非半导体行业质量背景（如快消/建筑）不进入优先池"
   ],
-  "skills_ontology_nodes": [],
-  "skills_ontology_note": "质量/可靠性族尚未纳入 kb_skill_ontology_semiconductor_v1；技能词来自 case_pengxinxu 真实职位，本体扩族后回填 canonical 词",
+  "skills_ontology_nodes": ["质量工程", "SPC", "SQC", "FMEA", "8D", "客诉处理", "质量体系", "可靠性"],
+  "skills_ontology_note": "质量/可靠性族（quality）已纳入 kb_skill_ontology_semiconductor_v1（P3-c，2026-08-14）；以上为回填的 canonical 词，技能词来自 case_pengxinxu 真实职位",
   "level_mapping": {
     "level_band": "expert",
     "job_title_range": "高级工程师/主任工程师/专家",
