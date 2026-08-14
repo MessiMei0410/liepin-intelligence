@@ -1016,8 +1016,7 @@ def _copilot_impl(
                 attachment_only_candidate = attachment_identity
                 selected = {"type": "candidate", "id": None, "page": "candidates", "filters": {}}
     workflow_outcome_question = bool(
-        "寻访" in message
-        and re.search(r"(?:什么结果|结果如何|结果怎样|结果怎么样|进展如何|进展怎么样|情况如何|情况怎么样)", message)
+        re.search(r"(?:什么结果|结果如何|结果怎样|结果怎么样|结果出来|进展如何|进展怎么样|情况如何|情况怎么样)", message)
     )
     workflow_strategy_question = _workflow_strategy_question(message, selected)
     semantic_constraints = [
@@ -2634,6 +2633,7 @@ def _copilot_impl(
         assistant_structured["workflow_progress"] = {
             "workflow_id": workflow.get("workflow_id"),
             "status": workflow.get("status") or (workflow_state.get("goal") or {}).get("status") or "queued",
+            "business_outcome": workflow.get("business_outcome") or (workflow_state.get("goal") or {}).get("business_outcome"),
             "completed": progress.get("completed") or 0,
             "total": progress.get("total") or len(workflow_state.get("steps") or []),
             "label": workflow.get("current_stage") or "准备执行",

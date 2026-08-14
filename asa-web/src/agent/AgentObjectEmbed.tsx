@@ -11,17 +11,14 @@ type CandidateAction = 'review' | 'advance' | 'contact' | 'recommend' | 'stop'
 const actionLabels: Record<CandidateAction, string> = {
   review: '评分复核', advance: '复核通过', contact: '已联系', recommend: '已推荐', stop: '停止推进',
 }
+// 停止原因枚举与后端 asa_core/stop_reasons.py STOP_REASON_LABELS 逐字对齐（8 枚标准码）。
 const stopReasons = [
-  ['too_senior', '太资深'], ['salary_too_high', '薪资太贵'], ['direction_mismatch', '方向不符'],
-  ['experience_mismatch', '经验不符'], ['location_mismatch', '地点不符'], ['low_interest', '意愿低'],
-  ['duplicate', '重复人选'], ['other', '其他'],
+  ['too_senior', '资历过高'], ['salary_mismatch', '薪资不符'], ['direction_mismatch', '方向不符'],
+  ['experience_mismatch', '经验不符'], ['location_mismatch', '地点不符'], ['low_intent', '意向不足'],
+  ['duplicate_candidate', '重复人选'], ['other', '其他'],
 ]
 
-const workflowProgressStatus: Record<string, string> = {
-  planned: '待确认计划', queued: '排队中', running: '执行中', waiting_approval: '待审批',
-  waiting_external: '等待渠道回执', blocked: '已阻塞', failed: '技术失败',
-  completed: '已完成', paused: '已暂停', cancelled: '已取消', superseded: '已被新修订替代',
-}
+// 步骤级状态文案（工作流级状态一律走 statusMapping.ts 的 mapWorkflowStatus）。
 const workflowStepStatus: Record<string, string> = {
   pending: '待执行', queued: '排队中', running: '执行中', waiting_approval: '待审批', waiting_external: '等渠道',
   completed: '已完成', skipped: '已跳过', failed: '失败', blocked: '阻塞', cancelled: '已取消',
@@ -39,6 +36,7 @@ const textList = (value: unknown) => Array.isArray(value) ? value.map(item => co
 function WorkflowPlanSummary({ progress, actionCard }: { progress?: Record<string, unknown> | null; actionCard?: Record<string, unknown> | null }) {
   const workflowId = compactText(progress?.workflow_id)
   const status = compactText(progress?.status || 'planned')
+  const statusMapping = mapWorkflowStatus({ status, business_outcome: compactText(progress?.business_outcome) || null })
   const completed = Number(progress?.completed ?? 0)
   const total = Number(progress?.total ?? 0)
   const boundedTotal = Math.max(0, Number.isFinite(total) ? total : 0)
@@ -52,7 +50,7 @@ function WorkflowPlanSummary({ progress, actionCard }: { progress?: Record<strin
   const current = compactText(business.current) || compactText(progress?.label) || compactText(evidence.find(item => item.label === '当前步骤')?.value) || '准备执行'
   if (!workflowId && !evidence.length && !boundedTotal) return null
   return <section className="agent-workflow-summary" aria-label="执行方案摘要">
-    <div className="agent-workflow-summary-head"><b>本次要做什么</b><span>{workflowProgressStatus[status] || status || '状态待同步'}</span></div>
+    <div className="agent-workflow-summary-head"><b>本次要做什么</b><span>{statusMapping.label}</span></div>
     <p className="agent-workflow-task">{task}</p>
     {boundedTotal > 0 && <div className="agent-workflow-progress"><div className="agent-workflow-meter"><i style={{ width: `${percent}%` }}/></div><small>{boundedCompleted} / {boundedTotal} 步{approvals.length ? ` · ${approvals.length} 个审批待确认` : ''}</small></div>}
     <p className="agent-workflow-current"><b>{status === 'planned' ? '下一步' : '当前'}</b><span>{current}</span></p>
@@ -241,6 +239,7 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
     ...recordValue(workflowProgress),
     workflow_id: compactText(workflowSummary.workflow_id) || compactText(reference.id),
     status: summaryStatus,
+    business_outcome: compactText(workflowSummary.business_outcome) || compactText(workflowProgress?.business_outcome) || null,
     completed: Number(summaryProgress.completed ?? workflowProgress?.completed ?? 0),
     total: Number(summaryProgress.total ?? workflowProgress?.total ?? 0),
     label: businessText(summaryNextStep.business_label) || businessText(workflowSummary.current_stage) || businessText(workflowProgress?.label) || (summaryStatus === 'completed' ? '任务已完成' : '准备执行'),
@@ -301,7 +300,7 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
       </section>}
       {workflow && <section className="agent-workflow-console" aria-label="执行控制台">
         <header><div><small>当前状态</small><b>{workflowStatus?.label || '状态待同步'}</b></div><div><small>当前阶段</small><b>{workflowStage}</b></div></header>
-        <ol aria-label="执行步骤">{workflow.steps.slice(0, 4).map(step => <li key={step.id} className={step.status}><span>{step.status === 'completed' ? <CircleCheck/> : <CircleDashed/>}</span><b>{step.business_label}</b><em>{workflowStepStatus[step.status] || step.status}</em></li>)}</ol>
+        <ol aria-label="执行步骤">{workflow.steps.slice(0, 4).map(step => <li key={step.id} className={step.status}><span>{step.status === 'completed' ? <CircleCheck/> : <CircleDashed/>}</span><b>{step.business_label}</b><em>{workflowStepStatus[step.status] || '状态待同步'}</em></li>)}</ol>
         {workflow.steps.length > 4 && <small className="agent-workflow-more">另有 {workflow.steps.length - 4} 个步骤，请在完整详情中查看</small>}
         {workflow.approvals.filter(item => item.status === 'pending').map(item => <section className="agent-approval" key={item.approval_id}><b>{item.title}</b><span>{item.risk_level} · 单次授权</span><div><button className="button primary" disabled={!!busy} onClick={() => void decideApproval(item.approval_id, 'approve')}>{busy === item.approval_id && <LoaderCircle className="spin"/>}批准本次执行</button><button className="button" disabled={!!busy} onClick={() => void decideApproval(item.approval_id, 'reject')}>不执行</button></div></section>)}
         <div className="agent-object-actions">{workflowIsActive && <><button className="button" disabled={!!busy} onClick={() => void updateWorkflowStatus('pause')}>{busy === 'workflow:pause' ? <LoaderCircle className="spin"/> : <Pause/>}暂停</button><button className="button danger" disabled={!!busy} onClick={() => void updateWorkflowStatus('cancel')}>{busy === 'workflow:cancel' ? <LoaderCircle className="spin"/> : <Ban/>}结束本轮</button></>}{workflowIsPaused && <button className="button primary" disabled={!!busy} onClick={() => void updateWorkflowStatus('resume')}>{busy === 'workflow:resume' ? <LoaderCircle className="spin"/> : <Play/>}继续执行</button>}<button className="button" onClick={() => onOpenFull(reference)}><ExternalLink/>查看完整工作流</button></div>
