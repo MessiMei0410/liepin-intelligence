@@ -22,6 +22,8 @@ jobs:
         # 仓库根运行（pytest.ini 含 pythonpath=scripts，tests/ 在根目录）。
         # --ignore：31 个文件硬编码本机绝对路径（/Users/messi/... 1.3GB 正式库、build_talent_workbench.py
         #           等），GitHub Actions 上必然失败，待路径参数化后移除（见 docs/ASA_优化方案 P2-4）。
+        #           另 2 个文件（test_opencli_sourcing_shadow/test_xsaas_candidate_search）依赖本机
+        #           skill 目录模块 cdp_client，CI 同样无法运行。
         # --deselect：4 个既有失败（测试库缺 candidate_intelligence 表等 schema 问题），属 P1 修复项。
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: |
@@ -50,6 +52,7 @@ jobs:
             --ignore tests/test_job_weekly_report.py \
             --ignore tests/test_knowledge_proposals.py \
             --ignore tests/test_opencli_primary_recall.py \
+            --ignore tests/test_opencli_sourcing_shadow.py \
             --ignore tests/test_query_builders_s4.py \
             --ignore tests/test_recommendation_packages.py \
             --ignore tests/test_stop_reasons.py \
@@ -57,6 +60,7 @@ jobs:
             --ignore tests/test_strategy_item_edits.py \
             --ignore tests/test_strategy_replay_s4.py \
             --ignore tests/test_talent_pool_intake.py \
+            --ignore tests/test_xsaas_candidate_search.py \
             --deselect tests/test_candidate_assessment_s6.py::AssessmentApiTest::test_post_get_404_409_idempotent \
             --deselect tests/test_candidate_assessment_s6_2.py::UpgradeAndRouteTest::test_regenerate_upgrades_legacy_artifact \
             --deselect tests/test_candidate_assessment_s6_2.py::UpgradeAndRouteTest::test_route_exposes_two_dimensions \
