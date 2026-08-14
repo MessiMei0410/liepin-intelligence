@@ -212,7 +212,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         self.assertIn("channels.length > 0", source)
         self.assertIn("snapshotReady ? '' : ' disabled'", source)
         self.assertIn("原话约束：", source)
-        for label in ["待开始", "排队中", "执行中", "待审批", "等待渠道回执", "技术失败", "已完成", "已取消", "已被新修订替代"]:
+        # 浮窗状态文案与 asa-web/src/workflow/statusMapping.ts workflowStatusLabel 逐字对齐。
+        for label in ["计划就绪", "正在排队", "执行中", "等待审批", "等待外部结果", "已阻塞", "执行失败", "已完成", "已取消", "已暂停", "已被修订版替代"]:
             self.assertIn(label, source)
 
     def test_background_context_sync_never_prompts_for_permissions(self) -> None:

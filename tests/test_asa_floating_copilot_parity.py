@@ -57,7 +57,8 @@ def test_floating_focus_bar_rendering_contract() -> None:
         "result.business_focus",
         "needs_clarification === true",
         "focus?.current_workflow || focus?.pending_workflow",
-        "等待外部寻访授权",
+        # 状态文案与 asa-web/src/workflow/statusMapping.ts workflowStatusLabel 逐字对齐
+        "等待审批",
         "页面对象与当前任务不一致",
         '<span class="task-ribbon-label">任务</span>',
         '<span class="task-ribbon-label">页面</span>',

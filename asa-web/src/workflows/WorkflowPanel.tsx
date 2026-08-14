@@ -162,7 +162,7 @@ export function WorkflowPanel({value:sourceValue,jobs,close,reload,openCandidate
     window.open(url,'_blank','noopener,noreferrer')
   }
   const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
-  const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待外部寻访授权` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='paused' ? '已暂停，渠道会在当前查询单元结束后停止。' : status==='planned' ? '计划已就绪，等待确认' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
+  const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待外部寻访授权` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='paused' ? '已暂停，渠道会在当前查询单元结束后停止。' : status==='planned' ? '计划已就绪，等待确认' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || '状态待同步'
   const detachPanel=(anchor?:DragResizeAnchor):boolean=>{
     if(nativeBridge('openDetachedDialog',{title:value.goal.title,url:`/asa-app#workflow=${encodeURIComponent(value.workflow.workflow_id)}&bare=1`,anchor})){close();return true}
     return false

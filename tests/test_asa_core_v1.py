@@ -515,6 +515,26 @@ def test_agent_mode_hides_executable_suggestions_without_a_real_workflow(db_path
         assert body["suggested_actions"] == [{"type": "open_job", "id": 111, "label": "打开岗位"}]
 
 
+def test_agent_mode_claim_guard_catches_verb_first_wording(db_path: Path) -> None:
+    """红线守卫须覆盖「已启动寻访/已开始搜索」语序，不能只认「寻访已启动」。"""
+    for wording in ("已启动寻访，稍后会同步进展。", "我已经开始搜索人选。", "寻访已启动。"):
+        with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+            client.app.state.core.agent_service.copilot = lambda *_args, **_kwargs: {
+                "ok": True,
+                "session_id": "agent_without_workflow",
+                "answer": wording,
+                "suggested_actions": [],
+            }
+            response = client.post("/api/v1/copilot/agent", json={
+                "request_id": "agent-claim-wording",
+                "session_id": "agent_without_workflow",
+                "message": "查看这个岗位的候选人覆盖情况",
+                "context": {"type": "job", "id": 111},
+            })
+            assert response.status_code == 200, response.json()
+            assert "尚未创建寻访工作流" in response.json()["answer"], wording
+
+
 def test_agent_mode_returns_r3_action_card_only_after_real_workflow(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         client.app.state.core.agent_service.copilot = lambda *_args, **_kwargs: {
