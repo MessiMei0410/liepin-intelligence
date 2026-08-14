@@ -70,8 +70,8 @@
     "只命中模块标签但无量产工艺项目证据时必须标记待核验，不得直接判定满足硬门槛",
     "禁挖名单/竞业限制见 restricted 层（出库走白名单），本文件不落地具体名单"
   ],
-  "skills_ontology_nodes": [],
-  "skills_ontology_note": "fab 工艺族尚未纳入 kb_skill_ontology_semiconductor_v1（当前 5 族不含 TD/模块工艺）；技能词来自 case_pengxinxu 真实职位，本体扩族后回填 canonical 词",
+  "skills_ontology_nodes": ["工艺整合", "光刻", "刻蚀", "薄膜沉积", "CMP", "扩散", "湿法", "离子注入", "器件", "量产导入", "晶圆代工"],
+  "skills_ontology_note": "fab 工艺族（fab_process）已纳入 kb_skill_ontology_semiconductor_v1（P3-c，2026-08-14）；以上为回填的 canonical 词，技能词来自 case_pengxinxu 真实职位",
   "level_mapping": {
     "level_band": "expert",
     "job_title_range": "资深工程师/专家（TD 系列）",

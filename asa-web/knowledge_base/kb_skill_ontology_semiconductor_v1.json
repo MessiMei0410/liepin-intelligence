@@ -2,7 +2,8 @@
   "meta": {
     "version": "v1",
     "created": "2026-08-05",
-    "source": "seed_silan_tme_v1.json（计算电源 TME）/ seed_changyue_motion_control_v1.json / seed_changyue_precision_mechanical_v1.json（长越封测设备）/ kb_seed_jiachi_equipment_v1.json（1168 职位分类法）/ cases/case_*.json 真实技能词归纳",
+    "source": "seed_silan_tme_v1.json（计算电源 TME）/ seed_changyue_motion_control_v1.json / seed_changyue_precision_mechanical_v1.json（长越封测设备）/ kb_seed_jiachi_equipment_v1.json（1168 职位分类法）/ cases/case_*.json 真实技能词归纳 / seed_pengxinxu_fab_process_v1.json / seed_pengxinxu_fab_quality_v1.json / seed_pengxinxu_fab_yield_v1.json（彭芯旭 12 寸 fab 工艺/质量/良率）/ seed_sukesi_fpga_v1.json（FPGA/嵌入式硬件）",
+    "updated": "2026-08-14（P3-c：扩 fab_process/quality/yield_enhancement/fpga 四族，来源为对应 seed 原型的真实岗位技能词）",
     "usage": "半导体/硬件招聘技能本体：技能族→技能→别名/中英文同义词→相关技能→常见证据形式。策略生成做关键词别名归一与相关词提示；简历评估做技能证据归一比对。运行时只读。",
     "governance": "本体只用于召回增强与证据比对，命中别名单独不构成技能证据；只命中技能标签无项目证据的人选必须标记待核验（沿用 seed 负向规则口径）"
   },
@@ -316,6 +317,246 @@
           "aliases": ["reference design", "参考设计方案", "ref design"],
           "related": ["客户导入", "AE"],
           "evidence": ["参考设计制作", "方案评审"]
+        }
+      ]
+    },
+    {
+      "family_id": "fab_process",
+      "label": "晶圆制造工艺与整合",
+      "skills": [
+        {
+          "name": "工艺整合",
+          "aliases": ["PIE", "TD", "工艺集成", "process integration", "整合工程师", "pie"],
+          "related": ["光刻", "刻蚀", "器件", "良率提升"],
+          "evidence": ["新工艺 transfer/量产导入负责", "WAT/CP 参数闭环改善项目", "工艺窗口建立"]
+        },
+        {
+          "name": "光刻",
+          "aliases": ["Litho", "lithography", "黄光", "光刻工艺", "litho"],
+          "related": ["刻蚀", "薄膜沉积", "工艺整合"],
+          "evidence": ["光刻模块工艺开发/量产维护", "overlay/CD 指标优化", "光刻缺陷改善项目"]
+        },
+        {
+          "name": "刻蚀",
+          "aliases": ["Etch", "干法刻蚀", "等离子刻蚀", "plasma etch", "etch"],
+          "related": ["光刻", "湿法", "工艺整合"],
+          "evidence": ["刻蚀模块工艺开发", "CD/均匀性优化项目", "刻蚀缺陷攻关"]
+        },
+        {
+          "name": "薄膜沉积",
+          "aliases": ["薄膜", "CVD", "PVD", "化学气相沉积", "物理气相沉积", "deposition"],
+          "related": ["CMP", "刻蚀", "工艺整合"],
+          "evidence": ["CVD/PVD 工艺开发", "薄膜厚度/均匀性指标交付", "新材料薄膜导入"]
+        },
+        {
+          "name": "CMP",
+          "aliases": ["化学机械抛光", "化学机械研磨", "cmp", "抛光工艺"],
+          "related": ["薄膜沉积", "湿法", "工艺整合"],
+          "evidence": ["CMP 工艺开发/量产维护", "平坦度/片内均匀性优化", "scratch 等缺陷改善项目"]
+        },
+        {
+          "name": "扩散",
+          "aliases": ["Diffusion", "炉管", "退火", "氧化", "diffusion", "RTP"],
+          "related": ["离子注入", "薄膜沉积", "器件"],
+          "evidence": ["扩散/炉管工艺开发", "热预算优化", "氧化/退火工艺窗口建立"]
+        },
+        {
+          "name": "湿法",
+          "aliases": ["WET", "湿法清洗", "湿法刻蚀", "清洗工艺", "wet"],
+          "related": ["CMP", "刻蚀"],
+          "evidence": ["湿法工艺开发", "颗粒/金属污染控制项目"]
+        },
+        {
+          "name": "离子注入",
+          "aliases": ["IMP", "implant", "注入", "ion implantation", "imp"],
+          "related": ["扩散", "器件"],
+          "evidence": ["注入工艺开发", "掺杂 profile 优化项目"]
+        },
+        {
+          "name": "器件",
+          "aliases": ["Device", "器件工程", "device engineer", "器件物理", "device"],
+          "related": ["工艺整合", "离子注入", "电性测试"],
+          "evidence": ["器件特性分析与优化", "WAT 电性参数改善", "器件模型提取"]
+        },
+        {
+          "name": "量产导入",
+          "aliases": ["工艺transfer", "工艺转移", "NPI", "新产线导入", "ramp"],
+          "related": ["工艺整合", "良率爬坡"],
+          "evidence": ["新工艺/新产线 transfer 经历", "量产爬坡项目负责"]
+        },
+        {
+          "name": "晶圆代工",
+          "aliases": ["foundry", "12寸", "12英寸", "晶圆厂", "fab"],
+          "related": ["工艺整合", "良率提升"],
+          "evidence": ["12 寸晶圆代工/IDM 产线工艺岗位经历"]
+        }
+      ]
+    },
+    {
+      "family_id": "quality",
+      "label": "质量与可靠性",
+      "skills": [
+        {
+          "name": "质量工程",
+          "aliases": ["PQE", "质量工程师", "品质工程师", "QE", "过程质量", "pqe"],
+          "related": ["SPC", "8D", "客诉处理"],
+          "evidence": ["产线质量改进项目", "过程质量指标（DPPM/批合格率）交付"]
+        },
+        {
+          "name": "SPC",
+          "aliases": ["统计过程控制", "spc", "过程管控"],
+          "related": ["SQC", "FMEA", "良率分析"],
+          "evidence": ["SPC 体系搭建/维护", "Cpk/过程能力分析项目"]
+        },
+        {
+          "name": "SQC",
+          "aliases": ["统计质量控制", "sqc", "质量统计"],
+          "related": ["SPC", "良率分析"],
+          "evidence": ["SQC 项目经历", "质量数据统计分析报告"]
+        },
+        {
+          "name": "FMEA",
+          "aliases": ["失效模式分析", "失效模式与影响分析", "fmea", "PFMEA", "DFMEA"],
+          "related": ["8D", "可靠性"],
+          "evidence": ["PFMEA/DFMEA 主导或评审记录", "失效模式库建设"]
+        },
+        {
+          "name": "8D",
+          "aliases": ["8D报告", "8d", "客诉8D", "8D 报告"],
+          "related": ["客诉处理", "FMEA", "失效分析"],
+          "evidence": ["客诉 8D 闭环报告", "重大质量问题 8D 项目"]
+        },
+        {
+          "name": "客诉处理",
+          "aliases": ["客诉", "客户投诉", "CQE", "客户质量", "cqe"],
+          "related": ["8D", "失效分析"],
+          "evidence": ["客户端质量问题处理记录", "客诉闭环率/响应时效指标"]
+        },
+        {
+          "name": "质量体系",
+          "aliases": ["体系审核", "IATF16949", "ISO9001", "QS", "质量管理体系"],
+          "related": ["质量工程", "SPC"],
+          "evidence": ["体系内外部审核经历", "IATF16949/ISO9001 内审员证书或审核项目"]
+        },
+        {
+          "name": "可靠性",
+          "aliases": ["可靠性验证", "可靠性工程", "reliability", "RA", "可靠性测试"],
+          "related": ["失效分析", "FMEA"],
+          "evidence": ["可靠性验证方案与报告（HTOL/TC/THB 等）", "可靠性失效定位项目"]
+        }
+      ]
+    },
+    {
+      "family_id": "yield_enhancement",
+      "label": "良率提升与缺陷分析",
+      "skills": [
+        {
+          "name": "良率提升",
+          "aliases": ["YE", "良率", "yield", "良率工程师", "yield enhancement", "ye"],
+          "related": ["良率分析", "缺陷分析", "工艺整合"],
+          "evidence": ["良率提升项目（量化良率指标）", "低良率批次攻关"]
+        },
+        {
+          "name": "良率分析",
+          "aliases": ["良率建模", "yield analysis", "良率数据分析"],
+          "related": ["良率提升", "电性测试", "SPC"],
+          "evidence": ["良率模型搭建", "良率报表/看板体系建设"]
+        },
+        {
+          "name": "良率爬坡",
+          "aliases": ["良率ramp", "ramp up", "量产爬坡", "良率 ramp"],
+          "related": ["量产导入", "良率提升"],
+          "evidence": ["新产品/新产线良率爬坡负责", "爬坡周期缩短指标"]
+        },
+        {
+          "name": "缺陷分析",
+          "aliases": ["缺陷分类", "defect", "缺陷", "defect analysis", "缺陷改善"],
+          "related": ["缺陷检测", "失效分析", "良率提升"],
+          "evidence": ["缺陷分类体系/缺陷库建设", "缺陷来源定位与改善项目"]
+        },
+        {
+          "name": "缺陷检测",
+          "aliases": ["KLA", "缺陷扫描", "defect inspection", "检测机台"],
+          "related": ["检测设备", "缺陷分析"],
+          "evidence": ["KLA 等检测程式（recipe）开发", "检测灵敏度/捕获率优化"]
+        },
+        {
+          "name": "失效分析",
+          "aliases": ["FA", "failure analysis", "失效分析工程师", "fa"],
+          "related": ["可靠性", "客诉处理", "缺陷分析"],
+          "evidence": ["FA 报告（EMMI/OBIRCH/FIB 等手段）", "客退品/低良率批次失效分析"]
+        },
+        {
+          "name": "电性测试",
+          "aliases": ["WAT", "CP", "晶圆测试", "电性参数", "wat"],
+          "related": ["良率分析", "器件"],
+          "evidence": ["WAT/CP 数据与良率关联分析", "电性参数异常攻关项目"]
+        }
+      ]
+    },
+    {
+      "family_id": "fpga",
+      "label": "FPGA 与嵌入式硬件",
+      "skills": [
+        {
+          "name": "FPGA",
+          "aliases": ["fpga", "现场可编程门阵列", "逻辑设计", "FPGA工程师", "FPGA开发"],
+          "related": ["Verilog", "时序约束", "高速接口"],
+          "evidence": ["FPGA 逻辑设计项目", "整板卡/子系统逻辑负责经历"]
+        },
+        {
+          "name": "Verilog",
+          "aliases": ["verilog", "SystemVerilog", "HDL", "硬件描述语言", "RTL", "systemverilog"],
+          "related": ["FPGA", "仿真验证"],
+          "evidence": ["RTL 代码开发与评审记录", "IP 核/功能模块开发"]
+        },
+        {
+          "name": "时序约束",
+          "aliases": ["时序收敛", "timing", "SDC", "时序分析", "时序约束编写"],
+          "related": ["FPGA", "高速接口"],
+          "evidence": ["时序约束编写与收敛项目", "时序违例攻关案例"]
+        },
+        {
+          "name": "高速接口",
+          "aliases": ["高速串行接口", "SerDes", "PCIe", "DDR", "GTX", "高速信号"],
+          "related": ["时序约束", "板级调试"],
+          "evidence": ["PCIe/DDR 等高速接口调试经历", "链路眼图/误码率指标交付"]
+        },
+        {
+          "name": "原型验证",
+          "aliases": ["FPGA原型", "FPGA原型验证", "prototype", "原型平台", "fpga原型"],
+          "related": ["FPGA", "仿真验证"],
+          "evidence": ["ASIC/SoC 原型验证平台搭建", "原型 bring-up 与联调"]
+        },
+        {
+          "name": "仿真验证",
+          "aliases": ["testbench", "仿真", "UVM", "ModelSim", "功能验证"],
+          "related": ["Verilog", "原型验证"],
+          "evidence": ["testbench 搭建", "仿真覆盖率报告"]
+        },
+        {
+          "name": "嵌入式硬件",
+          "aliases": ["嵌入式", "硬件工程师", "嵌入式硬件工程师", "MCU", "单片机"],
+          "related": ["FPGA", "原理图设计", "板级调试"],
+          "evidence": ["嵌入式板卡硬件设计项目", "硬件量产导入经历"]
+        },
+        {
+          "name": "原理图设计",
+          "aliases": ["原理图", "PCB", "硬件原理图", "schematic", "layout", "pcb"],
+          "related": ["嵌入式硬件", "高速接口"],
+          "evidence": ["原理图/PCB 设计项目", "高速板 layout 评审记录"]
+        },
+        {
+          "name": "板级调试",
+          "aliases": ["板级测试", "硬件调试", "bring-up", "单板调试", "bringup"],
+          "related": ["嵌入式硬件", "高速接口"],
+          "evidence": ["板级 bring-up 与调试记录", "硬件问题定位案例"]
+        },
+        {
+          "name": "FPGA器件",
+          "aliases": ["Xilinx", "Altera", "AMD Xilinx", "Intel FPGA", "国产FPGA", "紫光同创", "安路"],
+          "related": ["FPGA", "Verilog"],
+          "evidence": ["主流 FPGA 器件选型与开发经历", "国产化替代项目"]
         }
       ]
     }
