@@ -1,18 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, Database, MessageSquareText, Pin, ShieldAlert, Wifi, X } from 'lucide-react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { Activity, Database, LoaderCircle, MessageSquareText, Pin, ShieldAlert, Wifi, X } from 'lucide-react'
 import { api, AnalysisCatalogItem, AnalysisResult, AnalysisTemplate, AnalysisTemplateInput, AnalysisTrend, Bootstrap, Candidate, CandidateDetail, Dashboard, Job, JobDetail, Workbench, WorkbenchItem, Workflow } from '../api'
 import { Tab, tabs } from '../shared/tabs'
 import { Jobs } from '../pages/Jobs'
 import { Candidates } from '../pages/Candidates'
 import { Progress } from '../pages/Progress'
-import { JobPanel } from '../panels/JobPanel'
-import { CandidatePanel } from '../panels/CandidatePanel'
-import { WorkflowSurface } from '../workflows/WorkflowSurface'
-import { SourcingCandidatesPage } from '../pages/SourcingCandidatesPage'
 import { resolveWorkflowRevision } from '../workflow/workflowRevision'
-import { Diagnostics } from './Diagnostics'
-import { AnalysisWorkspace } from '../pages/AnalysisWorkspace'
-import { AnalysisTemplateDialog } from '../components/AnalysisTemplateDialog'
 import { AgentWorkspace } from '../agent/AgentWorkspace'
 import { AGENT_NAVIGATE_EVENT, notifyFullObjectClosed } from '../agent/navigation'
 import type { AgentContext, AgentReference } from '../agent/transport'
@@ -20,6 +13,17 @@ import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
 import { isBareDetached } from '../shared/nativeBridge'
 import { BareCandidateList } from '../agent/BareCandidateList'
 import { CANDIDATE_UPDATED_EVENT, type CandidateUpdatedDetail } from '../shared/candidateEvents'
+
+// 浮层/次屏组件按需懒加载（P2-2）：四个主 tab 首屏保持直出，点击打开面板时才拉取对应 chunk
+const JobPanel = lazy(() => import('../panels/JobPanel').then(module => ({ default: module.JobPanel })))
+const CandidatePanel = lazy(() => import('../panels/CandidatePanel').then(module => ({ default: module.CandidatePanel })))
+const WorkflowSurface = lazy(() => import('../workflows/WorkflowSurface').then(module => ({ default: module.WorkflowSurface })))
+const SourcingCandidatesPage = lazy(() => import('../pages/SourcingCandidatesPage').then(module => ({ default: module.SourcingCandidatesPage })))
+const AnalysisWorkspace = lazy(() => import('../pages/AnalysisWorkspace').then(module => ({ default: module.AnalysisWorkspace })))
+const AnalysisTemplateDialog = lazy(() => import('../components/AnalysisTemplateDialog').then(module => ({ default: module.AnalysisTemplateDialog })))
+const Diagnostics = lazy(() => import('./Diagnostics').then(module => ({ default: module.Diagnostics })))
+
+const panelFallback = <div className="empty"><LoaderCircle className="spin"/>面板加载中…</div>
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
@@ -436,7 +440,7 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  if (error && !boot) return <Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} />
+  if (error && !boot) return <Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>诊断页加载中…</div>}><Diagnostics error={error} retry={() => { setError(''); setRefreshKey(x => x + 1) }} /></Suspense>
 
   const pageTitle = sourcingCandidatesWorkflowId ? '寻访候选人名单' : analysis ? '分析结果' : tabs.find(x => x[0] === tab)?.[1]
   const todayLabel = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())
@@ -475,9 +479,11 @@ export function App() {
   if (isBareDetached()) {
     return <div className="shell bare-shell">
       {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
-      {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
-      {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
-      {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
+      <Suspense fallback={panelFallback}>
+        {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
+        {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+        {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
+      </Suspense>
       {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
       {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     </div>
@@ -497,8 +503,10 @@ export function App() {
       </header>
       {coreOffline && <div className="core-offline-banner" role="alert"><span>ASA Core 连接中断，检查本机服务后可点击重连</span><button className="button" onClick={() => void probeCore()}>重连</button></div>}
       <div className="content">
-        {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
-        {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
+        <Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>页面加载中…</div>}>
+          {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
+          {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
+        </Suspense>
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
@@ -517,10 +525,12 @@ export function App() {
         <section><header><Database/><h2>数据连接</h2></header><p>v3 统一库</p><span className="rail-online"><i/>实时连接</span></section>
       </>}
     </aside>}
-    {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
-    {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
-    {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
-    {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
+    <Suspense fallback={panelFallback}>
+      {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
+      {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+      {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
+      {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
+    </Suspense>
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}
   </div>
