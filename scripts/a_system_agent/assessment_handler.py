@@ -154,16 +154,20 @@ def get_candidate_assessment(self, candidate_id: int, job_id: int) -> dict[str, 
             fit = self._assessment_payload(fit_row)
             fit["source"] = "agent_assessment"
         else:
-            intel_row = conn.execute(
-                """
-                SELECT ci.* FROM job_candidates jc
-                JOIN candidate_intelligence ci ON ci.candidate_id = jc.source_candidate_id
-                WHERE jc.id=?
-                ORDER BY CASE WHEN ci.client=jc.raw_client AND ci.position=jc.raw_position THEN 0 ELSE 1 END,
-                         datetime(COALESCE(ci.last_evaluated_at, ci.updated_at)) DESC, ci.id DESC LIMIT 1
-                """,
-                (int(candidate_id),),
-            ).fetchone()
+            # candidate_intelligence 由外部 bootstrap 脚本建表（ensure_schema 不建），
+            # 未跑 bootstrap 的库缺表时应优雅降级（fit=None），不得 500。
+            intel_row = None
+            if _table_exists(conn, "candidate_intelligence"):
+                intel_row = conn.execute(
+                    """
+                    SELECT ci.* FROM job_candidates jc
+                    JOIN candidate_intelligence ci ON ci.candidate_id = jc.source_candidate_id
+                    WHERE jc.id=?
+                    ORDER BY CASE WHEN ci.client=jc.raw_client AND ci.position=jc.raw_position THEN 0 ELSE 1 END,
+                             datetime(COALESCE(ci.last_evaluated_at, ci.updated_at)) DESC, ci.id DESC LIMIT 1
+                    """,
+                    (int(candidate_id),),
+                ).fetchone()
             if intel_row is not None:
                 intel = dict(intel_row)
                 fit = {

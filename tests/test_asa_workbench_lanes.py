@@ -25,6 +25,14 @@ def db_path(tmp_path: Path) -> Path:
     finally:
         destination.close()
         source.close()
+    # 生产库副本里全部人岗关系都有评估记录，_pick_plain_candidate 需要"无评估、
+    # 未停止"的人岗关系来改造：拷贝后清空评估表，保证可改造候选确定存在。
+    conn = sqlite3.connect(target)
+    try:
+        conn.execute("DELETE FROM agent_candidate_assessments")
+        conn.commit()
+    finally:
+        conn.close()
     return target
 
 

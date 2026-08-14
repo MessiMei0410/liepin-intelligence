@@ -219,8 +219,16 @@ class DbCase(KbCase):
         self.db_temp = tempfile.TemporaryDirectory()
         self.db_path = Path(self.db_temp.name) / "asa.db"
         _create_db(self.db_path)
+        # company_kb 默认直连生产库（A_SYSTEM_DB 优先），测试必须隔离：
+        # 指向不存在的路径 → company_kb.get_profile 静默跳过，不读生产画像。
+        self._old_asm_env = os.environ.get("A_SYSTEM_DB")
+        os.environ["A_SYSTEM_DB"] = str(Path(self.db_temp.name) / "nonexistent.db")
 
     def tearDown(self) -> None:
+        if self._old_asm_env is None:
+            os.environ.pop("A_SYSTEM_DB", None)
+        else:
+            os.environ["A_SYSTEM_DB"] = self._old_asm_env
         self.db_temp.cleanup()
         super().tearDown()
 
