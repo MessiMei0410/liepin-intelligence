@@ -1590,6 +1590,56 @@ class CoreService:
                     recall["query_provenance"] = json_value(recall.pop("query_provenance_json", "[]"), [])
                     sourcing_recalls.append(recall)
             item["sourcing_recalls"] = sourcing_recalls
+            # Unified source lineage: keep Mapping task provenance alongside channel recalls.
+            # This is evidence only; it must not be inferred from task titles or URLs.
+            source_lineage: list[dict[str, Any]] = []
+            for row in conn.execute(
+                """
+                SELECT ce.id AS event_id,ce.source_id AS artifact_id,ce.raw_json,
+                       aa.workflow_id,aa.title
+                  FROM candidate_events ce
+             LEFT JOIN agent_artifacts aa
+                    ON aa.artifact_id=ce.source_id AND aa.artifact_type='mapping_task'
+                 WHERE ce.job_candidate_id=? AND ce.source_table='mapping_task'
+                 ORDER BY COALESCE(ce.event_time,'') DESC,ce.id DESC
+                """,
+                (candidate_id,),
+            ).fetchall():
+                raw = json_value(row["raw_json"], {})
+                source_lineage.append(
+                    {
+                        "source_type": "mapping",
+                        "workflow_id": str(row["workflow_id"] or ""),
+                        "artifact_id": str(row["artifact_id"] or ""),
+                        "artifact_title": str(row["title"] or ""),
+                        "candidate_index": raw.get("candidate_index") if isinstance(raw, dict) else None,
+                        "event_id": row["event_id"],
+                    }
+                )
+            for attribution in attributions:
+                source_lineage.append(
+                    {
+                        "source_type": "sourcing",
+                        "workflow_id": str(attribution.get("workflow_id") or ""),
+                        "strategy_artifact_id": str(attribution.get("strategy_artifact_id") or ""),
+                        "channel": str(attribution.get("channel") or ""),
+                        "source_query": str(attribution.get("source_query") or ""),
+                        "source_round": attribution.get("source_round"),
+                    }
+                )
+            for recall in sourcing_recalls:
+                source_lineage.append(
+                    {
+                        "source_type": "sourcing_recall",
+                        "workflow_id": str(recall.get("workflow_id") or ""),
+                        "strategy_artifact_id": str(recall.get("strategy_artifact_id") or ""),
+                        "channel": str(recall.get("channel") or ""),
+                        "source_query": str(recall.get("source_query") or ""),
+                        "source_round": recall.get("source_round"),
+                        "query_cell_id": recall.get("query_cell_id"),
+                    }
+                )
+            item["source_lineage"] = source_lineage
             report_rows = conn.execute(
                 """
                 SELECT DISTINCT a.id,a.artifact_id,a.workflow_id,a.artifact_type,a.title,
@@ -2843,11 +2893,13 @@ class CoreService:
                 LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
                 LEFT JOIN people p ON p.id=jc.person_id
                 WHERE a.job_id=?
-                ORDER BY CASE a.status WHEN 'pending' THEN 0 WHEN 'applied' THEN 1 ELSE 2 END, a.id DESC
+                ORDER BY CASE a.status
+                    WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 WHEN 'applied' THEN 2 ELSE 3
+                END, a.id DESC
                 """,
                 (job_id,),
             ).fetchall()
-            summary = {"pending": 0, "applied": 0, "ignored": 0}
+            summary = {"pending": 0, "accepted": 0, "applied": 0, "ignored": 0}
             items: list[dict[str, Any]] = []
             current_pool: dict[str, int] | None = None
             for row in rows:
@@ -2878,6 +2930,7 @@ class CoreService:
                     "id": int(row["id"]),
                     "job_id": int(row["job_id"]),
                     "candidate_id": int(row["candidate_id"]) if row["candidate_id"] else None,
+                    "candidate_name": row["candidate_name"] or "",
                     "candidate_display_name": row["candidate_name"] or "",
                     "adjust_type": row["adjust_type"],
                     "value": row["value"],
@@ -2885,8 +2938,11 @@ class CoreService:
                     "confidence": float(row["confidence"] or 0.5),
                     "status": status,
                     "created_at": row["created_at"] or "",
+                    "accepted_at": row["accepted_at"] or "",
                     "applied_at": row["applied_at"] or "",
                     "applied_round": int(row["applied_round"]) if row["applied_round"] else None,
+                    "applied_workflow_id": row["applied_workflow_id"] or "",
+                    "applied_artifact_id": row["applied_artifact_id"] or "",
                     "effect": delta,
                 })
             return {"ok": True, "items": items, "summary": summary}
@@ -2918,21 +2974,64 @@ class CoreService:
             conn.close()
 
     def confirm_sourcing_adjustment(self, adjustment_id: int) -> dict[str, Any]:
-        """顾问手动确认：pending → applied（与自动应用语义相同）。"""
+        """顾问采纳调整：pending → accepted；策略产物落库后才能进入 applied。"""
         conn = connect(self.db_path)
         try:
-            cursor = conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT status FROM agent_sourcing_adjustments WHERE id=?",
+                (adjustment_id,),
+            ).fetchone()
+            if current is None:
+                raise LookupError("调整指令不存在")
+            status = str(current["status"] or "")
+            already_accepted = status == "accepted"
+            if status == "pending":
+                conn.execute(
+                    """
+                    UPDATE agent_sourcing_adjustments
+                       SET status='accepted', accepted_at=datetime('now','localtime')
+                     WHERE id=? AND status='pending'
+                    """,
+                    (adjustment_id,),
+                )
+            elif not already_accepted:
+                raise LookupError("调整指令已应用或已忽略，不能再次采纳")
+            row = conn.execute(
                 """
-                UPDATE agent_sourcing_adjustments
-                   SET status='applied', applied_at=datetime('now','localtime')
-                 WHERE id=? AND status='pending'
+                SELECT a.*,p.display_name AS candidate_name
+                  FROM agent_sourcing_adjustments a
+                  LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
+                  LEFT JOIN people p ON p.id=jc.person_id
+                 WHERE a.id=?
                 """,
                 (adjustment_id,),
-            )
+            ).fetchone()
             conn.commit()
-            if cursor.rowcount == 0:
-                raise LookupError("调整指令不存在或已不是待确认状态")
-            return {"ok": True, "id": adjustment_id, "status": "applied"}
+            return {
+                "ok": True,
+                "id": int(row["id"]),
+                "job_id": int(row["job_id"]),
+                "candidate_id": int(row["candidate_id"]) if row["candidate_id"] else None,
+                "candidate_name": row["candidate_name"] or "",
+                "candidate_display_name": row["candidate_name"] or "",
+                "adjust_type": row["adjust_type"],
+                "value": row["value"],
+                "rationale": row["rationale"] or "",
+                "confidence": float(row["confidence"] or 0.5),
+                "status": "accepted",
+                "created_at": row["created_at"] or "",
+                "accepted_at": row["accepted_at"] or "",
+                "applied_at": None,
+                "applied_round": None,
+                "applied_workflow_id": None,
+                "applied_artifact_id": None,
+                "effect": None,
+                "already_accepted": already_accepted,
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -2948,10 +3047,42 @@ class CoreService:
                 """,
                 (adjustment_id,),
             )
-            conn.commit()
             if cursor.rowcount == 0:
                 raise LookupError("调整指令不存在或已不是待确认状态")
-            return {"ok": True, "id": adjustment_id, "status": "ignored"}
+            row = conn.execute(
+                """
+                SELECT a.*,p.display_name AS candidate_name
+                  FROM agent_sourcing_adjustments a
+                  LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
+                  LEFT JOIN people p ON p.id=jc.person_id
+                 WHERE a.id=?
+                """,
+                (adjustment_id,),
+            ).fetchone()
+            conn.commit()
+            return {
+                "ok": True,
+                "id": int(row["id"]),
+                "job_id": int(row["job_id"]),
+                "candidate_id": int(row["candidate_id"]) if row["candidate_id"] else None,
+                "candidate_name": row["candidate_name"] or "",
+                "candidate_display_name": row["candidate_name"] or "",
+                "adjust_type": row["adjust_type"],
+                "value": row["value"],
+                "rationale": row["rationale"] or "",
+                "confidence": float(row["confidence"] or 0.5),
+                "status": "ignored",
+                "created_at": row["created_at"] or "",
+                "accepted_at": row["accepted_at"] or "",
+                "applied_at": row["applied_at"] or None,
+                "applied_round": int(row["applied_round"]) if row["applied_round"] else None,
+                "applied_workflow_id": row["applied_workflow_id"] or None,
+                "applied_artifact_id": row["applied_artifact_id"] or None,
+                "effect": None,
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

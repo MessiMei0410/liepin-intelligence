@@ -684,10 +684,21 @@ class StrategyV2StorageTest(AgentDbCase):
         assert "strategy_v2" in row[1]
 
     def test_invalid_v2_returns_failed_diagnostic_without_valid_strategy(self) -> None:
+        self._create_sourcing_adjustments()
+        conn = sqlite3.connect(self.db_path)
+        adjustment_id = conn.execute(
+            """
+            INSERT INTO agent_sourcing_adjustments
+                (job_id,candidate_id,adjust_type,value,rationale,status,accepted_at)
+            VALUES (10,30,'exclude_company','ASM','候选人明确停止','accepted','2026-08-14 10:00:00')
+            """
+        ).lastrowid
+        conn.commit()
+        conn.close()
         original = strategy_v2.build_strategy_v2
         try:
             strategy_v2.build_strategy_v2 = lambda *args, **kwargs: {"schema_version": "strategy_v2"}  # type: ignore[assignment]
-            result = self.service.capability_runtime.run_search_strategy({"type": "job", "id": 30}, {"objective": "补充候选人"})
+            result = self.service.capability_runtime.run_search_strategy({"type": "job", "id": 10}, {"objective": "补充候选人"})
         finally:
             strategy_v2.build_strategy_v2 = original  # type: ignore[assignment]
         assert "strategy_v2" not in result
@@ -704,8 +715,16 @@ class StrategyV2StorageTest(AgentDbCase):
             "recoverable": True,
             "reason": result["postcondition"]["reason"],
         }
+        conn = sqlite3.connect(self.db_path)
+        try:
+            status = conn.execute(
+                "SELECT status FROM agent_sourcing_adjustments WHERE id=?", (adjustment_id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == "accepted"
 
-    def test_strategy_learning_context_reads_pending_adjustments_before_close(self) -> None:
+    def _create_sourcing_adjustments(self) -> None:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(
             """
@@ -719,17 +738,34 @@ class StrategyV2StorageTest(AgentDbCase):
                 confidence REAL DEFAULT 0.5,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT,
+                accepted_at TEXT,
                 applied_at TEXT,
                 applied_round INTEGER,
-                dedupe_key TEXT UNIQUE
+                dedupe_key TEXT UNIQUE,
+                baseline_json TEXT,
+                applied_workflow_id TEXT,
+                applied_artifact_id TEXT
             );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_strategy_learning_context_reads_only_accepted_adjustments(self) -> None:
+        self._create_sourcing_adjustments()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """
+            INSERT INTO agent_sourcing_adjustments
+                (job_id,candidate_id,adjust_type,value,rationale,status)
+            VALUES (10,30,'exclude_company','ASM','候选人明确停止','accepted')
             """
         )
         conn.execute(
             """
             INSERT INTO agent_sourcing_adjustments
                 (job_id,candidate_id,adjust_type,value,rationale,status)
-            VALUES (10,30,'exclude_company','ASM','候选人明确停止','pending')
+            VALUES (10,30,'add_keyword','精密设备','等待顾问判断','pending')
             """
         )
         conn.commit()
@@ -737,8 +773,100 @@ class StrategyV2StorageTest(AgentDbCase):
 
         job = self.service.capability_runtime._job({"type": "job", "id": 10})
         learning = self.service.capability_runtime._strategy_learning_context(job)
-        assert learning["stop_note_adjustments"]
-        assert learning["stop_note_adjustments"][0]["value"] == "ASM"
+        assert [item["value"] for item in learning["stop_note_adjustments"]] == ["ASM"]
+
+    def test_successful_strategy_consumes_only_frozen_accepted_ids_after_artifact_persistence(self) -> None:
+        self._create_sourcing_adjustments()
+        conn = sqlite3.connect(self.db_path)
+        first_id = conn.execute(
+            """
+            INSERT INTO agent_sourcing_adjustments
+                (job_id,candidate_id,adjust_type,value,rationale,status,accepted_at)
+            VALUES (10,30,'exclude_company','ASM','候选人明确停止','accepted','2026-08-14 10:00:00')
+            """
+        ).lastrowid
+        conn.commit()
+        conn.close()
+
+        original_execute = self.service._execute_workflow_capability
+        inserted_during_generation: list[int] = []
+
+        def execute_with_concurrent_adjustment(capability_id: str, context: dict, inputs: dict) -> dict:
+            result = original_execute(capability_id, context, inputs)
+            if capability_id == "search_strategy" and not inserted_during_generation:
+                concurrent = sqlite3.connect(self.db_path)
+                try:
+                    inserted_during_generation.append(int(concurrent.execute(
+                        """
+                        INSERT INTO agent_sourcing_adjustments
+                            (job_id,candidate_id,adjust_type,value,rationale,status,accepted_at)
+                        VALUES (10,30,'add_keyword','光学平台','策略生成期间新增','accepted',datetime('now'))
+                        """
+                    ).lastrowid))
+                    concurrent.commit()
+                finally:
+                    concurrent.close()
+            return result
+
+        self.service._execute_workflow_capability = execute_with_concurrent_adjustment  # type: ignore[method-assign]
+        try:
+            goal = self.service.create_goal("给长越科技机械高级工程师补充10位合适人选", {"type": "job", "id": 10})
+            workflow_id = goal["workflow"]["workflow_id"]
+            self.service.start_workflow(workflow_id)
+            state = self.wait_for(workflow_id, {"waiting_approval", "failed", "blocked", "completed"}, timeout=12)
+        finally:
+            self.service._execute_workflow_capability = original_execute  # type: ignore[method-assign]
+
+        assert state["workflow"]["status"] == "waiting_approval", state["workflow"]
+        assert inserted_during_generation
+        concurrent_id = inserted_during_generation[0]
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = {
+                int(row["id"]): dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM agent_sourcing_adjustments WHERE id IN (?,?)",
+                    (first_id, concurrent_id),
+                ).fetchall()
+            }
+            strategy = conn.execute(
+                """
+                SELECT artifact_id,metadata_json FROM agent_artifacts
+                 WHERE workflow_id=? AND artifact_type='search_strategy'
+                 ORDER BY id DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            step = conn.execute(
+                """
+                SELECT output_json FROM agent_workflow_steps
+                 WHERE workflow_id=? AND capability_id='search_strategy'
+                 ORDER BY id DESC LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert rows[first_id]["status"] == "applied"
+        assert rows[first_id]["applied_workflow_id"] == workflow_id
+        assert rows[first_id]["applied_artifact_id"] == strategy["artifact_id"]
+        assert rows[first_id]["applied_round"] == 1
+        assert json.loads(rows[first_id]["baseline_json"])["total"] == 1
+        assert rows[concurrent_id]["status"] == "accepted"
+        assert rows[concurrent_id]["applied_workflow_id"] is None
+        metadata = json.loads(strategy["metadata_json"])
+        assert metadata["sourcing_adjustment_input"] == [{
+            "id": first_id,
+            "adjust_type": "exclude_company",
+            "value": "ASM",
+            "rationale": "候选人明确停止",
+        }]
+        receipt = json.loads(step["output_json"])["sourcing_adjustment_consumption"]
+        assert receipt["status"] == "applied"
+        assert receipt["applied_ids"] == [first_id]
+        assert receipt["not_applied_ids"] == []
 
     def test_workflow_surfaces_strategy_validation_error_instead_of_adapter_contract_error(self) -> None:
         original = strategy_v2.build_strategy_v2

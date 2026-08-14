@@ -309,6 +309,54 @@ class SourcingAdjustmentDecision(WriteEnvelope):
     pass
 
 
+class SourcingAdjustmentEffectResponse(BaseModel):
+    baseline: dict[str, int]
+    current: dict[str, int]
+    diff: dict[str, int]
+
+
+class SourcingAdjustmentItemResponse(BaseModel):
+    id: int
+    job_id: int
+    candidate_id: int | None = None
+    candidate_name: str = ""
+    candidate_display_name: str = ""
+    adjust_type: Literal[
+        "add_keyword", "remove_keyword", "exclude_company", "add_company",
+        "add_filter", "adjust_salary_range",
+    ]
+    value: str
+    rationale: str = ""
+    confidence: float = 0.5
+    status: Literal["pending", "accepted", "applied", "ignored"]
+    created_at: str = ""
+    accepted_at: str | None = None
+    applied_at: str | None = None
+    applied_round: int | None = None
+    applied_workflow_id: str | None = None
+    applied_artifact_id: str | None = None
+    effect: SourcingAdjustmentEffectResponse | None = None
+
+
+class SourcingAdjustmentSummaryResponse(BaseModel):
+    pending: int = 0
+    accepted: int = 0
+    applied: int = 0
+    ignored: int = 0
+
+
+class SourcingAdjustmentListResponse(BaseModel):
+    ok: bool = True
+    items: list[SourcingAdjustmentItemResponse] = Field(default_factory=list)
+    summary: SourcingAdjustmentSummaryResponse
+
+
+class SourcingAdjustmentDecisionResponse(SourcingAdjustmentItemResponse):
+    ok: bool = True
+    already_accepted: bool = False
+    receipt: dict[str, Any] | None = None
+
+
 class ConsultantRecommendationPreflight(WriteEnvelope):
     candidate_id: int
 
@@ -1306,21 +1354,25 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         return core.consultant_recommendation_metrics(job_id)
 
     @app.get("/api/v1/jobs/{job_id}/sourcing-adjustments")
-    def job_sourcing_adjustments(job_id: int) -> dict[str, Any]:
+    def job_sourcing_adjustments(job_id: int) -> SourcingAdjustmentListResponse:
         # 停止备注 → 寻访调整指令列表；岗位不存在时返回空列表（不抛 404）。
-        return core.list_sourcing_adjustments(job_id)
+        return SourcingAdjustmentListResponse.model_validate(core.list_sourcing_adjustments(job_id))
 
     @app.post("/api/v1/sourcing-adjustments/{adjustment_id}/confirm")
-    def sourcing_adjustment_confirm(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
-        # 顾问手动确认调整：pending → applied。
-        return idem("sourcing_adjustment.confirm", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
-                    lambda: core.confirm_sourcing_adjustment(adjustment_id))
+    def sourcing_adjustment_confirm(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")) -> SourcingAdjustmentDecisionResponse:
+        # 顾问采纳调整：pending → accepted；applied 只由成功落库的策略产物写入。
+        return SourcingAdjustmentDecisionResponse.model_validate(
+            idem("sourcing_adjustment.confirm", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
+                 lambda: core.confirm_sourcing_adjustment(adjustment_id))
+        )
 
     @app.post("/api/v1/sourcing-adjustments/{adjustment_id}/ignore")
-    def sourcing_adjustment_ignore(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
+    def sourcing_adjustment_ignore(adjustment_id: int, body: SourcingAdjustmentDecision, idempotency_key: str = Header(alias="Idempotency-Key")) -> SourcingAdjustmentDecisionResponse:
         # 顾问忽略调整：pending → ignored。
-        return idem("sourcing_adjustment.ignore", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
-                    lambda: core.ignore_sourcing_adjustment(adjustment_id))
+        return SourcingAdjustmentDecisionResponse.model_validate(
+            idem("sourcing_adjustment.ignore", body, idempotency_key, "sourcing_adjustment", str(adjustment_id),
+                 lambda: core.ignore_sourcing_adjustment(adjustment_id))
+        )
 
     @app.get("/api/v1/candidates/{candidate_id}/recommendation-packages")
     def candidate_recommendation_packages(candidate_id: int) -> dict[str, Any]:
