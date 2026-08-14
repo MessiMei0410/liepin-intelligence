@@ -26,8 +26,11 @@ jobs:
         #   - 依赖本机 skill 目录模块 cdp_client（Chrome CDP）
         #   - 依赖 macOS 专有命令 /usr/bin/security（Keychain）
         #   - 依赖本机才安装的 cv2/pptx 等包
-        # --deselect：单测级本机依赖（依赖本机 skill 脚本生成 docx）。P1 已修复
-        #   s6/s7 的 schema 回退与 company_kb 隔离，相应 deselect 已移除。
+        # --deselect：单测级环境依赖。
+        #   - docx 生成：依赖本机 skill 脚本
+        #   - s6 AssessmentApiTest::test_post_get_404_409_idempotent：create_app 构造 LLM
+        #     时 llm.py 用 /usr/bin/security 读 Keychain（macOS 专有），ubuntu 必然失败
+        #     （schema 回退守卫已修复，P1 后仅剩此环境依赖）
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: |
           python3 -m pytest tests/ -q \
@@ -82,7 +85,8 @@ jobs:
             --ignore tests/test_talent_pool_intake.py \
             --ignore tests/test_wechat_attachment_reading.py \
             --ignore tests/test_xsaas_candidate_search.py \
-            --deselect tests/test_a_system_agent_workflow.py::WorkflowEngineTest::test_real_document_runners_generate_audited_docx
+            --deselect tests/test_a_system_agent_workflow.py::WorkflowEngineTest::test_real_document_runners_generate_audited_docx \
+            --deselect tests/test_candidate_assessment_s6.py::AssessmentApiTest::test_post_get_404_409_idempotent
 
   frontend-test:
     runs-on: ubuntu-latest
