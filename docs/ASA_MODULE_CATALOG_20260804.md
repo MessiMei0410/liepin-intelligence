@@ -402,3 +402,9 @@
 
 - `docs/P3a_推荐包升版_设计.md`（评估指纹 + preflight/commit 幂等升版，68 行）当前完好存在于 main：直推 main 的 `6035da7` 及其 revert `8e5ad59` 已在历史整理中移除，`6035da7` 内容经 PR #1 合并链路保留。
 - 实施前提不变：等 P2-1 `capability_runtime` 拆分完成后由后端侧实施（避免 `service.py` 并发改动冲突）；前端仅有只读“证据已过期”提示，不伪造升版入口。
+
+## 五十一、待客户 lane token 覆盖真实数据复核（2026-08-14，P3-e 闭环）
+
+- 复核对象：`analytics.py` 的 `CLIENT_WAIT_TOKENS`（已推荐/待客户/客户反馈/客户确认/待反馈/报告已发）对 `clean_stage + last_event_type + last_event_summary` 的文本命中。
+- 结论：覆盖链路完整无缺陷——顾问确认「推给客户」动作落库 `clean_stage=已推荐给客户`（`service_candidate_actions.py` 阶段映射表），token「已推荐」必命中，lane 正确归入 `waiting_client`。
+- 真实库（v3，只读复核）当前最远阶段为 已触达（32）/S3 已联系待回复（1），尚无任何「已推荐给客户」记录，lane 为 0 是业务真实现状而非口径缺陷。此项后续不必再列为待办。
