@@ -8,7 +8,8 @@
 //   0
 //   职责业绩：
 //   搭建硬件研发数据库：…
-// 解析失败/摘要级履历（如 280 字摘要）→ 返回空数组，调用方回退到标题行展示。
+// 解析失败（无工作经历章节）→ 返回空数组，调用方回退到标题行展示；
+// 摘要级履历（搜索卡，无职责业绩块）保留 公司+期间+职位 段正常展示。
 
 export type WorkDetailBlock = { company: string; period: string; role: string; description: string[] }
 export type ProjectDetailBlock = { title: string; period: string; role: string; company: string; description: string[]; duties: string[]; achievements: string[] }
@@ -30,6 +31,27 @@ const XSAAS_BAD_PERIOD_RE = /^(?:\d{4}[./年]\s*\d{1,2}(?:月)?\s*[-至]\s*0\.?\
 const XSAAS_WORK_FIELD_RE = /^(部门\/职位|汇报对象\/下属|工作内容\/业绩|工作业绩|职位类别|离职所需时间)[：:]?$/
 // 路由信号：猎聘履历也会出现“职位类别：”，不能作为 X-SaaS 判型依据，只用强信号字段。
 const XSAAS_DETECT_RE = /^(部门\/职位|汇报对象\/下属|工作内容\/业绩|离职所需时间)[：:]?$/
+// 猎聘搜索卡/营销/反馈等页面 chrome 混入 full_text 时的过滤词表。
+// 「完整原始履历」折叠区与工作经历解析共用，避免 UI 元素被当成履历内容或职位。
+const CHROME_LINE_RES = [
+  /^立即沟通$/,
+  /^向TA索要$/,
+  /金领券/,
+  /^已售出/,
+  /对方已上传附件简历/,
+  /搜索匹配到的简历不够精准/,
+  /点击这里进行反馈/,
+  /简历不匹配/,
+]
+export function isResumeChromeLine(line: string): boolean {
+  const text = String(line || '').trim()
+  return !!text && CHROME_LINE_RES.some(re => re.test(text))
+}
+export function filterResumeChromeLines(text: string): string {
+  return String(text || '').split(/\r?\n/).filter(line => !isResumeChromeLine(line)).join('\n')
+}
+// 猎聘占位行：「本科毕业后4年7个月未填写工作经历」是系统提示，不是职位。
+const PLACEHOLDER_RE = /未填写/
 const EDUCATION_DEGREE_RE = /^(博士后|博士|硕士|本科|大专|中专|高中|其它|其他)$/
 const EDUCATION_PERIOD_RE = /^(?:\d{4}[./年]\s*\d{1,2}(?:月)?\s*[-至]\s*(?:\d{4}[./年]\s*\d{1,2}(?:月)?|至今)|\d{4}\s*[-至]\s*(?:\d{4}|至今))$/
 const SCHOOL_RE = /(?:大学|学院|学校|附中|University|College|School|Institute|Academy|Universit)$/i
@@ -73,6 +95,7 @@ function parseLiepinWorkBlocks(lines: string[]): WorkDetailBlock[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (SECTION_END_RE.test(line) || (!inDuty && SECTION_END_CONTENT_RE.test(line))) break
+    if (isResumeChromeLine(line) || PLACEHOLDER_RE.test(line)) continue
     const isHeader = i + 1 < lines.length && PERIOD_RE.test(lines[i + 1])
     if (isHeader) {
     if (current) blocks.push(current)
@@ -96,7 +119,8 @@ function parseLiepinWorkBlocks(lines: string[]): WorkDetailBlock[] {
     current.role = line  // 行业/职位多行时职位取最后一行
   }
   if (current) blocks.push(current)
-  return blocks.filter(b => b.description.length > 0)
+  // 摘要级履历（搜索卡）没有「职责业绩：」块：公司+期间齐全的段保留展示，不再整条丢弃。
+  return blocks.filter(b => b.description.length > 0 || b.period.length > 0)
 }
 
 // X-SaaS 工作经历格式（示例）：
@@ -171,6 +195,23 @@ function dedupeWorkBlocks(blocks: WorkDetailBlock[]): WorkDetailBlock[] {
     kept.push({ ...best, period: XSAAS_BAD_PERIOD_RE.test(best.period) ? '时间不详' : best.period })
   }
   return kept
+}
+
+// 章节标题（裸标题或带（共N段）计数）；“项目经历：xxx”这类带正文行不算标题。
+const RESUME_SECTION_HEADING_RE = /^(工作经历|工作经验|项目经历|项目经验|教育经历|教育背景|技能(?:特长)?|语言能力|自我评价|附件简历|求职意向|求职期望)(?:[：:]?\s*$|（[^）]*）$)/
+// 摘要级履历常只有 full_text：education_text/project_text 为空时，从 full_text 切出对应章节正文补救。
+export function extractResumeSection(fullText: string, section: 'education' | 'project'): string {
+  const targetRe = section === 'education' ? /^教育经历|^教育背景/ : /^项目经历|^项目经验/
+  const lines = String(fullText || '').split(/\r?\n/).map(line => line.trim())
+  const start = lines.findIndex(line => targetRe.test(line) && RESUME_SECTION_HEADING_RE.test(line))
+  if (start < 0) return ''
+  const out: string[] = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (line && RESUME_SECTION_HEADING_RE.test(line) && !targetRe.test(line)) break
+    if (line && !isResumeChromeLine(line)) out.push(line)
+  }
+  return out.join('\n')
 }
 
 // 项目经历采用“项目名 + 下一行期间”作为分段锚点；字段标题后的多行文字仍属于同一个项目。
