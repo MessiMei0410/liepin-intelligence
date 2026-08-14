@@ -3153,9 +3153,9 @@ class RecruitingCapabilityRuntime:
                     (job["id"],),
                 ).fetchall()
             ] if self._table(conn, "agent_sourcing_attributions") and self._table(conn, "agent_sourcing_feedback") else []
-            pending_adjustments: list[dict[str, Any]] = []
+            accepted_adjustments: list[dict[str, Any]] = []
             if self._table(conn, "agent_sourcing_adjustments"):
-                pending_adjustments = [
+                accepted_adjustments = [
                     _row(row)
                     for row in conn.execute(
                         """
@@ -3163,7 +3163,7 @@ class RecruitingCapabilityRuntime:
                         FROM agent_sourcing_adjustments a
                         LEFT JOIN job_candidates jc ON jc.id=a.candidate_id
                         LEFT JOIN people p ON p.id=jc.person_id
-                        WHERE a.job_id=? AND a.status='pending'
+                        WHERE a.job_id=? AND a.status='accepted'
                         ORDER BY a.id
                         """,
                         (job["id"],),
@@ -3182,7 +3182,7 @@ class RecruitingCapabilityRuntime:
             "approved_memories": memories.get("memories") or [] if memories.get("mode") == "active" else [],
             "memory_mode": memories.get("mode") or "off",
             "memory_hits": len(memories.get("memories") or []),
-            "stop_note_adjustments": pending_adjustments,
+            "stop_note_adjustments": accepted_adjustments,
         }
 
     _STOP_NOTE_ADJUSTMENT_LABELS: dict[str, str] = {
@@ -3196,7 +3196,7 @@ class RecruitingCapabilityRuntime:
 
     @staticmethod
     def _stop_note_adjustments_summary(adjustments: list[dict[str, Any]]) -> str:
-        """把 pending 调整格式化为策略 prompt 可消费的文本摘要。"""
+        """把顾问已采纳的调整格式化为策略 prompt 可消费的文本摘要。"""
         if not adjustments:
             return ""
         parts: list[str] = []
@@ -3211,60 +3211,6 @@ class RecruitingCapabilityRuntime:
             rationale = str(item.get("rationale") or "")[:60]
             parts.append(f"{label}：{value}" + (f"（来源：{rationale}）" if rationale else ""))
         return "；".join(parts)
-
-    def _apply_stop_note_adjustments(self, job_id: int, workflow_id: str) -> None:
-        """策略生成成功后，将本轮消费的 pending 调整标记为 applied，并记录应用时候选池基线。失败静默。"""
-        if not job_id:
-            return
-        try:
-            conn = self.service._connect()
-            try:
-                # 轮次 = 本工作流已完成 search_strategy 步数（含当前步），无工作流时默认 1。
-                if workflow_id:
-                    round_row = conn.execute(
-                        "SELECT COUNT(*) AS n FROM agent_workflow_steps WHERE workflow_id=? AND capability_id='search_strategy' AND status='completed'",
-                        (workflow_id,),
-                    ).fetchone()
-                    applied_round = (int(round_row["n"] if round_row else 0) or 0) + 1
-                else:
-                    applied_round = 1
-                # 应用时候选池基线快照（供"调整前后效果对比"追踪）。
-                baseline = self._candidate_pool_baseline(conn, job_id)
-                conn.execute(
-                    """
-                    UPDATE agent_sourcing_adjustments
-                       SET status='applied', applied_at=datetime('now','localtime'), applied_round=?,
-                           baseline_json=?
-                     WHERE job_id=? AND status='pending'
-                    """,
-                    (applied_round, json.dumps(baseline, ensure_ascii=False), job_id),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception:
-            pass
-
-    @staticmethod
-    def _candidate_pool_baseline(conn: sqlite3.Connection, job_id: int) -> dict[str, int]:
-        """候选池质量基线：总池 / 待复核 / 已触达 / 已停止（按 clean_stage 口径）。"""
-        rows = conn.execute(
-            """
-            SELECT
-              COUNT(*) AS total,
-              SUM(clean_stage LIKE 'S1%' OR clean_stage LIKE 'X1%' OR clean_stage LIKE 'H1%' OR clean_stage LIKE 'H5%' OR clean_stage LIKE 'S2%') AS pending_review,
-              SUM(clean_stage LIKE 'S3%' OR clean_stage LIKE 'S4%' OR clean_stage LIKE 'S5%' OR clean_stage LIKE 'S6%' OR clean_stage LIKE 'S7%' OR clean_stage LIKE 'S8%' OR clean_stage LIKE 'S9%' OR clean_stage LIKE 'S10%' OR clean_stage LIKE 'S11%' OR clean_stage LIKE 'S12%' OR clean_stage LIKE 'S13%' OR clean_stage LIKE 'X2%' OR clean_stage LIKE 'X3%' OR clean_stage LIKE 'X4%' OR clean_stage LIKE 'X5%') AS contacted,
-              SUM(clean_stage LIKE '%停止%' OR clean_stage LIKE '%淘汰%' OR clean_stage LIKE '%不通过%') AS stopped
-            FROM job_candidates WHERE job_id=?
-            """,
-            (job_id,),
-        ).fetchone()
-        return {
-            "total": int(rows["total"] or 0),
-            "pending_review": int(rows["pending_review"] or 0),
-            "contacted": int(rows["contacted"] or 0),
-            "stopped": int(rows["stopped"] or 0),
-        }
 
     @staticmethod
     def _normalize_strategy_entries(values: Any) -> list[dict[str, str]]:
@@ -3493,6 +3439,16 @@ class RecruitingCapabilityRuntime:
                 "source": "v3_fallback",
             }
         learning = self._strategy_learning_context(job)
+        sourcing_adjustment_input = [
+            {
+                "id": int(item["id"]),
+                "adjust_type": str(item.get("adjust_type") or ""),
+                "value": str(item.get("value") or ""),
+                "rationale": str(item.get("rationale") or ""),
+            }
+            for item in (learning.get("stop_note_adjustments") or [])
+            if isinstance(item, dict) and item.get("id") is not None
+        ]
         # S4-1：策略生成前先定级（L1/L2/L3）并盘点四锚点；顾问在 Copilot 侧的
         # 放行/锚点回复经工作流上下文 strategy_clarification 传入（ consultant_override /
         # consultant_answers ），推断项按 PRD §1 保持 inferred:true + confidence。
@@ -3690,8 +3646,14 @@ class RecruitingCapabilityRuntime:
             result["strategy_v2"] = v2
             result["query_plan_v1"] = query_plan
             result["golden_candidate_replay_v1"] = golden_replay
-            # 策略生成成功：消费本轮 stop_note_adjustments。
-            self._apply_stop_note_adjustments(int(job.get("id") or 0), str(inputs.get("workflow_id") or ""))
+            if sourcing_adjustment_input:
+                # 这里只冻结本轮真实输入。状态转换由 WorkflowEngine 在策略产物落库事务内完成。
+                result["sourcing_adjustment_consumption"] = {
+                    "status": "awaiting_artifact_persistence",
+                    "job_id": int(job.get("id") or 0),
+                    "adjustment_ids": [item["id"] for item in sourcing_adjustment_input],
+                    "input": sourcing_adjustment_input,
+                }
             content = "# 多渠道寻访策略（strategy_v2）\n\n```json\n" + json.dumps(v2, ensure_ascii=False, indent=2) + "\n```"
             result["artifacts"] = [
                 self._artifact(
@@ -3703,6 +3665,7 @@ class RecruitingCapabilityRuntime:
                         "golden_candidate_replay_v1": golden_replay,
                         "schema_version": strategy_v2.STRATEGY_V2_VERSION,
                         "coverage_report": coverage_report,
+                        "sourcing_adjustment_input": sourcing_adjustment_input,
                     },
                 )
             ]

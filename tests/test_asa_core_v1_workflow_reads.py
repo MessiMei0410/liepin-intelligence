@@ -215,7 +215,7 @@ def test_workflow_candidates_pagination(env: dict) -> None:
         for item in everything:
             assert set(item) == {
                 "id", "person_id", "name", "company", "title", "fit_score", "fit_level",
-                "recommendation", "stage", "flow_bucket", "status", "assessed", "attribution", "updated_at",
+                "recommendation", "stage", "flow_bucket", "status", "assessed", "attribution", "source_lineage", "updated_at",
                 "resume_source_type", "resume_capture_status", "resume_captured_at", "intention",
             }
             name = item["name"]
@@ -225,6 +225,91 @@ def test_workflow_candidates_pagination(env: dict) -> None:
         assert any(item["fit_score"] is not None for item in everything)
         assert any(item["attribution"] for item in everything)
         print(f"\n[candidates] total={env['expected_total']} first_page_bytes={len(json.dumps(first, ensure_ascii=False))}")
+
+
+def test_mapping_lineage_is_first_class_without_becoming_channel_attribution(env: dict) -> None:
+    with TestClient(create_app(db_path=env["db_path"], start_legacy=False)) as client:
+        seed_page = client.get(f"/api/v1/workflows/{env['workflow_id']}/candidates?limit=1").json()
+        assert seed_page["items"]
+        candidate_id = int(seed_page["items"][0]["id"])
+    conn = sqlite3.connect(env["db_path"])
+    try:
+        candidate = conn.execute(
+            "SELECT id,person_id FROM job_candidates WHERE id=?",
+            (candidate_id,),
+        ).fetchone()
+        assert candidate
+        goal_id = conn.execute("SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (env["workflow_id"],)).fetchone()[0]
+        artifact_id = "mapping_lineage_contract_artifact"
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_artifacts
+               (artifact_id,goal_id,workflow_id,artifact_type,title,metadata_json,validation_status)
+               VALUES (?,?,?,?,?,?,?)""",
+            (artifact_id, goal_id, env["workflow_id"], "mapping_task", "Mapping 直挖任务卡", "{}", "passed"),
+        )
+        conn.execute(
+            """INSERT INTO candidate_events
+               (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (candidate[0], candidate[1], env["job_id"], "mapping_intake", "pending_review", "2026-08-14 10:00:00",
+             "Mapping 直挖入库", json.dumps({"mapping_artifact": artifact_id, "candidate_index": 3}), "mapping_task", artifact_id),
+        )
+        other_artifact_id = "mapping_lineage_other_workflow_artifact"
+        other_goal_id = conn.execute(
+            "SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (env["page_workflow_id"],)
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_artifacts
+               (artifact_id,goal_id,workflow_id,artifact_type,title,metadata_json,validation_status)
+               VALUES (?,?,?,?,?,?,?)""",
+            (other_artifact_id, other_goal_id, env["page_workflow_id"], "mapping_task", "另一工作流任务卡", "{}", "passed"),
+        )
+        conn.execute(
+            """INSERT INTO candidate_events
+               (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (candidate[0], candidate[1], env["job_id"], "mapping_intake", "pending_review", "2026-08-14 11:00:00",
+             "另一工作流 Mapping 入库", json.dumps({"mapping_artifact": other_artifact_id, "candidate_index": 5}), "mapping_task", other_artifact_id),
+        )
+        new_person = conn.execute(
+            """INSERT INTO people(display_name,current_company,current_title,fingerprint)
+               VALUES (?,?,?,?)""",
+            ("Mapping 未评估人选", "示例科技", "电源工程师", "mapping-lineage-contract-person"),
+        )
+        new_relation = conn.execute(
+            """INSERT INTO job_candidates
+               (job_id,person_id,raw_status,clean_stage,flow_bucket,updated_at)
+               VALUES (?,?,?,?,?,?)""",
+            (env["job_id"], new_person.lastrowid, "mapping_intake", "S1 新增寻访/待复核", "待复核", "2026-08-14 10:01:00"),
+        )
+        conn.execute(
+            """INSERT INTO candidate_events
+               (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (new_relation.lastrowid, new_person.lastrowid, env["job_id"], "mapping_intake", "pending_review", "2026-08-14 10:01:00",
+             "Mapping 未评估人选入库", json.dumps({"mapping_artifact": artifact_id, "candidate_index": 7}), "mapping_task", artifact_id),
+        )
+        conn.commit()
+        unassessed_id = int(new_relation.lastrowid)
+    finally:
+        conn.close()
+    with TestClient(create_app(db_path=env["db_path"], start_legacy=False)) as client:
+        first_page = client.get(f"/api/v1/workflows/{env['workflow_id']}/candidates?limit=200").json()
+        second_page = client.get(f"/api/v1/workflows/{env['workflow_id']}/candidates?limit=200&offset=200").json()
+        items = [*first_page["items"], *second_page["items"]]
+        item = next(value for value in items if value["id"] == candidate_id)
+        assert item["attribution"]["source_type"] in {"sourcing", "mapping"}
+        assert any(lineage.get("artifact_id") == artifact_id for lineage in item["source_lineage"])
+        assert not any(lineage.get("artifact_id") == other_artifact_id for lineage in item["source_lineage"])
+        detail = client.get(f"/api/v1/candidates/{candidate_id}")
+        assert detail.status_code == 200
+        assert any(lineage.get("artifact_id") == artifact_id for lineage in detail.json()["candidate"]["source_lineage"])
+        assert any(lineage.get("artifact_id") == other_artifact_id for lineage in detail.json()["candidate"]["source_lineage"])
+        unassessed = next(value for value in items if value["id"] == unassessed_id)
+        assert unassessed["assessed"] is False
+        assert unassessed["attribution"]["source_type"] == "mapping"
+        assert unassessed["attribution"]["artifact_id"] == artifact_id
+        assert unassessed["attribution"]["candidate_index"] == 7
 
 
 def test_workflow_candidates_404_and_non_job_workflow(env: dict) -> None:

@@ -10,6 +10,7 @@ import type {
 } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { date } from '../shared/format'
+import { candidateRecommendationLabel } from '../shared/candidateRecommendation'
 import { CalibrationMetrics } from './CalibrationMetrics'
 
 // S6-1b 判人评估区（候选人详情「评估」tab，新文件；CandidatePanel 只最小接线）：
@@ -49,13 +50,6 @@ const FIT_LEVEL_LABELS: Record<string, string> = {
   'A-优先推进': 'A-优先推进', 'B-可推进': 'B-可推进', 'C-需确认': 'C-需确认', 'D-暂缓': 'D-暂缓',
   unrated: '未评级', medium: '中等', strong: '强', hold: '暂缓', 不匹配: '不匹配',
 }
-const FIT_RECOMMENDATION_LABELS: Record<string, string> = {
-  '建议不推进': '建议不推进', '先核验后判断': '先核验后判断', '建议优先复核': '建议优先复核', '暂缓': '暂缓',
-  pending_review: '待复核', ready_for_review: '待复核', needs_review: '待复核', recommended: '推荐推进', contacted: '已联系',
-  continue_pending_manual_contact: '待人工跟进', backup: '备选', shortlist: '入围', hold: '暂缓', reject: '不推进',
-  age_risk_review: '年龄风险待核',
-}
-
 const confidenceLabel = (value?: string) => CONFIDENCE_LABELS[String(value || '')] || '推测'
 const confidenceTone = (value?: string) => (value === 'certain' ? 'ok' : 'warn')
 const directionLabel = (value?: string) => DIRECTION_LABELS[String(value || '')] || '无法判断'
@@ -66,7 +60,7 @@ const severityTone = (value?: string) => (value === 'high' ? 'danger' : value ==
 const fitStatusLabel = (value?: string) => FIT_STATUS_LABELS[String(value || '')] || '待核验'
 const fitStatusTone = (value?: string) => (value === 'met' ? 'ok' : value === 'partial' ? 'warn' : value === 'not_met' ? 'danger' : 'muted')
 const fitLevelLabel = (value?: string) => (value ? FIT_LEVEL_LABELS[String(value)] || String(value) : '')
-const fitRecommendationLabel = (value?: string) => (value ? FIT_RECOMMENDATION_LABELS[String(value)] || String(value) : '')
+const fitRecommendationLabel = (value?: string) => candidateRecommendationLabel(value)
 const fitScoreTone = (score?: number) =>
   score === null || score === undefined ? 'muted' : score >= 70 ? 'ok' : score >= 55 ? 'warn' : 'danger'
 // 初评来源的 fit_score=0 是「未评分」占位（历史数据未落分），不能当作 0 分误导；深度评估的 0 分为真实「不匹配」。
@@ -149,7 +143,7 @@ function MatchAnalysisSection({ fit, onRefreshFit, refreshBusy, refreshDisabled 
   const initial = isInitialFit(fit)
   const score = fitScoreShown(fit)
   const level = fitLevelLabel(fit.fit_level)
-  const recommendation = fitRecommendationLabel(fit.recommendation_label)
+  const recommendation = fitRecommendationLabel(fit.recommendation_label || fit.recommendation)
   const groups = Object.entries(FIT_GROUP_LABELS)
     .map(([key, label]) => ({ key, label, rows: fit.criteria?.[key] || [] }))
     .filter(group => group.rows.length > 0)
@@ -275,7 +269,7 @@ function MatchAnalysisSection({ fit, onRefreshFit, refreshBusy, refreshDisabled 
   )
 }
 
-export function CandidateAssessment({ candidateId, jobId }: { candidateId: number; jobId?: number }) {
+export function CandidateAssessment({ candidateId, jobId, onChanged }: { candidateId: number; jobId?: number; onChanged?: () => void | Promise<void> }) {
   const [payload, setPayload] = useState<CandidateAssessmentPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -329,6 +323,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
       const result = await api.generateCandidateAssessment(candidateId, jobId || 0, force)
       if (!applyWritePayload(result, seq)) return
       setFeedback({ tone: 'success', text: `${force ? '评估已重新生成' : '评估已生成'}。评估只辅助判断，最终判语由顾问本人下。` })
+      void Promise.resolve(onChanged?.()).catch(() => undefined)
     } catch (error) {
       if (seq !== requestSeq.current) return
       setFeedback({ tone: 'error', text: humanizeActionError(error, '评估生成失败，请重试。') })
@@ -347,6 +342,7 @@ export function CandidateAssessment({ candidateId, jobId }: { candidateId: numbe
       setNoteOpen(false)
       setNoteDraft('')
       setFeedback({ tone: 'success', text: `${ADVISOR_ACTION_LABELS[action]}已记录，会回流用于评估校准。` })
+      void Promise.resolve(onChanged?.()).catch(() => undefined)
     } catch (error) {
       if (seq !== requestSeq.current) return
       setFeedback({ tone: 'error', text: humanizeActionError(error, '动作提交失败，请重试。') })

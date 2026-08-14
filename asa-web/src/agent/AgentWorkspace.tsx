@@ -18,6 +18,7 @@ import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTu
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
 import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
 import { StrategyPatchCard } from './StrategyPatchCard'
+import { compareCandidatePageContext, CandidatePageConflict } from './pageContextConflict'
 
 const ACTIVE_SESSION_KEY = 'asaAgentSessionId'
 const RadarPage = lazy(() => import('../pages/Radar').then(module => ({ default: module.RadarPage })))
@@ -238,6 +239,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const [interactionError, setInteractionError] = useState('')
   const [structuredActionBusy, setStructuredActionBusy] = useState('')
   const [contextConflict, setContextConflict] = useState<{ incoming: AgentContext; restored?: AgentContext; label: string }>()
+  const [pageContextConflict, setPageContextConflict] = useState<CandidatePageConflict>()
+  const ignoredPageConflictKeyRef = useRef('')
   const controllerRef = useRef<AbortController | undefined>(undefined)
   const generationRef = useRef(0)
   const searchedRef = useRef(false)
@@ -485,8 +488,14 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       setDraft(''); setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('')
       return
     }
-    const turnContext: AgentContext = bridgeContext
-      ? { ...attachedContext, source: 'asa_floating', display_mode: 'workspace', bridge: bridgeContext }
+    const candidateConflict = compareCandidatePageContext(focus, bridgeContext)
+    if (candidateConflict && ignoredPageConflictKeyRef.current !== candidateConflict.key) {
+      setPageContextConflict(candidateConflict)
+      return
+    }
+    const bridgeForTurn = candidateConflict && ignoredPageConflictKeyRef.current === candidateConflict.key ? undefined : bridgeContext
+    const turnContext: AgentContext = bridgeForTurn
+      ? { ...attachedContext, source: 'asa_floating', display_mode: 'workspace', bridge: bridgeForTurn }
       : attachedContext
     const contextWithAttachments = readyAttachments.length
       ? { ...turnContext, uploaded_attachments: readyAttachments }
@@ -604,7 +613,13 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         return
       }
       if (type === 'floating_action') {
-        await api.floatingAction(String(id || action.action || ''), { target, constraints: action.constraints || [] })
+        await api.floatingAction(String(id || action.action || ''), {
+          target, constraints: action.constraints || [],
+          expected_context_key: bridgeContext?.context_key || '',
+          expected_instance_id: bridgeContext?.instance_id || '',
+          expected_job_candidate_id: bridgeContext?.job_candidate_id,
+          expected_context_revision: bridgeContext?.context_revision || bridgeContext?.identity_fingerprint || '',
+        })
         return
       }
       if (['view_a_candidates', 'compare_top_candidates', 'continue_sourcing', 'relax_search', 'generate_contact_queue', 'generate_contact_script', 'confirm_advance', 'confirm_stop', 'end_round'].includes(type)) {
@@ -621,6 +636,39 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         }
         await runTurn(createAgentTurn(sessionId, label, actionContext), false, true)
       }
+    } catch (value) { setInteractionError(value instanceof Error ? value.message : String(value)) }
+    finally { setStructuredActionBusy('') }
+  }
+  const runSourcingResultConversationAction = async (actionType: string, card: SourcingResultCardData) => {
+    const workflowId = String(card.summary?.workflow_id || (card.context?.type === 'workflow' ? card.context.id : '') || '').trim()
+    if (!workflowId || loading || structuredActionBusy) return
+    const target = {
+      type: 'workflow', id: workflowId,
+      client: String(card.summary?.client || ''),
+      label: String(card.summary?.job || card.title || '寻访工作流'),
+    }
+    if (actionType === 'continue_sourcing') {
+      await runStructuredAction({
+        action_id: `sourcing-result:${workflowId}:continue`,
+        type: 'continue_sourcing', label: '继续补池', target,
+      })
+      return
+    }
+    if (actionType !== 'discuss_strategy') return
+    const actionId = `sourcing-result:${workflowId}:strategy`
+    setInteractionError(''); setStructuredActionBusy(actionId)
+    try {
+      await runTurn(createAgentTurn(sessionId, '请基于本轮寻访结果复盘并调整寻访策略', {
+        type: 'workflow', id: workflowId, mode: 'strategy_revision',
+        client: target.client, job: target.label, clarification_binding: true,
+        sourcing_result: {
+          round: card.summary?.round ?? null,
+          business_outcome: card.summary?.business_outcome ?? null,
+          assessed_count: card.summary?.assessed_count ?? 0,
+          successful_count: card.summary?.successful_count ?? 0,
+          failed_count: card.summary?.failed_count ?? 0,
+        },
+      }), false, true)
     } catch (value) { setInteractionError(value instanceof Error ? value.message : String(value)) }
     finally { setStructuredActionBusy('') }
   }
@@ -715,6 +763,26 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     ? sessions.filter(item => `${item.title} ${item.preview}`.toLowerCase().includes(trimmedQuery.toLowerCase()))
     : sessions
 
+  useEffect(() => {
+    const candidateConflict = compareCandidatePageContext(focus, bridgeContext)
+    const timer = window.setTimeout(() => {
+      if (!candidateConflict || ignoredPageConflictKeyRef.current === candidateConflict.key) setPageContextConflict(undefined)
+      else setPageContextConflict(candidateConflict)
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [bridgeContext, focus])
+  const resolvePageConflictKeepTask = () => {
+    if (!pageContextConflict) return
+    ignoredPageConflictKeyRef.current = pageContextConflict.key
+    setPageContextConflict(undefined)
+  }
+  const resolvePageConflictNewTask = () => {
+    if (!pageContextConflict) return
+    startTaskWithContext({ type: 'candidate', id: pageContextConflict.page.id, candidate: pageContextConflict.page.label, source: 'asa_floating' })
+    ignoredPageConflictKeyRef.current = ''
+    setPageContextConflict(undefined)
+  }
+
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
       <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
@@ -754,6 +822,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
             <SourcingResultCard
               data={message.action_card as SourcingResultCardData}
               compact
+              actionsDisabled={loading || Boolean(structuredActionBusy)}
               onOpenCandidate={jobCandidateId => {
                 const candidate = (message.action_card as SourcingResultCardData).summary?.top_candidates?.find(c => c.job_candidate_id === jobCandidateId)
                 onOpenFullObject({ type: 'candidate', id: jobCandidateId, label: candidate?.name || '人选' })
@@ -771,8 +840,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
                     finally { setStructuredActionBusy('') }
                   })()
                 } else if(actionType==='discuss_strategy' || actionType==='continue_sourcing'){
-                  const workflowId = (message.action_card as SourcingResultCardData).summary?.workflow_id
-                  if(workflowId) window.dispatchEvent(new CustomEvent('asa:open-agent',{detail:{type:'workflow',id:workflowId,mode:'strategy_revision'}}))
+                  void runSourcingResultConversationAction(actionType, message.action_card as SourcingResultCardData)
                 }
               }}
             />
@@ -803,6 +871,10 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         {showJumpBottom && <button className="agent-jump-bottom" aria-label="回到底部" title="回到底部" onClick={jumpToBottom}><ChevronDown size={13}/><span>回到底部</span></button>}
       </div>
       <div className="agent-composer-stack">
+        {pageContextConflict && <div className="agent-page-context-conflict" role="alert">
+          <span>当前任务正在处理「{pageContextConflict.task.label}」，页面已切换到「{pageContextConflict.page.label}」{pageContextConflict.stale ? '（页面信息可能已过期）' : ''}。</span>
+          <div><button className="button primary" onClick={resolvePageConflictNewTask}>以页面人选新建任务</button><button className="button" onClick={resolvePageConflictKeepTask}>继续当前任务</button></div>
+        </div>}
         <AgentPageContextBar onOpenFullObject={onOpenFullObject} onBridgeContextChange={setBridgeContext}/>
         <form className={`agent-composer ${attachmentDragActive ? 'drag-active' : ''}`} onSubmit={submit} onDragEnter={event => { event.preventDefault(); setAttachmentDragActive(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAttachmentDragActive(false) }} onDrop={onAttachmentDrop}>
           {attachments.length > 0 && <div className="agent-attachment-list" aria-label="待发送附件" role="list" aria-live="polite">{attachments.map(item => <span className={item.state} key={item.key} role="listitem"><FileText/><span><b>{item.fileName}</b><small role={item.state === 'error' ? 'alert' : undefined}>{item.state === 'uploading' ? '正在读取…' : item.state === 'ready' ? `${formatAttachmentSize(item.sizeBytes)} · ${item.attachment?.status || '已读取'}` : item.error}</small></span><button type="button" className="icon-btn" aria-label={`移除附件：${item.fileName}`} title="移除附件" onClick={() => replaceAttachments(current => current.filter(attachment => attachment.key !== item.key))}>{item.state === 'uploading' ? <LoaderCircle className="spin"/> : <X/>}</button></span>)}</div>}

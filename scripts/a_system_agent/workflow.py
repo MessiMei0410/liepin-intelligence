@@ -1548,6 +1548,18 @@ class WorkflowEngine:
                         conn.commit()
                         return
                     artifact_ids = self._store_artifacts(conn, workflow["goal_id"], workflow_id, step_data["id"], result.get("artifacts") or [])
+                    consumption = result.get("sourcing_adjustment_consumption")
+                    if step_data["capability_id"] == "search_strategy" and isinstance(consumption, dict):
+                        result = {
+                            **result,
+                            "sourcing_adjustment_consumption": self._consume_sourcing_adjustments(
+                                conn,
+                                workflow_id=workflow_id,
+                                step_id=int(step_data["id"]),
+                                artifact_ids=artifact_ids,
+                                request=consumption,
+                            ),
+                        }
                     output = {**result, "artifact_ids": artifact_ids, "verification": verification}
                     if result.get("blocked") is True:
                         step_status = "blocked"
@@ -1628,6 +1640,116 @@ class WorkflowEngine:
             )
             ids.append(artifact_id)
         return ids
+
+    @staticmethod
+    def _candidate_pool_baseline(conn: Any, job_id: int) -> dict[str, int]:
+        row = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(clean_stage LIKE 'S1%' OR clean_stage LIKE 'X1%' OR clean_stage LIKE 'H1%' OR clean_stage LIKE 'H5%' OR clean_stage LIKE 'S2%') AS pending_review,
+              SUM(clean_stage LIKE 'S3%' OR clean_stage LIKE 'S4%' OR clean_stage LIKE 'S5%' OR clean_stage LIKE 'S6%' OR clean_stage LIKE 'S7%' OR clean_stage LIKE 'S8%' OR clean_stage LIKE 'S9%' OR clean_stage LIKE 'S10%' OR clean_stage LIKE 'S11%' OR clean_stage LIKE 'S12%' OR clean_stage LIKE 'S13%' OR clean_stage LIKE 'X2%' OR clean_stage LIKE 'X3%' OR clean_stage LIKE 'X4%' OR clean_stage LIKE 'X5%') AS contacted,
+              SUM(clean_stage LIKE '%停止%' OR clean_stage LIKE '%淘汰%' OR clean_stage LIKE '%不通过%') AS stopped
+            FROM job_candidates WHERE job_id=?
+            """,
+            (job_id,),
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "pending_review": int(row["pending_review"] or 0),
+            "contacted": int(row["contacted"] or 0),
+            "stopped": int(row["stopped"] or 0),
+        }
+
+    def _consume_sourcing_adjustments(
+        self,
+        conn: Any,
+        *,
+        workflow_id: str,
+        step_id: int,
+        artifact_ids: list[str],
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        adjustment_ids = list(dict.fromkeys(
+            int(value) for value in (request.get("adjustment_ids") or []) if str(value).isdigit() and int(value) > 0
+        ))
+        job_id = int(request.get("job_id") or 0)
+        if not adjustment_ids or not job_id:
+            return {**request, "status": "nothing_to_apply", "applied_ids": [], "not_applied_ids": adjustment_ids}
+        artifact_id = ""
+        if artifact_ids:
+            placeholders = ",".join("?" for _ in artifact_ids)
+            row = conn.execute(
+                f"""
+                SELECT artifact_id FROM agent_artifacts
+                 WHERE workflow_id=? AND step_id=? AND artifact_type='search_strategy'
+                   AND artifact_id IN ({placeholders})
+                 ORDER BY id DESC LIMIT 1
+                """,
+                (workflow_id, step_id, *artifact_ids),
+            ).fetchone()
+            artifact_id = str(row["artifact_id"] or "") if row else ""
+        if not artifact_id:
+            raise RuntimeError("寻访调整不能应用：本轮策略产物尚未成功落库")
+
+        round_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM agent_workflow_steps
+             WHERE workflow_id=? AND capability_id='search_strategy' AND status='completed'
+            """,
+            (workflow_id,),
+        ).fetchone()
+        applied_round = int(round_row["n"] or 0) + 1
+        baseline = self._candidate_pool_baseline(conn, job_id)
+        placeholders = ",".join("?" for _ in adjustment_ids)
+        conn.execute(
+            f"""
+            UPDATE agent_sourcing_adjustments
+               SET status='applied',applied_at=datetime('now','localtime'),applied_round=?,
+                   baseline_json=?,applied_workflow_id=?,applied_artifact_id=?
+             WHERE job_id=? AND status='accepted' AND id IN ({placeholders})
+            """,
+            (applied_round, _dumps(baseline), workflow_id, artifact_id, job_id, *adjustment_ids),
+        )
+        applied_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                f"""
+                SELECT id FROM agent_sourcing_adjustments
+                 WHERE job_id=? AND applied_workflow_id=? AND applied_artifact_id=?
+                   AND id IN ({placeholders})
+                 ORDER BY id
+                """,
+                (job_id, workflow_id, artifact_id, *adjustment_ids),
+            ).fetchall()
+        ]
+        not_applied_ids = [value for value in adjustment_ids if value not in set(applied_ids)]
+        status = "applied" if not not_applied_ids else "partially_applied" if applied_ids else "not_applied"
+        receipt = {
+            **request,
+            "status": status,
+            "workflow_id": workflow_id,
+            "artifact_id": artifact_id,
+            "applied_round": applied_round,
+            "applied_ids": applied_ids,
+            "not_applied_ids": not_applied_ids,
+            "baseline": baseline,
+        }
+        self._event(
+            conn,
+            workflow_id,
+            step_id,
+            "sourcing_adjustments_applied",
+            status,
+            f"本轮策略已应用 {len(applied_ids)} 条顾问采纳的寻访调整",
+            {
+                "adjustment_ids": applied_ids,
+                "not_applied_ids": not_applied_ids,
+                "artifact_id": artifact_id,
+                "applied_round": applied_round,
+            },
+        )
+        return receipt
 
     def _update_progress(self, conn, workflow_id: str, goal_id: str) -> None:
         total, completed = conn.execute(
@@ -3243,9 +3365,20 @@ class WorkflowEngine:
                     WHERE sp2.person_id=jc.person_id AND sp2.source_type IN ('liepin','xsaas')
                     ORDER BY sp2.source_date DESC,sp2.id DESC LIMIT 1
                 )
-                WHERE jc.job_id=? AND (a.id IS NOT NULL OR sa.id IS NOT NULL)
+                LEFT JOIN candidate_events me ON me.id=(
+                    SELECT ce.id FROM candidate_events ce
+                    JOIN agent_artifacts cae ON cae.artifact_id=ce.source_id
+                        AND cae.artifact_type='mapping_task' AND cae.workflow_id=?
+                    WHERE ce.job_candidate_id=jc.id AND ce.source_table='mapping_task'
+                      AND ce.event_type='mapping_intake'
+                    ORDER BY COALESCE(ce.event_time,'') DESC,ce.id DESC LIMIT 1
+                )
+                LEFT JOIN agent_artifacts ma ON ma.artifact_id=me.source_id
+                    AND ma.artifact_type='mapping_task'
+                WHERE jc.job_id=? AND (a.id IS NOT NULL OR sa.id IS NOT NULL OR ma.id IS NOT NULL)
             """
-            total = int(conn.execute(f"SELECT COUNT(*) {base}", (job_id,)).fetchone()[0])
+            base_params = (workflow_id, job_id)
+            total = int(conn.execute(f"SELECT COUNT(*) {base}", base_params).fetchone()[0])
             rows = conn.execute(
                 f"""
                 SELECT jc.id,p.id AS person_id,p.display_name,p.current_company,p.current_title,
@@ -3253,12 +3386,14 @@ class WorkflowEngine:
                        a.fit_score,a.fit_level,a.recommendation,
                        sa.channel AS attribution_channel,sa.source_query AS attribution_query,
                        sa.source_round AS attribution_round,sa.workflow_id AS attribution_workflow_id,
+                       me.id AS mapping_event_id,me.source_id AS mapping_event_source_id,me.raw_json AS mapping_event_raw_json,
+                       ma.artifact_id AS mapping_artifact_id,ma.workflow_id AS mapping_workflow_id,
                        sp.source_type AS resume_source_type,sp.source_date AS resume_source_date,
                        sp.raw_json AS resume_raw_json
                 {base}
                 ORDER BY (a.fit_score IS NULL),a.fit_score DESC,jc.id DESC LIMIT ? OFFSET ?
                 """,
-                (job_id, limit, offset),
+                (*base_params, limit, offset),
             ).fetchall()
             items = []
             for row in rows:
@@ -3270,7 +3405,39 @@ class WorkflowEngine:
                         "source_query": item["attribution_query"],
                         "source_round": item["attribution_round"],
                         "from_workflow": bool(item["attribution_workflow_id"]) and item["attribution_workflow_id"] == workflow_id,
+                        "source_type": "sourcing",
                     }
+                mapping_lineage = None
+                if item.get("mapping_artifact_id"):
+                    mapping_raw = _loads(item.get("mapping_event_raw_json"), {})
+                    mapping_lineage = {
+                        "source_type": "mapping",
+                        "workflow_id": str(item.get("mapping_workflow_id") or workflow_id),
+                        "artifact_id": str(item["mapping_artifact_id"]),
+                        "candidate_index": mapping_raw.get("candidate_index"),
+                        "event_id": item.get("mapping_event_id"),
+                        "from_workflow": True,
+                    }
+                    if attribution is None:
+                        attribution = {
+                            "source_type": "mapping",
+                            "workflow_id": mapping_lineage["workflow_id"],
+                            "artifact_id": mapping_lineage["artifact_id"],
+                            "candidate_index": mapping_lineage["candidate_index"],
+                            "from_workflow": True,
+                        }
+                source_lineage = []
+                if mapping_lineage:
+                    source_lineage.append(mapping_lineage)
+                if item.get("attribution_workflow_id") or item.get("attribution_channel"):
+                    source_lineage.append({
+                        "source_type": "sourcing",
+                        "workflow_id": str(item.get("attribution_workflow_id") or ""),
+                        "channel": item.get("attribution_channel") or "",
+                        "source_query": item.get("attribution_query") or "",
+                        "source_round": item.get("attribution_round") or "",
+                        "from_workflow": bool(item.get("attribution_workflow_id")) and item["attribution_workflow_id"] == workflow_id,
+                    })
                 resume_payload = _loads(item.get("resume_raw_json"), {})
                 resume_captured_at = str(resume_payload.get("captured_at") or item.get("resume_source_date") or "")
                 resume_capture_status = "complete" if resume_captured_at else "not_requested"
@@ -3295,6 +3462,7 @@ class WorkflowEngine:
                     "status": item["raw_status"],
                     "assessed": item["fit_score"] is not None,
                     "attribution": attribution,
+                    "source_lineage": source_lineage,
                     "updated_at": item["updated_at"],
                     "resume_source_type": item.get("resume_source_type") or "",
                     "resume_capture_status": resume_capture_status,

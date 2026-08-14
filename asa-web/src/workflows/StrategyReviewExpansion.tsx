@@ -12,13 +12,14 @@ import { MAPPING_TRIGGER_BY_TREE } from './mappingTask'
 // S5-2：escalate_mapping 步旁挂「发起 Mapping 直挖」入口——已有任务卡（本工作流产物含
 // mapping_task）直接打开；否则调 POST /jobs/{job_id}/mapping-tasks（trigger=decision_tree_exhausted）
 // 创建后打开。工作流无 job 上下文（jobId 缺失）时按钮不显示。
-export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mappingArtifactId, onOpenMapping }: {
+export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mappingArtifactId, onOpenMapping, onChanged }: {
   workflowId: string
   signals?: StrategyReviewSignal[]
   tree?: ExpansionTreeStep[]
   jobId?: number
   mappingArtifactId?: string
   onOpenMapping?: (artifactId: string) => void
+  onChanged?: () => void | Promise<void>
 }) {
   const signalList = signals || []
   const steps = sortedTreeSteps(tree || [])
@@ -46,7 +47,7 @@ export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mapp
           {summary.length > 0 && <ul className="review-tree-params">{summary.map((line, index) => <li key={index}>{line}</li>)}</ul>}
           {step.detail && <small>{step.detail}</small>}
           {step.action_type === 'escalate_mapping' && jobId != null && jobId > 0 && onOpenMapping && (
-            <MappingEntryButton jobId={jobId} mappingArtifactId={mappingArtifactId || ''} onOpenMapping={onOpenMapping} />
+            <MappingEntryButton jobId={jobId} mappingArtifactId={mappingArtifactId || ''} onOpenMapping={onOpenMapping} onChanged={onChanged} />
           )}
         </div>
       })}
@@ -56,10 +57,11 @@ export function StrategyReviewExpansion({ workflowId, signals, tree, jobId, mapp
 
 // 「发起 Mapping 直挖」入口：已存在任务卡直接打开（不重复发起采集）；否则创建后打开。
 // 创建走幂等写（Idempotency-Key + request_id），409（岗位无 strategy_v2 等）中文原因直接透出。
-function MappingEntryButton({ jobId, mappingArtifactId, onOpenMapping }: {
+function MappingEntryButton({ jobId, mappingArtifactId, onOpenMapping, onChanged }: {
   jobId: number
   mappingArtifactId: string
   onOpenMapping: (artifactId: string) => void
+  onChanged?: () => void | Promise<void>
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -73,6 +75,7 @@ function MappingEntryButton({ jobId, mappingArtifactId, onOpenMapping }: {
     try {
       const result = await api.createMappingTask(jobId, MAPPING_TRIGGER_BY_TREE)
       onOpenMapping(result.artifact_id)
+      if (onChanged) void Promise.resolve().then(onChanged).catch(() => undefined)
     } catch (cause) {
       setError(humanizeActionError(cause, '发起失败，请重试。'))
     } finally {

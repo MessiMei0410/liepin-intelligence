@@ -406,6 +406,21 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ADD COLUMN baseline_json TEXT;
         """,
     ),
+    (
+        11,
+        "sourcing_adjustment_acceptance_lineage",
+        # 顾问采纳与策略实际消费分离；applied 必须能追溯到成功落库的策略产物。
+        """
+        ALTER TABLE agent_sourcing_adjustments
+            ADD COLUMN accepted_at TEXT;
+        ALTER TABLE agent_sourcing_adjustments
+            ADD COLUMN applied_workflow_id TEXT;
+        ALTER TABLE agent_sourcing_adjustments
+            ADD COLUMN applied_artifact_id TEXT;
+        CREATE INDEX IF NOT EXISTS idx_adjustments_applied_workflow
+            ON agent_sourcing_adjustments(applied_workflow_id, applied_artifact_id);
+        """,
+    ),
 ]
 
 

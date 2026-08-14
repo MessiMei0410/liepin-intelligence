@@ -162,6 +162,17 @@ describe('Analysis Workspace', () => {
     expect(screen.getByText('+2')).toBeInTheDocument()
   })
 
+  it('分析表格保留 Mapping 直挖渠道口径', () => {
+    render(<AnalysisWorkspace result={{
+      ...analysis,
+      sections: [{ type: 'table', title: '渠道质量', columns: ['channel', 'intaked'], rows: [{ channel: 'mapping', intaked: 1 }] }],
+    }} close={() => {}} refresh={() => {}} exportReport={() => {}} />)
+
+    expect(screen.getByRole('columnheader', { name: '渠道' })).toBeInTheDocument()
+    expect(screen.getByText('Mapping 直挖')).toBeInTheDocument()
+    expect(screen.queryByText('人才库')).not.toBeInTheDocument()
+  })
+
   it('失败或过期结果提供明确重试且禁止导出', () => {
     const refresh = vi.fn()
     render(<AnalysisWorkspace result={{ ...analysis, status: 'expired', metrics: [], sections: [] }} close={() => {}} refresh={refresh} exportReport={() => {}} />)

@@ -122,11 +122,12 @@ CANDIDATE_MESSAGE_CONFIRMATION_LOCK = threading.Lock()
 CANDIDATE_STATE_CONFIRMATION_TTL_SECONDS = 300
 CANDIDATE_STATE_CONFIRMATIONS: dict[str, dict[str, Any]] = {}
 CANDIDATE_STATE_CONFIRMATION_LOCK = threading.Lock()
-ASA_FLOATING_LOCK = threading.Lock()
+ASA_FLOATING_LOCK = threading.RLock()
 ASA_FLOATING_CONTEXTS: dict[str, dict[str, Any]] = {}
 ASA_FLOATING_COMMANDS: dict[str, list[dict[str, Any]]] = {"liepin": [], "xsaas": [], "a_system": [], "native": []}
 ASA_FLOATING_COMMAND_HISTORY: list[dict[str, Any]] = []
 ASA_FLOATING_COMMAND_RESULTS: list[dict[str, Any]] = []
+ASA_FLOATING_ACTION_RECEIPTS: dict[str, dict[str, Any]] = {}
 # 候选人名单弹窗跨窗口同步：React 端操作成功后写入，浮窗端轮询读取。
 # 以 job_id 为键，保存最近变更（含时间戳），超期自动清理。
 ASA_FLOATING_CANDIDATE_UPDATES: dict[int, list[dict[str, Any]]] = {}
@@ -393,6 +394,134 @@ def sanitize_bridge_value(value: Any, depth: int = 0) -> Any:
     return clean(str(value))[:1000]
 
 
+def _floating_identity_value(value: Any, limit: int = 180) -> str:
+    return clean(value)[:limit]
+
+
+def floating_context_identity_summary(context: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a small, non-sensitive identity receipt for binding a page action."""
+    raw = context if isinstance(context, dict) else {}
+    nested = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+    candidate = raw.get("candidate") if isinstance(raw.get("candidate"), dict) else {}
+    lookup = raw.get("talent_lookup") if isinstance(raw.get("talent_lookup"), dict) else {}
+    match = lookup.get("match") if isinstance(lookup.get("match"), dict) else {}
+
+    def first(*values: Any, limit: int = 180) -> str:
+        for value in values:
+            text = _floating_identity_value(value, limit)
+            if text:
+                return text
+        return ""
+
+    source_id = first(
+        raw.get("source_candidate_id"), raw.get("res_id_encode"), raw.get("resume_id"),
+        raw.get("candidate_id"), raw.get("profile_id"), candidate.get("source_candidate_id"),
+        candidate.get("id"), match.get("source_candidate_id"), match.get("candidate_id"),
+    )
+    url = first(raw.get("url"), raw.get("page_url"), raw.get("source_url"), candidate.get("url"), limit=600)
+    parsed_url = urllib.parse.urlparse(url) if url else None
+    url_key = ""
+    if parsed_url and parsed_url.netloc:
+        query = urllib.parse.parse_qs(parsed_url.query)
+        selected_query = {
+            key: query[key][-1]
+            for key in ("res_id_encode", "resume_id", "candidate_id", "profile_id", "id")
+            if query.get(key)
+        }
+        url_key = json.dumps(
+            {"host": parsed_url.netloc.lower(), "path": parsed_url.path, "query": selected_query},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    summary: dict[str, Any] = {
+        "surface": normalize_bridge_surface(raw.get("surface")),
+        "context_key": _floating_identity_value(raw.get("context_key")),
+        "instance_id": _floating_identity_value(raw.get("instance_id")),
+        "job_candidate_id": floating_context_job_candidate_id(raw),
+        "source_candidate_id": source_id,
+        "candidate_name": first(candidate.get("name"), raw.get("candidate_name"), raw.get("name"), match.get("candidate_name")),
+        "candidate_company": first(candidate.get("company"), raw.get("company"), raw.get("candidate_company"), match.get("company")),
+        "candidate_title": first(candidate.get("title"), raw.get("candidate_title"), raw.get("title"), match.get("title")),
+        "page_type": first(nested.get("type"), raw.get("page_type"), raw.get("type")),
+    }
+    evidence = json.dumps({**summary, "url_key": url_key}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    summary["context_revision"] = hashlib.sha256(evidence.encode("utf-8")).hexdigest()[:24]
+    return summary
+
+
+def floating_context_expected(data: dict[str, Any]) -> dict[str, Any]:
+    expected: dict[str, Any] = {}
+    for key in ("expected_context_key", "expected_instance_id", "expected_context_revision", "expected_context_fingerprint"):
+        value = _floating_identity_value(data.get(key))
+        if value:
+            expected[key.removeprefix("expected_")] = value
+    candidate_id = parse_optional_int(data.get("expected_job_candidate_id"))
+    if candidate_id is not None:
+        expected["job_candidate_id"] = candidate_id
+    return expected
+
+
+def floating_action_requires_context(action: str) -> bool:
+    return (
+        action in {"refresh_bridge", "open_source", "dry-intake", "dry-continue", "dry-stop", "copy-current", "identity-match", "assess_current", "open_candidate"}
+        or action.isdigit()
+        or action in {"fill_resume", "generate_report", "draft_outreach", "job_publish_prepare"}
+        or action.startswith("open_wechat_attachment::")
+    )
+
+
+def _floating_action_request_id(data: dict[str, Any]) -> str:
+    return _floating_identity_value(data.get("request_id"), 120)
+
+
+def validate_floating_action_context(data: dict[str, Any], active_raw: dict[str, Any]) -> dict[str, Any] | None:
+    actual = floating_context_identity_summary(active_raw)
+    expected = floating_context_expected(data)
+    surface = actual.get("surface")
+    # A local action with no page context does not need a binding receipt.
+    if surface in {"global", "unknown"} and not expected:
+        return None
+    if not expected:
+        if surface not in {"liepin", "xsaas"} and not actual.get("job_candidate_id"):
+            return None
+        return {
+            "ok": False, "status": "blocked", "error_code": "context_changed",
+            "message": "当前页面身份未绑定，请刷新识别后重新确认。", "expected_context": expected,
+            "latest_context": actual, "latest_page_identity": actual,
+        }
+    mismatches: list[str] = []
+    for key, value in expected.items():
+        if key == "context_fingerprint":
+            key = "context_revision"
+        if value not in (None, "") and actual.get(key) != value:
+            mismatches.append(key)
+    if mismatches:
+        return {
+            "ok": False, "status": "blocked", "error_code": "context_changed",
+            "message": "当前页面已切换，请重新确认后重试。", "expected_context": expected,
+            "latest_context": actual, "latest_page_identity": actual,
+            "mismatched_fields": mismatches,
+        }
+    return None
+
+
+def floating_context_audit_request(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "action": clean(data.get("action")),
+            "expected_context_key": _floating_identity_value(data.get("expected_context_key")),
+            "expected_instance_id": _floating_identity_value(data.get("expected_instance_id")),
+            "expected_job_candidate_id": parse_optional_int(data.get("expected_job_candidate_id")),
+            "expected_context_revision": _floating_identity_value(data.get("expected_context_revision")),
+            "expected_context_fingerprint": _floating_identity_value(data.get("expected_context_fingerprint")),
+            "workflow_id": _floating_identity_value(data.get("workflow_id")),
+        }.items()
+        if value not in (None, "")
+    }
+
+
 def normalize_bridge_surface(value: Any) -> str:
     surface = clean(str(value or "")).lower().replace("-", "_")
     if surface in {"liepin", "xsaas", "a_system", "native"}:
@@ -478,6 +607,9 @@ def update_floating_context(data: dict[str, Any]) -> dict[str, Any]:
     if surface in {"liepin", "xsaas"} and instance_id:
         context_key = f"{surface}:{instance_id[:80]}"
     context["context_key"] = context_key
+    identity = floating_context_identity_summary(context)
+    context["context_revision"] = identity["context_revision"]
+    context["identity_fingerprint"] = identity["context_revision"]
     with ASA_FLOATING_LOCK:
         if surface == "native":
             current = ASA_FLOATING_CONTEXTS.get(context_key) or ASA_FLOATING_CONTEXTS.get("native") or {}
@@ -1392,11 +1524,30 @@ def floating_goal_context(active_context: dict[str, Any] | None) -> dict[str, An
 
 def route_floating_action(state: "WorkbenchState", data: dict[str, Any]) -> dict[str, Any]:
     action = clean(data.get("action"))
+    request_id = _floating_action_request_id(data)
+    with ASA_FLOATING_LOCK:
+        if request_id and request_id in ASA_FLOATING_ACTION_RECEIPTS:
+            return {**ASA_FLOATING_ACTION_RECEIPTS[request_id], "idempotent_replay": True}
+        # Keep identity validation and every page-bound side effect in one critical section.
+        result = _route_floating_action(state, data)
+        if request_id and result.get("ok"):
+            ASA_FLOATING_ACTION_RECEIPTS[request_id] = dict(result)
+            if len(ASA_FLOATING_ACTION_RECEIPTS) > 500:
+                oldest = next(iter(ASA_FLOATING_ACTION_RECEIPTS))
+                ASA_FLOATING_ACTION_RECEIPTS.pop(oldest, None)
+        return result
+
+
+def _route_floating_action(state: "WorkbenchState", data: dict[str, Any]) -> dict[str, Any]:
+    action = clean(data.get("action"))
     if not action:
         raise ValueError("缺少浮窗动作")
     snapshot = build_floating_state(state)
     active_raw = snapshot.get("active_context_raw") if isinstance(snapshot.get("active_context_raw"), dict) else {}
     active = snapshot.get("active_context") if isinstance(snapshot.get("active_context"), dict) else {}
+    conflict = validate_floating_action_context(data, active_raw)
+    if conflict:
+        return conflict
     surface = normalize_bridge_surface(active_raw.get("surface") or active.get("surface"))
 
     def queue_bridge(bridge_action: str) -> dict[str, Any]:
@@ -2486,7 +2637,12 @@ async function api(path, opts={}){
   try {
     const res = await fetch(path, {headers:{'Content-Type':'application/json'}, signal:controller.signal, ...requestOpts});
     const json = await res.json().catch(() => ({}));
-    if(!res.ok || json.ok === false) throw new Error(json.error || `HTTP ${res.status}`);
+    if(!res.ok || json.ok === false) {
+      const error = new Error(json.error || json.message || `HTTP ${res.status}`);
+      error.status = res.status;
+      error.errorCode = json.error_code || '';
+      throw error;
+    }
     return json;
   } catch (err) {
     if (err?.name === 'AbortError') throw new Error('请求超时，请重试');
@@ -3397,7 +3553,9 @@ async function answerAfterNativeAttachment(){
     document.getElementById('chatStatus').textContent = '';
     await loadState();
   }catch(err){
-    document.getElementById('chatStatus').textContent = err.message;
+    document.getElementById('chatStatus').textContent = err?.status === 409 && err?.errorCode === 'context_changed'
+      ? '当前页面已变化，动作未执行。请刷新页面识别后重新确认。'
+      : err.message;
   }finally{
     state.loading = false;
     renderMessages();
@@ -3414,7 +3572,15 @@ async function runFloatingAction(type, id, planRef=null){
   renderMessages();
   document.getElementById('chatStatus').textContent = 'ASA 正在执行动作...';
   try{
-    const payload = {action};
+    const rawContext = state.data?.active_context_raw || {};
+    const activeContext = state.data?.active_context || {};
+    const payload = {
+      action,
+      expected_context_key: String(rawContext.context_key || ''),
+      expected_instance_id: String(rawContext.instance_id || ''),
+      expected_job_candidate_id: Number(activeContext.job_candidate_id || rawContext.job_candidate_id || 0) || undefined,
+      expected_context_revision: String(rawContext.context_revision || rawContext.identity_fingerprint || ''),
+    };
     if (id && id !== action) payload.id = id;
     if (['start_workflow', 'open_workflow'].includes(action) && id) payload.workflow_id = id;
     if (action === 'start_workflow' && planRef?.plan_hash) payload.plan_ref = planRef;
@@ -3441,7 +3607,9 @@ async function runFloatingAction(type, id, planRef=null){
     document.getElementById('chatStatus').textContent = '';
     await loadState();
   }catch(err){
-    document.getElementById('chatStatus').textContent = err.message;
+    document.getElementById('chatStatus').textContent = err?.status === 409 && err?.errorCode === 'context_changed'
+      ? '当前页面已变化，动作未执行。请刷新页面识别后重新确认。'
+      : err.message;
   }finally{
     state.loading = false;
     renderMessages();
@@ -8442,7 +8610,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     self.state.agent_service.record_tool_call(
                         tool_name=f"floating.{action_name}",
                         permission_level=permission_level,
-                        request=data,
+                        request=floating_context_audit_request(data),
                         result=result,
                         status=clean(result.get("status")) or ("completed" if result.get("ok") else "blocked"),
                     )
@@ -8458,7 +8626,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                         )
                 except Exception:
                     pass
-                json_response(self, result, 200 if result.get("ok") else HTTPStatus.CONFLICT)
+                json_response(
+                    self,
+                    result,
+                    HTTPStatus.CONFLICT if result.get("error_code") == "context_changed" else (200 if result.get("ok") else HTTPStatus.CONFLICT),
+                )
             elif parsed.path == "/api/asa/floating/command":
                 if not agent_origin_allowed(self):
                     json_response(self, {"ok": False, "error": "拒绝非本地 ASA 浮窗创建页面命令"}, HTTPStatus.FORBIDDEN)

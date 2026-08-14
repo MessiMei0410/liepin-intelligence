@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CandidateAssessment } from '../panels/CandidateAssessment'
-import { mockResponse } from './helpers'
+import { CandidatePanel } from '../panels/CandidatePanel'
+import { candidateDetail, mockResponse } from './helpers'
 
 // S6-1b 判人评估区（CandidateAssessment）：404 空态 + 做评估、两维全字段渲染、证据列表、
 // 置信度 tag、顾问三动作 PATCH 体与状态回显、改判 note、null 占位维度不渲染。
@@ -105,7 +106,7 @@ const stubFetch = (handler?: FetchHandler) => {
 const patchCalls = (fetchMock: ReturnType<typeof stubFetch>) =>
   fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH')
 
-const renderAssessment = () => render(<CandidateAssessment candidateId={1} jobId={154}/>)
+const renderAssessment = (onChanged?: () => void | Promise<void>) => render(<CandidateAssessment candidateId={1} jobId={154} onChanged={onChanged}/>)
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -113,12 +114,13 @@ afterEach(() => {
 
 describe('判人评估区（CandidateAssessment）', () => {
   it('尚无评估：404 空态显示「还没做过评估」，「做评估」按钮调 POST 生成后渲染评估', async () => {
+    const onChanged = vi.fn()
     const fetchMock = stubFetch((url, init) => {
       if (url === ASSESSMENT_URL && !init?.method) return { body: { detail: '还没有判人评估' }, ok: false, status: 404 }
       if (url === ASSESSMENT_URL && init?.method === 'POST') return { body: assessmentPayload }
       return undefined
     })
-    renderAssessment()
+    renderAssessment(onChanged)
     expect(await screen.findByText('还没做过评估')).toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: '做评估' }))
@@ -131,20 +133,23 @@ describe('判人评估区（CandidateAssessment）', () => {
     // 生成成功 → 直接渲染评估内容
     expect(await screen.findByRole('region', { name: '职业轨迹' })).toBeInTheDocument()
     expect(screen.queryByText('还没做过评估')).not.toBeInTheDocument()
+    expect(onChanged).toHaveBeenCalledTimes(1)
   })
 
   it('做评估 409（无简历语料/模型不可用）显示后端中文错误文案', async () => {
+    const onChanged = vi.fn()
     stubFetch((url, init) => {
       if (url === ASSESSMENT_URL && !init?.method) return { body: { detail: '还没有判人评估' }, ok: false, status: 404 }
       if (url === ASSESSMENT_URL && init?.method === 'POST') return { body: { detail: '人选缺少可评估的简历数据，无法生成判人评估' }, ok: false, status: 409 }
       return undefined
     })
-    renderAssessment()
+    renderAssessment(onChanged)
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: '做评估' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('无法生成判人评估')
     // 失败仍停留在空态，可重试
     expect(screen.getByText('还没做过评估')).toBeInTheDocument()
+    expect(onChanged).not.toHaveBeenCalled()
   })
 
   it('两维全字段渲染：结论/晋升速度/技术栈演进/分段表/逐次移动/当前这单判定/顾问口径摘要', async () => {
@@ -219,6 +224,7 @@ describe('判人评估区（CandidateAssessment）', () => {
   })
 
   it('顾问动作「采纳 / 否决」：PATCH 体正确、状态回显、已 action 可再改', async () => {
+    const onChanged = vi.fn()
     const fetchMock = stubFetch((url, init) => {
       if (url === ADVISOR_URL && init?.method === 'PATCH') {
         const body = JSON.parse(String(init.body)) as { action?: string }
@@ -226,7 +232,7 @@ describe('判人评估区（CandidateAssessment）', () => {
       }
       return undefined
     })
-    renderAssessment()
+    renderAssessment(onChanged)
     const actions = await screen.findByLabelText('顾问动作')
     expect(within(actions).getByText('顾问动作：待处理')).toBeInTheDocument()
     const user = userEvent.setup()
@@ -247,6 +253,34 @@ describe('判人评估区（CandidateAssessment）', () => {
     const secondBody = JSON.parse(String(secondInit?.body)) as { action?: string }
     expect(secondBody.action).toBe('rejected')
     expect(await within(actions).findByText('顾问动作：已否决')).toBeInTheDocument()
+    expect(onChanged).toHaveBeenCalledTimes(2)
+  })
+
+  it('顾问动作失败时保留评估并且不触发候选详情回读', async () => {
+    const onChanged = vi.fn()
+    stubFetch((url, init) => url === ADVISOR_URL && init?.method === 'PATCH'
+      ? { body: { detail: '评估版本已变化，请刷新后重试' }, ok: false, status: 409 }
+      : undefined)
+    renderAssessment(onChanged)
+    const actions = await screen.findByLabelText('顾问动作')
+    await userEvent.setup().click(within(actions).getByRole('button', { name: '采纳' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('评估版本已变化，请刷新后重试')
+    expect(within(actions).getByText('顾问动作：待处理')).toBeInTheDocument()
+    expect(onChanged).not.toHaveBeenCalled()
+  })
+
+  it('候选人详情把评估写回成功通知接到父级详情刷新', async () => {
+    const changed = vi.fn()
+    stubFetch((url, init) => {
+      if (url === ADVISOR_URL && init?.method === 'PATCH') return { body: advisorResult('accepted') }
+      return undefined
+    })
+    render(<CandidatePanel value={{ ...candidateDetail, job_id: 154 }} close={() => undefined} changed={changed}/>)
+    await userEvent.setup().click(screen.getByRole('button', { name: '评估' }))
+    const actions = await screen.findByLabelText('顾问动作')
+    await userEvent.setup().click(within(actions).getByRole('button', { name: '采纳' }))
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1))
+    expect(await within(actions).findByText('顾问动作：已采纳')).toBeInTheDocument()
   })
 
   it('改判：展开 note 输入框一并提交，回显已改判与顾问备注', async () => {

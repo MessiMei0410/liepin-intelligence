@@ -51,7 +51,13 @@ const submitResult = {
   status: 'calibrated',
   status_label: '已校准',
   version: 1,
-  calibration: { calibration_id: 'ccal_2', version: 1 },
+  calibration: {
+    calibration_id: 'ccal_2', company_key: '鲁滨逊测试技术', company_name: '杭州鲁滨逊测试技术有限公司',
+    track: '后道测试设备', product_lines: ['STS8200 测试机', '分选机'], skill_tags: ['半导体设备'],
+    level_system: '', no_poach: true, non_compete: false, note: '',
+    status: 'calibrated', status_label: '已校准', version: 1,
+  },
+  progress: { ...progressPayload, calibrated: 2, needs_review: 1, pending: 47, ratio: 0.04 },
 }
 
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>
@@ -108,7 +114,7 @@ describe('核心公司校准面板', () => {
     expect(attempts).toBe(2)
   })
 
-  it('展开表单预填图谱原值，提交校准后展示回执并回读刷新', async () => {
+  it('展开表单预填图谱原值，提交校准后直接采用写入回执并后台对账', async () => {
     const submitted: Array<Record<string, unknown>> = []
     let queueReads = 0
     vi.stubGlobal('fetch', stubFetch({
@@ -135,6 +141,7 @@ describe('核心公司校准面板', () => {
     fireEvent.click(screen.getByRole('button', { name: '提交校准' }))
 
     expect(await screen.findByText(/已保存「杭州鲁滨逊测试技术有限公司」校准（已校准，v1）/)).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
     await waitFor(() => expect(queueReads).toBe(2))
     expect(submitted).toHaveLength(1)
     const body = submitted[0]
@@ -144,6 +151,48 @@ describe('核心公司校准面板', () => {
     expect(body.product_lines).toEqual(['STS8200 测试机', '分选机'])
     expect(body.no_poach).toBe(true)
     expect(typeof body.request_id).toBe('string')
+  })
+
+  it('写入成功后后台队列永久悬挂，仍立即结束提交并保留真实进度回执', async () => {
+    let queueReads = 0
+    vi.stubGlobal('fetch', stubFetch({
+      queue: async () => {
+        queueReads += 1
+        if (queueReads === 1) return mockResponse(queuePayload)
+        return new Promise<Response>(() => undefined)
+      },
+    }))
+
+    render(<CompanyCalibrationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '校准公司：杭州鲁滨逊测试技术有限公司' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交校准' }))
+
+    expect(await screen.findByText(/已保存「杭州鲁滨逊测试技术有限公司」校准（已校准，v1）/)).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
+    expect(screen.queryByRole('button', { name: '提交校准' })).not.toBeInTheDocument()
+    expect(screen.queryByText('校准队列加载中…')).not.toBeInTheDocument()
+  })
+
+  it('写入成功后后台队列读取失败，不显示全局错误或推翻成功回执', async () => {
+    let queueReads = 0
+    vi.stubGlobal('fetch', stubFetch({
+      queue: async () => {
+        queueReads += 1
+        return queueReads === 1
+          ? mockResponse(queuePayload)
+          : mockResponse({ detail: '后台队列暂不可用' }, false, 503)
+      },
+    }))
+
+    render(<CompanyCalibrationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '校准公司：杭州鲁滨逊测试技术有限公司' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交校准' }))
+
+    expect(await screen.findByText(/已保存「杭州鲁滨逊测试技术有限公司」校准（已校准，v1）/)).toBeInTheDocument()
+    await waitFor(() => expect(queueReads).toBe(2))
+    expect(screen.queryByText('后台队列暂不可用')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
   })
 
   it('同内容重提与幂等重放的回执如实呈现', async () => {

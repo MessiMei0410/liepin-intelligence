@@ -2478,6 +2478,183 @@ export interface components {
             /** Request Id */
             request_id: string;
         };
+        /** SourcingAdjustmentDecisionResponse */
+        SourcingAdjustmentDecisionResponse: {
+            /** Id */
+            id: number;
+            /** Job Id */
+            job_id: number;
+            /** Candidate Id */
+            candidate_id?: number | null;
+            /**
+             * Candidate Name
+             * @default
+             */
+            candidate_name: string;
+            /**
+             * Candidate Display Name
+             * @default
+             */
+            candidate_display_name: string;
+            /**
+             * Adjust Type
+             * @enum {string}
+             */
+            adjust_type: "add_keyword" | "remove_keyword" | "exclude_company" | "add_company" | "add_filter" | "adjust_salary_range";
+            /** Value */
+            value: string;
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+            /**
+             * Confidence
+             * @default 0.5
+             */
+            confidence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "accepted" | "applied" | "ignored";
+            /**
+             * Created At
+             * @default
+             */
+            created_at: string;
+            /** Accepted At */
+            accepted_at?: string | null;
+            /** Applied At */
+            applied_at?: string | null;
+            /** Applied Round */
+            applied_round?: number | null;
+            /** Applied Workflow Id */
+            applied_workflow_id?: string | null;
+            /** Applied Artifact Id */
+            applied_artifact_id?: string | null;
+            effect?: components["schemas"]["SourcingAdjustmentEffectResponse"] | null;
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /**
+             * Already Accepted
+             * @default false
+             */
+            already_accepted: boolean;
+            /** Receipt */
+            receipt?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** SourcingAdjustmentEffectResponse */
+        SourcingAdjustmentEffectResponse: {
+            /** Baseline */
+            baseline: {
+                [key: string]: number;
+            };
+            /** Current */
+            current: {
+                [key: string]: number;
+            };
+            /** Diff */
+            diff: {
+                [key: string]: number;
+            };
+        };
+        /** SourcingAdjustmentItemResponse */
+        SourcingAdjustmentItemResponse: {
+            /** Id */
+            id: number;
+            /** Job Id */
+            job_id: number;
+            /** Candidate Id */
+            candidate_id?: number | null;
+            /**
+             * Candidate Name
+             * @default
+             */
+            candidate_name: string;
+            /**
+             * Candidate Display Name
+             * @default
+             */
+            candidate_display_name: string;
+            /**
+             * Adjust Type
+             * @enum {string}
+             */
+            adjust_type: "add_keyword" | "remove_keyword" | "exclude_company" | "add_company" | "add_filter" | "adjust_salary_range";
+            /** Value */
+            value: string;
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+            /**
+             * Confidence
+             * @default 0.5
+             */
+            confidence: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "accepted" | "applied" | "ignored";
+            /**
+             * Created At
+             * @default
+             */
+            created_at: string;
+            /** Accepted At */
+            accepted_at?: string | null;
+            /** Applied At */
+            applied_at?: string | null;
+            /** Applied Round */
+            applied_round?: number | null;
+            /** Applied Workflow Id */
+            applied_workflow_id?: string | null;
+            /** Applied Artifact Id */
+            applied_artifact_id?: string | null;
+            effect?: components["schemas"]["SourcingAdjustmentEffectResponse"] | null;
+        };
+        /** SourcingAdjustmentListResponse */
+        SourcingAdjustmentListResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /** Items */
+            items?: components["schemas"]["SourcingAdjustmentItemResponse"][];
+            summary: components["schemas"]["SourcingAdjustmentSummaryResponse"];
+        };
+        /** SourcingAdjustmentSummaryResponse */
+        SourcingAdjustmentSummaryResponse: {
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
+            /**
+             * Accepted
+             * @default 0
+             */
+            accepted: number;
+            /**
+             * Applied
+             * @default 0
+             */
+            applied: number;
+            /**
+             * Ignored
+             * @default 0
+             */
+            ignored: number;
+        };
         /** StrategyItemEdits */
         StrategyItemEdits: {
             /** Request Id */
@@ -5685,9 +5862,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SourcingAdjustmentListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5724,7 +5899,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SourcingAdjustmentDecisionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -5761,7 +5936,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SourcingAdjustmentDecisionResponse"];
                 };
             };
             /** @description Validation Error */

@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { ArrowLeft, ExternalLink, LoaderCircle, UserRoundSearch, UsersRound, RefreshCw } from 'lucide-react'
 import { api } from '../api'
 import { WorkflowCandidateItem } from '../workflow/workflowSummary'
-import { sourceLabel, date } from '../shared/format'
+import { date } from '../shared/format'
+import { sourcingAttributionChannel, sourcingAttributionQuery, sourcingAttributionRound, sourcingAttributionStatus } from '../workflow/sourcingAttribution'
+import { candidateRecommendationLabel, candidateRecommendationTone } from '../shared/candidateRecommendation'
 
 function resumeStatusLabel(status?: string) {
   if (!status || status === 'not_requested') return '未抓取'
@@ -19,18 +21,6 @@ function resumeStatusTone(status?: string) {
   if (status === 'complete') return 'good'
   if (status === 'partial') return 'warn'
   return 'bad'
-}
-
-function recommendationLabel(value?: string) {
-  if (value === 'not_recommended') return '不推荐'
-  if (value === 'verify_first') return '待补证据'
-  return '待复核'
-}
-
-function recommendationTone(value?: string) {
-  if (value === 'not_recommended') return 'bad'
-  if (value === 'verify_first') return 'warn'
-  return 'neutral'
 }
 
 export function SourcingCandidatesPage({
@@ -117,7 +107,11 @@ export function SourcingCandidatesPage({
                   <div className="candidate-company">{candidate.company || '公司待补充'}</div>
                   <div className="candidate-title">{candidate.title || '职位待补充'}</div>
                 </td>
-                <td>{sourceLabel(candidate.attribution?.channel || '')}</td>
+                <td>
+                  <div>{sourcingAttributionChannel(candidate.attribution)}</div>
+                  <small className="sourcing-candidates-origin-status">{sourcingAttributionStatus(candidate.attribution)}</small>
+                  <small className="sourcing-candidates-origin-query">{sourcingAttributionQuery(candidate.attribution)}{sourcingAttributionRound(candidate.attribution)}</small>
+                </td>
                 <td>
                   <span className={`tag ${resumeStatusTone(candidate.resume_capture_status)}`}>
                     {resumeStatusLabel(candidate.resume_capture_status)}
@@ -137,8 +131,8 @@ export function SourcingCandidatesPage({
                     <b>{candidate.fit_score ?? '-'}</b>
                     <span>{candidate.fit_level || ''}</span>
                   </div>
-                  <span className={`tag ${recommendationTone(candidate.recommendation)}`}>
-                    {recommendationLabel(candidate.recommendation)}
+                  <span className={`tag ${candidateRecommendationTone(candidate.recommendation)}`}>
+                    {candidateRecommendationLabel(candidate.recommendation)}
                   </span>
                 </td>
                 <td>

@@ -121,6 +121,7 @@ describe('岗位画像区块（JobProfileInsights）', () => {
   })
 
   it('「不对」按钮：POST feedback 幂等回写 → 重新拉取 → 条目进入已标记区', async () => {
+    const onChanged = vi.fn()
     let disputed = false
     const fetchMock = stubFetch((url, init) => {
       if (url.includes('/profile-insights/feedback') && init?.method === 'POST') {
@@ -130,7 +131,7 @@ describe('岗位画像区块（JobProfileInsights）', () => {
       if (url.includes('/profile-insights')) return disputed ? disputedPayload : readyPayload
       return readyPayload
     })
-    render(<JobProfileInsights jobId={154} />)
+    render(<JobProfileInsights jobId={154} onChanged={onChanged} />)
     const row = (await screen.findByText(textOf('PC电源多相控制器'))).closest('.job-profile-item') as HTMLElement
     const disputeButton = Array.from(row.querySelectorAll('button')).find(button => button.textContent === '不对') as HTMLButtonElement
     await userEvent.click(disputeButton)
@@ -146,6 +147,101 @@ describe('岗位画像区块（JobProfileInsights）', () => {
     await waitFor(() => expect(screen.getByText(/顾问已标记不对（1 条/)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'PC电源多相控制器' })).not.toBeInTheDocument()
     expect(screen.getByText(textOf('PC电源多相控制器 ×3'))).toBeInTheDocument()
+    expect(onChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('纠正写入失败时不触发岗位详情回读', async () => {
+    const onChanged = vi.fn()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/profile-insights/feedback') && init?.method === 'POST') return mockResponse({ detail: '画像版本已变化，请重试' }, false, 409)
+      return mockResponse(readyPayload)
+    }))
+    render(<JobProfileInsights jobId={154} onChanged={onChanged} />)
+    const row = (await screen.findByText(textOf('PC电源多相控制器'))).closest('.job-profile-item') as HTMLElement
+    await userEvent.click(Array.from(row.querySelectorAll('button')).find(button => button.textContent === '不对') as HTMLButtonElement)
+    expect(await screen.findByText('画像版本已变化，请重试')).toBeInTheDocument()
+    expect(onChanged).not.toHaveBeenCalled()
+  })
+
+  it('纠正成功直接采用 POST 重算画像，不等待画像与岗位详情回读', async () => {
+    const never = new Promise<Response>(() => undefined)
+    const onChanged = vi.fn(() => new Promise<void>(() => undefined))
+    let wrote = false
+    let profileGets = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/profile-insights/feedback') && init?.method === 'POST') {
+        wrote = true
+        return mockResponse({
+          ok: true,
+          status: 'disputed',
+          item_type: 'duty',
+          item_key: 'pc电源多相控制器',
+          duties: disputedPayload.duties,
+          tools: disputedPayload.tools,
+          deliverables: disputedPayload.deliverables,
+          customers: disputedPayload.customers,
+          disputed: disputedPayload.disputed,
+          stats: disputedPayload.stats,
+          source_count: disputedPayload.source_count,
+          as_of: disputedPayload.as_of,
+        })
+      }
+      if (url.includes('/profile-insights')) {
+        profileGets += 1
+        return wrote ? never : mockResponse(readyPayload)
+      }
+      throw new Error(`未预期的请求：${url}`)
+    }))
+    render(<JobProfileInsights jobId={154} onChanged={onChanged} />)
+    const row = (await screen.findByText(textOf('PC电源多相控制器'))).closest('.job-profile-item') as HTMLElement
+    await userEvent.click(Array.from(row.querySelectorAll('button')).find(button => button.textContent === '不对') as HTMLButtonElement)
+
+    expect(await screen.findByText(/已记录"PC电源多相控制器"不对/)).toBeInTheDocument()
+    expect(screen.getByText(/顾问已标记不对（1 条/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'PC电源多相控制器' })).not.toBeInTheDocument()
+    await waitFor(() => expect(profileGets).toBe(2))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+  })
+
+  it('纠正后的后台回读失败不覆盖数据库成功回执', async () => {
+    const onChanged = vi.fn(async () => { throw new Error('岗位详情回读失败') })
+    let wrote = false
+    let profileGets = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/profile-insights/feedback') && init?.method === 'POST') {
+        wrote = true
+        return mockResponse({
+          ok: true,
+          status: 'disputed',
+          duties: disputedPayload.duties,
+          tools: disputedPayload.tools,
+          deliverables: disputedPayload.deliverables,
+          customers: disputedPayload.customers,
+          disputed: disputedPayload.disputed,
+          stats: disputedPayload.stats,
+          source_count: disputedPayload.source_count,
+          as_of: disputedPayload.as_of,
+        })
+      }
+      if (url.includes('/profile-insights')) {
+        profileGets += 1
+        return wrote ? mockResponse({ detail: '画像回读失败' }, false, 500) : mockResponse(readyPayload)
+      }
+      throw new Error(`未预期的请求：${url}`)
+    }))
+    render(<JobProfileInsights jobId={154} onChanged={onChanged} />)
+    const row = (await screen.findByText(textOf('PC电源多相控制器'))).closest('.job-profile-item') as HTMLElement
+    await userEvent.click(Array.from(row.querySelectorAll('button')).find(button => button.textContent === '不对') as HTMLButtonElement)
+
+    expect(await screen.findByText(/已记录"PC电源多相控制器"不对/)).toBeInTheDocument()
+    await waitFor(() => expect(profileGets).toBe(2))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(screen.getByText(/顾问已标记不对（1 条/)).toBeInTheDocument()
+    expect(screen.queryByText('画像回读失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('岗位详情回读失败')).not.toBeInTheDocument()
   })
 
   it('加载失败如实呈现错误并可原地重试', async () => {
@@ -184,6 +280,22 @@ describe('岗位详情接线（JobPanel 挂载画像区块）', () => {
     render(<JobPanel value={jobDetail} close={() => undefined} openCandidate={() => undefined} />)
     expect(await screen.findByText('这个岗位实际在干什么')).toBeInTheDocument()
     expect(await screen.findByText(/来源 5 份人选履历/)).toBeInTheDocument()
+  })
+
+  it('岗位详情把画像纠正成功通知接到父级详情刷新', async () => {
+    let disputed = false
+    const changed = vi.fn()
+    stubFetch((url, init) => {
+      if (url.includes('/profile-insights/feedback') && init?.method === 'POST') {
+        disputed = true
+        return { ok: true, status: 'disputed' }
+      }
+      return disputed ? disputedPayload : readyPayload
+    })
+    render(<JobPanel value={jobDetail} close={() => undefined} openCandidate={() => undefined} changed={changed} />)
+    const row = (await screen.findByText(textOf('PC电源多相控制器'))).closest('.job-profile-item') as HTMLElement
+    await userEvent.click(Array.from(row.querySelectorAll('button')).find(button => button.textContent === '不对') as HTMLButtonElement)
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1))
   })
 
   it('数据不足时区块显示空态，不影响其余区块渲染', async () => {

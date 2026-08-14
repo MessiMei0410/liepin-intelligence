@@ -1,6 +1,7 @@
 import { AlertTriangle, ArrowLeft, Download, LoaderCircle, Minus, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react'
 import type { AnalysisResult, AnalysisTrend } from '../api'
 import { sourceLabel } from '../shared/format'
+import { candidateRecommendationLabel } from '../shared/candidateRecommendation'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 
 const columnLabels: Record<string, string> = {
@@ -18,10 +19,6 @@ const columnLabels: Record<string, string> = {
   review_state: '复盘状态', updated_at: '更新时间',
 }
 
-const recommendationLabels: Record<string, string> = {
-  recommended: '推荐', priority_review: '优先复核', verify_first: '先核验',
-  not_recommended: '不推荐', rejected: '不推进',
-}
 
 const severityLabels: Record<string, string> = { high: '高', medium: '中', low: '低' }
 
@@ -36,7 +33,7 @@ const cellText = (value: unknown, column: string) => {
   if (value === null || value === undefined || value === '') return '-'
   if (column === 'status') return mapWorkflowStatus({ status: String(value) }).label
   if (column === 'channel') return sourceLabel(String(value))
-  if (column === 'recommendation') return recommendationLabels[String(value)] || String(value)
+  if (column === 'recommendation') return candidateRecommendationLabel(String(value || ''))
   if (column === 'severity') return severityLabels[String(value)] || String(value)
   if (typeof value === 'number' && (column.endsWith('_rate') || column === 'evidence_coverage')) {
     return `${Math.round(value * 1000) / 10}%`

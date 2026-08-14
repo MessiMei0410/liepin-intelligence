@@ -38,7 +38,7 @@ function LimitNote({ total, limit, expanded, onToggle, unit = '条' }: {
   )
 }
 
-export function JobPanel({ value, close, openCandidate }: { value: JobDetail; close: () => void; openCandidate: (id: number) => void }) {
+export function JobPanel({ value, close, openCandidate, changed }: { value: JobDetail; close: () => void; openCandidate: (id: number) => void; changed?: () => void | Promise<void> }) {
   const [followupExpanded, setFollowupExpanded] = useState(false)
   const [eventExpanded, setEventExpanded] = useState(false)
   const [experimentExpanded, setExperimentExpanded] = useState(false)
@@ -104,7 +104,7 @@ export function JobPanel({ value, close, openCandidate }: { value: JobDetail; cl
               {value.closed_reason && <p className="job-warning">{value.closed_reason}</p>}
             </section>
             <JobBrief job={value} />
-            <JobProfileInsights key={value.id} jobId={value.id} />
+            <JobProfileInsights key={value.id} jobId={value.id} onChanged={changed} />
             <JobListSection title="硬性要求" items={hard} />
             <JobListSection title="核心能力" items={abilities} />
             <JobListSection title="岗位卖点" items={pitch} />

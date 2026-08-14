@@ -1,13 +1,47 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CircleDashed, FileText, LoaderCircle, RefreshCw, ScrollText, TriangleAlert } from 'lucide-react'
 import { api } from '../api'
-import type { JobWeeklyReportBrief, JobWeeklyReportListPayload } from '../api'
+import type { JobWeeklyReportBrief, JobWeeklyReportCreateResult, JobWeeklyReportListPayload } from '../api'
 import { copilotText } from '../shared/text'
 import { WorkflowArtifactDialog } from '../workflows/WorkflowArtifactDialog'
 
 // 岗位周报区块（三期驾驶舱缺口）：生成按钮 + 最新周报摘要 + 历史版本列表。
 // 完整报告复用 WorkflowArtifactDialog（markdown 正文 + 下载链路），不在此另做渲染。
 const countText = (value: number | null | undefined) => value === null || value === undefined ? '—' : String(value)
+
+const briefFromCreateResult = (result: JobWeeklyReportCreateResult): JobWeeklyReportBrief | null => {
+  const report = result.report
+  const artifactId = String(result.artifact_id || '')
+  const weekStart = String(result.week_start || report?.week_start || '')
+  const weekEnd = String(result.week_end || report?.week_end || '')
+  if (!report || !artifactId || !weekStart || !weekEnd) return null
+  const version = Number(result.version || report.version || 1)
+  const current = report.funnel?.current
+  return {
+    artifact_id: artifactId,
+    title: ['岗位周报', report.client, report.job_title, weekStart, `v${version}`].filter(Boolean).join(' '),
+    version,
+    week_start: weekStart,
+    week_end: weekEnd,
+    generated_at: report.generated_at,
+    summary: {
+      total: current?.total,
+      active: current?.active,
+      recommended: current?.recommended,
+      confirmed_this_week: report.recommendations?.confirmed_this_week,
+      comparison: report.funnel?.comparison,
+      risk_count: Array.isArray(report.risks) ? report.risks.length : undefined,
+      suggestion_count: Array.isArray(report.suggestions) ? report.suggestions.length : undefined,
+    },
+  }
+}
+
+const mergeGeneratedReport = (payload: JobWeeklyReportListPayload, generated: JobWeeklyReportBrief) => {
+  const same = payload.items.find(item => item.artifact_id === generated.artifact_id)
+  if (same && same.version >= generated.version) return payload
+  const items = [generated, ...payload.items.filter(item => item.artifact_id !== generated.artifact_id)]
+  return { ...payload, latest: items[0], items }
+}
 
 function ReportRow({ item, latest, onOpen }: { item: JobWeeklyReportBrief; latest: boolean; onOpen: (artifactId: string) => void }) {
   return (
@@ -27,6 +61,7 @@ export function JobWeeklyReport({ jobId }: { jobId: number }) {
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState('')
+  const [generateNotice, setGenerateNotice] = useState('')
   const [openArtifactId, setOpenArtifactId] = useState('')
   const load = useCallback(async () => {
     setLoading(true)
@@ -45,9 +80,21 @@ export function JobWeeklyReport({ jobId }: { jobId: number }) {
   const generate = async () => {
     setGenerating(true)
     setGenerateError('')
+    setGenerateNotice('')
     try {
-      await api.generateJobWeeklyReport(jobId)
-      await load()
+      const result = await api.generateJobWeeklyReport(jobId)
+      const generated = briefFromCreateResult(result)
+      if (generated) {
+        setData(current => mergeGeneratedReport(current || { ok: true, job_id: jobId, latest: null, items: [] }, generated))
+        setError('')
+      }
+      setGenerateNotice(result.receipt?.idempotent_replay
+        ? `本周周报此前已生成，已返回保存版本 v${result.version || generated?.version || 1}。`
+        : `本周周报已生成并保存为 v${result.version || generated?.version || 1}。`)
+      void api.jobWeeklyReports(jobId).then(payload => {
+        setData(generated ? mergeGeneratedReport(payload, generated) : payload)
+        setError('')
+      }).catch(() => undefined)
     } catch (reason) {
       setGenerateError(copilotText(reason) || '周报生成失败，请重试')
     } finally {
@@ -67,6 +114,7 @@ export function JobWeeklyReport({ jobId }: { jobId: number }) {
         </button>
       </h3>
       {generateError && <p className="job-weekly-report-message error" role="alert"><TriangleAlert />{generateError}</p>}
+      {generateNotice && <p className="job-weekly-report-message" role="status"><FileText />{generateNotice}</p>}
       {loading && !data && <div className="job-weekly-report-message" role="status"><LoaderCircle className="spin" /><span>正在读取岗位周报…</span></div>}
       {error && <div className="job-weekly-report-message error" role="alert"><CircleDashed /><span>{error}</span><button type="button" className="button" onClick={() => void load()}><RefreshCw />重试</button></div>}
       {data && !error && items.length === 0 && (

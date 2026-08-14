@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ClipboardCheck, LoaderCircle, RefreshCw, UserRoundSearch } from 'lucide-react'
 import { api } from '../api'
-import type { ChannelDownweight, EvaluationReviewItem, StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload } from '../api'
+import type { ChannelDownweight, EvaluationReviewItem, StrategyReviewChannelFinding, StrategyReviewDiff, StrategyReviewPayload, StrategyReviewRebuildResult } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { channelLabel } from './utils'
 import { diffContentText, diffOpLabel, diffStepLabel } from './strategyReviewDiff'
 import { StrategyReviewExpansion } from './StrategyReviewExpansion'
+import { strategyReviewFreshness } from './strategyReviewFreshness'
 
 // S4-3 策略复盘：终局工作流（completed/blocked/failed）展示规则版复盘结论与修订建议 diff。
 // 独立按需路由 /strategy-review，面板挂载与详情刷新（updatedAt 变化）时拉取，不进 /summary 轮询签名。
@@ -23,7 +24,7 @@ const FINDING_LABELS: Record<string, string> = {
   low_high_rate: '高分率低',
 }
 
-export function StrategyReview({ workflowId, status, updatedAt, openCandidate, jobId, mappingArtifactId, onOpenMapping }: {
+export function StrategyReview({ workflowId, status, updatedAt, openCandidate, jobId, mappingArtifactId, onOpenMapping, onChanged }: {
   workflowId: string
   status: string
   updatedAt: string
@@ -31,9 +32,10 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
   jobId?: number
   mappingArtifactId?: string
   onOpenMapping?: (artifactId: string) => void
+  onChanged?: () => void | Promise<void>
 }) {
   const reviewable = REVIEWABLE_STATUSES.has(status)
-  const [payload, setPayload] = useState<StrategyReviewPayload | null>(null)
+  const [payload, setPayload] = useState<StrategyReviewPayload | StrategyReviewRebuildResult | null>(null)
   const [missing, setMissing] = useState(false)
   const [error, setError] = useState('')
   const [building, setBuilding] = useState(false)
@@ -55,6 +57,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
   if (!reviewable) return null
 
   const review = payload?.review
+  const freshness = strategyReviewFreshness(review?.generated_at, updatedAt)
   const evidence = review?.evidence
   const findings = review?.per_channel_findings || []
   const diffs = review?.revision_diff || []
@@ -67,8 +70,14 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
     setBuilding(true)
     setError('')
     try {
-      await api.rebuildStrategyReview(workflowId)
-      await load()
+      const result = await api.rebuildStrategyReview(workflowId)
+      setPayload(result)
+      setMissing(false)
+      setError('')
+      void api.strategyReview(workflowId).then(refreshed => {
+        if (refreshed) setPayload(refreshed)
+      }).catch(() => undefined)
+      void Promise.resolve().then(() => onChanged?.()).catch(() => undefined)
     } catch (cause) {
       setError(humanizeActionError(cause, '分析失败，请重试。'))
     } finally {
@@ -84,8 +93,12 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
         <b>{headSummary}</b>
         {review && <small>{`v${review.version || 1} · 生成于 ${review.generated_at || '未知时间'}`}</small>}
       </div>
+      {freshness.stale && <span className="tag warn" title="工作流更新时间晚于复盘生成时间">复盘已过期</span>}
       {review?.degraded && <span className="tag warn">证据不完整，结论仅供参考</span>}
       {error && <span className="tag warn">{error}</span>}
+      {review && freshness.stale && <button className="button workflow-review-rebuild" disabled={building} onClick={() => void rebuild()}>
+        {building ? <LoaderCircle className="spin" /> : <RefreshCw />}重新分析
+      </button>}
     </header>
     {missing && !error && <div className="insight-empty">
       <span>这轮还没分析没成的原因。可以基于本轮各渠道的结果和评估情况补一份。</span>
@@ -95,6 +108,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
     </div>}
     {!review && !missing && !error && <div className="insight-empty"><LoaderCircle className="spin" />正在分析…</div>}
     {review && <>
+      {freshness.stale && <div className="review-stale-notice" role="status">工作流在这份复盘生成后又发生过更新，以下结论仅供对照；重新分析后再决定是否调整策略。</div>}
       <div className="review-verdict">
         <p>{review.verdict_reason}</p>
         {evidence && <div className="funnel-line">
@@ -111,7 +125,7 @@ export function StrategyReview({ workflowId, status, updatedAt, openCandidate, j
         <div className="review-diffs-head"><b>修订建议</b><span>在 Agent 中讨论并确认应用</span></div>
         {diffs.map(diff => <DiffRow key={diff.diff_id} diff={diff} />)}
       </div>}
-      <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} jobId={jobId} mappingArtifactId={mappingArtifactId} onOpenMapping={onOpenMapping} />
+      <StrategyReviewExpansion workflowId={workflowId} signals={review.signals} tree={review.expansion_decision_tree} jobId={jobId} mappingArtifactId={mappingArtifactId} onOpenMapping={onOpenMapping} onChanged={onChanged} />
       {downweights.length > 0 && <div className="review-diffs" aria-label="渠道降权建议">
         <div className="review-diffs-head"><b>渠道降权建议</b><span>连续 0 召回（非渠道故障）≥2 轮 · 仅建议不执行，配额调整待顾问确认</span></div>
         {downweights.map((item, index) => <DownweightRow key={`${item.channel}-${index}`} item={item} />)}

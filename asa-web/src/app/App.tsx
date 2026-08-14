@@ -19,6 +19,7 @@ import type { AgentContext, AgentReference } from '../agent/transport'
 import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
 import { isBareDetached } from '../shared/nativeBridge'
 import { BareCandidateList } from '../agent/BareCandidateList'
+import { CANDIDATE_UPDATED_EVENT, type CandidateUpdatedDetail } from '../shared/candidateEvents'
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
@@ -67,8 +68,11 @@ export function App() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [agentContext, setAgentContext] = useState<AgentContext>({ type: 'page', page: 'agent', mode: 'page_review' })
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
+  const workflowStateRef = useRef<Workflow | undefined>(undefined)
   const coreFailuresRef = useRef(0)
   const workbenchRefreshRef = useRef(0)
+  const jobsRefreshRef = useRef(0)
+  const candidatesRefreshRef = useRef(0)
   useGlobalDialogDrag()
 
   // Core 健康探测：连续 2 次失败才判定离线；成功一次即复位，不重复打搅。
@@ -83,7 +87,7 @@ export function App() {
     }
   }
 
-  const refreshWorkbench = async () => {
+  const refreshWorkbench = useCallback(async () => {
     const refreshId = ++workbenchRefreshRef.current
     await Promise.allSettled([
       api.workbench().then(next => {
@@ -93,10 +97,12 @@ export function App() {
         if (refreshId === workbenchRefreshRef.current && Array.isArray(next.items)) setTemplates(next.items)
       }),
     ])
-  }
+  }, [])
 
   useEffect(() => {
     let active = true
+    const jobsRefreshId = ++jobsRefreshRef.current
+    const candidatesRefreshId = ++candidatesRefreshRef.current
     api.bootstrap()
       .then(value => { if (active) setBoot(value) })
       .catch(e => { if (active) setError(String(e.message || e)) })
@@ -107,10 +113,12 @@ export function App() {
         const failures: string[] = []
         if (dashboardResult.status === 'fulfilled') setDashboard(dashboardResult.value)
         else failures.push(`经营概况：${String(dashboardResult.reason?.message || dashboardResult.reason)}`)
-        if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value.items)
-        else failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
-        if (candidatesResult.status === 'fulfilled') setCandidates(candidatesResult.value.items)
-        else failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
+        if (jobsResult.status === 'fulfilled') {
+          if (jobsRefreshId === jobsRefreshRef.current) setJobs(jobsResult.value.items)
+        } else failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
+        if (candidatesResult.status === 'fulfilled') {
+          if (candidatesRefreshId === candidatesRefreshRef.current) setCandidates(candidatesResult.value.items)
+        } else failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
         if (failures.length) setError(`部分模块加载失败。${failures.join('；')}`)
         else setError('')
       })
@@ -119,7 +127,7 @@ export function App() {
       void api.analyticsCatalog().then(result => setAnalysisCatalog(result.items)).catch(() => undefined)
     })
     return () => { active = false }
-  }, [refreshKey])
+  }, [refreshKey, refreshWorkbench])
 
   useEffect(() => {
     let active = true
@@ -143,13 +151,49 @@ export function App() {
       document.removeEventListener('visibilitychange', onVisible)
       source?.close()
     }
-  }, [])
+  }, [refreshWorkbench])
 
   // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
   // dashboard 计数由统一轮询自然收敛。
-  const refreshCandidateList = async () => {
-    try { setCandidates((await api.allCandidates()).items) } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
-  }
+  const refreshCandidateList = useCallback(async () => {
+    const refreshId = ++candidatesRefreshRef.current
+    try {
+      const result = await api.allCandidates()
+      if (refreshId === candidatesRefreshRef.current) setCandidates(result.items)
+    } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
+  }, [])
+
+  const refreshCreatedCandidate = useCallback(async (candidateId: number) => {
+    const refreshId = ++candidatesRefreshRef.current
+    await Promise.allSettled([
+      api.candidate(candidateId).then(result => {
+        if (refreshId !== candidatesRefreshRef.current) return
+        setCandidates(current => [result.candidate, ...current.filter(candidate => candidate.id !== result.candidate.id)])
+      }),
+      api.allCandidates().then(result => {
+        if (refreshId === candidatesRefreshRef.current) setCandidates(result.items)
+      }),
+    ])
+  }, [])
+
+  // Mapping 等入口新建岗位关系后，立即让四主 tab 的岗位/人选数据回读数据库。
+  // 普通阶段更新仍走详情增量刷新，不触发这条全量列表路径。
+  useEffect(() => {
+    const onCandidateUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<CandidateUpdatedDetail>).detail
+      if (!detail?.created) return
+      const jobsRefreshId = ++jobsRefreshRef.current
+      void Promise.allSettled([
+        refreshCreatedCandidate(detail.id),
+        api.allJobs().then(result => {
+          if (jobsRefreshId === jobsRefreshRef.current) setJobs(result.items)
+        }),
+        refreshWorkbench(),
+      ])
+    }
+    window.addEventListener(CANDIDATE_UPDATED_EVENT, onCandidateUpdated)
+    return () => window.removeEventListener(CANDIDATE_UPDATED_EVENT, onCandidateUpdated)
+  }, [refreshCreatedCandidate, refreshWorkbench])
 
   // 合并双轮询：单一定时器统一刷新 dashboard + 候选人详情，避免两个独立 setInterval(2000)。
   useEffect(() => {
@@ -205,9 +249,10 @@ export function App() {
       window.removeEventListener('focus', tick)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [])
+  }, [refreshCandidateList])
 
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
+  useEffect(() => { workflowStateRef.current = workflow }, [workflow])
 
   const openCandidate = async (id: number) => {
     try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
@@ -221,15 +266,26 @@ export function App() {
   const openJob = async (id: number) => {
     try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
+  const refreshJobDetail = async (id: number) => {
+    const fresh = (await api.job(id)).job
+    setJob(current => current?.id === id ? fresh : current)
+  }
   const openWorkflow = async (id: string) => {
     try {
       setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false)
       const resolved = await resolveWorkflowRevision(id, api.workflow)
+      workflowStateRef.current = resolved.value
       setWorkflow(resolved.value)
       const nextHash = `workflow=${encodeURIComponent(resolved.id)}${isBareDetached() ? '&bare=1' : ''}`
       if (resolved.id !== id) history.replaceState(null, '', `${location.pathname}${location.search}#${nextHash}`)
       else location.hash = nextHash
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+  const refreshWorkflowDetail = async (id: string) => {
+    const resolved = await resolveWorkflowRevision(id, api.workflow)
+    if (workflowStateRef.current?.workflow.workflow_id !== id) return
+    workflowStateRef.current = resolved.value
+    setWorkflow(resolved.value)
   }
   const openSourcingCandidates = (workflowId: string) => {
     setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId('')
@@ -333,6 +389,7 @@ export function App() {
   const closeOverlay = () => {
     // 纯净模式（独立窗口）：优先退回上一页（如从名单点进详情），无历史再清空。
     if (isBareDetached() && history.length > 1) { history.back(); return }
+    workflowStateRef.current = undefined
     setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false); history.replaceState(null, '', `${location.pathname}${location.search}`)
     notifyFullObjectClosed()
   }
@@ -396,6 +453,7 @@ export function App() {
     return null
   }
   const navigateTab = (id: Tab) => {
+    workflowStateRef.current = undefined
     setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
     history.replaceState(null, '', `${location.pathname}${location.search}`)
   }
@@ -417,9 +475,9 @@ export function App() {
   if (isBareDetached()) {
     return <div className="shell bare-shell">
       {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
-      {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
+      {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
       {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
-      {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
+      {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
       {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
       {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     </div>
@@ -459,9 +517,9 @@ export function App() {
         <section><header><Database/><h2>数据连接</h2></header><p>v3 统一库</p><span className="rail-online"><i/>实时连接</span></section>
       </>}
     </aside>}
-    {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} />}
+    {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
     {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
-    {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => openWorkflow(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
+    {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
     {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}

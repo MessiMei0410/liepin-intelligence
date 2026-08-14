@@ -4,6 +4,7 @@ import { App } from '../app/App'
 import { WorkflowPanel } from '../workflows/WorkflowPanel'
 import type { Workflow } from '../api'
 import { candidateDetail, mockResponse, plannedWorkflow } from './helpers'
+import { dispatchCandidateUpdated } from '../shared/candidateEvents'
 
 // R7 轮询优化三组验收：summary 门控（变化才拉详情）、候选人增量刷新（不触发 bootstrap）、SSE 接入与降级。
 
@@ -182,5 +183,53 @@ describe('R7 候选人增量刷新', () => {
     expect(callsMatching(fetchMock, /\/api\/v1\/jobs/)).toBe(1)
     expect(callsMatching(fetchMock, /\/api\/v1\/candidates[?]/)).toBeGreaterThanOrEqual(2)
     expect(callsMatching(fetchMock, /\/api\/v1\/candidates\/1/)).toBeGreaterThanOrEqual(2)
+  })
+
+  it('Mapping 新建岗位关系事件立即回读主候选人与岗位列表', async () => {
+    let candidateListReads = 0
+    let resolveInitialCandidates: ((response: Response) => void) | undefined
+    const mappingCandidate = {
+      id: 887,
+      person_id: 66,
+      name: 'K**',
+      current_company: 'MPS',
+      current_title: '应用工程师',
+      job_id: 154,
+      job: '技术市场经理',
+      client: '士兰微',
+      clean_stage: 'S1 新增寻访/待复核',
+      source_type: 'mapping',
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/v1/bootstrap')) return Promise.resolve(mockResponse({ ok: true, core: { status: 'connected' } }))
+      if (url.includes('/api/v1/dashboard')) return Promise.resolve(mockResponse({ ok: true, counts: {}, workflows: [] }))
+      if (url.includes('/api/v1/jobs')) return Promise.resolve(mockResponse({ items: [], total: 0 }))
+      if (/\/api\/v1\/candidates\/887$/.test(url)) return Promise.resolve(mockResponse({ candidate: mappingCandidate }))
+      if (url.includes('/api/v1/candidates')) {
+        candidateListReads += 1
+        if (candidateListReads === 1) return new Promise<Response>(resolve => { resolveInitialCandidates = resolve })
+        return Promise.resolve(mockResponse({ items: [mappingCandidate], total: 1 }))
+      }
+      if (url.includes('/api/v1/workbench')) return Promise.resolve(mockResponse({ ok: true, version: 'v1', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }))
+      if (url.includes('/api/v1/analytics/')) return Promise.resolve(mockResponse({ ok: true, items: [] }))
+      if (url.includes('/api/v1/copilot/sessions')) return Promise.resolve(mockResponse({ ok: true, sessions: [] }))
+      return Promise.resolve(mockResponse({ ok: true }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<App />)
+    await act(async () => undefined)
+
+    act(() => dispatchCandidateUpdated({ id: 887, created: true, jobId: 154, source: 'mapping' }))
+    await act(async () => undefined)
+    // 首屏旧快照晚到，不能覆盖 Mapping 事件触发的新列表回读。
+    resolveInitialCandidates?.(mockResponse({ items: [], total: 0 }))
+    await act(async () => undefined)
+    fireEvent.click(screen.getByRole('button', { name: '人选列表' }))
+
+    expect(screen.getByLabelText('打开候选人 K**')).toBeInTheDocument()
+    expect(candidateListReads).toBeGreaterThanOrEqual(2)
+    expect(callsMatching(fetchMock, /\/api\/v1\/candidates\/887$/)).toBe(1)
+    expect(callsMatching(fetchMock, /\/api\/v1\/jobs/)).toBeGreaterThanOrEqual(2)
   })
 })

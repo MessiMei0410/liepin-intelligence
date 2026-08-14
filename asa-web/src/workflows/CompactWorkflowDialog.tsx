@@ -4,14 +4,14 @@ import {
   ListChecks, LoaderCircle, Pause, Play, RotateCcw, ShieldCheck, TriangleAlert,
   UserRoundSearch, Workflow as WorkflowIcon, X,
 } from 'lucide-react'
-import { api, type Workflow } from '../api'
+import type { Workflow } from '../api'
 import { DialogPanel } from '../shared/Dialog'
-import { humanizeActionError } from '../shared/errors'
 import { nativeBridge } from '../shared/nativeBridge'
 import type { DragResizeAnchor } from '../shared/dialogDragResize'
 import { elapsed } from '../shared/format'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 import { useWorkflowLiveSync } from './useWorkflowLiveSync'
+import { useWorkflowWriteActions } from './useWorkflowWriteActions'
 import { activeWorkflowStatuses, humanizeWorkflowError, stepStatusLabel } from './utils'
 
 export type WorkflowDetailSection = 'strategy' | 'candidates' | 'funnel' | 'events' | 'artifacts' | 'full'
@@ -34,89 +34,52 @@ export function CompactWorkflowDialog({
   archived: () => void
   openDetail: (section: WorkflowDetailSection) => void
 }) {
-  const [busy, setBusy] = useState('')
-  const [error, setError] = useState('')
   const [menu, setMenu] = useState<'view' | 'more' | ''>('')
-  const status = value.workflow.status
+  const {
+    value: displayValue,
+    busy,
+    error,
+    feedback: actionFeedback,
+    runAction,
+    decide,
+    retry,
+  } = useWorkflowWriteActions({ sourceValue: value, reload, archived })
+  const status = displayValue.workflow.status
   const live = activeWorkflowStatuses.has(status)
-  const pendingApprovals = value.approvals.filter(item => item.status === 'pending')
-  const failedSteps = value.steps.filter(step => ['failed', 'blocked'].includes(step.status))
-  const completed = value.progress?.completed ?? value.steps.filter(step => ['completed', 'skipped'].includes(step.status)).length
-  const total = value.progress?.total ?? value.steps.length
-  const ratio = value.progress?.ratio ?? completed / Math.max(1, total)
+  const steps = displayValue.steps
+  const pendingApprovals = displayValue.approvals.filter(item => item.status === 'pending')
+  const failedSteps = steps.filter(step => ['failed', 'blocked'].includes(step.status))
+  const completed = displayValue.progress?.completed ?? steps.filter(step => ['completed', 'skipped'].includes(step.status)).length
+  const total = displayValue.progress?.total ?? steps.length
+  const ratio = displayValue.progress?.ratio ?? completed / Math.max(1, total)
   const percent = Math.max(0, Math.min(100, Math.round(ratio * 100)))
-  const businessOutcome = value.business_outcome ?? value.workflow.business_outcome ?? value.goal.business_outcome
-  const mapped = mapWorkflowStatus({ status, business_outcome: businessOutcome, steps: value.steps })
-  const activeStep = value.steps.find(step => ['running', 'queued', 'waiting_external', 'waiting_approval'].includes(step.status))
+  const businessOutcome = displayValue.business_outcome ?? displayValue.workflow.business_outcome ?? displayValue.goal.business_outcome
+  const mapped = mapWorkflowStatus({ status, business_outcome: businessOutcome, steps })
+  const activeStep = steps.find(step => ['running', 'queued', 'waiting_external', 'waiting_approval'].includes(step.status))
     || failedSteps[0]
-    || value.steps.find(step => step.status === 'pending')
-  const archiveAllowed = !activeWorkflowStatuses.has(status) && status !== 'paused' && !value.workflow.archived_at
+    || steps.find(step => step.status === 'pending')
+  const archiveAllowed = !activeWorkflowStatuses.has(status) && status !== 'paused' && !displayValue.workflow.archived_at
 
-  const now = useWorkflowLiveSync(value, reload)
+  const now = useWorkflowLiveSync(displayValue, reload)
 
-  const runAction = async (name: string, payload: Record<string, unknown> = {}) => {
-    const exactPayload = name === 'start' && value.plan_ref
-      ? { ...payload, expected_plan_version: value.plan_ref.version, expected_plan_hash: value.plan_ref.plan_hash }
-      : payload
-    setBusy(name)
-    setError('')
-    setMenu('')
-    try {
-      await api.workflowAction(value.workflow.workflow_id, name, exactPayload)
-      if (name === 'archive') archived()
-      else await reload()
-    } catch (reason) {
-      setError(humanizeActionError(reason, '工作流操作失败，请重试。'))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const decide = async (approvalId: string, decision: 'approve' | 'reject') => {
-    setBusy(approvalId)
-    setError('')
-    try {
-      await api.approval(approvalId, decision)
-      await reload()
-    } catch (reason) {
-      setError(humanizeActionError(reason, '审批失败，请重试。'))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const retry = async (stepId: number) => {
-    const key = `retry-${stepId}`
-    setBusy(key)
-    setError('')
-    try {
-      await api.retryStep(stepId)
-      await reload()
-    } catch (reason) {
-      setError(humanizeActionError(reason, '重试失败，请稍后再试。'))
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const runningFor = live && value.workflow.started_at && now > 0
-    ? `已运行 ${elapsed(value.workflow.started_at, value.workflow.finished_at, now)}`
+  const runningFor = live && displayValue.workflow.started_at && now > 0
+    ? `已运行 ${elapsed(displayValue.workflow.started_at, displayValue.workflow.finished_at, now)}`
     : live ? '运行中' : mapped.label
 
   // 弹出为独立窗口：macOS 宿主 openDetachedDialog 打开可自由拖出屏幕的原生窗口。
   const detachPanel = (anchor?: DragResizeAnchor): boolean => {
-    if (nativeBridge('openDetachedDialog', { title: value.goal.title, url: `/asa-app#workflow=${encodeURIComponent(value.workflow.workflow_id)}&bare=1`, anchor })) {
+    if (nativeBridge('openDetachedDialog', { title: displayValue.goal.title, url: `/asa-app#workflow=${encodeURIComponent(displayValue.workflow.workflow_id)}&bare=1`, anchor })) {
       close()
       return true
     }
     return false
   }
 
-  return <DialogPanel panelClassName="compact-workflow-dialog" ariaLabel={`工作流：${value.goal.title}`} onEscape={close} onDetach={detachPanel} minWidth={320} minHeight={300}>
+  return <DialogPanel panelClassName="compact-workflow-dialog" ariaLabel={`工作流：${displayValue.goal.title}`} onEscape={close} onDetach={detachPanel} minWidth={320} minHeight={300}>
     <header className="compact-workflow-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口">
       <span className="compact-workflow-icon"><WorkflowIcon /></span>
       <div>
-        <h2>{value.goal.title}</h2>
+        <h2>{displayValue.goal.title}</h2>
         <p>{mapped.label}{activeStep ? ` · ${activeStep.business_label}` : ''}</p>
       </div>
       <button className="icon-btn candidate-dialog-detach" onClick={() => void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink /></button>
@@ -125,7 +88,7 @@ export function CompactWorkflowDialog({
 
     <div className="compact-workflow-body">
       <ol className="compact-workflow-steps" aria-label="执行步骤">
-        {value.steps.map(step => <li key={step.id} className={step.status} data-step-status={step.status}>
+        {steps.map(step => <li key={step.id} className={step.status} data-step-status={step.status}>
           <span className="compact-step-icon"><CompactStepIcon status={step.status} /></span>
           <div><b>{step.business_label}</b>{step.reason && <small>{step.reason}</small>}</div>
           <em>{stepStatusLabel[step.status] || '状态待同步'}</em>
@@ -153,6 +116,7 @@ export function CompactWorkflowDialog({
       </section>)}
 
       {error && <p className="compact-workflow-error" role="alert">{error}</p>}
+      {actionFeedback && <p className="compact-workflow-feedback" role="status"><CircleCheck />{actionFeedback}</p>}
     </div>
 
     <footer className="compact-workflow-foot">
@@ -175,10 +139,10 @@ export function CompactWorkflowDialog({
         <div className="compact-menu-wrap">
           <button className="icon-btn" aria-label="更多工作流操作" aria-haspopup="menu" aria-expanded={menu === 'more'} onClick={() => setMenu(current => current === 'more' ? '' : 'more')}><Ellipsis /></button>
           {menu === 'more' && <div className="compact-workflow-menu align-right" role="menu">
-            {live && <button role="menuitem" disabled={!!busy} onClick={() => void runAction('pause')}><Pause />暂停寻访</button>}
-            {status === 'paused' && <button role="menuitem" disabled={!!busy} onClick={() => void runAction('resume')}><Play />继续寻访</button>}
-            {!['cancelled', 'completed'].includes(status) && <button className="danger" role="menuitem" disabled={!!busy} onClick={() => void runAction('cancel')}><Ban />立即停止寻访</button>}
-            {archiveAllowed && <button role="menuitem" disabled={!!busy} onClick={() => void runAction('archive')}><Archive />归档工作流</button>}
+            {live && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('pause') }}><Pause />暂停寻访</button>}
+            {status === 'paused' && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('resume') }}><Play />继续寻访</button>}
+            {!['cancelled', 'completed'].includes(status) && <button className="danger" role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('cancel') }}><Ban />立即停止寻访</button>}
+            {archiveAllowed && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('archive') }}><Archive />归档工作流</button>}
           </div>}
         </div>
       </div>
