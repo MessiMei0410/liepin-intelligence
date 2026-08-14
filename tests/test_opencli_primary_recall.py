@@ -348,6 +348,7 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
                 "opencli_sourcing_shadow.py", "--mode", "primary", "--channel", "xsaas",
                 "--queries-json", str(queries), "--output", str(output),
                 "--client", "客户", "--job", "岗位", "--port", "9223", "--limit", "12",
+                "--opencli-bin", str(Path(sys.executable)),
             ]
             with patch.object(
                 shadow, "run_opencli",

@@ -256,6 +256,7 @@ class OpenCliSourcingShadowTest(unittest.TestCase):
                 "opencli_sourcing_shadow.py", "--channel", "liepin",
                 "--queries-json", str(queries), "--baseline", str(baseline),
                 "--client", "C", "--job", "J", "--port", "9223", "--limit", "12",
+                "--opencli-bin", str(Path(sys.executable)),
             ]
             with patch.object(shadow, "run_opencli", return_value=(
                 [shadow.normalize_candidate("liepin", item) for item in rows], diagnostics,

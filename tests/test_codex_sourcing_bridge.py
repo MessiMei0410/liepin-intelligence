@@ -92,6 +92,10 @@ class CodexSourcingBridgeTest(unittest.TestCase):
             refreshed = server.refresh_sourcing_run_liveness(run)
             self.assertEqual(refreshed["thread_id"], "thread-123")
 
+    @unittest.skipUnless(
+        server.MULTICHANNEL_SCRIPT.exists() and server.TALENT_DB.exists(),
+        "本机资源缺失（多渠道脚本/生产库），CI 上跳过集成校验",
+    )
     def test_dry_run_validates_canonical_a_system_position(self) -> None:
         state = server.WorkbenchState(
             server.TALENT_DB, server.DEFAULT_OUTPUT_DIR, "127.0.0.1", 8765

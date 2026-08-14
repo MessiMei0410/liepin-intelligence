@@ -147,6 +147,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         self.assertEqual(write["returncode"], 2)
         self.assertEqual(write["batch_path"], "")
 
+    @skip_unless_local(SYNC_PATH, "talent_system_sync.py 脚本（candidate_message_preflight 依赖）")
     def test_preflight_token_commits_reply_event_task_and_stage_once(self) -> None:
         self.assertTrue(hasattr(server, "candidate_message_preflight"), "缺少候选人消息预检")
         self.assertTrue(hasattr(server, "candidate_message_commit"), "缺少候选人消息原子提交")
@@ -184,6 +185,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
             self.assertFalse(reused["ok"])
             self.assertEqual(reused["decision"], "deny")
 
+    @skip_unless_local(SYNC_PATH, "talent_system_sync.py 脚本（candidate_message_preflight 依赖）")
     def test_atomic_commit_rolls_back_reply_when_event_write_fails(self) -> None:
         self.assertTrue(hasattr(server, "candidate_message_preflight"), "缺少候选人消息预检")
         self.assertTrue(hasattr(server, "candidate_message_commit"), "缺少候选人消息原子提交")
@@ -229,6 +231,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         self.assertEqual([row[0] for row in rows], [2])
         conn.close()
 
+    @skip_unless_local(SYNC_PATH, "talent_system_sync.py 脚本（candidate_message_preflight 依赖）")
     def test_state_evidence_and_correction_restore_all_linked_facts(self) -> None:
         self.assertTrue(hasattr(server, "candidate_state_evidence"), "缺少状态依据接口")
         self.assertTrue(hasattr(server, "candidate_state_correction_preflight"), "缺少状态纠正预检")

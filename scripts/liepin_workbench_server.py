@@ -6410,8 +6410,6 @@ def pending_talent_action_result(
 
 
 def apply_talent_action_batch(data: dict[str, Any]) -> dict[str, Any]:
-    if not TALENT_SYNC_SCRIPT.exists():
-        raise FileNotFoundError(f"找不到统一同步脚本：{TALENT_SYNC_SCRIPT}")
     kind = first_present(data, "kind") or first_present(data, "action_type", "")
     write = truthy(data.get("write"))
     if kind in {"xsaas_intake", "xsaas_candidate_intake"}:
@@ -6434,6 +6432,8 @@ def apply_talent_action_batch(data: dict[str, Any]) -> dict[str, Any]:
                 lookup=lookup,
                 error="talent action requires a unique A 系统 job_candidate_id before write",
             )
+    if not TALENT_SYNC_SCRIPT.exists():
+        raise FileNotFoundError(f"找不到统一同步脚本：{TALENT_SYNC_SCRIPT}")
     batch_path = write_talent_action_batch(data)
     refresh_workbench = truthy(data.get("refresh_workbench"))
     cmd = [
