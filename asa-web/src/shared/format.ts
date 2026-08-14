@@ -13,8 +13,8 @@ export const elapsed = (started?: string, finished?: string, now = Date.now()) =
   return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
 }
 
-export const sourceLabel=(v='')=>{const source=v.toLowerCase();return source.includes('xsaas')||source.includes('x-saas')||v.includes('X-SaaS')?'X-SaaS':source.includes('liepin')||v.includes('猎聘')?'猎聘':'人才库'}
-export const sourceLinkLabel=(v='')=>sourceLabel(v)==='X-SaaS'?'X-SaaS档案':sourceLabel(v)==='猎聘'?'猎聘简历':'来源档案'
+export const sourceLabel=(v='')=>{const source=v.toLowerCase();return source.includes('mapping')?'Mapping 直挖':source.includes('xsaas')||source.includes('x-saas')||v.includes('X-SaaS')?'X-SaaS':source.includes('liepin')||v.includes('猎聘')?'猎聘':'人才库'}
+export const sourceLinkLabel=(v='')=>sourceLabel(v)==='Mapping 直挖'?'Mapping 公开资料':sourceLabel(v)==='X-SaaS'?'X-SaaS档案':sourceLabel(v)==='猎聘'?'猎聘简历':'来源档案'
 export const eventStatusLabel=(v='')=>({pending_review:'待复核',completed:'已完成',open:'待处理',done:'已完成',verified:'已核验',failed:'失败',stopped:'已停止',
   // 生命周期一等事件状态（面试/Offer/入职）
   scheduled:'已安排',passed:'通过',extended:'已发出',accepted:'已接受',declined:'已拒绝',recorded:'已记录',cancelled:'已取消',withdrawn:'已撤回',

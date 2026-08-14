@@ -5,6 +5,7 @@ import type { Workflow as WorkflowValue } from '../api'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 import type { AgentReference } from './transport'
 import { useDialogFocus } from '../shared/useDialogFocus'
+import { dispatchCandidateUpdated } from '../shared/candidateEvents'
 
 type CandidateAction = 'review' | 'advance' | 'contact' | 'recommend' | 'stop'
 const actionLabels: Record<CandidateAction, string> = {
@@ -137,15 +138,31 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
   }
   const commit = async () => {
     if (!pending || busy) return
+    const action = pending.action
+    const candidateId = Number(reference.id)
     setBusy('commit'); setError(''); setActionFeedback('')
     try {
-      const result = await api.commit(Number(reference.id), pending.action, pending.token, note.trim(), pending.action === 'stop' ? reason : undefined)
+      const result = await api.commit(candidateId, action, pending.token, note.trim(), action === 'stop' ? reason : undefined)
       setPending(undefined); setNote('')
-      setCandidate((await api.candidate(Number(reference.id))).candidate)
-      setActionFeedback(result.already_applied || result.receipt?.idempotent_replay ? `${actionLabels[pending.action]}此前已完成，已同步当前状态。` : `${actionLabels[pending.action]}已完成。`)
+      setActionFeedback(result.already_applied || result.receipt?.idempotent_replay ? `${actionLabels[action]}此前已完成，已同步当前状态。` : `${actionLabels[action]}已完成。`)
+      dispatchCandidateUpdated({ id: candidateId, stage: result.stage, isStopped: action === 'stop' })
+      const refreshAfterWrite = async () => {
+        const requests: Promise<unknown>[] = [
+          api.candidate(candidateId).then(value => setCandidate(value.candidate)),
+        ]
+        if (candidate?.job_id) {
+          requests.push(api.notifyFloatingCandidateUpdate(candidate.job_id, {
+            job_candidate_id: candidateId,
+            stage: result.stage,
+            is_stopped: action === 'stop',
+          }))
+        }
+        await Promise.allSettled(requests)
+      }
+      void refreshAfterWrite()
     } catch (value) {
       setError(value instanceof Error ? value.message : String(value))
-      try { setCandidate((await api.candidate(Number(reference.id))).candidate) } catch { /* 保留原错误 */ }
+      try { setCandidate((await api.candidate(candidateId)).candidate) } catch { /* 保留原错误 */ }
     }
     finally { setBusy('') }
   }
@@ -153,7 +170,18 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
     setBusy(approvalId); setError('')
     try {
       await api.approval(approvalId, decision)
-      setWorkflow(await api.workflow(String(reference.id)))
+      const workflowId = String(reference.id)
+      const nextStatus = decision === 'approve' ? 'queued' : workflow?.workflow.status
+      setWorkflow(current => current ? {
+        ...current,
+        workflow: { ...current.workflow, ...(nextStatus ? { status: nextStatus } : {}) },
+        approvals: current.approvals.map(item => item.approval_id === approvalId
+          ? { ...item, status: decision === 'approve' ? 'approved' : 'rejected' }
+          : item),
+      } : current)
+      if (decision === 'approve') setWorkflowSummary(current => ({ ...recordValue(current), workflow_id: workflowId, status: 'queued' }))
+      setActionFeedback(decision === 'approve' ? '本次审批已批准，工作流已进入执行队列。' : '已选择不执行本次外部动作。')
+      void api.workflow(workflowId).then(setWorkflow).catch(() => undefined)
     } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
     finally { setBusy('') }
   }
@@ -187,11 +215,15 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
   }
   const confirmWorkflowStart = async () => {
     if (!workflowPending || busy) return
+    const { id: workflowId, planRef } = workflowPending
     setBusy('workflow:start'); setError('')
     try {
-      await api.workflowAction(workflowPending.id, 'start', workflowPending.planRef)
-      setWorkflow({ ...(await api.workflow(workflowPending.id)) })
+      await api.workflowAction(workflowId, 'start', planRef)
       setWorkflowPending(undefined)
+      setWorkflow(current => current ? { ...current, workflow: { ...current.workflow, status: 'queued' } } : current)
+      setWorkflowSummary(current => ({ ...recordValue(current), workflow_id: workflowId, status: 'queued' }))
+      setActionFeedback('计划已确认并进入执行队列；外部寻访仍需 R3 单次审批。')
+      void api.workflow(workflowId).then(setWorkflow).catch(() => undefined)
     } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
     finally { setBusy('') }
   }
@@ -248,9 +280,9 @@ export function AgentObjectEmbed({ reference, workflowProgress, actionCard, onOp
       )
       return <button key={`${type}:${compactText(action.id) || compactText(reference.id)}`} className={`button ${type === 'start_workflow' ? 'primary' : ''}`} disabled={!!busy} onClick={() => void runWorkflowAction(action)}>{busy === `workflow:${type}` ? <LoaderCircle className="spin"/> : type === 'start_workflow' ? <Activity/> : <ExternalLink/>}{label}</button>
     })}</div>}
+    {actionFeedback && <p className="agent-inline-feedback" role="status">{actionFeedback}</p>}
     {expanded && <div className="agent-object-body">
       {error && <p className="agent-inline-error">{error}</p>}
-      {actionFeedback && <p className="agent-inline-feedback" role="status">{actionFeedback}</p>}
       {candidate && <section className="agent-candidate-console" aria-label="候选人决策台">
         <header><span className="agent-console-icon"><UserRound/></span><div><small>当前经历</small><b>{candidate.current_company || '待补充'} · {candidate.current_title || '待补充'}</b></div><em className={candidate.is_stopped ? 'stopped' : ''}>{candidate.is_stopped ? '已停止' : candidate.clean_stage || '待确认'}</em></header>
         <div className="agent-candidate-facts"><span><MapPin/>{candidate.city || '地点待补充'}</span><span>{candidate.experience || '经验待补充'}</span><span>{candidate.education || '学历待补充'}</span></div>

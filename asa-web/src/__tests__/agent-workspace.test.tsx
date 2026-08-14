@@ -705,6 +705,66 @@ describe('Agent workspace', () => {
     expect(screen.queryByRole('status', { name: '当前任务焦点' })).not.toBeInTheDocument()
   })
 
+  it('寻访结果卡把策略复盘和继续补池作为带工作流证据的 Agent 回合发送', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-result')
+    const resultCard = {
+      type: 'sourcing_result',
+      title: '寻访结果：士兰微 · 电源专家 · 第3轮',
+      context: { type: 'workflow', id: 'workflow-result-3' },
+      summary: {
+        workflow_id: 'workflow-result-3', round: 3, client: '士兰微', job: '电源专家', status: 'completed',
+        business_outcome: 'completed_pool_insufficient', assessed_count: 50, successful_count: 47, failed_count: 3,
+        total_assessed_in_job: 138,
+        recommendation_breakdown: { recommended: 12, verify_first: 8, not_recommended: 27 },
+        top_candidates: [],
+        next_actions: [
+          { type: 'discuss_strategy', label: '调整寻访策略' },
+          { type: 'continue_sourcing', label: '继续补池' },
+        ],
+      },
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-result?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-result',
+        business_focus: { context: { type: 'workflow', id: 'workflow-result-3' }, client: '士兰微', job: { title: '电源专家' } },
+        messages: [{ role: 'assistant', content: '第 3 轮寻访已完成。', action_card: resultCard }],
+      })
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-result"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-result","answer":"已受理下一步动作"}\n\n',
+      )
+      return mockResponse({ ok: true, sessions: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.click(await screen.findByRole('button', { name: '调整寻访策略' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toHaveLength(1))
+    const strategyBody = JSON.parse(String(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))[0][1]?.body || '{}'))
+    expect(strategyBody).toMatchObject({
+      session_id: 'task-result',
+      message: '请基于本轮寻访结果复盘并调整寻访策略',
+      context: {
+        type: 'workflow', id: 'workflow-result-3', mode: 'strategy_revision', client: '士兰微', job: '电源专家',
+        sourcing_result: { round: 3, business_outcome: 'completed_pool_insufficient', assessed_count: 50, successful_count: 47, failed_count: 3 },
+      },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '继续补池' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toHaveLength(2))
+    const continueBody = JSON.parse(String(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/v1/copilot/stream'))[1][1]?.body || '{}'))
+    expect(continueBody).toMatchObject({
+      session_id: 'task-result', message: '继续补池',
+      context: {
+        type: 'workflow', id: 'workflow-result-3', client: '士兰微',
+        structured_action: {
+          action_id: 'sourcing-result:workflow-result-3:continue', type: 'continue_sourcing',
+          target: { type: 'workflow', id: 'workflow-result-3', client: '士兰微', label: '电源专家' },
+        },
+      },
+    })
+  })
+
   it('带着新业务上下文恢复不同焦点任务时提示冲突而不是静默覆盖', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-1')
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
@@ -1063,7 +1123,48 @@ describe('Agent workspace', () => {
       })
     })
   })
-})
+
+  it('当前任务候选人与页面候选人不同，发送前提示并阻止请求', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-candidate')
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/asa/floating/state')) return mockResponse({
+        active_context: { surface: 'liepin', title: '候选人 B', job_candidate_id: 116 },
+        active_context_raw: { context_key: 'liepin:tab-1', job_candidate_id: 116 },
+      })
+      if (url.endsWith('/api/v1/copilot/sessions/task-candidate?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-candidate', business_focus: { context: { type: 'candidate', id: 115 }, candidate: { name: '候选人 A' } }, messages: [],
+      })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('候选人 A')
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '评估当前人选' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/copilot/stream'))).toBe(false)
+  })
+
+  it('选择继续当前任务后允许发送且不带新页面人选焦点', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-candidate')
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/asa/floating/state')) return mockResponse({ active_context: { surface: 'liepin', title: '候选人 B', job_candidate_id: 116 }, active_context_raw: { context_key: 'liepin:tab-1', job_candidate_id: 116 } })
+      if (url.endsWith('/api/v1/copilot/sessions/task-candidate?limit=100')) return mockResponse({ ok: true, session_id: 'task-candidate', business_focus: { context: { type: 'candidate', id: 115 }, candidate: { name: '候选人 A' } }, messages: [] })
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse('event: done\ndata: {"ok":true,"session_id":"task-candidate","answer":"已继续"}\n\n')
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+    fireEvent.click(await screen.findByRole('button', { name: '继续当前任务' }))
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '继续评估' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/stream'))).toBe(true))
+    const streamCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/copilot/stream'))
+    expect(JSON.parse(String(streamCall?.[1]?.body || '{}')).context).not.toHaveProperty('bridge')
+  })
 
   it('名单点人选打开详情后，关闭详情自动恢复名单浮窗', { timeout: 30000 }, async () => {
     localStorage.clear() // 避免上一个用例留下的 asaAgentSessionId 触发旧任务恢复
@@ -1102,6 +1203,7 @@ describe('Agent workspace', () => {
     fireEvent.click(screen.getByLabelText('关闭名单'))
     expect(screen.queryByText('张雯')).not.toBeInTheDocument()
   })
+})
 
 describe('Agent object embed', () => {
   it('展开候选人并通过预检后提交操作', async () => {
@@ -1123,6 +1225,89 @@ describe('Agent object embed', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/candidate-actions/commit'))).toBe(true))
   })
 
+  it('候选动作写入成功后不等待悬挂的详情回读', async () => {
+    const detailRefresh = new Promise<Response>(() => {})
+    let candidateReads = 0
+    const candidateUpdated = vi.fn()
+    window.addEventListener('asa:candidate-updated', candidateUpdated, { once: true })
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/candidates/1')) {
+        candidateReads += 1
+        return candidateReads === 1 ? mockResponse({ candidate: candidateDetail }) : detailRefresh
+      }
+      if (url.endsWith('/api/v1/candidate-actions/preflight')) return mockResponse({ token: 'preflight-1', impact: '候选人将进入复核通过阶段' })
+      if (url.endsWith('/api/v1/candidate-actions/commit')) return mockResponse({ ok: true, stage: 'S2 复核通过' })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed reference={{ type: 'candidate', id: 1, label: '张三' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开张三' }))
+    await screen.findByRole('region', { name: '候选人决策台' })
+    fireEvent.click(screen.getByRole('button', { name: '复核通过' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认执行' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('复核通过已完成。')
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(candidateUpdated).toHaveBeenCalledTimes(1)
+    expect((candidateUpdated.mock.calls[0][0] as CustomEvent).detail).toEqual({ id: 1, stage: 'S2 复核通过', isStopped: false })
+  })
+
+  it('候选动作成功后的详情回读失败不推翻成功回执', async () => {
+    let candidateReads = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/candidates/1')) {
+        candidateReads += 1
+        if (candidateReads > 1) throw new Error('详情暂不可用')
+        return mockResponse({ candidate: candidateDetail })
+      }
+      if (url.endsWith('/api/v1/candidate-actions/preflight')) return mockResponse({ token: 'preflight-1', impact: '候选人将进入复核通过阶段' })
+      if (url.endsWith('/api/v1/candidate-actions/commit')) return mockResponse({ ok: true, stage: 'S2 复核通过' })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed reference={{ type: 'candidate', id: 1, label: '张三' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开张三' }))
+    await screen.findByRole('region', { name: '候选人决策台' })
+    fireEvent.click(screen.getByRole('button', { name: '复核通过' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认执行' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('复核通过已完成。')
+    await waitFor(() => expect(candidateReads).toBe(2))
+    expect(screen.queryByText('详情暂不可用')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('候选动作写入失败时保留确认层且不广播成功事件', async () => {
+    let candidateReads = 0
+    const candidateUpdated = vi.fn()
+    window.addEventListener('asa:candidate-updated', candidateUpdated, { once: true })
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/candidates/1')) {
+        candidateReads += 1
+        return mockResponse({ candidate: candidateDetail })
+      }
+      if (url.endsWith('/api/v1/candidate-actions/preflight')) return mockResponse({ token: 'preflight-1', impact: '候选人将进入复核通过阶段' })
+      if (url.endsWith('/api/v1/candidate-actions/commit')) return mockResponse({ detail: '预检令牌已失效' }, false, 409)
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed reference={{ type: 'candidate', id: 1, label: '张三' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开张三' }))
+    await screen.findByRole('region', { name: '候选人决策台' })
+    fireEvent.click(screen.getByRole('button', { name: '复核通过' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认执行' }))
+
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('预检令牌已失效')
+    await waitFor(() => expect(candidateReads).toBe(2))
+    expect(candidateUpdated).not.toHaveBeenCalled()
+  })
+
   it('工作流审批继续走既有 approval decision 接口', async () => {
     const workflow = { ...plannedWorkflow, approvals: [{ approval_id: 'approval-1', title: '批准外部寻访', risk_level: 'R3', status: 'pending' }] }
     const fetchMock = vi.fn<typeof fetch>(async input => String(input).includes('/decision') ? mockResponse({ ok: true }) : mockResponse(workflow))
@@ -1132,6 +1317,100 @@ describe('Agent object embed', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开寻访前端工程师' }))
     fireEvent.click(await screen.findByRole('button', { name: '批准本次执行' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/approvals/approval-1/decision'))).toBe(true))
+  })
+
+  it('工作流审批成功不等待悬挂的详情回读', async () => {
+    const workflow = { ...plannedWorkflow, approvals: [{ approval_id: 'approval-1', title: '批准外部寻访', risk_level: 'R3', status: 'pending' }] }
+    const detailRefresh = new Promise<Response>(() => {})
+    let detailReads = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/workflows/wf-1/summary')) return mockResponse({ ok: true, workflow_id: 'wf-1', status: 'waiting_approval', progress: { completed: 1, total: 2 }, pending_approvals: [{ approval_id: 'approval-1', status: 'pending' }] })
+      if (url.endsWith('/api/v1/workflows/wf-1')) {
+        detailReads += 1
+        return detailReads === 1 ? mockResponse(workflow) : detailRefresh
+      }
+      if (url.includes('/api/v1/approvals/approval-1/decision')) return mockResponse({ ok: true })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed reference={{ type: 'workflow', id: 'wf-1', label: '寻访前端工程师' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开寻访前端工程师' }))
+    fireEvent.click(await screen.findByRole('button', { name: '批准本次执行' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('本次审批已批准，工作流已进入执行队列。')
+    expect(screen.queryByRole('button', { name: '批准本次执行' })).not.toBeInTheDocument()
+    expect(detailReads).toBe(2)
+  })
+
+  it('工作流启动成功不等待详情回读且保留外部审批边界', async () => {
+    const detailRefresh = new Promise<Response>(() => {})
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/workflows/wf-1/summary')) return mockResponse({ ok: true, workflow_id: 'wf-1', status: 'planned', progress: { completed: 0, total: 2 }, pending_approvals: [] })
+      if (url.endsWith('/api/v1/workflows/wf-1/start') && init?.method === 'POST') return mockResponse({ ok: true, workflow: { workflow_id: 'wf-1', status: 'queued' } })
+      if (url.endsWith('/api/v1/workflows/wf-1')) return detailRefresh
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed
+      reference={{ type: 'workflow', id: 'wf-1', label: '寻访前端工程师' }}
+      workflowProgress={{ workflow_id: 'wf-1', status: 'planned', completed: 0, total: 2, label: '确认推进方案' }}
+      actionCard={{ next_actions: [{ type: 'start_workflow', id: 'wf-1', label: '确认计划并准备', plan_ref: { version: 1, plan_hash: 'hash-1' } }] }}
+      onOpenFull={() => {}}
+    />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '确认计划并准备' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认开始' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('计划已确认并进入执行队列；外部寻访仍需 R3 单次审批。')
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '确认计划并准备' })).not.toBeInTheDocument()
+    expect(screen.getByText('排队中')).toBeInTheDocument()
+  })
+
+  it('工作流审批写入失败时保留待审批入口', async () => {
+    const workflow = { ...plannedWorkflow, approvals: [{ approval_id: 'approval-1', title: '批准外部寻访', risk_level: 'R3', status: 'pending' }] }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/workflows/wf-1/summary')) return mockResponse({ ok: true, workflow_id: 'wf-1', status: 'waiting_approval', progress: { completed: 1, total: 2 }, pending_approvals: [{ approval_id: 'approval-1', status: 'pending' }] })
+      if (url.endsWith('/api/v1/workflows/wf-1')) return mockResponse(workflow)
+      if (url.includes('/api/v1/approvals/approval-1/decision')) return mockResponse({ detail: '审批已过期，请刷新后重试' }, false, 409)
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed reference={{ type: 'workflow', id: 'wf-1', label: '寻访前端工程师' }} onOpenFull={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '展开寻访前端工程师' }))
+    fireEvent.click(await screen.findByRole('button', { name: '批准本次执行' }))
+
+    expect(await screen.findByText('审批已过期，请刷新后重试')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '批准本次执行' })).toBeEnabled()
+    expect(screen.queryByText('本次审批已批准，工作流已进入执行队列。')).not.toBeInTheDocument()
+  })
+
+  it('工作流启动写入失败时保留确认层', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/workflows/wf-1/summary')) return mockResponse({ ok: true, workflow_id: 'wf-1', status: 'planned', progress: { completed: 0, total: 2 }, pending_approvals: [] })
+      if (url.endsWith('/api/v1/workflows/wf-1/start') && init?.method === 'POST') return mockResponse({ detail: '待确认计划版本已变化，请重新确认' }, false, 409)
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AgentObjectEmbed
+      reference={{ type: 'workflow', id: 'wf-1', label: '寻访前端工程师' }}
+      workflowProgress={{ workflow_id: 'wf-1', status: 'planned', completed: 0, total: 2, label: '确认推进方案' }}
+      actionCard={{ next_actions: [{ type: 'start_workflow', id: 'wf-1', label: '确认计划并准备', plan_ref: { version: 1, plan_hash: 'hash-1' } }] }}
+      onOpenFull={() => {}}
+    />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '确认计划并准备' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认开始' }))
+
+    expect(await screen.findByRole('alertdialog')).toHaveTextContent('待确认计划版本已变化，请重新确认')
+    expect(screen.getByRole('button', { name: '确认开始' })).toBeEnabled()
+    expect(screen.queryByText('计划已确认并进入执行队列；外部寻访仍需 R3 单次审批。')).not.toBeInTheDocument()
   })
 
   it('活动中的寻访工作流提供立即停止入口', async () => {

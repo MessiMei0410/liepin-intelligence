@@ -139,7 +139,10 @@ describe('R3 工作流业务终态', () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/workflows/wf-r3/candidates')
       ? mockResponse({
         ok: true,
-        items: [{ id: 101, name: '刘**', company: '中科时代计算机系统有限公司', title: '运动控制软件工程师', fit_score: 100, fit_level: 'A-优先推进', recommendation: 'recommended', assessed: true }],
+        items: [
+          { id: 101, name: '刘**', company: '中科时代计算机系统有限公司', title: '运动控制软件工程师', fit_score: 100, fit_level: 'A-优先推进', recommendation: 'recommended', assessed: true },
+          { id: 102, name: '王**', company: '示例科技', title: '资深软件工程师', fit_score: 95, fit_level: 'A-优先推进', assessed: true },
+        ],
         total: 116,
       })
       : mockResponse({ ok: true })))
@@ -162,6 +165,9 @@ describe('R3 工作流业务终态', () => {
     expect(await screen.findByText('本轮评估 15 位 · 岗位已评估 116 人')).toBeInTheDocument()
     expect(screen.queryByText('等待渠道与评估结果')).not.toBeInTheDocument()
     expect(screen.getByText('刘**')).toBeInTheDocument()
+    expect(screen.getByText('王**')).toBeInTheDocument()
+    expect(screen.getByText('推荐')).toBeInTheDocument()
+    expect(screen.getByText('待复核')).toBeInTheDocument()
     expect(screen.getByText('候选人核验结果')).toBeInTheDocument()
   })
 

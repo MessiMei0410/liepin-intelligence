@@ -75,6 +75,34 @@ describe('候选人停止确认层', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
+  it('成功写入不等待悬挂的详情刷新即可关闭对话框并显示回执', async () => {
+    const changed = vi.fn(() => new Promise<void>(() => undefined))
+    const user = userEvent.setup()
+    render(<CandidatePanel value={candidateDetail} close={() => undefined} changed={changed} />)
+    await user.click(screen.getByRole('button', { name: '停止' }))
+    const dialog = await screen.findByRole('alertdialog')
+
+    await user.click(within(dialog).getByRole('button', { name: '确认停止推进' }))
+
+    expect(await screen.findByText(/停止推进已完成，候选人状态已更新/)).toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('详情刷新失败不推翻已成功落库的动作回执', async () => {
+    const changed = vi.fn().mockRejectedValue(new Error('详情刷新超时'))
+    const user = userEvent.setup()
+    render(<CandidatePanel value={candidateDetail} close={() => undefined} changed={changed} />)
+    await user.click(screen.getByRole('button', { name: '停止' }))
+    const dialog = await screen.findByRole('alertdialog')
+
+    await user.click(within(dialog).getByRole('button', { name: '确认停止推进' }))
+
+    expect(await screen.findByText(/停止推进已完成，候选人状态已更新/)).toBeInTheDocument()
+    expect(screen.queryByText(/详情刷新超时/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
   it('快速双击确认只提交一次', async () => {
     const { dialog } = await openDialog()
     const confirm = within(dialog).getByRole('button', { name: '确认停止推进' })
@@ -82,6 +110,31 @@ describe('候选人停止确认层', () => {
     fireEvent.click(confirm)
     await screen.findByText(/候选人状态已更新/)
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(commitUrl))).toHaveLength(1)
+  })
+
+  it('提交失败时不等待详情刷新即可在对话框内显示错误', async () => {
+    fetchMock.mockImplementation(async input => {
+      const url = String(input)
+      if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '候选人状态将更新' })
+      if (url.includes(commitUrl)) return mockResponse({ detail: '模拟提交失败' }, false, 500)
+      throw new Error(`未预期的请求：${url}`)
+    })
+    let finishRefresh: (() => void) | undefined
+    const refresh = new Promise<void>(resolve => { finishRefresh = resolve })
+    const changed = vi.fn(() => refresh)
+    const user = userEvent.setup()
+    render(<CandidatePanel value={candidateDetail} close={() => undefined} changed={changed} />)
+    await user.click(screen.getByRole('button', { name: '停止' }))
+    const dialog = await screen.findByRole('alertdialog')
+
+    await user.click(within(dialog).getByRole('button', { name: '确认停止推进' }))
+
+    expect(await within(dialog).findByText(/模拟提交失败.*正在重新读取候选人状态/)).toBeInTheDocument()
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(dialog).toBeVisible()
+
+    finishRefresh?.()
+    await waitFor(() => expect(within(dialog).getByText(/模拟提交失败.*已重新读取候选人状态/)).toBeInTheDocument())
   })
 
   it('后端判断动作此前已完成时显示同步回执', async () => {

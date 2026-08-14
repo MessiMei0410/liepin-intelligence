@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { BookPlus, CircleCheck, LoaderCircle, RefreshCw, Sparkles, TriangleAlert } from 'lucide-react'
 import { api } from '../api'
 import type {
   KnowledgeProposalBrief,
   KnowledgeProposalCandidate,
+  KnowledgeProposalDecisionResult,
   KnowledgeProposalDetailPayload,
   KnowledgeProposalEvidence,
   KnowledgeProposalStatus,
@@ -59,7 +60,7 @@ function EvidenceBlock({ evidence }: { evidence: KnowledgeProposalEvidence[] }) 
   )
 }
 
-function ProposalDetail({ proposalId, onDecided }: { proposalId: string; onDecided: (nextStatus: string) => void }) {
+function ProposalDetail({ proposalId, onDecided }: { proposalId: string; onDecided: (result: KnowledgeProposalDecisionResult) => void }) {
   const [detail, setDetail] = useState<KnowledgeProposalDetailPayload>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -111,6 +112,12 @@ function ProposalDetail({ proposalId, onDecided }: { proposalId: string; onDecid
           : (await api.preflightKnowledgeProposal(proposalId)).confirmation_token
         const result = await api.decideKnowledgeProposal(proposalId, decisionToken, kind, kind === 'reject' ? note.trim() : '')
         const statusLabel = result.status_label || (kind === 'accept' ? '已入库' : '已拒绝')
+        setDetail(current => result.proposal || (current ? {
+          ...current,
+          status: result.status || current.status,
+          status_label: statusLabel,
+          applied_to: result.applied_to ?? current.applied_to,
+        } : current))
         setReceipt({
           tone: 'success',
           text: result.receipt?.idempotent_replay
@@ -122,8 +129,8 @@ function ProposalDetail({ proposalId, onDecided }: { proposalId: string; onDecid
         setAction('')
         setToken('')
         setNote('')
-        await load()
-        onDecided(result.status || '')
+        onDecided(result)
+        void api.knowledgeProposal(proposalId).then(setDetail).catch(() => undefined)
       }
     } catch (e) {
       setReceipt({ tone: 'error', text: `提案确认失败：${copilotText(e) || '请稍后重试'}。可重新预检后再试。` })
@@ -207,6 +214,7 @@ export function KnowledgeProposalsPanel() {
   const [busy, setBusy] = useState(false)
   const [openId, setOpenId] = useState('')
   const [notice, setNotice] = useState<{ tone: 'error' | 'success'; text: string }>()
+  const quietStatusRefreshRef = useRef('')
 
   // 事件处理器内的显式刷新（生成/决策回读/重试）：带 loading 态。
   const load = useCallback(async (nextStatus: string) => {
@@ -225,16 +233,44 @@ export function KnowledgeProposalsPanel() {
   // 挂载与状态过滤切换：alive 模式拉取（不在 effect 体内同步 setState）。
   useEffect(() => {
     let alive = true
+    const quiet = quietStatusRefreshRef.current === status
+    quietStatusRefreshRef.current = ''
     api.knowledgeProposals(status)
       .then((payload) => { if (alive) { setItems(payload.items || []); setCounts(payload.counts || {}); setError(''); setLoading(false) } })
-      .catch((e) => { if (alive) { setError(copilotText(e) || '知识增补提案加载失败，请重试。'); setLoading(false) } })
+      .catch((e) => { if (alive && !quiet) { setError(copilotText(e) || '知识增补提案加载失败，请重试。'); setLoading(false) } })
     return () => { alive = false }
   }, [status])
 
   // 决策后回读：当前过滤已不含该提案时切到决策后的状态，保证展开的详情与回执不被卸载。
-  const handleDecided = (nextStatus: string) => {
-    if (status !== 'all' && nextStatus && nextStatus !== status) setStatus(nextStatus)
-    else void load(status)
+  const handleDecided = (result: KnowledgeProposalDecisionResult) => {
+    const nextStatus = result.status || ''
+    const current = items.find(item => item.proposal_id === result.proposal_id)
+    const updated = result.proposal || (current && nextStatus ? {
+      ...current,
+      status: nextStatus,
+      status_label: result.status_label || current.status_label,
+    } : current)
+    if (current && nextStatus && current.status !== nextStatus) {
+      setCounts(value => ({
+        ...value,
+        [current.status]: Math.max(0, (value[current.status] || 0) - 1),
+        [nextStatus]: (value[nextStatus] || 0) + 1,
+      }))
+    }
+    if (updated) {
+      setItems(value => status !== 'all' && nextStatus && nextStatus !== status
+        ? [updated]
+        : value.map(item => item.proposal_id === updated.proposal_id ? updated : item))
+    }
+    if (status !== 'all' && nextStatus && nextStatus !== status) {
+      quietStatusRefreshRef.current = nextStatus
+      setStatus(nextStatus)
+    } else {
+      void api.knowledgeProposals(status).then(payload => {
+        setItems(payload.items || [])
+        setCounts(payload.counts || {})
+      }).catch(() => undefined)
+    }
   }
 
   const generate = async () => {
@@ -252,7 +288,18 @@ export function KnowledgeProposalsPanel() {
           ? '本次生成与此前请求相同，返回首次结果。'
           : `扫描完成：新建提案 ${created} 条，已存在 ${existing} 条，证据不足留候选 ${(result.candidates || []).length} 条。`,
       })
-      await load(status)
+      const returned = [...(result.created || []), ...(result.existing || [])]
+      if ((status === 'pending' || status === 'all') && returned.length > 0) {
+        setItems(current => {
+          const merged = new Map(current.map(item => [item.proposal_id, item]))
+          returned.forEach(item => merged.set(item.proposal_id, item))
+          return [...merged.values()]
+        })
+      }
+      void api.knowledgeProposals(status).then(payload => {
+        setItems(payload.items || [])
+        setCounts(payload.counts || {})
+      }).catch(() => undefined)
     } catch (e) {
       setNotice({ tone: 'error', text: `提案生成失败：${copilotText(e) || '请稍后重试'}。` })
     } finally {

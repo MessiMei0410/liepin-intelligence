@@ -75,8 +75,8 @@ const stubFetch = (handler?: (url: string, init?: RequestInit) => unknown) => {
   return fetchMock
 }
 
-const renderCard = async (openCandidate = vi.fn()) => {
-  render(<MappingTaskCard jobId={154} artifactId="mapping_task_wf-1" openCandidate={openCandidate} onClose={() => undefined} />)
+const renderCard = async (openCandidate = vi.fn(), onChanged?: () => void | Promise<void>) => {
+  render(<MappingTaskCard jobId={154} artifactId="mapping_task_wf-1" openCandidate={openCandidate} onClose={() => undefined} onChanged={onChanged} />)
   const section = await screen.findByRole('region', { name: 'Mapping 任务卡' })
   await within(section).findByText('目标团队')
   return { section, openCandidate }
@@ -247,6 +247,9 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
   })
 
   it('入库动作调对端点并显示「已入库」回执，可跳候选人详情', async () => {
+    const onChanged = vi.fn()
+    const candidateUpdated = vi.fn()
+    window.addEventListener('asa:candidate-updated', candidateUpdated, { once: true })
     const fetchMock = stubFetch((url, init) => {
       if (url.endsWith('/candidates/1/intake') && init?.method === 'POST') {
         return {
@@ -258,7 +261,7 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
       }
       return undefined
     })
-    const { openCandidate } = await renderCard()
+    const { openCandidate } = await renderCard(vi.fn(), onChanged)
     const user = userEvent.setup()
     await user.click(cardOf('K**').getByRole('button', { name: '入库' }))
     const card = cardOf('K**')
@@ -268,6 +271,14 @@ describe('Mapping 任务卡视图（MappingTaskCard）', () => {
     const intakeCalls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/candidates/1/intake'))
     expect(intakeCalls).toHaveLength(1)
     expect((intakeCalls[0][1]?.headers as Record<string, string>)['Idempotency-Key']).toMatch(/^web_/)
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(candidateUpdated).toHaveBeenCalledTimes(1)
+    expect((candidateUpdated.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      id: 887,
+      created: true,
+      jobId: 154,
+      source: 'mapping',
+    })
     await user.click(card.getByRole('button', { name: '查看候选人' }))
     expect(openCandidate).toHaveBeenCalledWith(887)
     // 已入库人选不再出现动作按钮
@@ -507,10 +518,12 @@ describe('扩池决策树 Mapping 入口（StrategyReviewExpansion）', () => {
       return undefined
     })
     const onOpenMapping = vi.fn()
-    render(<StrategyReviewExpansion workflowId="wf-1" tree={[escalateStep]} jobId={154} onOpenMapping={onOpenMapping} />)
+    const onChanged = vi.fn()
+    render(<StrategyReviewExpansion workflowId="wf-1" tree={[escalateStep]} jobId={154} onOpenMapping={onOpenMapping} onChanged={onChanged} />)
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: '发起 Mapping 直挖' }))
     await waitFor(() => expect(onOpenMapping).toHaveBeenCalledWith('mapping_task_wf-1'))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
     const createCalls = fetchMock.mock.calls.filter(([url, init]) => String(url) === '/api/v1/jobs/154/mapping-tasks' && init?.method === 'POST')
     expect(createCalls).toHaveLength(1)
     const body = JSON.parse(String(createCalls[0][1]?.body)) as { trigger?: string; request_id?: string }

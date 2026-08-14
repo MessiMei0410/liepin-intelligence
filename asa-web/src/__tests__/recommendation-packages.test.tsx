@@ -104,8 +104,27 @@ describe('版本化推荐包（recommendation-packages）', () => {
     expect(screen.getByText('暂无待核验问题')).toBeInTheDocument()
   })
 
+  it('当前评估晚于推荐包时提示证据可能过期，不提供虚假升版按钮', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/v1/recommendation-packages/recpkg-1')) {
+        return mockResponse({
+          ...packageDetail(),
+          evidence: { ...packageDetail().evidence, assessed_at: '2026-08-06 09:00:00' },
+        })
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<CandidatePanel value={panelCandidate()} close={() => undefined} changed={() => undefined} />)
+    await user.click(screen.getByRole('button', { name: '查看推荐包 v1' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('当前人岗评估在推荐包生成后已更新')
+    expect(screen.queryByRole('button', { name: /升版|重新生成/ })).not.toBeInTheDocument()
+  })
+
   it('记录客户反馈：类型+内容提交走幂等写，回执展示并回读刷新反馈列表', async () => {
     let posted = false
+    const changed = vi.fn()
     fetchMock.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/v1/recommendation-packages/recpkg-1/feedback')) {
@@ -128,7 +147,7 @@ describe('版本化推荐包（recommendation-packages）', () => {
       throw new Error(`未预期的请求：${url}`)
     })
     const user = userEvent.setup()
-    render(<CandidatePanel value={panelCandidate()} close={() => undefined} changed={() => undefined} />)
+    render(<CandidatePanel value={panelCandidate()} close={() => undefined} changed={changed} />)
     await user.click(screen.getByRole('button', { name: '查看推荐包 v1' }))
     await screen.findByText('候选摘要')
 
@@ -148,6 +167,75 @@ describe('版本化推荐包（recommendation-packages）', () => {
     // 回读刷新：反馈条目出现在列表中
     expect(await screen.findByText('客户反馈（1 条）')).toBeInTheDocument()
     expect(screen.getByText('客户安排首轮面试')).toBeInTheDocument()
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('反馈写入成功不等待悬挂的推荐包与候选人详情回读', async () => {
+    let detailReads = 0
+    const changed = vi.fn(() => new Promise<void>(() => {}))
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/feedback')) return mockResponse({
+        ok: true,
+        feedback_id: 12,
+        already_recorded: false,
+        feedback: { id: 12, feedback_type: 'approved', feedback_type_label: '客户认可', content: '客户认可专业背景', feedback_time: '2026-08-05 16:00:00', recorded_by: 'consultant' },
+      })
+      if (url.includes('/api/v1/recommendation-packages/recpkg-1')) {
+        detailReads += 1
+        return detailReads === 1 ? mockResponse(packageDetail()) : new Promise<Response>(() => {})
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<CandidatePanel value={panelCandidate()} close={() => undefined} changed={changed} />)
+    await user.click(screen.getByRole('button', { name: '查看推荐包 v1' }))
+    await screen.findByText('候选摘要')
+
+    await user.type(screen.getByLabelText('反馈内容'), '客户认可专业背景')
+    await user.click(screen.getByRole('button', { name: '记录客户反馈' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('客户反馈已记录（客户认可），并写入候选人时间线。')
+    expect(screen.getByText('客户反馈（1 条）')).toBeInTheDocument()
+    expect(screen.getByText('客户认可专业背景')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '记录客户反馈' })).toBeEnabled()
+    expect(screen.getByLabelText('反馈内容')).toHaveValue('')
+    expect(detailReads).toBe(2)
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('反馈成功后的后台回读失败不遮蔽成功证据', async () => {
+    let detailReads = 0
+    const changed = vi.fn(() => Promise.reject(new Error('候选人详情暂不可用')))
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/feedback')) return mockResponse({
+        ok: true,
+        feedback_id: 13,
+        already_recorded: false,
+        feedback: { id: 13, feedback_type: 'hold', feedback_type_label: '暂缓推进', content: '客户本周暂缓', feedback_time: '2026-08-05 17:00:00', recorded_by: 'consultant' },
+      })
+      if (url.includes('/api/v1/recommendation-packages/recpkg-1')) {
+        detailReads += 1
+        if (detailReads > 1) throw new Error('推荐包详情暂不可用')
+        return mockResponse(packageDetail())
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<CandidatePanel value={panelCandidate()} close={() => undefined} changed={changed} />)
+    await user.click(screen.getByRole('button', { name: '查看推荐包 v1' }))
+    await screen.findByText('候选摘要')
+
+    await user.selectOptions(screen.getByLabelText('反馈类型'), 'hold')
+    await user.type(screen.getByLabelText('反馈内容'), '客户本周暂缓')
+    await user.click(screen.getByRole('button', { name: '记录客户反馈' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('客户反馈已记录（暂缓推进），并写入候选人时间线。')
+    expect(screen.getByText('客户本周暂缓')).toBeInTheDocument()
+    expect(screen.queryByText('推荐包详情暂不可用')).not.toBeInTheDocument()
+    expect(screen.queryByText('候选人详情暂不可用')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('反馈内容为空时不提交并给出可读提示', async () => {

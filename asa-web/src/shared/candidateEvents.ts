@@ -4,6 +4,9 @@ export type CandidateUpdatedDetail = {
   id: number
   stage?: string
   isStopped?: boolean
+  created?: boolean
+  jobId?: number
+  source?: string
 }
 
 export function dispatchCandidateUpdated(detail: CandidateUpdatedDetail) {

@@ -1,4 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from '../app/App'
 import type { Workflow } from '../api'
@@ -76,5 +77,45 @@ describe('App 工作流修订导航', () => {
     expect(await screen.findByText(plannedWorkflow.goal.title)).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/asa/floating/context')).toBe(false)
     expect(postMessage).not.toHaveBeenCalled()
+  })
+
+  it('关闭工作流后忽略迟到的详情刷新响应', async () => {
+    history.replaceState(null, '', `${location.pathname}#workflow=wf-1`)
+    let workflowReads = 0
+    let releaseRefresh: (value: Response) => void = () => undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/bootstrap') return Promise.resolve(mockResponse({ ok: true, core: { status: 'connected' } }))
+      if (url === '/api/v1/dashboard') return Promise.resolve(mockResponse({ ok: true, workflows: [] }))
+      if (url.startsWith('/api/v1/jobs')) return Promise.resolve(mockResponse({ items: [], total: 0 }))
+      if (url.startsWith('/api/v1/candidates')) return Promise.resolve(mockResponse({ items: [], total: 0 }))
+      if (url === '/api/v1/workflows/wf-1/start') return Promise.resolve(mockResponse({ ok: true }))
+      if (url === '/api/v1/workflows/wf-1') {
+        workflowReads += 1
+        if (workflowReads === 1) return Promise.resolve(mockResponse(plannedWorkflow))
+        return new Promise<Response>(resolve => { releaseRefresh = resolve })
+      }
+      return Promise.resolve(mockResponse({ ok: false }, false, 404))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    expect(await screen.findByRole('dialog', { name: `工作流：${plannedWorkflow.goal.title}` })).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '确认计划并准备' }))
+    await waitFor(() => expect(workflowReads).toBe(2))
+    await user.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('dialog', { name: `工作流：${plannedWorkflow.goal.title}` })).not.toBeInTheDocument()
+
+    releaseRefresh(mockResponse({
+      ...plannedWorkflow,
+      goal: { ...plannedWorkflow.goal, title: '不应重新出现的工作流' },
+      workflow: { ...plannedWorkflow.workflow, status: 'running' },
+    }))
+    await act(async () => undefined)
+
+    expect(screen.queryByText('不应重新出现的工作流')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /工作流/ })).not.toBeInTheDocument()
   })
 })

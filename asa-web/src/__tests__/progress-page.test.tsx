@@ -93,6 +93,14 @@ describe('人选进度 Progress', () => {
     expect(screen.getByRole('status')).toHaveTextContent('共 3 位人选 · 2 个阶段')
   })
 
+  it('Mapping 来源可按真实渠道名称检索', () => {
+    render(<Progress items={[makeCandidate(9, '待复核', { source_type: 'mapping' })]} openCandidate={() => {}} />)
+
+    fireEvent.change(screen.getByLabelText('搜索人选进度'), { target: { value: 'Mapping 直挖' } })
+    expect(screen.getByRole('status')).toHaveTextContent('共 1 位人选 · 1 个阶段')
+    expect(screen.getByRole('button', { name: /候选人9/ })).toBeInTheDocument()
+  })
+
   it('阶段顺序稳定：未停止在前、已停止在后，兜底「待复核」优先', () => {
     const items = [
       makeCandidate(1, '初筛'),

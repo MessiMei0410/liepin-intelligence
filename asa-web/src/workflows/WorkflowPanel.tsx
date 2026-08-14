@@ -9,7 +9,6 @@ import { recordValue } from '../shared/records'
 import { DialogPanel } from '../shared/Dialog'
 import { nativeBridge } from '../shared/nativeBridge'
 import type { DragResizeAnchor } from '../shared/dialogDragResize'
-import { humanizeActionError } from '../shared/errors'
 import { SectionHead } from '../shared/primitives'
 import { stepStatusLabel, activeWorkflowStatuses, stepTone, humanizeWorkflowError, humanizeWorkflowEvent, stepBusinessResult } from './utils'
 import { openAgentWorkspace } from '../agent/navigation'
@@ -26,10 +25,10 @@ import { WorkflowArtifactDialog } from './WorkflowArtifactDialog'
 import { artifactAbsenceMessage, artifactStatusLabel, artifactTypeLabel } from './artifactPresentation'
 import { BusinessDeliverySummary } from './BusinessDeliverySummary'
 import { SourcingResultCard, type SourcingResultCardData } from './SourcingResultCard'
+import { useWorkflowWriteActions } from './useWorkflowWriteActions'
 
-export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived,closeAll}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void,closeAll?:()=>void}) {
-  const [busy,setBusy]=useState('')
-  const [actionError,setActionError]=useState('')
+export function WorkflowPanel({value:sourceValue,jobs,close,reload,openCandidate,archived,closeAll}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void,closeAll?:()=>void}) {
+  const {value,busy,error:actionError,feedback:actionFeedback,runAction:action,decide,retry}=useWorkflowWriteActions({sourceValue,reload,archived})
   const [now,setNow]=useState(Date.now())
   const [strategyOpen,setStrategyOpen]=useState(false)
   const [sourcingResultCard,setSourcingResultCard]=useState<SourcingResultCardData | null>(null)
@@ -75,10 +74,6 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived,cl
   const strategyHighlights=revisionHighlights.length&&flashedWorkflowId!==value.workflow.workflow_id?revisionHighlights:[]
   const jobEntity=jobs.find(job=>job.id===contextJobId)
   const target={client:String(strategy.client||appliedResult.client||jobEntity?.client||'客户待确认'),job:String(strategy.job||appliedResult.job||jobEntity?.title||'岗位待确认'),location:jobEntity?.location||'',status:jobEntity?.status||'',priority:jobEntity?.priority||'',id:contextJobId}
-
-  useEffect(()=>{
-    if(status!=='waiting_approval'||pendingApprovals.length===0)setActionError('')
-  },[status,pendingApprovals.length])
 
   useEffect(()=>{
     if(revisionHighlights.length&&flashedWorkflowId!==value.workflow.workflow_id)setFlashedWorkflowId(value.workflow.workflow_id)
@@ -161,34 +156,18 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived,cl
     return()=>{window.clearInterval(poll);window.clearInterval(clock);document.removeEventListener('visibilitychange',onVisible)}
   },[value.workflow.workflow_id,status,streamConnected])
 
-  const action=async(name:string,payload:Record<string,unknown>={})=>{
-    const exactPayload=name==='start'&&value.plan_ref
-      ? {...payload,expected_plan_version:value.plan_ref.version,expected_plan_hash:value.plan_ref.plan_hash}
-      : payload
-    setBusy(name);setActionError('')
-    try{await api.workflowAction(value.workflow.workflow_id,name,exactPayload);if(name==='archive')archived();else await checkSummary()}
-    catch(e){setActionError(humanizeActionError(e,'工作流操作失败，请重试。'))}
-    finally{setBusy('')}
-  }
-  const discussStrategy=async()=>{
-    setBusy('copilot')
-    try{
-      openAgentWorkspace({type:'workflow',id:value.workflow.workflow_id,mode:'strategy_revision',client:target.client,job:target.job})
-    }finally{setBusy('')}
-  }
+  const discussStrategy=()=>openAgentWorkspace({type:'workflow',id:value.workflow.workflow_id,mode:'strategy_revision',client:target.client,job:target.job})
   const openSourcingCandidatesNewTab=()=>{
     const url=`${location.origin}${location.pathname}#sourcing_candidates=${encodeURIComponent(value.workflow.workflow_id)}`
     window.open(url,'_blank','noopener,noreferrer')
   }
   const reviewCandidates=()=>{candidatesRef.current?.scrollIntoView?.({behavior:'smooth',block:'start'})}
-  const decide=async(id:string,decision:string)=>{setBusy(id);setActionError('');try{await api.approval(id,decision);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'审批失败，请重试。'))}finally{setBusy('')}}
-  const retry=async(stepId:number)=>{setBusy(`retry-${stepId}`);setActionError('');try{await api.retryStep(stepId);await checkSummary()}catch(e){setActionError(humanizeActionError(e,'重试失败，请稍后再试。'))}finally{setBusy('')}}
   const headline=['target_met','needs_review','pool_insufficient'].includes(mapped.kind) ? mapped.label : status==='waiting_approval' ? `已完成 ${completed}/${total} 步，等待外部寻访授权` : status==='completed' ? `工作流已完成，共 ${total} 步` : status==='failed' ? humanizeWorkflowError(failedStep?.error||value.goal.error) : status==='blocked' ? '工作流需要处理后继续' : status==='paused' ? '已暂停，渠道会在当前查询单元结束后停止。' : status==='planned' ? '计划已就绪，等待确认' : current ? `正在处理：${current.business_label}` : workflowStatusLabel[status] || status
   const detachPanel=(anchor?:DragResizeAnchor):boolean=>{
     if(nativeBridge('openDetachedDialog',{title:value.goal.title,url:`/asa-app#workflow=${encodeURIComponent(value.workflow.workflow_id)}&bare=1`,anchor})){close();return true}
     return false
   }
-  return <DialogPanel panelClassName="workflow-panel" onEscape={close} onDetach={detachPanel} minWidth={320} minHeight={300}><header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'?<LoaderCircle className="spin"/>:<MessageSquareText/>}在 Agent 中讨论策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{live&&<button className="button" disabled={!!busy} onClick={()=>action('pause')}>{busy==='pause'?<LoaderCircle className="spin"/>:<Pause/>}暂停寻访</button>}{status==='paused'&&<button className="button primary" disabled={!!busy} onClick={()=>action('resume')}>{busy==='resume'?<LoaderCircle className="spin"/>:<Play/>}继续寻访</button>}{!['cancelled','completed'].includes(status)&&<button className="button danger" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'?<LoaderCircle className="spin"/>:<Ban/>}立即停止寻访</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}确认计划并准备</button>}<button className="icon-btn candidate-dialog-detach" onClick={()=>void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink/></button>{closeAll&&<button className="icon-btn" onClick={closeAll} title="关闭" aria-label="关闭"><X/></button>}</div></header><div className="workflow-body"><main>
+  return <DialogPanel panelClassName="workflow-panel" onEscape={close} onDetach={detachPanel} minWidth={320} minHeight={300}><header className="detail-head" style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }} title="按住拖动；拖出屏幕边缘可弹出为独立窗口"><button className="icon-btn" onClick={close} title="返回" aria-label="返回"><ChevronLeft/></button><div><h2>{value.goal.title}</h2><p>{value.workflow.workflow_id} · {mapped.label}</p></div><div className="detail-actions">{actionError&&<span className="tag warn">{actionError}</span>}<button className="button" disabled={!!busy} onClick={()=>void discussStrategy()}>{busy==='copilot'?<LoaderCircle className="spin"/>:<MessageSquareText/>}在 Agent 中讨论策略</button>{archiveAllowed&&<button className="button" disabled={!!busy} onClick={()=>action('archive')}>{busy==='archive'?<LoaderCircle className="spin"/>:<Archive/>}归档</button>}{live&&<button className="button" disabled={!!busy} onClick={()=>action('pause')}>{busy==='pause'?<LoaderCircle className="spin"/>:<Pause/>}暂停寻访</button>}{status==='paused'&&<button className="button primary" disabled={!!busy} onClick={()=>action('resume')}>{busy==='resume'?<LoaderCircle className="spin"/>:<Play/>}继续寻访</button>}{!['cancelled','completed'].includes(status)&&<button className="button danger" disabled={!!busy} onClick={()=>action('cancel')}>{busy==='cancel'?<LoaderCircle className="spin"/>:<Ban/>}立即停止寻访</button>}{status==='planned'&&<button className="button primary" disabled={!!busy} onClick={()=>action('start')}>{busy==='start'?<LoaderCircle className="spin"/>:<Activity/>}确认计划并准备</button>}<button className="icon-btn candidate-dialog-detach" onClick={()=>void detachPanel()} title="弹出为独立窗口（可拖出屏幕）" aria-label="弹出为独立窗口"><ExternalLink/></button>{closeAll&&<button className="icon-btn" onClick={closeAll} title="关闭" aria-label="关闭"><X/></button>}</div></header>{actionFeedback&&<div className="candidate-action-feedback success" role="status"><CircleCheck/><span>{actionFeedback}</span></div>}<div className="workflow-body"><main>
     <section className={`workflow-progress ${progressTone}`} aria-live="polite">
       <div className="progress-status"><span className="progress-icon"><WorkflowStatusIcon status={status}/></span><div><span>{mapped.label}</span><b>{headline}</b><small>{status==='waiting_approval'&&pendingApprovals[0]?.created_at?`已等待 ${elapsed(pendingApprovals[0].created_at,undefined,now)}`:live&&value.workflow.started_at?`已运行 ${elapsed(value.workflow.started_at,value.workflow.finished_at,now)}`:`更新于 ${date(value.workflow.updated_at)}`}</small></div><strong>{percent}%</strong></div>
       <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><i style={{width:`${percent}%`}}/></div>
@@ -199,8 +178,8 @@ export function WorkflowPanel({value,jobs,close,reload,openCandidate,archived,cl
     <WorkflowTarget target={target} objective={value.goal.objective}/>
     <WorkflowStrategy strategy={strategy} channels={strategyChannels} gates={reviewGates} coverage={strategyCoverage} highlights={strategyHighlights} open={strategyOpen} toggle={()=>setStrategyOpen(value=>!value)} strategyV2={strategyV2} workflowId={value.workflow.workflow_id} editable={strategyEditable} onEdited={reload}/>
     {sourcingStep&&<WorkflowFunnel workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''}/>}
-    <StrategyReview workflowId={value.workflow.workflow_id} status={status} updatedAt={value.workflow.updated_at||''} openCandidate={openCandidate} jobId={contextJobId||undefined} mappingArtifactId={mappingArtifactId||undefined} onOpenMapping={openMappingCard}/>
-    {mappingCardId&&contextJobId>0&&<MappingTaskCard jobId={contextJobId} artifactId={mappingCardId} openCandidate={openCandidate} onClose={()=>setMappingCardId('')}/>}
+    <StrategyReview workflowId={value.workflow.workflow_id} status={status} updatedAt={value.workflow.updated_at||''} openCandidate={openCandidate} jobId={contextJobId||undefined} mappingArtifactId={mappingArtifactId||undefined} onOpenMapping={openMappingCard} onChanged={reload}/>
+    {mappingCardId&&contextJobId>0&&<MappingTaskCard jobId={contextJobId} artifactId={mappingCardId} openCandidate={openCandidate} onClose={()=>setMappingCardId('')} onChanged={reload}/>}
     <WorkflowCandidates ref={candidatesRef} workflowId={value.workflow.workflow_id} updatedAt={value.workflow.updated_at||''} workflowStatus={status} sourcingStatus={sourcingStep?.status||'pending'} assessmentQueue={assessmentQueue} openCandidate={openCandidate}/>
     {sourcingResultCard&&<div className="sourcing-result-dialog-backdrop" role="dialog" aria-modal="true" aria-label={sourcingResultCard.title}>
       <div className="sourcing-result-dialog">

@@ -137,6 +137,16 @@ describe('候选人列表 Candidates', () => {
     expect(screen.getByRole('status')).toHaveTextContent('共 3 个结果')
   })
 
+  it('Mapping 入库关系显示并可按真实来源检索，不误标为人才库', () => {
+    render(<Candidates items={[makeCandidate(9, { source_type: 'mapping' })]} openCandidate={() => {}} />)
+
+    expect(screen.getByText('Mapping 直挖')).toBeInTheDocument()
+    expect(screen.queryByText('人才库')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('搜索候选人'), { target: { value: 'Mapping 直挖' } })
+    expect(screen.getByRole('status')).toHaveTextContent('共 1 个结果')
+    expect(screen.getByRole('row', { name: /候选人9/ })).toBeInTheDocument()
+  })
+
   it('搜索与范围变化后页码回到第一页', () => {
     const items = Array.from({ length: 45 }, (_, index) => makeCandidate(index + 1))
     render(<Candidates items={items} openCandidate={() => {}} />)

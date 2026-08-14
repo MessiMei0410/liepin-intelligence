@@ -11,7 +11,8 @@ skipIfNoBackend()
 // 「当前有确认按钮的卡」（pending）动态确定并以序号跟踪，不再钉人名/既有状态；
 // 破冰内容质量随真实数据波动，结构断言只到「开场白要点」区块，内容词由 Vitest mock 覆盖。
 
-test('Mapping 任务卡：团队树渲染 + 确认破冰 + 状态持久 + 入库入口', async ({ page }) => {
+test('Mapping 任务卡：团队树、状态持久与入库后主列表即时回读', async ({ page }) => {
+  test.setTimeout(90_000)
   const panel = await openWorkflowDetail(page, MAPPING_WORKFLOW_ID)
   // 决策树 escalate_mapping 步旁入口：已有任务卡 → 按钮直接打开（不重复发起采集）
   const review = panel.getByRole('region', { name: '没成的原因' })
@@ -64,4 +65,47 @@ test('Mapping 任务卡：团队树渲染 + 确认破冰 + 状态持久 + 入库
   const secondAgain = card2.locator('.mapping-candidate').nth(pendingIndexes[1])
   await expect(secondAgain).toContainText('已确认')
   await expect(secondAgain.getByRole('button', { name: '入库' })).toBeVisible()
+
+  // 入库写入真实 job_candidates + candidate_events 后，不刷新页面直接切主「人选列表」回读新关系。
+  const intakeResponsePromise = page.waitForResponse(response =>
+    response.request().method() === 'POST' && response.url().includes('/mapping-tasks/') && response.url().endsWith('/intake'))
+  const candidateRefreshPromise = page.waitForResponse(response =>
+    response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/candidates')
+  const candidateDetailRefreshPromise = page.waitForResponse(response =>
+    response.request().method() === 'GET' && /^\/api\/v1\/candidates\/\d+$/.test(new URL(response.url()).pathname))
+  await secondAgain.getByRole('button', { name: '入库' }).click()
+  const intakeResponse = await intakeResponsePromise
+  expect(intakeResponse.ok()).toBe(true)
+  const intake = await intakeResponse.json() as { job_candidate_id: number; relation_existed?: boolean }
+  expect(intake.relation_existed).toBe(false)
+  await expect(secondAgain).toContainText('已入库')
+  const candidateDetailRefresh = await candidateDetailRefreshPromise
+  expect(new URL(candidateDetailRefresh.url()).pathname).toBe(`/api/v1/candidates/${intake.job_candidate_id}`)
+  expect(candidateDetailRefresh.ok()).toBe(true)
+  expect(await candidateDetailRefresh.finished()).toBeNull()
+  const candidateRefresh = await candidateRefreshPromise
+  expect(candidateRefresh.ok()).toBe(true)
+  expect(await candidateRefresh.finished()).toBeNull()
+
+  await reopened.getByRole('button', { name: '收起' }).click()
+  await reopened.locator('.detail-head').getByRole('button', { name: '关闭' }).click()
+  await expect(page.locator('.workflow-panel')).toHaveCount(0)
+  await page.locator('aside.nav').getByRole('button', { name: '人选列表' }).click()
+  await page.getByRole('searchbox', { name: '搜索候选人' }).fill(String(intake.job_candidate_id))
+  const row = page.getByRole('region', { name: '候选人列表，可横向滚动' })
+    .getByRole('row')
+    .filter({ hasText: '技术市场经理/总监（PC电源）' })
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('技术市场经理/总监（PC电源）')
+  await expect(row).toContainText('Mapping 直挖')
+  await expect(row).toContainText('S1 新增寻访/待复核')
+  await row.click()
+  const candidatePanel = page.locator('.candidate-panel')
+  await expect(candidatePanel).toBeVisible()
+  await expect(candidatePanel.getByText('从 Mapping 任务卡确认后入库')).toBeVisible()
+  await expect(candidatePanel.getByText(/不作为猎聘\/X-SaaS 查询召回/)).toBeVisible()
+  await expect(candidatePanel.getByRole('link', { name: /核对公开资料/ })).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 700 })
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.body.clientWidth)).toBeTruthy()
+  await expect(candidatePanel.getByText('从 Mapping 任务卡确认后入库')).toBeVisible()
 })

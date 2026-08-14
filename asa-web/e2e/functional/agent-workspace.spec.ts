@@ -93,13 +93,14 @@ test('Agent 发送任务、渲染对象卡并在重载后恢复', async ({ page 
 })
 
 test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {
+  let sentBody: Record<string, unknown> = {}
   await page.addInitScript(() => localStorage.setItem('asaAgentSessionId', 'agent-sourcing-result-layout'))
   await page.route('**/api/v1/copilot/sessions**', route => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/agent-sourcing-result-layout')) return route.fulfill({ json: {
       ok: true,
       session_id: 'agent-sourcing-result-layout',
-      business_focus: { context: { type: 'job', id: 154, client: '士兰微', job: '电源专家' } },
+      business_focus: { context: { type: 'workflow', id: 'workflow-e2e-result' }, client: '士兰微', job: { title: '电源专家' } },
       messages: [{
         role: 'assistant',
         content: '第 3 轮寻访已完成。',
@@ -111,12 +112,23 @@ test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {
             workflow_id: 'workflow-e2e-result', round: 3, client: '士兰微', job: '电源专家', status: 'completed',
             assessed_count: 50, successful_count: 47, failed_count: 3, total_assessed_in_job: 138,
             recommendation_breakdown: { recommended: 0, verify_first: 18, not_recommended: 120 },
-            top_candidates: [], next_actions: [{ type: 'review_candidates', label: '复核现有人选' }],
+            top_candidates: [], next_actions: [
+              { type: 'review_candidates', label: '复核现有人选' },
+              { type: 'continue_sourcing', label: '继续补池' },
+            ],
           },
         },
       }],
     } })
     return route.fulfill({ json: { ok: true, sessions: [] } })
+  })
+  await page.route('**/api/v1/copilot/stream', route => {
+    sentBody = route.request().postDataJSON() as Record<string, unknown>
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'event: context\ndata: {"session_id":"agent-sourcing-result-layout"}\n\nevent: done\ndata: {"ok":true,"session_id":"agent-sourcing-result-layout","answer":"已基于原工作流受理继续补池"}\n\n',
+    })
   })
 
   await page.goto('/asa-app')
@@ -135,6 +147,19 @@ test('Agent 寻访结果卡铺满消息内容列', async ({ page }) => {
   expect(Math.abs(layout.cardWidth - layout.contentWidth)).toBeLessThanOrEqual(1)
   // 消息行 3 列（角色 | 时间 | 内容），卡片在内容列。
   expect(layout.gridColumn).toBe('3')
+  await card.getByRole('button', { name: '继续补池' }).click()
+  await expect(page.getByText('已基于原工作流受理继续补池')).toBeVisible()
+  expect(sentBody).toMatchObject({
+    session_id: 'agent-sourcing-result-layout',
+    message: '继续补池',
+    context: {
+      type: 'workflow', id: 'workflow-e2e-result', client: '士兰微',
+      structured_action: {
+        type: 'continue_sourcing',
+        target: { type: 'workflow', id: 'workflow-e2e-result', client: '士兰微', label: '电源专家' },
+      },
+    },
+  })
 })
 
 test('Agent 策略建议逐项预检、二次确认并持久化回执', async ({ page }) => {

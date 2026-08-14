@@ -1,4 +1,4 @@
-import { Search } from 'lucide-react'
+import { ExternalLink, Search } from 'lucide-react'
 import type { CandidateDetail } from '../api'
 import { date, sourceLabel } from '../shared/format'
 import { formatFeedbackScore } from './overviewFormat'
@@ -73,7 +73,11 @@ function RecallHistory({ recalls }: { recalls: Recall[] }) {
 export function SourcingTrace({ value }: { value: CandidateDetail }) {
   const attributions = value.sourcing_attributions || []
   const recalls = value.sourcing_recalls || []
-  if (!attributions.length && !recalls.length) return null
+  const mappingLineage = (value.source_lineage || []).filter(item => item.source_type === 'mapping')
+  const mappingLinks = [...new Map((value.source_links || [])
+    .filter(link => sourceLabel(link.source_system) === 'Mapping 直挖' && link.source_url)
+    .map(link => [link.source_url, link])).values()]
+  if (!attributions.length && !recalls.length && !mappingLinks.length && !mappingLineage.length) return null
 
   const attributionKeys = new Set(attributions.map(item => sourceKey(item.channel, item.source_query)))
   const unmatchedRecalls = recalls.filter(recall => !attributionKeys.has(sourceKey(recall.channel, recall.source_query)))
@@ -81,8 +85,26 @@ export function SourcingTrace({ value }: { value: CandidateDetail }) {
   return <section className="sourcing-trace">
     <div className="sourcing-trace-head">
       <Search />
-      <div><span>寻访来源 · {recalls.length} 次执行</span><b>怎么找到他的</b></div>
+      <div><span>{mappingLinks.length ? `来源证据 · ${recalls.length} 次寻访执行 · Mapping 直挖` : `寻访来源 · ${recalls.length} 次执行`}</span><b>怎么找到他的</b></div>
     </div>
+    {(mappingLinks.length > 0 || mappingLineage.length > 0) && <div className="sourcing-trace-row sourcing-trace-row-mapping">
+      <div className="trace-main">
+        <span>Mapping 直挖 · 公开资料</span>
+        <b>从 Mapping 任务卡确认后入库</b>
+        <small>独立扩圈来源，不作为猎聘/X-SaaS 查询召回；任务卡与候选索引已保留</small>
+        {mappingLineage.length > 0 && <div className="mapping-lineage-receipts">
+          {[...new Map(mappingLineage.map(item => [`${item.workflow_id || ''}:${item.artifact_id || ''}:${item.candidate_index ?? ''}`, item])).values()].map(item => <span key={`${item.workflow_id || ''}:${item.artifact_id || ''}:${item.candidate_index ?? ''}`}>
+            {item.artifact_id ? `任务卡 ${item.artifact_id}` : 'Mapping 任务卡'}{item.candidate_index !== null && item.candidate_index !== undefined ? ` · 候选 ${Number(item.candidate_index) + 1}` : ''}{item.workflow_id ? ` · 工作流 ${item.workflow_id}` : ''}
+          </span>)}
+        </div>}
+        <div className="mapping-source-links">
+          {mappingLinks.map((link, index) => <a key={link.source_url} href={link.source_url} target="_blank" rel="noreferrer">
+            核对公开资料{mappingLinks.length > 1 ? ` ${index + 1}` : ''}<ExternalLink />
+          </a>)}
+        </div>
+      </div>
+      <div className="trace-side"><span className="feedback-score muted">待完整简历复核</span></div>
+    </div>}
     {attributions.map(item => {
       const matches = recalls.filter(recall => sourceKey(recall.channel, recall.source_query) === sourceKey(item.channel, item.source_query))
       const score = formatFeedbackScore(item.learning_score)

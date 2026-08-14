@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CircleCheck, LoaderCircle, MessageSquarePlus, PackageOpen, TriangleAlert } from 'lucide-react'
 import { api } from '../api'
-import type { RecommendationPackageDetailPayload, RecommendationPackageSummary } from '../api'
+import type { RecommendationPackageDetailPayload, RecommendationPackageFeedback, RecommendationPackageSummary } from '../api'
 import { date } from '../shared/format'
 import { copilotText } from '../shared/text'
 import { SectionHead } from '../shared/primitives'
+import { recommendationPackageFreshness } from './recommendationPackageFreshness'
 
 // 版本化推荐包（推荐闭环）：顾问确认推荐后由 Core 聚合生成（候选摘要/人岗证据/风险/待核验问题），
 // 客户反馈按包版本记录并回写候选人事件时间线。
@@ -22,7 +23,13 @@ const feedbackTypeOptions: Array<{ value: string; label: string }> = [
   { value: 'other', label: '其他反馈' },
 ]
 
-export function RecommendationPackagesSection({ packages }: { packages: RecommendationPackageSummary[] }) {
+const mergeFeedback = (current: RecommendationPackageFeedback[] = [], incoming: RecommendationPackageFeedback[] = []) =>
+  [...new Map([...current, ...incoming].map(item => [item.id, item])).values()]
+
+export function RecommendationPackagesSection({ packages, onFeedbackRecorded }: {
+  packages: RecommendationPackageSummary[]
+  onFeedbackRecorded?: () => void | Promise<void>
+}) {
   const [openId, setOpenId] = useState('')
   if (!packages.length) return null
   return (
@@ -43,14 +50,17 @@ export function RecommendationPackagesSection({ packages }: { packages: Recommen
               <small>{date(item.created_at)} · 客户反馈 {item.feedback_count ?? 0} 条</small>
             </span>
           </button>
-          {openId === item.package_id && <RecommendationPackageDetail packageId={item.package_id} />}
+          {openId === item.package_id && <RecommendationPackageDetail packageId={item.package_id} onFeedbackRecorded={onFeedbackRecorded} />}
         </div>
       ))}
     </>
   )
 }
 
-function RecommendationPackageDetail({ packageId }: { packageId: string }) {
+function RecommendationPackageDetail({ packageId, onFeedbackRecorded }: {
+  packageId: string
+  onFeedbackRecorded?: () => void | Promise<void>
+}) {
   const [detail, setDetail] = useState<RecommendationPackageDetailPayload>()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -58,8 +68,9 @@ function RecommendationPackageDetail({ packageId }: { packageId: string }) {
   const [feedbackContent, setFeedbackContent] = useState('')
   const [busy, setBusy] = useState(false)
   const [receipt, setReceipt] = useState<{ tone: 'error' | 'success'; text: string }>()
+  const refreshSeq = useRef(0)
 
-  // 展开时按需拉取一次（挂载即拉）；反馈提交后调用 load 回读刷新。
+  // 展开时按需拉取一次（挂载即拉）；手动重试调用 load。
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
@@ -90,6 +101,13 @@ function RecommendationPackageDetail({ packageId }: { packageId: string }) {
     try {
       const result = await api.recordPackageFeedback(packageId, { feedback_type: feedbackType, content: feedbackContent.trim() })
       const label = result.feedback?.feedback_type_label || feedbackTypeOptions.find((o) => o.value === feedbackType)?.label || feedbackType
+      if (result.feedback) {
+        const recordedFeedback = result.feedback
+        setDetail(current => current ? {
+          ...current,
+          feedback: mergeFeedback(current.feedback, [recordedFeedback]),
+        } : current)
+      }
       setReceipt({
         tone: 'success',
         text: result.already_recorded || result.receipt?.idempotent_replay
@@ -97,7 +115,12 @@ function RecommendationPackageDetail({ packageId }: { packageId: string }) {
           : `客户反馈已记录（${label}），并写入候选人时间线。`,
       })
       setFeedbackContent('')
-      void load()
+      const refreshId = ++refreshSeq.current
+      void api.recommendationPackage(packageId).then(payload => {
+        if (refreshId !== refreshSeq.current) return
+        setDetail(current => ({ ...payload, feedback: mergeFeedback(payload.feedback, current?.feedback) }))
+      }).catch(() => undefined)
+      void Promise.resolve().then(() => onFeedbackRecorded?.()).catch(() => undefined)
     } catch (e) {
       setReceipt({ tone: 'error', text: `客户反馈记录失败：${copilotText(e) || '请稍后重试'}。可重试，重复提交不会重复记录。` })
     } finally {
@@ -113,8 +136,13 @@ function RecommendationPackageDetail({ packageId }: { packageId: string }) {
   const risks = detail.risks || []
   const questions = detail.verification_questions || []
   const feedback = detail.feedback || []
+  const freshness = recommendationPackageFreshness(detail.created_at, evidence.assessed_at)
   return (
     <div className="reco-package-detail">
+      {freshness.stale && <div className="reco-package-stale" role="status">
+        <TriangleAlert />
+        <span>当前人岗评估在推荐包生成后已更新；本包证据仅供对照，推荐包升版需由后端版本化接口生成。</span>
+      </div>}
       <section>
         <h4>候选摘要</h4>
         <p>{[summary.current_title, summary.current_company].filter(Boolean).join(' @ ') || summary.name || '-'}</p>

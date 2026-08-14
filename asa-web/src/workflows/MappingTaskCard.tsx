@@ -4,6 +4,7 @@ import { api } from '../api'
 import type { MappingCandidate, MappingCandidateStatus, MappingTaskPayload, MappingTaskStats } from '../api'
 import { humanizeActionError } from '../shared/errors'
 import { date } from '../shared/format'
+import { dispatchCandidateUpdated } from '../shared/candidateEvents'
 import {
   groupMappingTeams,
   humanizeMappingFailure,
@@ -43,11 +44,12 @@ const STATUS_ACTIONS: Record<string, Array<{ key: string; label: string; status:
   ],
 }
 
-export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
+export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose, onChanged }: {
   jobId: number
   artifactId: string
   openCandidate: (id: number) => void
   onClose: () => void
+  onChanged?: () => void | Promise<void>
 }) {
   const [payload, setPayload] = useState<MappingTaskPayload | null>(null)
   const [loadError, setLoadError] = useState('')
@@ -179,6 +181,13 @@ export function MappingTaskCard({ jobId, artifactId, openCandidate, onClose }: {
       }
       if (result.stats) setStatsOverride(result.stats)
       showReceipt(index, '入库完成')
+      dispatchCandidateUpdated({
+        id: result.job_candidate_id,
+        created: !result.relation_existed,
+        jobId,
+        source: 'mapping',
+      })
+      if (onChanged) void Promise.resolve().then(onChanged).catch(() => undefined)
     })
 
   const saveNote = (index: number, value: string) => {

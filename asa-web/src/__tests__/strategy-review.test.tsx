@@ -96,6 +96,18 @@ afterEach(() => {
 })
 
 describe('策略复盘展示（StrategyReview）', () => {
+  it('工作流更新晚于复盘时标记过期，并提供重新分析入口', async () => {
+    stubReviewFetch(reviewPayload)
+    const user = userEvent.setup()
+    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 11:00:00" />)
+    const section = await screen.findByRole('region', { name: '没成的原因' })
+    expect(within(section).getByText('复盘已过期')).toBeInTheDocument()
+    expect(within(section).getByRole('status')).toHaveTextContent('工作流在这份复盘生成后又发生过更新')
+    expect(within(section).getByRole('button', { name: '重新分析' })).toBeInTheDocument()
+    await user.click(within(section).getByRole('button', { name: '重新分析' }))
+    expect((await screen.findByText('策略问题：关键词/目标池太窄')).textContent).toContain('策略问题')
+  })
+
   it('渲染判定、证据行、渠道简表与修订 diff 列表，并回显本地决策标记', async () => {
     window.localStorage.setItem(decisionsKey, JSON.stringify({ 'diff-1': 'accepted' }))
     stubReviewFetch()
@@ -142,6 +154,7 @@ describe('策略复盘展示（StrategyReview）', () => {
 
   it('404 显示“这轮还没分析没成的原因”，点击分析按钮调 rebuild 后重新拉取', async () => {
     const user = userEvent.setup()
+    const onChanged = vi.fn()
     let gets = 0
     const fetchMock = vi.fn<typeof fetch>(async input => {
       const url = String(input)
@@ -152,7 +165,7 @@ describe('策略复盘展示（StrategyReview）', () => {
       return gets === 1 ? mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404) : mockResponse(reviewPayload)
     })
     vi.stubGlobal('fetch', fetchMock)
-    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" />)
+    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" onChanged={onChanged} />)
     expect(await screen.findByText('这轮还没分析没成的原因。可以基于本轮各渠道的结果和评估情况补一份。')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '分析没成的原因' }))
     const rebuildCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/strategy-review/rebuild'))
@@ -163,6 +176,97 @@ describe('策略复盘展示（StrategyReview）', () => {
     // rebuild 成功后重新拉取并展示复盘结论
     expect(await screen.findByText('策略问题：关键词/目标池太窄')).toBeInTheDocument()
     expect(gets).toBe(2)
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+  })
+
+  it('重建成功后直接展示 POST 回执，不等待后台复盘与父级详情回读', async () => {
+    const user = userEvent.setup()
+    const never = new Promise<Response>(() => undefined)
+    const onChanged = vi.fn(() => new Promise<void>(() => undefined))
+    const rebuiltPayload = {
+      ok: true,
+      workflow_id: 'wf-1',
+      artifact_id: 'strategy_review_wf-1-v2',
+      review: {
+        ...reviewPayload.review,
+        verdict_label: '重建后的策略判断',
+        verdict_reason: '这是 rebuild POST 返回的最新数据库结论',
+        generated_at: '2026-07-23 11:30:00',
+        version: 2,
+      },
+    }
+    let gets = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/rebuild')) return mockResponse(rebuiltPayload)
+      gets += 1
+      if (gets === 1) return mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404)
+      return never
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="2026-07-23 12:00:00" onChanged={onChanged} />)
+    await user.click(await screen.findByRole('button', { name: '分析没成的原因' }))
+
+    expect(await screen.findByText('重建后的策略判断')).toBeInTheDocument()
+    expect(screen.getByText('这是 rebuild POST 返回的最新数据库结论')).toBeInTheDocument()
+    expect(screen.getByText('v2 · 生成于 2026-07-23 11:30:00')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: '重新分析' })).toBeEnabled())
+    await waitFor(() => expect(gets).toBe(2))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText('原因分析加载失败')).not.toBeInTheDocument()
+  })
+
+  it('重建后的后台回读失败不遮蔽成功回执', async () => {
+    const user = userEvent.setup()
+    const onChanged = vi.fn(async () => { throw new Error('parent refresh failed') })
+    const rebuiltPayload = {
+      ok: true,
+      workflow_id: 'wf-1',
+      artifact_id: 'strategy_review_wf-1-v2',
+      review: {
+        ...reviewPayload.review,
+        verdict_label: '重建成功且保持可见',
+        generated_at: '2026-07-23 11:30:00',
+        version: 2,
+      },
+    }
+    let gets = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/rebuild')) return mockResponse(rebuiltPayload)
+      gets += 1
+      if (gets === 1) return mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404)
+      return mockResponse({ detail: '详情回读失败' }, false, 500)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" onChanged={onChanged} />)
+    await user.click(await screen.findByRole('button', { name: '分析没成的原因' }))
+
+    expect(await screen.findByText('重建成功且保持可见')).toBeInTheDocument()
+    await waitFor(() => expect(gets).toBe(2))
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText('原因分析加载失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('详情回读失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('分析失败，请重试。')).not.toBeInTheDocument()
+  })
+
+  it('重建失败不通知父级刷新', async () => {
+    const user = userEvent.setup()
+    const onChanged = vi.fn()
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/rebuild')) return mockResponse({ detail: '写入失败' }, false, 500)
+      return mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<StrategyReview workflowId="wf-1" status="blocked" updatedAt="" onChanged={onChanged} />)
+    await user.click(await screen.findByRole('button', { name: '分析没成的原因' }))
+
+    expect(await screen.findByText('写入失败')).toBeInTheDocument()
+    expect(onChanged).not.toHaveBeenCalled()
   })
 
   it('非终局工作流不渲染复盘区，也不发起请求', () => {
@@ -289,6 +393,34 @@ describe('工作流面板：策略编辑统一交给 Agent', () => {
     expect(close).not.toHaveBeenCalled()
     expect(screen.getByRole('heading', { name: plannedWorkflow.goal.title })).toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-1/revise'))).toBe(false)
+  })
+
+  it('策略复盘重建成功后刷新父级工作流详情', async () => {
+    const user = userEvent.setup()
+    const reload = vi.fn()
+    let gets = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/strategy-review/rebuild')) {
+        return mockResponse({ ok: true, workflow_id: 'wf-1', artifact_id: 'strategy_review_wf-1', review: reviewPayload.review })
+      }
+      if (url.includes('/strategy-review')) {
+        gets += 1
+        return gets === 1 ? mockResponse({ detail: '该工作流还没生成原因分析：wf-1' }, false, 404) : mockResponse(reviewPayload)
+      }
+      if (url.includes('/candidates')) return mockResponse({ ok: true, items: [], total: 0 })
+      return mockResponse({ ok: true })
+    }))
+    const terminalWorkflow = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'blocked' },
+      goal: { ...plannedWorkflow.goal, status: 'blocked' },
+    }
+
+    render(<WorkflowPanel value={terminalWorkflow} jobs={[]} close={vi.fn()} reload={reload} openCandidate={vi.fn()} archived={vi.fn()} />)
+    await user.click(await screen.findByRole('button', { name: '分析没成的原因' }))
+
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
   })
 })
 

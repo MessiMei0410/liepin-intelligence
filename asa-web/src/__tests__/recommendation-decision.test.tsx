@@ -144,6 +144,30 @@ describe('顾问确认推荐（recommendation-decision）', () => {
     expect(screen.getByText('待汇总效果')).toBeInTheDocument()
   })
 
+  it('Mapping 公开资料作为独立来源证据展示，不伪造成查询召回', () => {
+    const value: CandidateDetail = {
+      ...recommendationCandidate(),
+      source_links: [{
+        source_system: 'mapping',
+        source_entity_type: 'external_profile',
+        source_entity_id: 'https://example.com/profile/9',
+        source_url: 'https://example.com/profile/9',
+      }],
+      sourcing_attributions: [],
+      sourcing_recalls: [],
+    }
+
+    render(<CandidatePanel value={value} close={() => undefined} changed={() => undefined} />)
+
+    expect(screen.getByText('来源证据 · 0 次寻访执行 · Mapping 直挖')).toBeInTheDocument()
+    expect(screen.getByText('从 Mapping 任务卡确认后入库')).toBeInTheDocument()
+    expect(screen.getByText(/不作为猎聘\/X-SaaS 查询召回；任务卡与候选索引已保留/)).toBeInTheDocument()
+    expect(screen.getByText('待完整简历复核')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /核对公开资料/ })).toHaveAttribute('href', 'https://example.com/profile/9')
+    expect(screen.getByRole('link', { name: /Mapping 公开资料/ })).toHaveAttribute('href', 'https://example.com/profile/9')
+    expect(screen.queryByText('猎聘 · 执行记录')).not.toBeInTheDocument()
+  })
+
   it('provenance 缺失时回显查询族，有哈希无 revision 时仅声明已批准', () => {
     const value: CandidateDetail = {
       ...recommendationCandidate(),

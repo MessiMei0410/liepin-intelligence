@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Building2, CircleCheck, LoaderCircle, RefreshCw, Search, TriangleAlert } from 'lucide-react'
 import { api } from '../api'
 import type {
   CompanyCalibrationProgress,
   CompanyCalibrationQueueItem,
+  CompanyCalibrationResult,
   CompanyCalibrationStatus,
 } from '../api'
 import { copilotText } from '../shared/text'
@@ -31,7 +32,60 @@ const splitLines = (value: string) =>
 
 type CalibrationFormProps = {
   item: CompanyCalibrationQueueItem
-  onSubmitted: (receipt: { tone: 'error' | 'success'; text: string }) => void
+  onSubmitted: (
+    receipt: { tone: 'error' | 'success'; text: string },
+    result: CompanyCalibrationResult,
+    item: CompanyCalibrationQueueItem,
+  ) => void
+}
+
+const visibleInStatus = (itemStatus: CompanyCalibrationQueueItem['status'], selectedStatus: string) => {
+  if (selectedStatus === 'all') return true
+  if (selectedStatus) return itemStatus === selectedStatus
+  return itemStatus === 'pending' || itemStatus === 'needs_review'
+}
+
+const mergeSubmittedCalibration = (
+  items: CompanyCalibrationQueueItem[],
+  original: CompanyCalibrationQueueItem,
+  result: CompanyCalibrationResult,
+  selectedStatus: string,
+) => {
+  const calibration = result.calibration
+  const nextStatus = result.status
+  if (!calibration || !nextStatus) return items
+  const companyKey = result.company_key || calibration.company_key || original.company_key
+  const current = items.find(item => item.company_key === companyKey)
+  if ((current?.calibration?.version ?? 0) > calibration.version) return items
+  const updated: CompanyCalibrationQueueItem = {
+    ...(current || original),
+    company_key: companyKey,
+    company_name: result.company_name || calibration.company_name || original.company_name,
+    status: nextStatus,
+    status_label: result.status_label || calibration.status_label || original.status_label,
+    calibration,
+  }
+  const withoutCurrent = items.filter(item => item.company_key !== companyKey)
+  if (!visibleInStatus(nextStatus, selectedStatus)) return withoutCurrent
+  const originalIndex = items.findIndex(item => item.company_key === companyKey)
+  if (originalIndex < 0) return [updated, ...withoutCurrent]
+  return items.map(item => item.company_key === companyKey ? updated : item)
+}
+
+const mergeSubmittedProgress = (
+  fetched: CompanyCalibrationProgress,
+  submitted: CompanyCalibrationProgress | undefined,
+  previousStatus: CompanyCalibrationQueueItem['status'],
+  nextStatus: CompanyCalibrationResult['status'],
+) => {
+  if (!submitted || !nextStatus) return fetched
+  const decided = (value: CompanyCalibrationProgress) => value.calibrated + value.needs_review + value.rejected
+  const count = (value: CompanyCalibrationProgress, itemStatus: CompanyCalibrationQueueItem['status']) =>
+    itemStatus === 'pending' ? value.pending : value[itemStatus]
+  if (decided(fetched) < decided(submitted)) return submitted
+  if (count(fetched, nextStatus) < count(submitted, nextStatus)) return submitted
+  if (previousStatus !== nextStatus && count(fetched, previousStatus) > count(submitted, previousStatus)) return submitted
+  return fetched
 }
 
 function CalibrationForm({ item, onSubmitted }: CalibrationFormProps) {
@@ -73,7 +127,7 @@ function CalibrationForm({ item, onSubmitted }: CalibrationFormProps) {
           ? `内容与已存校准一致（${statusLabel}，v${result.version ?? '-'}），未产生新版本。`
           : `已保存「${result.company_name || item.company_name}」校准（${statusLabel}，v${result.version ?? 1}）。`
       setFeedback({ tone: 'success', text })
-      onSubmitted({ tone: 'success', text })
+      onSubmitted({ tone: 'success', text }, result, item)
     } catch (e) {
       setFeedback({ tone: 'error', text: `校准提交失败：${copilotText(e) || '请稍后重试'}。` })
     } finally {
@@ -139,8 +193,10 @@ export function CompanyCalibrationPanel() {
   const [error, setError] = useState('')
   const [openKey, setOpenKey] = useState('')
   const [notice, setNotice] = useState<{ tone: 'error' | 'success'; text: string }>()
+  const loadSequence = useRef(0)
 
   const load = useCallback(async (nextQuery: string, nextStatus: string) => {
+    const sequence = ++loadSequence.current
     setLoading(true)
     setError('')
     try {
@@ -148,21 +204,49 @@ export function CompanyCalibrationPanel() {
         api.companyCalibrations(nextQuery, nextStatus),
         api.companyCalibrationProgress(),
       ])
+      if (sequence !== loadSequence.current) return
       setItems(queue.items || [])
       setProgress(progressPayload)
     } catch (e) {
+      if (sequence !== loadSequence.current) return
       setError(copilotText(e) || '校准队列加载失败，请重试。')
     } finally {
-      setLoading(false)
+      if (sequence === loadSequence.current) setLoading(false)
     }
   }, [])
   useEffect(() => { queueMicrotask(() => void load(query, status)) }, [query, status, load])
 
-  // 提交后回读：刷新队列与进度；当前过滤已不含该公司时收起表单。
-  const handleSubmitted = (receipt: { tone: 'error' | 'success'; text: string }) => {
+  const reconcileInBackground = useCallback(async (
+    nextQuery: string,
+    nextStatus: string,
+    result: CompanyCalibrationResult,
+    submittedItem: CompanyCalibrationQueueItem,
+  ) => {
+    const sequence = ++loadSequence.current
+    try {
+      const [queue, progressPayload] = await Promise.all([
+        api.companyCalibrations(nextQuery, nextStatus),
+        api.companyCalibrationProgress(),
+      ])
+      if (sequence !== loadSequence.current) return
+      setItems(mergeSubmittedCalibration(queue.items || [], submittedItem, result, nextStatus))
+      setProgress(mergeSubmittedProgress(progressPayload, result.progress, submittedItem.status, result.status))
+    } catch {
+      // POST 已经返回持久化事实；后台对账失败不应推翻成功回执。
+    }
+  }, [])
+
+  // POST 回执先驱动当前视图，完整队列与进度仅在后台收敛。
+  const handleSubmitted = (
+    receipt: { tone: 'error' | 'success'; text: string },
+    result: CompanyCalibrationResult,
+    submittedItem: CompanyCalibrationQueueItem,
+  ) => {
     setNotice(receipt)
     setOpenKey('')
-    void load(query, status)
+    setItems(current => mergeSubmittedCalibration(current, submittedItem, result, status))
+    if (result.progress) setProgress(result.progress)
+    void reconcileInBackground(query, status, result, submittedItem)
   }
 
   const target = progress?.target ?? 50

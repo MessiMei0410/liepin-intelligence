@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { KnowledgeProposalsPanel } from '../panels/KnowledgeProposals'
 import type { KnowledgeProposalBrief, KnowledgeProposalDetailPayload, KnowledgeProposalListPayload } from '../api'
@@ -209,6 +209,122 @@ describe('知识增补提案（knowledge_proposal）', () => {
     await user.click(screen.getByRole('button', { name: /拒绝提案/ }))
     expect(await screen.findByText(/提案已拒绝（已拒绝），原因已留痕/)).toBeInTheDocument()
     expect(await screen.findByText('原因：证据样本太薄')).toBeInTheDocument()
+  })
+
+  it('决策成功直接采用 POST 提案回执，不等待详情与列表回读', async () => {
+    const never = new Promise<Response>(() => undefined)
+    let decided = false
+    let detailGets = 0
+    let listGets = 0
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/preflight')) return mockResponse({ ok: true, confirmation_token: 'tok-direct', impact: '接受后写入确认知识库。' })
+      if (url.endsWith('/decision')) {
+        decided = true
+        return mockResponse({
+          ok: true,
+          proposal_id: 'kprop-1',
+          decision: 'accept',
+          status: 'accepted',
+          status_label: '已入库',
+          applied_to: '/tmp/kb/confirmed.json',
+          proposal: detailPayload({
+            status: 'accepted',
+            status_label: '已入库',
+            applied_to: '/tmp/kb/confirmed.json',
+            decided_at: '2026-08-05 13:00:00',
+          }),
+        })
+      }
+      if (url.endsWith('/api/v1/knowledge-proposals/kprop-1')) {
+        detailGets += 1
+        return decided ? never : mockResponse(detailPayload())
+      }
+      if (url.startsWith('/api/v1/knowledge-proposals?')) {
+        listGets += 1
+        return decided ? never : mockResponse(listPayload())
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<KnowledgeProposalsPanel />)
+    await user.click(await screen.findByRole('button', { name: '查看提案：排除规则建议：聚类客户甲 × 方向不符' }))
+    await screen.findByText('提案内容')
+    await user.click(screen.getByRole('button', { name: /接受并写入知识库/ }))
+    await user.click(await screen.findByRole('button', { name: /确认接受并入库/ }))
+
+    expect(await screen.findByText(/提案已确认（已入库），已写入：\/tmp\/kb\/confirmed.json/)).toBeInTheDocument()
+    expect(screen.getByText('处理结果')).toBeInTheDocument()
+    expect(screen.getByText(/已入库 · /)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /确认接受并入库/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(detailGets).toBe(2))
+    await waitFor(() => expect(listGets).toBe(2))
+  })
+
+  it('决策后的后台回读失败不覆盖知识入库成功', async () => {
+    let decided = false
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/preflight')) return mockResponse({ ok: true, confirmation_token: 'tok-quiet', impact: '接受后写入确认知识库。' })
+      if (url.endsWith('/decision')) {
+        decided = true
+        return mockResponse({
+          ok: true,
+          proposal_id: 'kprop-1',
+          decision: 'accept',
+          status: 'accepted',
+          status_label: '已入库',
+          proposal: detailPayload({ status: 'accepted', status_label: '已入库', decided_at: '2026-08-05 13:30:00' }),
+        })
+      }
+      if (url.endsWith('/api/v1/knowledge-proposals/kprop-1')) {
+        return decided ? mockResponse({ detail: '详情回读失败' }, false, 500) : mockResponse(detailPayload())
+      }
+      if (url.startsWith('/api/v1/knowledge-proposals?')) {
+        return decided ? mockResponse({ detail: '列表回读失败' }, false, 500) : mockResponse(listPayload())
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<KnowledgeProposalsPanel />)
+    await user.click(await screen.findByRole('button', { name: '查看提案：排除规则建议：聚类客户甲 × 方向不符' }))
+    await screen.findByText('提案内容')
+    await user.click(screen.getByRole('button', { name: /接受并写入知识库/ }))
+    await user.click(await screen.findByRole('button', { name: /确认接受并入库/ }))
+
+    expect(await screen.findByText(/提案已确认（已入库）/)).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('status=accepted'))).toHaveLength(1))
+    expect(screen.getByText('处理结果')).toBeInTheDocument()
+    expect(screen.queryByText('详情回读失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('列表回读失败')).not.toBeInTheDocument()
+    expect(screen.queryByText(/提案确认失败/)).not.toBeInTheDocument()
+  })
+
+  it('扫描生成成功后直接合并 Core 返回提案，不等待列表回读', async () => {
+    const never = new Promise<Response>(() => undefined)
+    let generated = false
+    let listGets = 0
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/generate')) {
+        generated = true
+        return mockResponse({ ok: true, created: [brief], existing: [], candidates: [] })
+      }
+      if (url.startsWith('/api/v1/knowledge-proposals?')) {
+        listGets += 1
+        return generated ? never : mockResponse(listPayload([]))
+      }
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<KnowledgeProposalsPanel />)
+    await screen.findByText(/当前状态下暂无提案/)
+    await user.click(screen.getByRole('button', { name: /扫描生成提案/ }))
+
+    expect(await screen.findByText(/扫描完成：新建提案 1 条/)).toBeInTheDocument()
+    expect(screen.getByText('排除规则建议：聚类客户甲 × 方向不符')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: /扫描生成提案/ })).toBeEnabled())
+    await waitFor(() => expect(listGets).toBe(2))
   })
 
   it('决策失败（409 内容漂移）：如实报错，不误报成功', async () => {

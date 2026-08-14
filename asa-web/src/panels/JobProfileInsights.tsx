@@ -10,7 +10,7 @@ import { date } from '../shared/format'
 
 const pct = (ratio: number) => `${Math.round((ratio || 0) * 100)}%`
 
-export function JobProfileInsights({ jobId }: { jobId: number }) {
+export function JobProfileInsights({ jobId, onChanged }: { jobId: number; onChanged?: () => void | Promise<void> }) {
   const [data, setData] = useState<JobProfileInsightsPayload | null>(null)
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -46,9 +46,21 @@ export function JobProfileInsights({ jobId }: { jobId: number }) {
     setPending(pendingKey)
     setNotice('')
     try {
-      await api.disputeJobProfileItem(jobId, { item_type: itemType, item_key: item.key, item_label: item.label })
+      const result = await api.disputeJobProfileItem(jobId, { item_type: itemType, item_key: item.key, item_label: item.label })
+      setData(current => current ? {
+        ...current,
+        duties: result.duties ?? current.duties,
+        tools: result.tools ?? current.tools,
+        deliverables: result.deliverables ?? current.deliverables,
+        customers: result.customers ?? current.customers,
+        disputed: result.disputed ?? current.disputed,
+        stats: result.stats ?? current.stats,
+        source_count: result.source_count ?? current.source_count,
+        as_of: result.as_of ?? current.as_of,
+      } : current)
       setNotice(`已记录"${item.label}"不对，这条不再参与这个岗位的学习结果`)
-      await load()
+      void api.jobProfileInsights(jobId).then(setData).catch(() => undefined)
+      void Promise.resolve().then(() => onChanged?.()).catch(() => undefined)
     } catch (err) {
       setNotice(err instanceof Error ? err.message : '记录失败，请重试')
     } finally {

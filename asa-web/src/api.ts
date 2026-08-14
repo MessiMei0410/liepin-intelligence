@@ -70,6 +70,12 @@ export type CandidateDetail = Candidate & {
     channel: string; source_query: string; page_number?: number; position_index?: number;
     fit_score?: number | null; fit_level?: string; duplicate_state?: string; created_at?: string;
   }>;
+  source_lineage?: Array<{
+    source_type: 'mapping' | 'sourcing' | 'sourcing_recall' | string;
+    workflow_id?: string; artifact_id?: string; strategy_artifact_id?: string;
+    artifact_title?: string; candidate_index?: number | null; event_id?: number;
+    channel?: string; source_query?: string; source_round?: string; query_cell_id?: string;
+  }>;
   report_artifacts?: Array<{
     id: number; artifact_id: string; workflow_id?: string; artifact_type: string; title: string;
     mime_type?: string; validation_status: string; created_at?: string; version: number;
@@ -271,7 +277,7 @@ export type FloatingSuggestedAction = {
 }
 export type FloatingBridgeContext = {
   surface?: string; context_key?: string; instance_id?: string; job_candidate_id?: number | null;
-  title?: string; subtitle?: string; updated_at?: string;
+  title?: string; subtitle?: string; updated_at?: string; context_revision?: string; identity_fingerprint?: string; stale?: boolean;
 }
 export type FloatingStatePayload = {
   ok?: boolean; server_time?: string; active_context?: FloatingActiveContext; active_context_raw?: Record<string, unknown>;
@@ -280,7 +286,7 @@ export type FloatingStatePayload = {
 }
 export type FloatingActionResult = WriteAck & {
   status?: string; message?: string; open_url?: string; workflow_id?: string;
-  command?: Record<string, unknown>; result?: Record<string, unknown>; workflow?: Record<string, unknown>;
+  error_code?: string; expected_context?: Record<string, unknown>; latest_context?: Record<string, unknown>; latest_page_identity?: Record<string, unknown>; command?: Record<string, unknown>; result?: Record<string, unknown>; workflow?: Record<string, unknown>;
 }
 export type AgentCandidateAssessResult = WriteAck & {
   status?: string; message?: string; assessment_id?: number; job_candidate_id?: number; run_id?: string;
@@ -307,18 +313,19 @@ export type RecommendationMetrics = {
   assessed_candidates: number; rate: number | null;
 }
 // 停止备注 → 寻访调整：停止候选人时填写的备注经 LLM 分析成下一轮寻访调整指令。
-// Core 返回动态 dict（openapi 只描述为 object），按 agent_sourcing_adjustments 实际 payload 收窄声明。
+// Core/OpenAPI 返回四态完整对象；accepted 只表示顾问采纳，applied 必须带真实策略 lineage。
 export type SourcingAdjustmentType = 'add_keyword' | 'remove_keyword' | 'exclude_company' | 'add_company' | 'add_filter' | 'adjust_salary_range'
-export type SourcingAdjustmentStatus = 'pending' | 'applied' | 'ignored'
+export type SourcingAdjustmentStatus = 'pending' | 'accepted' | 'applied' | 'ignored'
 export type SourcingAdjustment = {
   id: number; job_id: number; candidate_id?: number | null;
   adjust_type: SourcingAdjustmentType; value: string; rationale?: string;
   confidence?: number; status: SourcingAdjustmentStatus;
-  created_at?: string; applied_at?: string | null; applied_round?: number | null;
+  created_at?: string; accepted_at?: string | null; applied_at?: string | null; applied_round?: number | null;
+  applied_workflow_id?: string | null; applied_artifact_id?: string | null;
   candidate_name?: string | null;
   effect?: SourcingAdjustmentEffect | null;
 }
-export type SourcingAdjustmentSummary = { pending: number; applied: number; ignored: number }
+export type SourcingAdjustmentSummary = { pending: number; accepted: number; applied: number; ignored: number }
 export type SourcingAdjustmentEffect = {
   baseline: { total: number; pending_review: number; contacted: number; stopped: number }
   current: { total: number; pending_review: number; contacted: number; stopped: number }
@@ -326,6 +333,9 @@ export type SourcingAdjustmentEffect = {
 }
 export type SourcingAdjustmentListPayload = {
   ok?: boolean; items: SourcingAdjustment[]; summary: SourcingAdjustmentSummary;
+}
+export type SourcingAdjustmentDecisionResult = SourcingAdjustment & {
+  ok?: boolean; already_accepted?: boolean;
 }
 export type WorkflowArtifactDetail = {
   artifact_id: string; workflow_id?: string; step_id?: number | null;
@@ -615,7 +625,9 @@ export type JobProfileInsightsPayload = {
   disputed?: JobProfileDisputedItem[]; stats?: Record<string, unknown>;
 }
 export type JobProfileFeedbackResult = {
-  ok?: boolean; status?: string; already_disputed?: boolean; item_type?: string; item_key?: string
+  ok?: boolean; status?: string; already_disputed?: boolean; item_type?: string; item_key?: string;
+  duties?: JobProfileItem[]; tools?: JobProfileItem[]; deliverables?: JobProfileItem[]; customers?: JobProfileItem[];
+  disputed?: JobProfileDisputedItem[]; stats?: Record<string, unknown>; source_count?: number; as_of?: string;
 }
 
 // 版本化推荐包闭环：顾问确认推荐 → 推荐包（候选摘要/人岗证据/风险/待核验问题）→ 客户反馈按包版本留痕。
@@ -676,8 +688,10 @@ const json = async <T>(url: string, init?: RequestInit): Promise<T> => {
   if (!response.ok) {
     const record = body && typeof body === 'object' ? body as Record<string, unknown> : {}
     // 携带 HTTP status：调用方需区分 409（状态漂移/签名不符）等可读错误。
-    const error = new Error((record.detail || record.error || `请求失败 (${response.status})`) as string) as Error & { status?: number }
+    const error = new Error((record.detail || record.error || record.message || `请求失败 (${response.status})`) as string) as Error & { status?: number; errorCode?: string; latestContext?: Record<string, unknown> }
     error.status = response.status
+    error.errorCode = typeof record.error_code === 'string' ? record.error_code : undefined
+    error.latestContext = record.latest_context && typeof record.latest_context === 'object' ? record.latest_context as Record<string, unknown> : undefined
     throw error
   }
   return body as T
@@ -894,9 +908,9 @@ export const api = {
   sourcingAdjustments: (jobId: number) =>
     json<SourcingAdjustmentListPayload>(`/api/v1/jobs/${jobId}/sourcing-adjustments`),
   confirmSourcingAdjustment: (id: number) =>
-    write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/confirm`, {}),
+    write<SourcingAdjustmentDecisionResult>(`/api/v1/sourcing-adjustments/${id}/confirm`, {}),
   ignoreSourcingAdjustment: (id: number) =>
-    write<{ ok?: boolean }>(`/api/v1/sourcing-adjustments/${id}/ignore`, {}),
+    write<SourcingAdjustmentDecisionResult>(`/api/v1/sourcing-adjustments/${id}/ignore`, {}),
   // 寻访策略按项编辑：generated/api.d.ts 已同步 preflight 与最终写入路由并加入 ContractAnchor。
   // 走 write 幂等封装（Idempotency-Key + request_id，重放返回首次响应）；
   // 404=工作流/策略不存在，409=外部寻访已开始/目标项缺失/质量校验不过（中文 detail 透出）。
@@ -983,9 +997,20 @@ export type JobWeeklyReportBrief = {
 export type JobWeeklyReportListPayload = {
   ok?: boolean; job_id?: number; latest: JobWeeklyReportBrief | null; items: JobWeeklyReportBrief[];
 }
+export type JobWeeklyReportDocument = {
+  job_id?: number; job_title?: string; client?: string; version?: number;
+  week_start?: string; week_end?: string; generated_at?: string;
+  funnel?: {
+    current?: { total?: number | null; active?: number | null; recommended?: number | null };
+    comparison?: string;
+  };
+  recommendations?: { confirmed_this_week?: number | null };
+  risks?: unknown[]; suggestions?: unknown[];
+}
 export type JobWeeklyReportCreateResult = WriteAck & {
   job_id?: number; artifact_id?: string; version?: number;
   week_start?: string; week_end?: string;
+  report?: JobWeeklyReportDocument;
   receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
 }
 

@@ -44,7 +44,7 @@ describe('SourcingResultCard', () => {
   it('渲染推荐等级分布与 Top 候选人', () => {
     render(<SourcingResultCard data={mockCard} />)
     expect(screen.getAllByText('推荐').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText('待核验').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('待补证据').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('不推荐')).toBeInTheDocument()
     expect(screen.getByText('王**')).toBeInTheDocument()
     expect(screen.getByText('李**')).toBeInTheDocument()

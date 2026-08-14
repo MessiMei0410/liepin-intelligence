@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { Archive, CheckCircle, ExternalLink, MessageSquareText, Search, Trophy, UserRoundSearch, X, AlertTriangle } from 'lucide-react'
+import { candidateRecommendationLabel, candidateRecommendationTone } from '../shared/candidateRecommendation'
 
 export type SourcingResultCandidate = {
   job_candidate_id: number
@@ -43,18 +44,13 @@ export type SourcingResultCardData = {
   summary: SourcingResultSummary
 }
 
-const recommendationMeta: Record<string, { label: string; tone: string }> = {
-  recommended: { label: '推荐', tone: 'green' },
-  verify_first: { label: '待核验', tone: 'amber' },
-  not_recommended: { label: '不推荐', tone: 'red' },
-}
-
 function recommendationLabel(value: string) {
-  return recommendationMeta[value]?.label || value
+  return candidateRecommendationLabel(value)
 }
 
 function recommendationTone(value: string) {
-  return recommendationMeta[value]?.tone || 'neutral'
+  const tone = candidateRecommendationTone(value)
+  return tone === 'good' ? 'green' : tone === 'warn' ? 'amber' : tone === 'bad' ? 'red' : 'neutral'
 }
 
 function ScoreBadge({ score, level }: { score?: number; level?: string }) {
@@ -73,6 +69,7 @@ export function SourcingResultCard({
   onClose,
   onOpenCandidate,
   onOpenFullList,
+  actionsDisabled = false,
   compact = false,
 }: {
   data: SourcingResultCardData
@@ -80,6 +77,7 @@ export function SourcingResultCard({
   onClose?: () => void
   onOpenCandidate?: (jobCandidateId: number) => void
   onOpenFullList?: () => void
+  actionsDisabled?: boolean
   compact?: boolean
 }) {
   const summary = data.summary
@@ -97,13 +95,14 @@ export function SourcingResultCard({
       <button
         key={action.type}
         className="button"
+        disabled={actionsDisabled}
         onClick={() => onAction?.(action.type, data.context)}
       >
         {icons[action.type] || <CheckCircle size={14} />}
         {action.label}
       </button>
     ))
-  }, [summary.next_actions, onAction, data.context])
+  }, [summary.next_actions, onAction, data.context, actionsDisabled])
 
   const isBlocked = summary.status === 'blocked' || (summary.business_outcome && summary.business_outcome !== 'completed_target_met')
 
@@ -192,7 +191,7 @@ export function SourcingResultCard({
 
       <div className="sourcing-result-actions" role="group" aria-label="下一步操作">
         {onOpenFullList && (
-          <button className="button primary" onClick={onOpenFullList}>
+          <button className="button primary" disabled={actionsDisabled} onClick={onOpenFullList}>
             <ExternalLink size={14} />
             新标签页查看完整名单
           </button>
