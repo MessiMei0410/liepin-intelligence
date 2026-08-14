@@ -52,7 +52,7 @@ KB_SEED_FIXTURE = {
 }
 
 # 士兰微真实种子（只读来源；测试用其临时副本，绝不直接读写知识库）
-SILAN_SEED_SOURCE = Path("/Users/messi/Documents/ASA/knowledge_base/seed_silan_tme_v1.json")
+SILAN_SEED_SOURCE = Path(__file__).resolve().parents[1] / "asa-web" / "knowledge_base" / "seed_silan_tme_v1.json"
 
 
 def _write_kb(directory: Path, doc: dict | None = KB_SEED_FIXTURE) -> Path:

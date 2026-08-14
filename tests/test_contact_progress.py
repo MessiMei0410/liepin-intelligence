@@ -4,14 +4,15 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from _local import env_path, require_local
 from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SYNC_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py")
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
+SYNC_PATH = env_path("ASA_SYNC_SCRIPT", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py"))
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
 SERVER_PATH = ROOT / "scripts" / "liepin_workbench_server.py"
-DOCTOR_PATH = Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_db_doctor.py")
+DOCTOR_PATH = env_path("ASA_DOCTOR_PATH", Path("/Users/messi/.codex/skills/a-system-workbench/scripts/a_system_db_doctor.py"))
 
 
 def load_module(name: str, path: Path):
@@ -23,6 +24,8 @@ def load_module(name: str, path: Path):
     return module
 
 
+require_local(SYNC_PATH, "talent_system_sync.py 脚本")
+require_local(DOCTOR_PATH, "a_system_db_doctor.py 脚本")
 sync = load_module("talent_system_sync_contact_test", SYNC_PATH)
 server = load_module("liepin_workbench_server_contact_test", SERVER_PATH)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,7 +29,7 @@ from a_system_agent.strategy_editor import (
 )
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +37,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：整模块只复制一次生产库（1.5GB）。client fixture 每次
     # _seed_workflow 前先删除固定主键的种子行，保证每个测试起点一致。
     target = tmp_path_factory.mktemp("strategy-item-edits") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

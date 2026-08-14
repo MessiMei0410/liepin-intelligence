@@ -31,7 +31,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import strategy_replay_eval as replay  # noqa: E402
 
 # 回放事实源（只读）：真实知识库目录；可用 ASA_KNOWLEDGE_BASE_DIR 覆盖（本测试显式传目录）。
-REAL_KB_DIR = Path("/Users/messi/Documents/ASA/knowledge_base")
+REAL_KB_DIR = Path(__file__).resolve().parents[1] / "asa-web" / "knowledge_base"
 
 # 基线：2026-07-23 实跑生成（确定性模式 deterministic_fallback；口径见脚本 docstring §指标口径）。
 # case_silan_tme：L1，参考池 15 家（T1 4 + T2 11），Agent 池 23 家（kb_profile 15 + kb_graph 8）；

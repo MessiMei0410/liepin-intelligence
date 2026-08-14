@@ -129,9 +129,9 @@ class ASAFloatingCompletionTest(unittest.TestCase):
     def test_agent_routes_selected_context_to_the_react_conversation_surface(self) -> None:
         # Agent Conversation Surface v1: compatibility callers dispatch an in-app event only.
         # 旧 src/copilot/bridge.ts 已随死代码清理删除，入口统一在 src/agent/navigation.ts。
-        navigation = Path("/Users/messi/Documents/ASA/src/agent/navigation.ts").read_text(encoding="utf-8")
-        app = Path("/Users/messi/Documents/ASA/src/app/App.tsx").read_text(encoding="utf-8")
-        self.assertFalse(Path("/Users/messi/Documents/ASA/src/copilot").exists())
+        navigation = (ROOT / "asa-web" / "src" / "agent" / "navigation.ts").read_text(encoding="utf-8")
+        app = (ROOT / "asa-web" / "src" / "app" / "App.tsx").read_text(encoding="utf-8")
+        self.assertFalse((ROOT / "asa-web" / "src" / "copilot").exists())
         self.assertIn("AGENT_NAVIGATE_EVENT", navigation + app)
         self.assertNotIn("publishCopilotContext", navigation + app)
         self.assertNotIn("showFloating", navigation + app)

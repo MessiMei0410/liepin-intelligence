@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from _local import env_path, require_local
 
 
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
+require_local(BUILDER_PATH, "build_talent_workbench.py 脚本")
 spec = importlib.util.spec_from_file_location("build_talent_workbench_source_link_test", BUILDER_PATH)
 builder = importlib.util.module_from_spec(spec)
 assert spec.loader is not None

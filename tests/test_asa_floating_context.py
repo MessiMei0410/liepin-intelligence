@@ -13,6 +13,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 
@@ -20,7 +21,7 @@ import liepin_workbench_server as legacy
 from a_system_agent.service import AgentService
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 NOW = datetime(2026, 7, 22, 15, 0, 0)
 
 
@@ -129,6 +130,7 @@ def test_fresh_asystem_explicit_click_still_wins_without_browser_bridge() -> Non
 def service(tmp_path_factory: pytest.TempPathFactory):
     # 模块级共享副本：每个测试用独立 session_id 写入焦点，互不冲突。
     target = tmp_path_factory.mktemp("floating-context") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

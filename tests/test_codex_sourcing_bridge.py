@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from _local import env_path, skip_unless_local
 from unittest import mock
 
 
@@ -39,8 +40,9 @@ class CodexSourcingBridgeTest(unittest.TestCase):
         self.assertIn('child_env["PATH"] = codex_node_dir', source)
         self.assertIn("env=child_env", source)
 
+    @skip_unless_local(env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")), "build_talent_workbench.py 脚本")
     def test_overview_restores_running_state_after_switching_cards(self) -> None:
-        builder = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py").read_text(encoding="utf-8")
+        builder = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")).read_text(encoding="utf-8")
         self.assertIn("window.overviewSourcingRuns", builder)
         self.assertIn("hydrateOverviewSourcingAction(actions[index])", builder)
         self.assertIn("hydrateOverviewSourcingAction(actions[0])", builder)

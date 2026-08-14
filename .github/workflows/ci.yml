@@ -20,70 +20,13 @@ jobs:
           pip install pytest fastapi uvicorn pydantic httpx openpyxl python-docx
       - name: Run backend tests
         # 仓库根运行（pytest.ini 含 pythonpath=scripts，tests/ 在根目录）。
-        # --ignore：本机环境依赖文件，GitHub Actions (ubuntu) 上必然失败，待环境参数化后移除
-        #   （见 docs/ASA_优化方案 P2-4）：
-        #   - 硬编码本机绝对路径（/Users/messi/... 1.3GB 正式库、build_talent_workbench.py、skill 脚本）
-        #   - 依赖本机 skill 目录模块 cdp_client（Chrome CDP）
-        #   - 依赖 macOS 专有命令 /usr/bin/security（Keychain）
-        #   - 依赖本机才安装的 cv2/pptx 等包
+        # 全量测试（1306 项）。本机环境依赖已参数化（tests/_local.py：ASA_SOURCE_DB /
+        # ASA_BUILDER_PATH / ASA_SYNC_SCRIPT / ASA_CDP_SKILL_DIR 等环境变量可覆盖），
+        # CI 上缺本机资源时测试显式 skip（require_local/skip_unless_local），不再静默 ignore。
         # --deselect：单测级环境依赖（依赖本机 skill 脚本生成 docx）。
-        # s6 Keychain 依赖已随 conftest LLM stub 移除（create_app 不再构造真实 LLM，
-        # 不读 /usr/bin/security），deselect 相应移除。
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: |
           python3 -m pytest tests/ -q \
-            --ignore tests/test_a_system_agent_v1.py \
-            --ignore tests/test_a_system_agent_v15.py \
-            --ignore tests/test_asa_analytics.py \
-            --ignore tests/test_asa_copilot_intent.py \
-            --ignore tests/test_asa_core_v1.py \
-            --ignore tests/test_asa_core_v1_workflow_reads.py \
-            --ignore tests/test_asa_floating_completion.py \
-            --ignore tests/test_asa_floating_context.py \
-            --ignore tests/test_asa_workbench_lanes.py \
-            --ignore tests/test_assessment_calibration_s64.py \
-            --ignore tests/test_batch_review_optimizations.py \
-            --ignore tests/test_candidate_assessment_advisor_s6.py \
-            --ignore tests/test_candidate_assessment_s6_2.py \
-            --ignore tests/test_candidate_lifecycle_events.py \
-            --ignore tests/test_candidate_message_workflow.py \
-            --ignore tests/test_candidate_reply_direction_guard.py \
-            --ignore tests/test_candidate_source_links.py \
-            --ignore tests/test_codex_sourcing_bridge.py \
-            --ignore tests/test_company_calibration.py \
-            --ignore tests/test_consultant_recommendation.py \
-            --ignore tests/test_contact_progress.py \
-            --ignore tests/test_flow_queue_continuation.py \
-            --ignore tests/test_intake_prescreen.py \
-            --ignore tests/test_job_profile_insights_s8.py \
-            --ignore tests/test_job_status_filter.py \
-            --ignore tests/test_job_weekly_report.py \
-            --ignore tests/test_knowledge_proposals.py \
-            --ignore tests/test_liepin_cdp_config.py \
-            --ignore tests/test_mapping_backflow_s5_3.py \
-            --ignore tests/test_mapping_task_s5.py \
-            --ignore tests/test_mapping_task_s5_2.py \
-            --ignore tests/test_opencli_primary_recall.py \
-            --ignore tests/test_opencli_sourcing_shadow.py \
-            --ignore tests/test_query_builders_s4.py \
-            --ignore tests/test_radar_linkage_s7_2.py \
-            --ignore tests/test_radar_scan_s7.py \
-            --ignore tests/test_radar_weekly_s7_3.py \
-            --ignore tests/test_recommendation_package_upgrade.py \
-            --ignore tests/test_recommendation_packages.py \
-            --ignore tests/test_skill_ontology_level_mapping.py \
-            --ignore tests/test_sourcing_funnel.py \
-            --ignore tests/test_stop_reasons.py \
-            --ignore tests/test_strategy_coverage_n6.py \
-            --ignore tests/test_strategy_item_edits.py \
-            --ignore tests/test_strategy_replay_s4.py \
-            --ignore tests/test_strategy_review_diffs_s4.py \
-            --ignore tests/test_strategy_review_expansion_s4.py \
-            --ignore tests/test_strategy_review_s4.py \
-            --ignore tests/test_strategy_v2_s4.py \
-            --ignore tests/test_talent_pool_intake.py \
-            --ignore tests/test_wechat_attachment_reading.py \
-            --ignore tests/test_xsaas_candidate_search.py \
             --deselect tests/test_a_system_agent_workflow.py::WorkflowEngineTest::test_real_document_runners_generate_audited_docx
 
   frontend-test:
@@ -102,11 +45,21 @@ jobs:
         run: cd asa-web && npm run typecheck
       - name: Lint
         run: cd asa-web && npm run lint
+      - name: Contract tests (Python)
+        # asa-web/tests 的 Python 契约测试（候选确认层正则锚点/doctor/backup/opencli）。
+        # opencli 相关测试模块顶层依赖本机 scripts/xsaas_candidate_search.py，
+        # 本机路径缺失时模块级 SkipTest 自动跳过，CI 上不会 ImportError 变红。
+        run: cd asa-web && python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Run frontend tests
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: cd asa-web && npx vitest run
       - name: Build
         run: cd asa-web && npm run build
+      - name: E2E functional
+        # CI 无后端/正式库/Python 时 global-setup 置 ASA_E2E_SKIP，整套显式 skip；
+        # 本机（或具备依赖的环境）真实拉起隔离 Core（127.0.0.1:8876 + /tmp 副本）跑功能组。
+        run: cd asa-web && npm run ci:e2e-functional
       - name: API contract drift
-        # Core 不可达时脚本自身 exit 0（打印警告跳过），不会误伤无 Core 的 CI。
-        run: cd asa-web && npm run check:api-drift
+        # 严格模式（CI 无 Core）：Core 不可达时回退仓库快照 scripts/openapi.snapshot.json
+        # 比对，快照缺失或漂移都会让 CI 红；本地 Core 可达时仍与实时契约比对。
+        run: cd asa-web && ASA_API_DRIFT_STRICT=1 npm run check:api-drift

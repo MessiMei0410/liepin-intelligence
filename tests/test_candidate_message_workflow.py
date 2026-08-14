@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from _local import env_path, skip_unless_local
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,8 +18,8 @@ REPLY_PATH = ROOT / "scripts" / "record_candidate_reply.py"
 CONTENT_PATH = ROOT / "liepin-reply-assistant-extension" / "content.js"
 EVIDENCE_PATH = ROOT / "liepin-reply-assistant-extension" / "message-evidence.js"
 MANIFEST_PATH = ROOT / "liepin-reply-assistant-extension" / "manifest.json"
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
-SYNC_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py")
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
+SYNC_PATH = env_path("ASA_SYNC_SCRIPT", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py"))
 BROWSER_TEST_PATH = ROOT / "tests" / "reply_message_evidence_browser.js"
 
 
@@ -320,6 +321,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         self.assertIn("body?.reason", source)
         self.assertNotIn("await postCandidateReply(payload);", source)
 
+    @skip_unless_local(env_path("ASA_NODE_MODULES", Path("/Users/messi/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules")), "codex-runtime node_modules")
     def test_browser_fixture_covers_direction_and_conversation_switch(self) -> None:
         self.assertTrue(BROWSER_TEST_PATH.exists(), "缺少消息方向浏览器测试")
         proc = subprocess.run(
@@ -329,7 +331,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "NODE_PATH": "/Users/messi/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
+                "NODE_PATH": env_path("ASA_NODE_MODULES", Path("/Users/messi/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules")).__str__(),
             },
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -340,6 +342,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         self.assertEqual(report["conversationId"], "chat-zhanghang")
         self.assertFalse(report["conversationSwitchMatches"])
 
+    @skip_unless_local(BUILDER_PATH, "build_talent_workbench.py 脚本")
     def test_builder_exposes_state_evidence_correction_reply_queues_and_sla(self) -> None:
         source = BUILDER_PATH.read_text(encoding="utf-8")
         for marker in (
@@ -358,6 +361,7 @@ class CandidateMessageWorkflowTest(unittest.TestCase):
         ):
             self.assertIn(marker, source)
 
+    @skip_unless_local(SYNC_PATH, "talent_system_sync.py 脚本")
     def test_sync_and_builder_share_effective_event_view(self) -> None:
         sync_source = SYNC_PATH.read_text(encoding="utf-8")
         builder_source = BUILDER_PATH.read_text(encoding="utf-8")

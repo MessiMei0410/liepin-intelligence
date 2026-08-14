@@ -15,10 +15,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from _local import env_path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, "/Users/messi/.codex/skills/multi-channel-search/scripts")
+sys.path.insert(0, str(env_path("ASA_MULTICHANNEL_SCRIPTS", Path("/Users/messi/.codex/skills/multi-channel-search/scripts"))))
 
 from a_system_agent.candidate_pool_filter import intake_mismatch_verdict  # noqa: E402
 
@@ -52,7 +53,10 @@ class IntakePrescreenTest(unittest.TestCase):
         self.assertIn("方向不符", verdict["reason"])
 
     def test_skill_script_inline_version_matches_shared(self) -> None:
-        module = importlib.import_module("a_system_multichannel")
+        try:
+            module = importlib.import_module("a_system_multichannel")
+        except ImportError as exc:
+            self.skipTest(f"本机 skill 脚本缺失: {exc}")
         for job_title, candidate_title in [
             ("机械高级工程师", "电气工程师"),
             ("机械高级工程师", "机械设计工程师"),
@@ -133,7 +137,10 @@ class MultiChannelIntakePrescreenIntegrationTest(unittest.TestCase):
         }
 
     def test_apply_intake_prescreens_mismatched_title(self) -> None:
-        module = importlib.import_module("a_system_multichannel")
+        try:
+            module = importlib.import_module("a_system_multichannel")
+        except ImportError as exc:
+            self.skipTest(f"本机 skill 脚本缺失: {exc}")
         db = self._make_db()
         context = {"job_id": 10, "client": "长越科技", "job": "自动化软件高级工程师", "ability_keywords": ["C++", "运动控制"]}
         candidates = [
