@@ -375,6 +375,16 @@ class PackageFeedbackCreate(WriteEnvelope):
     feedback_time: str = ""
 
 
+class PackageUpgradePreflight(WriteEnvelope):
+    # 推荐包升版预检（P3-a）：package_id 同时在路径与 body（路径为准）。
+    package_id: str = Field(min_length=1)
+
+
+class PackageUpgradeCommit(PackageUpgradePreflight):
+    # 推荐包升版提交：preflight 一次性 token + Idempotency-Key 幂等。
+    preflight_token: str = ""
+
+
 class JobWeeklyReportCreate(WriteEnvelope):
     # 岗位周报手动生成（无额外表单字段；同周幂等更新同一 artifact，version 自增留痕）
     pass
@@ -1382,7 +1392,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/recommendation-packages/{package_id}")
     def recommendation_package_detail(package_id: str) -> dict[str, Any]:
-        # 推荐包详情：候选摘要/人岗匹配证据/风险/待核验问题 + 已记录客户反馈；不存在 → 404。
+        # 推荐包详情：候选摘要/人岗匹配证据（含评估指纹）/风险/待核验问题 + 已记录客户反馈；
+        # upgradeable/latest_assessment_id 供升版入口判定（P3-a）；不存在 → 404。
         return core.get_recommendation_package(package_id)
 
     @app.post("/api/v1/recommendation-packages/{package_id}/feedback")
@@ -1392,6 +1403,25 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 404=推荐包不存在；409=反馈类型非法/内容为空。
         return idem("recommendation_package.feedback", body, idempotency_key, "recommendation_package", package_id,
                     lambda: core.record_package_feedback(package_id, body.feedback_type, body.content, body.feedback_time, body.request_id))
+
+    @app.post("/api/v1/recommendation-packages/{package_id}/upgrade/preflight")
+    def recommendation_package_upgrade_preflight(package_id: str, body: PackageUpgradePreflight) -> dict[str, Any]:
+        # 推荐包升版预检（P3-a）：包存在（404）且为最新版本、评估指纹已更新（409 中文 detail），
+        # 通过则发一次性 preflight token（5 分钟有效）。
+        try:
+            return core.recommendation_package_upgrade_preflight(package_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/recommendation-packages/{package_id}/upgrade/commit")
+    def recommendation_package_upgrade_commit(package_id: str, body: PackageUpgradeCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 推荐包升版提交（P3-a）：走 execute_idempotent 幂等 + 审计，重放返回首次响应；
+        # 一次性 token 失效/指纹回退一致 → 409；UNIQUE(job_candidate_id, version) 并发兜底回读；
+        # 404=推荐包不存在。
+        if not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
+        return idem("recommendation_package.upgrade", body, idempotency_key, "recommendation_package", package_id,
+                    lambda: core.recommendation_package_upgrade_commit(package_id, body.preflight_token))
 
     @app.post("/api/v1/candidates/{candidate_id}/lifecycle-events")
     def candidate_lifecycle_event_create(candidate_id: int, body: LifecycleEventCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
