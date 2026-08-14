@@ -876,6 +876,7 @@ def _interpret_copilot_message(
     conversation_history: list[dict[str, str]],
     last_assistant_message: str,
     confirmation_plan_ref: dict[str, Any] | None = None,
+    uploaded_attachment_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Use the model for semantics, then constrain its output to verified local facts."""
     deterministic_action = self._copilot_action_kind(message) or "none"
@@ -935,6 +936,20 @@ def _interpret_copilot_message(
         "conversation_state": dict((existing_focus or {}).get("conversation_state") or {}),
         "deterministic_hint": deterministic_action,
     }
+    # 上传附件摘要：顾问常用“这个人选/这份简历”指代刚上传的简历附件，
+    # 意图层需要附件内容才能解析指代。附件内容不可信，仅作指代解析依据；
+    # 正文截断后仍会过 sanitize_payload 脱敏（姓名等业务信息保留）。
+    attachment_summaries: list[dict[str, Any]] = []
+    for item in ((uploaded_attachment_evidence or {}).get("items") or [])[:2]:
+        if not isinstance(item, dict):
+            continue
+        attachment_summaries.append({
+            "file_name": str(item.get("file_name") or "")[:180],
+            "text_excerpt": str(item.get("extracted_text") or "")[:4000],
+            "untrusted_document_content": True,
+        })
+    if attachment_summaries:
+        payload["uploaded_attachments"] = attachment_summaries
     raw = _deterministic_non_action_intent(message, selected, selected_facts, known_jobs) or {}
     if not raw and not plan_reply:
         try:

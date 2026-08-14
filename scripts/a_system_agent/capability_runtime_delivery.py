@@ -27,6 +27,52 @@ from .context import build_candidate_context
 from .policy import is_stopped
 
 
+_JIASHI_RESUME_LABELS = {
+    "推荐岗位": "position",
+    "所属中心": "customer",
+    "姓名": "name",
+    "出生年月": "birth",
+    "性别": "gender",
+    "婚育": "marital_status",
+    "工作地址": "current_location",
+    "综合年薪": "current_salary",
+    "期望薪酬": "expected_salary",
+    "推荐理由": "consultant_comments",
+    "教育背景": "education",
+    "工作经历": "work_experience",
+    "项目经历": "project_experience",
+}
+_JIASHI_RESUME_LIST_FIELDS = {"consultant_comments", "education", "work_experience", "project_experience"}
+
+
+def _parse_jiashi_resume_fields(text: str) -> dict[str, Any]:
+    """解析嘉驰报告结构的上传简历文本（推荐岗位/所属中心/姓名/…标签行）。
+
+    标量字段取标签行“标签：值”的值；段落字段（推荐理由/教育背景/工作经历/
+    项目经历）收集标签行之后的连续非标签行。
+    """
+    fields: dict[str, Any] = {}
+    current = ""
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^([一-龥]{2,6})\s*[：:]\s*(.*)$", line)
+        if match and match.group(1) in _JIASHI_RESUME_LABELS:
+            current = _JIASHI_RESUME_LABELS[match.group(1)]
+            value = match.group(2).strip()
+            if current in _JIASHI_RESUME_LIST_FIELDS:
+                fields.setdefault(current, [])
+                if value:
+                    fields[current].append(value)
+            elif value:
+                fields[current] = value
+            continue
+        if current in _JIASHI_RESUME_LIST_FIELDS:
+            fields.setdefault(current, []).append(line)
+    return fields
+
+
 class RunnerDeliveryMixin:
     """交付能力：策略学习/停止笔记、多渠道寻访、岗位发布、报告与候选人触达。"""
 
@@ -899,6 +945,11 @@ class RunnerDeliveryMixin:
             conn.close()
 
     def run_recommendation_report(self, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+        attachment_candidate = inputs.get("attachment_candidate") if isinstance(inputs.get("attachment_candidate"), dict) else None
+        if attachment_candidate:
+            # attachment-only：候选人不在系统内（仅存在于上传简历附件），
+            # 本质是“简历→嘉驰模板”转换，合法绕过 S6-3 判人评估前置。
+            return self._run_attachment_recommendation_report(attachment_candidate)
         candidate = self._candidate(context)
         relation, identity, position = candidate["relation"], candidate["identity"], candidate["position"]
         # S6-3：推荐报告强制引用判人评估块（PRD §1 ②）——无评估不许退回纯简历罗列。
@@ -954,6 +1005,71 @@ class RunnerDeliveryMixin:
                         },
                     },
                 )]}
+
+    def _run_attachment_recommendation_report(self, attachment_candidate: dict[str, Any]) -> dict[str, Any]:
+        """attachment-only 候选人：从上传简历文本解析字段 → 嘉驰模板 → 审计。
+
+        候选人不挂任何 job_candidate 关系，artifact 标注 source=attachment_resume、
+        不含 s6_assessment，并提示“基于上传简历生成，发送前请顾问复核”。
+        """
+        name = str(attachment_candidate.get("name") or "").strip()
+        resume_text = str(attachment_candidate.get("resume_text") or "").strip()
+        file_name = str(attachment_candidate.get("file_name") or "").strip()
+        references = [
+            {"type": "local_attachment", "id": "", "label": file_name or "上传简历附件", "subtitle": "用户上传的简历附件"}
+        ]
+        if not name or not resume_text:
+            return self._blocked("上传简历缺少可识别的候选人姓名或正文，无法生成推荐报告。", ["包含姓名与正文的简历附件"], references)
+        if not JIASHI_TEMPLATE.exists():
+            return self._blocked("嘉驰标准模板不存在。", [str(JIASHI_TEMPLATE)], references)
+        fields = _parse_jiashi_resume_fields(resume_text)
+        customer = str(fields.get("customer") or attachment_candidate.get("customer") or "不详")
+        position = str(fields.get("position") or attachment_candidate.get("position") or "不详")
+        data = {
+            "customer": customer,
+            "position": position,
+            "name": name,
+            "gender": str(fields.get("gender") or "不详"),
+            "marital_status": str(fields.get("marital_status") or "不详"),
+            "current_location": str(fields.get("current_location") or "不详"),
+            "expected_location": "不详",
+            "current_salary": str(fields.get("current_salary") or "不详"),
+            "expected_salary": str(fields.get("expected_salary") or "待核验"),
+            "consultant_comments": list(fields.get("consultant_comments") or []) or ["基于上传简历生成，顾问评语待补充。"],
+            "education": list(fields.get("education") or []) or ["不详"],
+            "work_experience": list(fields.get("work_experience") or []) or ["详见简历原文"],
+            "project_experience": list(fields.get("project_experience") or []) or ["暂无明确项目经历"],
+            "motivation": "待核验",
+            "leaving_reason": "待核验",
+        }
+        data_path = self._path("reports", f"{name}-jiashi-attachment-data", "json")
+        output = self._path("reports", f"嘉驰国际-{customer}-{position}-{name}", "docx")
+        data_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._run([self.python, str(JIASHI_REPORT), "--template", str(JIASHI_TEMPLATE), "--data", str(data_path), "--output", str(output)], 180)
+        self._sanitize_docx_privacy(output)
+        audit = self._run([self.python, str(JIASHI_AUDIT), str(output)], 120)
+        return {
+            "summary": (
+                f"已基于上传简历生成 {name} 的嘉驰推荐报告草稿并通过模板审计。"
+                "候选人尚未入库，报告基于上传简历生成，发送前请顾问复核。"
+            ),
+            "references": references,
+            "artifacts": [self._artifact(
+                "recommendation_report", "嘉驰推荐报告", file_path=output,
+                mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                content=audit.stdout[-4000:],
+                metadata={
+                    "source": "attachment_resume",
+                    "attachment_file": file_name,
+                    "candidate_name": name,
+                    "client": customer,
+                    "job": position,
+                    "attached_to_candidate": False,
+                    "external_submitted": False,
+                    "review_notice": "基于上传简历生成，发送前请顾问复核",
+                },
+            )],
+        }
 
     @staticmethod
     def _sanitize_docx_privacy(path: Path) -> None:
