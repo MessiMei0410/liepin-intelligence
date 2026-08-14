@@ -45,9 +45,9 @@ KB_GRAPH_FIXTURE = {
 }
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    target = tmp_path_factory.mktemp("company-calibration") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -64,6 +64,17 @@ def db_path(tmp_path: Path) -> Path:
     finally:
         conn.close()
     return target
+
+
+def _clear_calibrations(db_path: Path) -> None:
+    """模块级共享副本：整表绝对断言的测试先清空校准表，保证队列/计数语义与
+    函数级副本一致（绝不写生产库，仅清临时副本）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM company_calibrations")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.fixture()
@@ -101,6 +112,7 @@ def _submit(client: TestClient, key: str, **overrides) -> dict:
 
 
 def test_calibration_submit_versioned_and_content_idempotent(db_path: Path, kb_dir: Path) -> None:
+    _clear_calibrations(db_path)  # 断言整表恰 1 条：先清空共享副本中的历史校准
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         first = _submit(client, "v1")
         assert first["changed"] is True
@@ -188,6 +200,7 @@ def test_calibration_alias_submit_and_validation(db_path: Path, kb_dir: Path) ->
 
 
 def test_calibration_queue_search_filter_and_progress(db_path: Path, kb_dir: Path) -> None:
+    _clear_calibrations(db_path)  # 队列断言（total==3 / 全 pending）需要空校准表起点
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         queue = client.get("/api/v1/company-calibrations")
         assert queue.status_code == 200
@@ -260,6 +273,7 @@ def test_calibration_overlay_merges_into_graph(db_path: Path, kb_dir: Path) -> N
 
 def test_calibration_overlay_degrades_without_db(db_path: Path, kb_dir: Path, tmp_path: Path) -> None:
     """降级口径：无 db_path/库文件缺失/无表/无记录 → 空覆盖层，图谱完全保持现状。"""
+    _clear_calibrations(db_path)  # "无 calibrated 记录" 覆盖层断言需要空校准表起点
     graph, _ = knowledge_base.load_company_graph(kb_dir)
 
     overlay, trace = knowledge_base.load_calibration_overlay(tmp_path / "missing.db")

@@ -19,9 +19,11 @@ GRAPH_DOC = {
 }
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。client fixture 每次
+    # _seed 前先清空种子行与 knowledge_proposals，保证每个测试起点一致。
+    target = tmp_path_factory.mktemp("knowledge-proposals") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -47,6 +49,13 @@ def kb_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _seed(db: Path) -> None:
     conn = sqlite3.connect(db)
     try:
+        # 共享副本：先清空种子行与已生成提案，再重建种子数据，保证每个测试
+        # 的 generate/决策语义与函数级副本一致（不写生产库，仅清临时副本）。
+        conn.execute("DELETE FROM knowledge_proposals")
+        conn.execute("DELETE FROM consultant_confirmed_recommendations WHERE job_candidate_id IN (9100,9101,9102,9200)")
+        conn.execute("DELETE FROM recommendation_package_feedback WHERE request_id LIKE 'kp-fb-%'")
+        conn.execute("DELETE FROM job_candidates WHERE id IN (9100,9101,9102,9200)")
+        conn.execute("DELETE FROM people WHERE id IN (9100,9101,9102,9200)")
         conn.execute("INSERT OR IGNORE INTO clients(id,name) VALUES (9001,'聚类客户甲')")
         conn.execute("INSERT OR IGNORE INTO clients(id,name) VALUES (9002,'稀疏客户乙')")
         conn.execute("INSERT OR IGNORE INTO jobs(id,client_id,title) VALUES (9001,9001,'刻蚀工程师')")
@@ -95,7 +104,10 @@ def client(db_path: Path, kb_dir: Path):
         yield test_client
 
 
-def _generate(client: TestClient, key: str = "kp-gen-1") -> dict:
+def _generate(client: TestClient, key: str | None = None) -> dict:
+    # 共享副本：generate 走 API 幂等（重放不落库）。默认 key 每次调用唯一，
+    # 避免跨测试命中前序 generate 的幂等重放导致"返回了创建结果但库内无提案"。
+    key = key or f"kp-gen-{uuid.uuid4().hex[:8]}"
     response = client.post(
         "/api/v1/knowledge-proposals/generate",
         headers={"Idempotency-Key": key},

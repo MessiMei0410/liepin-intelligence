@@ -19,9 +19,11 @@ STOP_STATUSES = {"screen_rejected", "xsaas_review_stop", "rejected", "stopped", 
 STOP_STAGE_TOKENS = ("初筛不通过", "停止", "淘汰", "关闭")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试先复位候选人 558；
+    # 依赖"整表停止原因全 NULL"的 summary/schema 测试在测试内再次清洗。
+    target = tmp_path_factory.mktemp("stop-reasons") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -44,12 +46,22 @@ def _reset_candidate_558(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
         "UPDATE job_candidates SET clean_stage='S1 新增寻访/待复核',flow_bucket='待复核',"
-        "raw_status='search_shortlisted',raw_stage='S1 新增寻访/待复核' WHERE id=558"
+        "raw_status='search_shortlisted',raw_stage='S1 新增寻访/待复核',stop_reason=NULL WHERE id=558"
     )
     conn.execute("DELETE FROM candidate_events WHERE job_candidate_id=558 AND event_type='resume_review_completed'")
     conn.execute("DELETE FROM agent_sourcing_feedback WHERE job_candidate_id=558")
     conn.commit()
     conn.close()
+
+
+def _clear_all_stop_reasons(db_path: Path) -> None:
+    """共享副本：依赖"已停止候选人全部未标注"整表语义的测试先清空 stop_reason。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("UPDATE job_candidates SET stop_reason=NULL WHERE stop_reason IS NOT NULL")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _active_candidate_ids(client: TestClient, count: int) -> list[int]:
@@ -195,6 +207,9 @@ def test_repeat_stop_still_returns_409(db_path: Path) -> None:
 
 
 def test_stop_reasons_summary_counts_and_unlabeled(db_path: Path) -> None:
+    # 前序测试已为多个候选人写入 stop_reason；"存量停止行全部未标注"的整表断言
+    # 需要先清空 stop_reason（清的是临时副本，绝不写生产库）。
+    _clear_all_stop_reasons(db_path)
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         before = client.get("/api/v1/candidates/stop-reasons/summary").json()
         assert before["ok"] is True
@@ -226,6 +241,8 @@ def test_stop_reasons_summary_counts_and_unlabeled(db_path: Path) -> None:
 
 
 def test_stop_reason_schema_ensure_is_idempotent(db_path: Path) -> None:
+    # 前序测试已写入 stop_reason；"存量行全部 NULL"断言需先清空 stop_reason。
+    _clear_all_stop_reasons(db_path)
     first = migrate(db_path, backup=False)
     assert first["ok"] is True
     conn = sqlite3.connect(db_path)

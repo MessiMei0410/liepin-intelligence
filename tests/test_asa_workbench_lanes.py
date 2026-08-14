@@ -15,9 +15,9 @@ SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_syst
 LANES = ("decision", "running", "waiting_client", "risk", "delivered")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa-workbench-lanes.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    target = tmp_path_factory.mktemp("workbench-lanes") / "asa-workbench-lanes.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

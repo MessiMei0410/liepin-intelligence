@@ -34,9 +34,11 @@ def corpus() -> list[dict]:
     return json.loads(CORPUS_PATH.read_text(encoding="utf-8"))["entries"]
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。测试间隔离靠各测试
+    # 开头 _set_candidate_stage 先清洗候选人 558 状态再操作。
+    target = tmp_path_factory.mktemp("copilot-intent") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -98,7 +100,9 @@ def _post_confirm(
         headers={"Idempotency-Key": confirm_id},
         json={
             "request_id": confirm_id,
-            "session_id": "intent-test-confirm",
+            # 共享副本：服务层幂等键由 session_id|target|action|message 派生，
+            # 用每次调用唯一的 session_id 避免跨测试命中前序确认的幂等重放。
+            "session_id": f"intent-test-confirm-{uuid.uuid4().hex[:8]}",
             "intent": {"kind": kind or pending["kind"], "action": action or pending["action"]},
             "intent_hash": intent_hash if intent_hash is not None else pending["intent_hash"],
             "candidate_id": pending["candidate"]["id"],

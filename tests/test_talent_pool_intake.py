@@ -23,9 +23,11 @@ sync = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sync)
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。process_action 按 source_id
+    # 判重：各测试用独立 source_id/action_id（dry-run 还用独立候选人名），互不冲突。
+    target = tmp_path_factory.mktemp("talent-pool-intake") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -150,10 +152,13 @@ def test_pool_only_intake_persists_resume_profile_text(db_path: Path) -> None:
 def test_pool_only_intake_repeat_is_already_exists(db_path: Path) -> None:
     conn = _connect(db_path)
     try:
-        first = _process(conn, _pool_action())
+        # 共享副本按 source_id 判重：本测试用独立 source_id，保证首次为 written；
+        # 候选人按名字 upsert 复用，count==1 仍成立。
+        action = _pool_action(action_id="pool-test-repeat", source_id="pool-test:pool-test-repeat")
+        first = _process(conn, action)
         conn.commit()
         assert first["status"] == "written"
-        second = _process(conn, _pool_action())
+        second = _process(conn, action)
         conn.commit()
         assert second["status"] == "already_exists"
         count = conn.execute(
@@ -249,15 +254,24 @@ def test_intake_without_candidate_still_pending_review(db_path: Path) -> None:
 def test_pool_only_dry_run_rolls_back_cleanly(db_path: Path) -> None:
     conn = _connect(db_path)
     try:
-        result = _process(conn, _pool_action(), dry_run=True)
+        # 共享副本中"测试储备人选"可能已被前序测试提交：dry-run 用独立候选人名，
+        # rollback 后断言 0 条仅针对本测试自己的插入。
+        result = _process(
+            conn,
+            _pool_action(
+                action_id="pool-test-dry", source_id="pool-test:pool-test-dry",
+                candidate="干跑储备人选",
+            ),
+            dry_run=True,
+        )
         assert result["status"] == "would_write"
         assert result["resolve_status"] == "pool_intake"
         conn.rollback()
         assert conn.execute(
-            "SELECT COUNT(*) FROM candidates WHERE name = ?", ("测试储备人选",)
+            "SELECT COUNT(*) FROM candidates WHERE name = ?", ("干跑储备人选",)
         ).fetchone()[0] == 0
         assert conn.execute(
-            "SELECT COUNT(*) FROM candidate_events WHERE source_id = ?", ("pool-test:pool-test-001",)
+            "SELECT COUNT(*) FROM candidate_events WHERE source_id = ?", ("pool-test:pool-test-dry",)
         ).fetchone()[0] == 0
     finally:
         conn.close()

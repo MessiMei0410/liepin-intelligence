@@ -14,9 +14,11 @@ from asa_core.app import create_app
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。周报 artifact 按周幂等
+    # 合并（同周共用一个 artifact_id）；list 空态测试先清空本类型 artifact 再断言。
+    target = tmp_path_factory.mktemp("job-weekly-report") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -25,6 +27,16 @@ def db_path(tmp_path: Path) -> Path:
         destination.close()
         source.close()
     return target
+
+
+def _clear_weekly_reports(db_path: Path) -> None:
+    """共享副本：'空列表→生成→恰好 1 条' 断言需要清空本模块已生成的周报 artifact。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM agent_artifacts WHERE artifact_type='job_weekly_report'")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _generate(client: TestClient, job_id: int, key: str, request_id: str) -> dict:
@@ -80,6 +92,7 @@ def test_job_weekly_report_unknown_job(db_path: Path) -> None:
 
 
 def test_job_weekly_report_list_empty_then_latest(db_path: Path) -> None:
+    _clear_weekly_reports(db_path)  # 空列表断言需要清空共享副本中前序测试生成的周报
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         empty = client.get("/api/v1/jobs/154/weekly-reports")
         assert empty.status_code == 200

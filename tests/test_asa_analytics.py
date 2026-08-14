@@ -14,9 +14,11 @@ from a_system_agent.copilot_tools import execute_search_candidates
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa-analytics.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试用独立
+    # template_id/run_id/session_id，计数断言均为相对增量，共享安全。
+    target = tmp_path_factory.mktemp("asa-analytics") / "asa-analytics.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -213,14 +215,20 @@ def test_scheduled_templates_can_be_managed_run_and_trended(db_path: Path) -> No
         })
         assert created.status_code == 201, created.json()
         template_id = created.json()["template_id"]
-        template = client.get("/api/v1/analytics/templates").json()["items"][0]
+
+        def own_template() -> dict:
+            # 共享副本里可能残留其他测试的模板：按 template_id 取自己的，不依赖列表首位。
+            items = client.get("/api/v1/analytics/templates").json()["items"]
+            return next(item for item in items if item["template_id"] == template_id)
+
+        template = own_template()
         assert template["schedule_enabled"] is True
         assert template["schedule_kind"] == "daily"
         assert template["next_run_at"]
 
         disabled = patch(client, f"/api/v1/analytics/templates/{template_id}", {"schedule_enabled": False})
         assert disabled.status_code == 200, disabled.json()
-        template = client.get("/api/v1/analytics/templates").json()["items"][0]
+        template = own_template()
         assert template["schedule_enabled"] is False
         assert template["next_run_at"] is None
 

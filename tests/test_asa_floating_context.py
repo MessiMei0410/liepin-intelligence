@@ -125,9 +125,10 @@ def test_fresh_asystem_explicit_click_still_wins_without_browser_bridge() -> Non
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def service(tmp_path: Path):
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def service(tmp_path_factory: pytest.TempPathFactory):
+    # 模块级共享副本：每个测试用独立 session_id 写入焦点，互不冲突。
+    target = tmp_path_factory.mktemp("floating-context") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

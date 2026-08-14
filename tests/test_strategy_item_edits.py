@@ -31,9 +31,11 @@ from a_system_agent.strategy_editor import (
 SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    target = tmp_path / "asa.db"
+@pytest.fixture(scope="module")
+def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # 模块级共享副本：整模块只复制一次生产库（1.5GB）。client fixture 每次
+    # _seed_workflow 前先删除固定主键的种子行，保证每个测试起点一致。
+    target = tmp_path_factory.mktemp("strategy-item-edits") / "asa.db"
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -81,6 +83,13 @@ def _seed_workflow(db_path: Path, *, workflow_status: str = "planned", sourcing_
     }
     conn = sqlite3.connect(db_path)
     try:
+        # 共享副本：先删除固定主键的种子工作流（含其审批/工件/步骤），再重建，
+        # 避免 UNIQUE 冲突与前一测试的状态残留。
+        conn.execute("DELETE FROM agent_approvals WHERE workflow_id='workflow_edit1'")
+        conn.execute("DELETE FROM agent_artifacts WHERE workflow_id='workflow_edit1'")
+        conn.execute("DELETE FROM agent_workflow_steps WHERE workflow_id='workflow_edit1'")
+        conn.execute("DELETE FROM agent_workflows WHERE workflow_id='workflow_edit1'")
+        conn.execute("DELETE FROM agent_goals WHERE goal_id='goal_edit1'")
         conn.execute(
             "INSERT INTO agent_goals(goal_id,objective,title,context_type,context_id,status) "
             "VALUES ('goal_edit1','为士兰微寻 10 位电源工程师','士兰微电源寻访','job',10,'planned')"
