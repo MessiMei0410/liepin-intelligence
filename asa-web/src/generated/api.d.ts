@@ -1570,6 +1570,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/recommendation-packages/{package_id}/upgrade/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recommendation Package Upgrade Preflight */
+        post: operations["recommendation_package_upgrade_preflight_api_v1_recommendation_packages__package_id__upgrade_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/recommendation-packages/{package_id}/upgrade/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recommendation Package Upgrade Commit */
+        post: operations["recommendation_package_upgrade_commit_api_v1_recommendation_packages__package_id__upgrade_commit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/{candidate_id}/lifecycle-events": {
         parameters: {
             query?: never;
@@ -2402,6 +2436,25 @@ export interface components {
              * @default
              */
             feedback_time: string;
+        };
+        /** PackageUpgradeCommit */
+        PackageUpgradeCommit: {
+            /** Request Id */
+            request_id: string;
+            /** Package Id */
+            package_id: string;
+            /**
+             * Preflight Token
+             * @default
+             */
+            preflight_token: string;
+        };
+        /** PackageUpgradePreflight */
+        PackageUpgradePreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Package Id */
+            package_id: string;
         };
         /** ProposalDecision */
         ProposalDecision: {
@@ -6030,6 +6083,80 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["PackageFeedbackCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommendation_package_upgrade_preflight_api_v1_recommendation_packages__package_id__upgrade_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                package_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PackageUpgradePreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recommendation_package_upgrade_commit_api_v1_recommendation_packages__package_id__upgrade_commit_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                package_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PackageUpgradeCommit"];
             };
         };
         responses: {
