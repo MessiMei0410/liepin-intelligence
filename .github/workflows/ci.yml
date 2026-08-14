@@ -20,11 +20,13 @@ jobs:
           pip install pytest fastapi uvicorn pydantic httpx openpyxl python-docx
       - name: Run backend tests
         # 仓库根运行（pytest.ini 含 pythonpath=scripts，tests/ 在根目录）。
-        # --ignore：31 个文件硬编码本机绝对路径（/Users/messi/... 1.3GB 正式库、build_talent_workbench.py
-        #           等），GitHub Actions 上必然失败，待路径参数化后移除（见 docs/ASA_优化方案 P2-4）。
-        #           另 2 个文件（test_opencli_sourcing_shadow/test_xsaas_candidate_search）依赖本机
-        #           skill 目录模块 cdp_client，CI 同样无法运行。
-        # --deselect：4 个既有失败（测试库缺 candidate_intelligence 表等 schema 问题），属 P1 修复项。
+        # --ignore：本机环境依赖文件，GitHub Actions (ubuntu) 上必然失败，待环境参数化后移除
+        #   （见 docs/ASA_优化方案 P2-4）：
+        #   - 硬编码本机绝对路径（/Users/messi/... 1.3GB 正式库、build_talent_workbench.py、skill 脚本）
+        #   - 依赖本机 skill 目录模块 cdp_client（Chrome CDP）
+        #   - 依赖 macOS 专有命令 /usr/bin/security（Keychain）
+        #   - 依赖本机才安装的 cv2/pptx 等包
+        # --deselect：既有失败/单测级本机依赖（属 P1 修复项或保留可移植部分）。
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: |
           python3 -m pytest tests/ -q \
@@ -37,7 +39,10 @@ jobs:
             --ignore tests/test_asa_floating_completion.py \
             --ignore tests/test_asa_floating_context.py \
             --ignore tests/test_asa_workbench_lanes.py \
+            --ignore tests/test_assessment_calibration_s64.py \
             --ignore tests/test_batch_review_optimizations.py \
+            --ignore tests/test_candidate_assessment_advisor_s6.py \
+            --ignore tests/test_candidate_assessment_s6_2.py \
             --ignore tests/test_candidate_lifecycle_events.py \
             --ignore tests/test_candidate_message_workflow.py \
             --ignore tests/test_candidate_reply_direction_guard.py \
@@ -48,22 +53,36 @@ jobs:
             --ignore tests/test_contact_progress.py \
             --ignore tests/test_flow_queue_continuation.py \
             --ignore tests/test_intake_prescreen.py \
+            --ignore tests/test_job_profile_insights_s8.py \
             --ignore tests/test_job_status_filter.py \
             --ignore tests/test_job_weekly_report.py \
             --ignore tests/test_knowledge_proposals.py \
+            --ignore tests/test_liepin_cdp_config.py \
+            --ignore tests/test_mapping_backflow_s5_3.py \
+            --ignore tests/test_mapping_task_s5.py \
+            --ignore tests/test_mapping_task_s5_2.py \
             --ignore tests/test_opencli_primary_recall.py \
             --ignore tests/test_opencli_sourcing_shadow.py \
             --ignore tests/test_query_builders_s4.py \
+            --ignore tests/test_radar_linkage_s7_2.py \
+            --ignore tests/test_radar_scan_s7.py \
+            --ignore tests/test_radar_weekly_s7_3.py \
             --ignore tests/test_recommendation_packages.py \
+            --ignore tests/test_skill_ontology_level_mapping.py \
+            --ignore tests/test_sourcing_funnel.py \
             --ignore tests/test_stop_reasons.py \
             --ignore tests/test_strategy_coverage_n6.py \
             --ignore tests/test_strategy_item_edits.py \
             --ignore tests/test_strategy_replay_s4.py \
+            --ignore tests/test_strategy_review_diffs_s4.py \
+            --ignore tests/test_strategy_review_expansion_s4.py \
+            --ignore tests/test_strategy_review_s4.py \
+            --ignore tests/test_strategy_v2_s4.py \
             --ignore tests/test_talent_pool_intake.py \
+            --ignore tests/test_wechat_attachment_reading.py \
             --ignore tests/test_xsaas_candidate_search.py \
+            --deselect tests/test_a_system_agent_workflow.py::WorkflowEngineTest::test_real_document_runners_generate_audited_docx \
             --deselect tests/test_candidate_assessment_s6.py::AssessmentApiTest::test_post_get_404_409_idempotent \
-            --deselect tests/test_candidate_assessment_s6_2.py::UpgradeAndRouteTest::test_regenerate_upgrades_legacy_artifact \
-            --deselect tests/test_candidate_assessment_s6_2.py::UpgradeAndRouteTest::test_route_exposes_two_dimensions \
             --deselect tests/test_kb_confirmed_consumption_s7.py::AssessmentCalibrationOverlayTest::test_graph_hits_without_overlay_unchanged
 
   frontend-test:
