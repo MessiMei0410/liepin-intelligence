@@ -55,6 +55,14 @@ def db_path(tmp_path: Path) -> Path:
     finally:
         destination.close()
         source.close()
+    # 生产库副本会泄入既有校准记录（如长越科技），测试假设空校准表：
+    # 拷贝后清空 company_calibrations，保证计数/队列/覆盖层断言确定。
+    conn = sqlite3.connect(target)
+    try:
+        conn.execute("DELETE FROM company_calibrations")
+        conn.commit()
+    finally:
+        conn.close()
     return target
 
 
@@ -296,3 +304,4 @@ def test_calibration_overlay_degrades_without_db(db_path: Path, kb_dir: Path, tm
     assert "幽灵公司" not in merged
     assert any("不在公司图谱中" in line for line in merge_trace)
     assert merged["杭州鲁滨逊测试技术有限公司"]["source"] == "consultant_calibrated"
+

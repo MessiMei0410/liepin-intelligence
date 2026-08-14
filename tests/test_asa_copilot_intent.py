@@ -294,49 +294,54 @@ def test_stopped_candidate_extended_advance_intent_blocked(db_path: Path) -> Non
 
 
 def test_stopped_candidate_extended_stop_intent_produces_no_card(db_path: Path) -> None:
-    """已停止人选的停止类表达：目标状态已达成，不再产生确认卡片。"""
+    """已停止人选的停止类表达：目标状态已达成，不产生确认卡片，返回 already_applied 回执。"""
     _set_candidate_stage(db_path, STOPPED_STAGE)
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         body = _post_message(client, "这人不合适，停了吧")
         assert "pending_intent" not in body
-        assert "candidate_action" not in body
+        assert body.get("candidate_action", {}).get("already_applied") is True
+        assert "已同步到 ASA" in body["answer"]
         assert body.get("write_blocked") is not True
     assert _candidate_row(db_path) == STOPPED_STAGE
 
 
 def test_extended_intent_already_applied_produces_no_card(db_path: Path) -> None:
+    """已应用动作再次表达：不产生确认卡片，返回 already_applied 回执。"""
     _set_candidate_stage(db_path, ("S3 已联系/待回复", "联系推进", "contacted"))
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         body = _post_message(client, "我跟他电话聊过了")
         assert "pending_intent" not in body
-        assert "candidate_action" not in body
+        assert body.get("candidate_action", {}).get("already_applied") is True
+        assert "已同步到 ASA" in body["answer"]
         assert body.get("write_blocked") is not True
     assert _candidate_row(db_path) == ("S3 已联系/待回复", "联系推进", "contacted")
 
 
 # ---------------------------------------------------------------------------
-# 既有直写行为回归（兼容期）：明确短句仍直写，不走确认通道
+# 顾问式交互（2026-08-13 重构）：明确短句与扩展表达统一走确认层，
+# 只产出 pending_intent（含签名 + preflight token），由确认端点执行。
 # ---------------------------------------------------------------------------
 
-def test_direct_short_phrases_still_write_immediately(db_path: Path) -> None:
+def test_direct_short_phrases_go_through_confirmation(db_path: Path) -> None:
     _set_candidate_stage(db_path, ACTIVE_STAGE)
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         body = _post_message(client, "这个人选复核不通过")
-        assert "pending_intent" not in body
-        assert body["candidate_action"]["action"] == "stop"
-        assert "已同步到 ASA" in body["answer"]
-        assert client.get(f"/api/v1/candidates/{CANDIDATE_ID}").json()["candidate"]["is_stopped"] is True
-    assert _candidate_row(db_path) == STOPPED_STAGE
+        assert body["pending_intent"]["action"] == "stop"
+        assert body["pending_intent"]["candidate"]["id"] == CANDIDATE_ID
+        assert body["pending_intent"]["preflight_token"]
+        assert "未确认前不会写入 ASA" in body["answer"]
+        assert body.get("write_blocked") is None
+    assert _candidate_row(db_path) == ACTIVE_STAGE  # 未确认不落库
 
 
-def test_direct_contact_short_phrase_still_writes_immediately(db_path: Path) -> None:
+def test_direct_contact_short_phrase_goes_through_confirmation(db_path: Path) -> None:
     _set_candidate_stage(db_path, ACTIVE_STAGE)
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         body = _post_message(client, "这个人选已联系")
-        assert "pending_intent" not in body
-        assert body["candidate_action"]["action"] == "contact"
-        assert "已同步到 ASA" in body["answer"]
-        assert "未确认前不会写入" not in body["answer"]
+        assert body["pending_intent"]["action"] == "contact"
+        assert body["pending_intent"]["candidate"]["id"] == CANDIDATE_ID
+        assert body["pending_intent"]["preflight_token"]
+        assert "未确认前不会写入 ASA" in body["answer"]
 
 
 # ---------------------------------------------------------------------------
