@@ -3,7 +3,7 @@ import { expect, skipIfNoBackend, test } from '../support/fixtures'
 const JOB_ID = 137
 const ADJUSTMENT_ID = 11
 
-test.beforeEach(() => skipIfNoBackend())
+skipIfNoBackend()
 
 test('停止备注调整先采纳，策略未产出前不显示为已应用', async ({ page }) => {
   await page.goto(`/asa-app#job=${JOB_ID}`)

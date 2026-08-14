@@ -5,7 +5,7 @@ import {
   openCandidateAssessment,
 } from '../support/nav'
 
-test.beforeEach(() => skipIfNoBackend())
+skipIfNoBackend()
 
 test('顾问采纳评估后立即回读候选人业务时间线', async ({ page }) => {
   const assessment = await openCandidateAssessment(

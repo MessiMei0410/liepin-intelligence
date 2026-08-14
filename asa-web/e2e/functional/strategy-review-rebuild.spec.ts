@@ -3,7 +3,7 @@ import { openWorkflowDetail } from '../support/nav'
 
 const MISSING_REVIEW_WORKFLOW_ID = 'workflow_ba826dbdccf0'
 
-test.beforeEach(() => skipIfNoBackend())
+skipIfNoBackend()
 
 test('策略复盘重建后立即回读工作流事件与产物', async ({ page }) => {
   const panel = await openWorkflowDetail(page, MISSING_REVIEW_WORKFLOW_ID)
