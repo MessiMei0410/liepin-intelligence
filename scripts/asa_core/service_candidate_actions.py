@@ -40,6 +40,42 @@ PACKAGE_FEEDBACK_TYPE_LABELS = {
 }
 
 
+# P3-b 新旧反馈表口径统一：新表 recommendation_package_feedback 写入时同事务双写旧表
+# client_feedback_events，存量报表脚本（generate_workflow_status_report /
+# generate_position_dashboard 等约 10 个旧读方）零改动即可读到新口径反馈。
+# 反馈类型映射到旧表写方 record_client_feedback.FEEDBACK_OPTIONS 的口径（含 status_after 约定）；
+# 新表没有的字段（原因标签/下一步）留空，source='recommendation_package' 留痕，
+# 包版本链路经 event_id → candidate_events.raw_json（含 package_id/package_version/feedback_id）可追溯。
+LEGACY_FEEDBACK_TYPE_MAP = {
+    "approved": ("approved", "client_approved"),
+    "interview": ("interviewing", "interviewing"),
+    "rejected": ("rejected", "client_rejected"),
+    "hold": ("hold", "hold"),
+    "other": ("other", ""),
+}
+
+
+# 与 scripts/record_client_feedback.py 的 SCHEMA 保持一致（IF NOT EXISTS，不覆盖既有表）。
+LEGACY_CLIENT_FEEDBACK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS client_feedback_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER,
+    candidate_name TEXT NOT NULL,
+    candidate_company TEXT,
+    client TEXT,
+    position TEXT,
+    feedback_type TEXT NOT NULL,
+    status_after TEXT,
+    reason_tags_json TEXT DEFAULT '[]',
+    feedback_detail TEXT,
+    next_action TEXT,
+    source TEXT DEFAULT 'manual',
+    feedback_time TEXT DEFAULT (datetime('now','localtime')),
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+)
+"""
+
+
 # 生命周期一等事件（三期驾驶舱）：面试/Offer/入职统一为候选人结构化时间线事件。
 # label 用于时间线摘要与回执；statuses 限定 event_status 合法取值（缺省用 default_status）；
 # followup_task/followup_days 定义自动生成的跟进待办（只建内部任务，不自动对外沟通）。
@@ -1502,6 +1538,97 @@ class CandidateActionsMixin:
             "already_upgraded": False,
         }
 
+    # ------------------------------------------------------------------
+    # P3-b：客户反馈新旧表口径统一（新表写入同事务双写旧表，旧读方零改动）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_legacy_feedback_schema(conn: sqlite3.Connection) -> None:
+        """保证旧表存在且带 governance 扩展列（job_candidate_id/event_id）。
+
+        与 a_system_workflow_governance 同款的 PRAGMA 幂等加列模式：
+        任一方先加列另一方安全跳过；存量行不受影响。
+        """
+        conn.execute(LEGACY_CLIENT_FEEDBACK_SCHEMA)
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(client_feedback_events)")}
+        if "job_candidate_id" not in columns:
+            conn.execute("ALTER TABLE client_feedback_events ADD COLUMN job_candidate_id INTEGER")
+        if "event_id" not in columns:
+            conn.execute("ALTER TABLE client_feedback_events ADD COLUMN event_id INTEGER")
+
+    def _mirror_feedback_to_legacy_events(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        package: sqlite3.Row,
+        feedback_type: str,
+        content: str,
+        feedback_time: str,
+        event_id: int,
+    ) -> int:
+        """把推荐包反馈按旧报表口径镜像进 client_feedback_events，返回旧表行 id。
+
+        幂等由新表 UNIQUE(package_id, request_id) 保证：重放在上方提前返回，不会走到这里。
+        """
+        self._ensure_legacy_feedback_schema(conn)
+        legacy_type, status_after = LEGACY_FEEDBACK_TYPE_MAP.get(feedback_type, ("other", ""))
+        base = conn.execute(
+            """SELECT jc.source_candidate_id, p.display_name, p.current_company,
+                      j.title AS job_title, c.name AS client_name
+                 FROM job_candidates jc
+                 LEFT JOIN people p ON p.id=jc.person_id
+                 LEFT JOIN jobs j ON j.id=jc.job_id
+                 LEFT JOIN clients c ON c.id=j.client_id
+                WHERE jc.id=?""",
+            (int(package["job_candidate_id"]),),
+        ).fetchone()
+        candidate_id: int | None = None
+        if base and base["source_candidate_id"] not in (None, ""):
+            try:
+                candidate_id = int(base["source_candidate_id"])
+            except (TypeError, ValueError):
+                candidate_id = None
+        cursor = conn.execute(
+            """INSERT INTO client_feedback_events
+               (candidate_id,candidate_name,candidate_company,client,position,
+                feedback_type,status_after,reason_tags_json,feedback_detail,next_action,
+                source,feedback_time,job_candidate_id,event_id)
+               VALUES (?,?,?,?,?,?,?,'[]',?,?,'recommendation_package',?,?,?)""",
+            (
+                candidate_id,
+                str(base["display_name"] or "") if base else "",
+                str(base["current_company"] or "") if base else "",
+                str(base["client_name"] or "") if base else "",
+                str(base["job_title"] or "") if base else "",
+                legacy_type,
+                status_after,
+                content,
+                "",
+                feedback_time,
+                int(package["job_candidate_id"]),
+                int(event_id),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _legacy_feedback_event_id(conn: sqlite3.Connection, event_id: Any) -> int | None:
+        """按 candidate_events 事件 id 回查旧表镜像行（幂等重放路径用）。"""
+        if event_id is None:
+            return None
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='client_feedback_events'"
+        ).fetchone():
+            return None
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(client_feedback_events)")}
+        if "event_id" not in columns:
+            return None
+        row = conn.execute(
+            "SELECT id FROM client_feedback_events WHERE event_id=? ORDER BY id DESC LIMIT 1",
+            (int(event_id),),
+        ).fetchone()
+        return int(row[0]) if row else None
+
     def record_package_feedback(
         self,
         package_id: str,
@@ -1530,7 +1657,7 @@ class CandidateActionsMixin:
                     (package["package_id"], request_id),
                 ).fetchone()
                 if existing:
-                    # 表级幂等兜底：UNIQUE(package_id, request_id) 命中即回读，不重复写事件。
+                    # 表级幂等兜底：UNIQUE(package_id, request_id) 命中即回读，不重复写事件/双写。
                     return {
                         "ok": True,
                         "package_id": package["package_id"],
@@ -1538,6 +1665,7 @@ class CandidateActionsMixin:
                         "candidate_id": int(package["job_candidate_id"]),
                         "feedback_id": int(existing["id"]),
                         "event_id": existing["event_id"],
+                        "client_feedback_event_id": self._legacy_feedback_event_id(conn, existing["event_id"]),
                         "already_recorded": True,
                         "feedback": {
                             "id": int(existing["id"]),
@@ -1579,6 +1707,7 @@ class CandidateActionsMixin:
                     "candidate_id": int(package["job_candidate_id"]),
                     "feedback_id": int(existing["id"]),
                     "event_id": existing["event_id"],
+                    "client_feedback_event_id": self._legacy_feedback_event_id(conn, existing["event_id"]),
                     "already_recorded": True,
                     "feedback": {
                         "id": int(existing["id"]),
@@ -1625,6 +1754,16 @@ class CandidateActionsMixin:
                 "SELECT * FROM recommendation_package_feedback WHERE id=?",
                 (feedback_id,),
             ).fetchone()
+            # P3-b：同事务双写旧 client_feedback_events（旧报表口径零改动可见）。
+            # 幂等由新表 UNIQUE(package_id, request_id) 保证——重放在上方提前返回，不会走到这里。
+            legacy_event_id = self._mirror_feedback_to_legacy_events(
+                conn,
+                package=package,
+                feedback_type=row["feedback_type"],
+                content=row["content"],
+                feedback_time=row["feedback_time"],
+                event_id=event_id,
+            )
         return {
             "ok": True,
             "package_id": row["package_id"],
@@ -1632,6 +1771,7 @@ class CandidateActionsMixin:
             "candidate_id": int(row["job_candidate_id"]),
             "feedback_id": feedback_id,
             "event_id": event_id,
+            "client_feedback_event_id": legacy_event_id,
             "already_recorded": False,
             "feedback": {
                 "id": feedback_id,
