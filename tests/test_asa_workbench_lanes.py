@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,13 +12,14 @@ from a_system_agent.service import AgentService
 from asa_core.analytics import AnalyticsService, _flow_item_lane
 from asa_core.app import create_app
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 LANES = ("decision", "running", "waiting_client", "risk", "delivered")
 
 
 @pytest.fixture(scope="module")
 def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     target = tmp_path_factory.mktemp("workbench-lanes") / "asa-workbench-lanes.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

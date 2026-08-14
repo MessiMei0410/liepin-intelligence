@@ -12,12 +12,14 @@ import importlib.util
 import json
 import sqlite3
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 
-SYNC_SCRIPT = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py")
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SYNC_SCRIPT = env_path("ASA_SYNC_SCRIPT", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py"))
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 
+require_local(SYNC_SCRIPT, "talent_system_sync.py 脚本")
 spec = importlib.util.spec_from_file_location("talent_system_sync", SYNC_SCRIPT)
 sync = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sync)
@@ -28,6 +30,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：整模块只复制一次生产库（1.5GB）。process_action 按 source_id
     # 判重：各测试用独立 source_id/action_id（dry-run 还用独立候选人名），互不冲突。
     target = tmp_path_factory.mktemp("talent-pool-intake") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

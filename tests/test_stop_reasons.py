@@ -4,6 +4,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +15,7 @@ from asa_core.stop_reasons import STOP_REASON_LABELS, normalize_stop_reason
 import liepin_workbench_server as legacy
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 STOP_STATUSES = {"screen_rejected", "xsaas_review_stop", "rejected", "stopped", "closed"}
 STOP_STAGE_TOKENS = ("初筛不通过", "停止", "淘汰", "关闭")
 
@@ -24,6 +25,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试先复位候选人 558；
     # 依赖"整表停止原因全 NULL"的 summary/schema 测试在测试内再次清洗。
     target = tmp_path_factory.mktemp("stop-reasons") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

@@ -5,12 +5,13 @@ import importlib.util
 import sqlite3
 import sys
 from pathlib import Path
+from _local import env_path, require_local
 from unittest import mock
 
 
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
-SERVER_PATH = Path("/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/scripts/liepin_workbench_server.py")
-SYNC_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py")
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
+SERVER_PATH = Path(__file__).resolve().parents[1] / "scripts" / "liepin_workbench_server.py"
+SYNC_PATH = env_path("ASA_SYNC_SCRIPT", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py"))
 
 
 def load_sync_module():
@@ -22,6 +23,7 @@ def load_sync_module():
     return module
 
 
+require_local(SYNC_PATH, "talent_system_sync.py 脚本")
 sync = load_sync_module()
 
 

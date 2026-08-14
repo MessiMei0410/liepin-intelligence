@@ -26,7 +26,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import strategy_replay_eval as replay  # noqa: E402
 
-REAL_KB_DIR = Path("/Users/messi/Documents/ASA/knowledge_base")
+REAL_KB_DIR = Path(__file__).resolve().parents[1] / "asa-web" / "knowledge_base"
 HAS_REAL_KB = (REAL_KB_DIR / "cases" / "seed_silan_tme_v1.json").is_file()
 
 # 与 tests/test_strategy_replay_s4.py 的 REPLAY_BASELINE 对齐（proxy 快照兼容断言用）

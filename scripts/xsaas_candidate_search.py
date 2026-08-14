@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -10,9 +11,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-CDP_DIR = Path("/Users/messi/.codex/skills/liepin-cdp-search/scripts")
+CDP_DIR = Path(os.environ.get("ASA_CDP_SKILL_DIR", "/Users/messi/.codex/skills/liepin-cdp-search/scripts"))
 sys.path.insert(0, str(CDP_DIR))
-from cdp_client import CDP  # noqa: E402
+try:
+    from cdp_client import CDP  # noqa: E402
+except ImportError:
+    # CI/无 skill 环境：模块仍可导入（测试 patch CDP 后运行）；真实调用给出清晰错误。
+    class CDP:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "cdp_client 不可用：请安装 liepin-cdp-search skill，"
+                "或用 ASA_CDP_SKILL_DIR 指向其 scripts 目录"
+            )
 from a_system_agent.sourcing_pagination import PageResult, collect_pages, seek_to_page  # noqa: E402
 
 

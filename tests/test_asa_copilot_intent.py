@@ -15,6 +15,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from fastapi.testclient import TestClient
 from asa_core.app import create_app
 from asa_core.intent import parse_candidate_intent
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 CORPUS_PATH = Path(__file__).parent / "fixtures" / "copilot_intent_corpus.json"
 CANDIDATE_ID = 558
 ACTIVE_STAGE = ("S1 新增寻访/待复核", "待复核", "search_shortlisted")
@@ -39,6 +40,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：整模块只复制一次生产库（1.5GB）。测试间隔离靠各测试
     # 开头 _set_candidate_stage 先清洗候选人 558 状态再操作。
     target = tmp_path_factory.mktemp("copilot-intent") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:
@@ -93,6 +95,7 @@ def _post_confirm(
     kind: str | None = None,
     preflight_token: str | None = None,
     request_id: str | None = None,
+    session_id: str | None = None,
 ):
     confirm_id = request_id or f"confirm-{uuid.uuid4().hex[:12]}"
     return client.post(
@@ -101,8 +104,9 @@ def _post_confirm(
         json={
             "request_id": confirm_id,
             # 共享副本：服务层幂等键由 session_id|target|action|message 派生，
-            # 用每次调用唯一的 session_id 避免跨测试命中前序确认的幂等重放。
-            "session_id": f"intent-test-confirm-{uuid.uuid4().hex[:8]}",
+            # 默认每次调用唯一 session_id 避免跨测试命中前序确认的幂等重放；
+            # 幂等重放测试显式复用同一 session_id 验证真实客户端重放语义。
+            "session_id": session_id or f"intent-test-confirm-{uuid.uuid4().hex[:8]}",
             "intent": {"kind": kind or pending["kind"], "action": action or pending["action"]},
             "intent_hash": intent_hash if intent_hash is not None else pending["intent_hash"],
             "candidate_id": pending["candidate"]["id"],
@@ -206,7 +210,8 @@ def test_pending_intent_confirm_full_chain(db_path: Path) -> None:
         assert client.get(f"/api/v1/candidates/{CANDIDATE_ID}").json()["candidate"]["is_stopped"] is False
 
         confirm_id = f"confirm-{uuid.uuid4().hex[:12]}"
-        first = _post_confirm(client, pending, request_id=confirm_id)
+        confirm_session = f"intent-test-confirm-replay-{uuid.uuid4().hex[:8]}"
+        first = _post_confirm(client, pending, request_id=confirm_id, session_id=confirm_session)
         assert first.status_code == 200
         confirmed = first.json()
         assert confirmed["ok"] is True
@@ -229,8 +234,8 @@ def test_pending_intent_confirm_full_chain(db_path: Path) -> None:
         ).fetchone()
         conn.close()
         assert audit_row == ("candidate.commit", "job_candidate", str(CANDIDATE_ID), "success")
-        # 幂等重放：相同 request_id + Idempotency-Key 返回同一结果，不重复写入
-        replay = _post_confirm(client, pending, request_id=confirm_id)
+        # 幂等重放：相同 request_id + Idempotency-Key + session_id 返回同一结果，不重复写入
+        replay = _post_confirm(client, pending, request_id=confirm_id, session_id=confirm_session)
         assert replay.status_code == 200
         assert replay.json()["candidate_action"]["action"] == "stop"
 

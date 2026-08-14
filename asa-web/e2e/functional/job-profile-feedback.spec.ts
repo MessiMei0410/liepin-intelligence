@@ -1,7 +1,7 @@
 import { expect, skipIfNoBackend, test } from '../support/fixtures'
 import { openJob } from '../support/nav'
 
-test.beforeEach(() => skipIfNoBackend())
+skipIfNoBackend()
 
 test('岗位画像纠正后立即回读岗位最近动态', async ({ page }) => {
   const panel = await openJob(page)

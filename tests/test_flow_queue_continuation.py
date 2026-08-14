@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from _local import env_path, skip_unless_local
 
 
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
 
 
+@skip_unless_local(BUILDER_PATH, "build_talent_workbench.py 脚本")
 class FlowQueueContinuationTest(unittest.TestCase):
     def test_overview_queue_opens_candidate_batch_workspace(self) -> None:
         source = BUILDER_PATH.read_text(encoding="utf-8")

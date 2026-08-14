@@ -5,14 +5,15 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
+from _local import env_path, require_local, skip_unless_local
 from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "scripts" / "liepin_workbench_server.py"
 CONTENT_PATH = ROOT / "liepin-reply-assistant-extension" / "content.js"
-SYNC_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py")
-BUILDER_PATH = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")
+SYNC_PATH = env_path("ASA_SYNC_SCRIPT", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/talent_system_sync.py"))
+BUILDER_PATH = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py"))
 
 
 def load_module(name: str, path: Path):
@@ -25,6 +26,7 @@ def load_module(name: str, path: Path):
 
 
 server = load_module("liepin_workbench_server_reply_direction_test", SERVER_PATH)
+require_local(SYNC_PATH, "talent_system_sync.py 脚本")
 sync = load_module("talent_system_sync_reply_direction_test", SYNC_PATH)
 
 
@@ -114,6 +116,7 @@ class CandidateReplyDirectionGuardTest(unittest.TestCase):
         self.assertIn("manual_transcription", source)
         self.assertIn("explicit_inbound_dom", source)
 
+    @skip_unless_local(BUILDER_PATH, "build_talent_workbench.py 脚本")
     def test_undone_reply_events_are_excluded_from_current_state_queries(self) -> None:
         builder = BUILDER_PATH.read_text(encoding="utf-8")
         server_source = SERVER_PATH.read_text(encoding="utf-8")

@@ -10,6 +10,7 @@ import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from _local import env_path, skip_unless_local
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -313,8 +314,9 @@ class AgentIntegrationContractTest(unittest.TestCase):
             self.assertIn(route, source)
         self.assertIn("agent_origin_allowed(self)", source)
 
+    @skip_unless_local(env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")), "build_talent_workbench.py 脚本")
     def test_generator_preserves_agent_panel_and_retry_cooldown(self) -> None:
-        builder = Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py").read_text(encoding="utf-8")
+        builder = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")).read_text(encoding="utf-8")
         for marker in [
             'id="candidateAgentPanel"',
             "hydrateCandidateAgent(c)",

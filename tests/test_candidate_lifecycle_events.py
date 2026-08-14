@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 from asa_core.app import create_app
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 
 
 @pytest.fixture(scope="module")
@@ -17,6 +18,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：候选人 559 事件均为追加写入且各测试用独立幂等键/request_id，
     # 断言均限定在本测试自己的记录上，共享安全。
     target = tmp_path_factory.mktemp("lifecycle-events") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

@@ -6,6 +6,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 import openpyxl
@@ -23,7 +24,7 @@ from a_system_agent.context import build_candidate_context
 import liepin_workbench_server as legacy
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 
 
 def test_copilot_attachment_reads_xlsx_without_exposing_a_local_path(db_path: Path) -> None:
@@ -728,6 +729,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 模块级共享副本：整模块只复制一次生产库（1.5GB）。各测试用独立
     # request_id/session_id，候选人 558 相关测试均先自行复位状态，共享安全。
     target = tmp_path_factory.mktemp("core-v1") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 import unittest
+from pathlib import Path
+
+from _local import env_path, skip_unless_local
 
 from test_a_system_agent_v1 import (
     AgentDbCase,
@@ -607,6 +610,7 @@ class AgentV15HttpApiTest(AgentHttpApiTest):
 
 
 class AgentV15IntegrationContractTest(unittest.TestCase):
+    @skip_unless_local(env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")), "build_talent_workbench.py 脚本")
     def test_server_and_generator_expose_v15_workbench_contract(self) -> None:
         server = open("scripts/liepin_workbench_server.py", encoding="utf-8").read()
         schema = open("scripts/a_system_agent/schema.py", encoding="utf-8").read()
@@ -648,10 +652,7 @@ class AgentV15IntegrationContractTest(unittest.TestCase):
             'parsed.path in {"/asa", "/a-system"}',
         ]:
             self.assertIn(route, server)
-        builder = open(
-            "/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py",
-            encoding="utf-8",
-        ).read()
+        builder = env_path("ASA_BUILDER_PATH", Path("/Users/messi/Documents/Codex/2026-06-26/re/work/build_talent_workbench.py")).read_text(encoding="utf-8")
         for marker in [
             'id="agentWorkbenchSlot"',
             "hydrateAgentWorkbench()",

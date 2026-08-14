@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from _local import env_path
 from unittest.mock import patch
 
 
@@ -20,7 +21,7 @@ SPEC.loader.exec_module(shadow)
 
 from a_system_agent.capability_runtime import RecruitingCapabilityRuntime
 
-MULTICHANNEL = Path("/Users/messi/.codex/skills/multi-channel-search/scripts/a_system_multichannel.py")
+MULTICHANNEL = env_path("ASA_MULTICHANNEL_SCRIPT", Path("/Users/messi/.codex/skills/multi-channel-search/scripts/a_system_multichannel.py"))
 
 
 def _row(candidate_id: str, name: str, status: str, **extra):
@@ -347,6 +348,7 @@ class OpenCliPrimaryRecallTest(unittest.TestCase):
                 "opencli_sourcing_shadow.py", "--mode", "primary", "--channel", "xsaas",
                 "--queries-json", str(queries), "--output", str(output),
                 "--client", "客户", "--job", "岗位", "--port", "9223", "--limit", "12",
+                "--opencli-bin", str(Path(sys.executable)),
             ]
             with patch.object(
                 shadow, "run_opencli",

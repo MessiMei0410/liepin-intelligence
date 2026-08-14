@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from _local import env_path, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 from asa_core.app import create_app
 
 
-SOURCE_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
+SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 BIG_STDOUT = "AUDIT-STDOUT-" + "x" * 300_000
 
 # 与 WorkflowEngine.get_workflow_candidates 的统计口径保持一致
@@ -88,6 +89,7 @@ def _pick_fixtures(db: Path) -> dict:
 @pytest.fixture(scope="module")
 def env(tmp_path_factory: pytest.TempPathFactory) -> dict:
     target = tmp_path_factory.mktemp("asa-workflow-reads") / "asa.db"
+    require_local(SOURCE_DB, "正式库 talent_system_v3")
     source = sqlite3.connect(SOURCE_DB)
     destination = sqlite3.connect(target)
     try:

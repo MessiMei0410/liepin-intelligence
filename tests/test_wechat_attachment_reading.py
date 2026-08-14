@@ -43,8 +43,11 @@ class WeChatAttachmentReadingTest(unittest.TestCase):
         self.assertFalse(image_analysis_requested("总结当前聊天"))
 
     def test_image_bubble_detector_prefers_lower_dense_visual_block(self) -> None:
-        import cv2
-        import numpy as np
+        try:
+            import cv2
+            import numpy as np
+        except ImportError as exc:
+            self.skipTest(f"本机未安装 opencv/numpy: {exc}")
 
         image = np.full((900, 1400, 3), 248, dtype=np.uint8)
         for x in range(980, 1230, 12):
@@ -126,7 +129,10 @@ class WeChatAttachmentReadingTest(unittest.TestCase):
             self.assertIn("年终奖\t45000\t5", item["extracted_text"])
 
     def test_resolver_extracts_pptx_text(self) -> None:
-        from pptx import Presentation
+        try:
+            from pptx import Presentation
+        except ImportError as exc:
+            self.skipTest(f"本机未安装 python-pptx: {exc}")
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
