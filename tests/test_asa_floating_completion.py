@@ -426,7 +426,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         # 实现字符串在拆分后的模块中搜索。
         copilot_impl = "".join(
             (ROOT / "scripts" / "a_system_agent" / f"copilot_{m}.py").read_text(encoding="utf-8")
-            for m in ("evidence", "intent", "sessions", "routing", "api")
+            for m in ("evidence", "intent", "sessions", "routing", "api", "impl", "skill_routes")
         )
         copilot_runtime = service + copilot_handler + copilot_impl
         self.assertIn("COPILOT_FLOATING_SYSTEM_PROMPT", llm)
