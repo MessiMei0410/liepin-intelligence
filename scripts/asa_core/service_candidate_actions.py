@@ -1149,6 +1149,75 @@ class CandidateActionsMixin:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _current_assessment(conn: sqlite3.Connection, candidate_id: int) -> sqlite3.Row | None:
+        """候选人当前有效判人评估（is_current=1 且 run 完成），供推荐包证据快照/升版判定复用。"""
+        return conn.execute(
+            """SELECT a.id,a.fit_score,a.fit_level,a.recommendation,a.confidence,a.evidence_coverage,
+                      a.criteria_json,a.strengths_json,a.gaps_json,a.risks_json,a.verification_questions_json,
+                      a.created_at
+                 FROM agent_candidate_assessments a
+                 JOIN agent_runs r ON r.run_id=a.run_id
+                WHERE a.job_candidate_id=? AND a.is_current=1 AND r.status='completed'
+                ORDER BY datetime(a.created_at) DESC,a.id DESC LIMIT 1""",
+            (int(candidate_id),),
+        ).fetchone()
+
+    @staticmethod
+    def _assessment_fingerprint(assessment: sqlite3.Row) -> str:
+        """评估指纹：assessment_id + fit_score + fit_level + evidence_coverage + created_at。
+
+        指纹变化即视为"评估已更新"，是推荐包升版（P3-a）的判定基准。
+        """
+        parts = [
+            str(assessment["id"]),
+            str(assessment["fit_score"]),
+            str(assessment["fit_level"]),
+            str(assessment["evidence_coverage"]),
+            str(assessment["created_at"]),
+        ]
+        return "sha256:" + hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+    def _package_snapshot_fingerprint(self, conn: sqlite3.Connection, package: sqlite3.Row) -> str:
+        """推荐包 evidence 快照的评估指纹；旧包（无指纹字段）用快照 assessment_id 反查补齐。"""
+        evidence = json_value(package["evidence_json"], {})
+        fingerprint = str(evidence.get("fingerprint") or "")
+        if fingerprint:
+            return fingerprint
+        assessment_id = evidence.get("assessment_id")
+        if assessment_id:
+            row = conn.execute(
+                "SELECT id,fit_score,fit_level,evidence_coverage,created_at FROM agent_candidate_assessments WHERE id=?",
+                (int(assessment_id),),
+            ).fetchone()
+            if row:
+                return self._assessment_fingerprint(row)
+        return ""
+
+    def _package_evidence(self, assessment: sqlite3.Row | None) -> tuple[dict[str, Any], list[Any], list[Any]]:
+        """评估行 → 推荐包证据快照（含指纹）+ 风险 + 待核验问题；无有效评估时如实标注证据缺失。"""
+        if not assessment:
+            return {"status": "no_current_assessment", "note": "暂无当前有效的判人评估，人岗匹配证据缺失"}, [], []
+        evidence: dict[str, Any] = {
+            "status": "ready",
+            "assessment_id": int(assessment["id"]),
+            "fit_score": assessment["fit_score"],
+            "fit_level": assessment["fit_level"],
+            "recommendation": assessment["recommendation"],
+            "confidence": assessment["confidence"],
+            "evidence_coverage": assessment["evidence_coverage"],
+            "criteria": json_value(assessment["criteria_json"], {}),
+            "strengths": json_value(assessment["strengths_json"], []),
+            "gaps": json_value(assessment["gaps_json"], []),
+            "assessed_at": assessment["created_at"],
+            "fingerprint": self._assessment_fingerprint(assessment),
+        }
+        return (
+            evidence,
+            json_value(assessment["risks_json"], []),
+            json_value(assessment["verification_questions_json"], []),
+        )
+
+    @staticmethod
     def _package_brief(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "package_id": row["package_id"],
@@ -1182,16 +1251,7 @@ class CandidateActionsMixin:
         ).fetchone()
         if not base:
             raise LookupError("candidate not found")
-        assessment = conn.execute(
-            """SELECT a.id,a.fit_score,a.fit_level,a.recommendation,a.confidence,a.evidence_coverage,
-                      a.criteria_json,a.strengths_json,a.gaps_json,a.risks_json,a.verification_questions_json,
-                      a.created_at
-                 FROM agent_candidate_assessments a
-                 JOIN agent_runs r ON r.run_id=a.run_id
-                WHERE a.job_candidate_id=? AND a.is_current=1 AND r.status='completed'
-                ORDER BY datetime(a.created_at) DESC,a.id DESC LIMIT 1""",
-            (int(candidate_id),),
-        ).fetchone()
+        assessment = self._current_assessment(conn, candidate_id)
         summary = {
             "name": base["name"],
             "current_company": base["current_company"] or "",
@@ -1209,25 +1269,10 @@ class CandidateActionsMixin:
             },
         }
         if assessment:
-            evidence: dict[str, Any] = {
-                "status": "ready",
-                "assessment_id": int(assessment["id"]),
-                "fit_score": assessment["fit_score"],
-                "fit_level": assessment["fit_level"],
-                "recommendation": assessment["recommendation"],
-                "confidence": assessment["confidence"],
-                "evidence_coverage": assessment["evidence_coverage"],
-                "criteria": json_value(assessment["criteria_json"], {}),
-                "strengths": json_value(assessment["strengths_json"], []),
-                "gaps": json_value(assessment["gaps_json"], []),
-                "assessed_at": assessment["created_at"],
-            }
-            risks = json_value(assessment["risks_json"], [])
-            questions = json_value(assessment["verification_questions_json"], [])
+            evidence, risks, questions = self._package_evidence(assessment)
         else:
             # 无当前有效评估时如实标注证据缺失，不伪造人岗证据。
-            evidence = {"status": "no_current_assessment", "note": "暂无当前有效的判人评估，人岗匹配证据缺失"}
-            risks, questions = [], []
+            evidence, risks, questions = self._package_evidence(None)
         try:
             cursor = conn.execute(
                 """INSERT INTO recommendation_packages
@@ -1301,6 +1346,19 @@ class CandidateActionsMixin:
                 ).fetchall()
             ]
             payload = self._package_brief(row)
+            # 升版合同（P3-a）：详情携带评估指纹与可升版标记。
+            # upgradeable = 本包为最新版本 且 当前有效评估指纹 ≠ 包内证据快照指纹。
+            evidence = json_value(row["evidence_json"], {})
+            snapshot_fp = self._package_snapshot_fingerprint(conn, row)
+            if snapshot_fp and not evidence.get("fingerprint"):
+                evidence["fingerprint"] = snapshot_fp
+            assessment = self._current_assessment(conn, int(row["job_candidate_id"]))
+            latest_fp = self._assessment_fingerprint(assessment) if assessment else ""
+            max_version = conn.execute(
+                "SELECT MAX(version) FROM recommendation_packages WHERE job_candidate_id=?",
+                (int(row["job_candidate_id"]),),
+            ).fetchone()[0]
+            is_latest = int(max_version or 0) == int(row["version"])
             payload.update(
                 {
                     "ok": True,
@@ -1308,15 +1366,141 @@ class CandidateActionsMixin:
                     "person_id": int(row["person_id"]),
                     "job_id": int(row["job_id"]),
                     "summary": json_value(row["summary_json"], {}),
-                    "evidence": json_value(row["evidence_json"], {}),
+                    "evidence": evidence,
                     "risks": json_value(row["risks_json"], []),
                     "verification_questions": json_value(row["verification_questions_json"], []),
                     "feedback": feedback,
+                    "upgradeable": bool(is_latest and latest_fp and latest_fp != snapshot_fp),
+                    "latest_assessment_id": int(assessment["id"]) if assessment else None,
                 }
             )
             return payload
         finally:
             conn.close()
+
+    def recommendation_package_upgrade_preflight(self, package_id: str) -> dict[str, Any]:
+        """推荐包升版预检（P3-a）：包存在且为最新版本、评估指纹已更新才发一次性 token。
+
+        409：历史版本只读 / 无当前有效评估 / 评估指纹一致无需升版。
+        """
+        package_id = str(package_id or "").strip()
+        conn = connect(self.db_path)
+        try:
+            package = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE package_id=?",
+                (package_id,),
+            ).fetchone()
+            if not package:
+                raise LookupError("recommendation package not found")
+            max_version = conn.execute(
+                "SELECT MAX(version) FROM recommendation_packages WHERE job_candidate_id=?",
+                (int(package["job_candidate_id"]),),
+            ).fetchone()[0]
+            if int(max_version or 0) != int(package["version"]):
+                raise ValueError("历史版本推荐包为只读，请基于最新版本发起升版")
+            snapshot_fp = self._package_snapshot_fingerprint(conn, package)
+            assessment = self._current_assessment(conn, int(package["job_candidate_id"]))
+            if not assessment:
+                raise ValueError("暂无当前有效的判人评估，无法升版")
+            latest_fp = self._assessment_fingerprint(assessment)
+            if latest_fp == snapshot_fp:
+                raise ValueError("评估未发生变化（指纹一致），无需升版")
+        finally:
+            conn.close()
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=5)
+        with self._preflight_lock:
+            now = datetime.now()
+            self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
+            self._preflight_tokens[token] = (int(package["job_candidate_id"]), f"recommendation_package_upgrade:{package_id}", expires)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": "recommendation_package_upgrade",
+            "package_id": package_id,
+            "current_version": int(package["version"]),
+            "latest_fingerprint": latest_fp,
+            "latest_assessment_id": int(assessment["id"]),
+            "impact": "将以当前有效评估重新生成推荐包新版本（summary 继承、证据快照换新），旧版本保留只读。",
+        }
+
+    def recommendation_package_upgrade_commit(self, package_id: str, preflight_token: str) -> dict[str, Any]:
+        """推荐包升版提交（P3-a）：一次性 token + 指纹复核 + UNIQUE(job_candidate_id, version) 并发兜底。
+
+        以 commit 时刻的指纹为准：指纹回退为一致 → 409；并发撞唯一键 → 回读现有最新版本。
+        """
+        package_id = str(package_id or "").strip()
+        with self._preflight_lock:
+            grant = self._preflight_tokens.pop(preflight_token, None)
+        if not grant or grant[1] != f"recommendation_package_upgrade:{package_id}" or grant[2] <= datetime.now():
+            raise ValueError("preflight token is invalid, expired, or already used")
+        with transaction(self.db_path) as conn:
+            package = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE package_id=?",
+                (package_id,),
+            ).fetchone()
+            if not package or grant[0] != int(package["job_candidate_id"]):
+                raise LookupError("recommendation package not found")
+            max_version = conn.execute(
+                "SELECT MAX(version) FROM recommendation_packages WHERE job_candidate_id=?",
+                (int(package["job_candidate_id"]),),
+            ).fetchone()[0]
+            if int(max_version or 0) != int(package["version"]):
+                raise ValueError("历史版本推荐包为只读，请基于最新版本发起升版")
+            snapshot_fp = self._package_snapshot_fingerprint(conn, package)
+            assessment = self._current_assessment(conn, int(package["job_candidate_id"]))
+            if not assessment:
+                raise ValueError("暂无当前有效的判人评估，无法升版")
+            latest_fp = self._assessment_fingerprint(assessment)
+            if latest_fp == snapshot_fp:
+                raise ValueError("评估未发生变化（指纹一致），无需升版")
+            evidence, risks, questions = self._package_evidence(assessment)
+            new_version = int(package["version"]) + 1
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO recommendation_packages
+                       (package_id,job_candidate_id,person_id,job_id,recommendation_id,version,status,
+                        summary_json,evidence_json,risks_json,verification_questions_json,created_at)
+                       VALUES (?,?,?,?,?,?,'generated',?,?,?,?,datetime('now','localtime'))""",
+                    (
+                        f"recpkg_{secrets.token_urlsafe(12)}",
+                        int(package["job_candidate_id"]),
+                        int(package["person_id"]),
+                        int(package["job_id"]),
+                        int(package["recommendation_id"]),
+                        new_version,
+                        # 人岗/推荐事实不变：summary 原样继承；仅证据快照换新评估。
+                        package["summary_json"],
+                        json.dumps(evidence, ensure_ascii=False),
+                        json.dumps(risks if isinstance(risks, list) else [], ensure_ascii=False),
+                        json.dumps(questions if isinstance(questions, list) else [], ensure_ascii=False),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # 并发兜底：UNIQUE(job_candidate_id, version) 命中即视为已升版，回读现有最新版本。
+                existing = conn.execute(
+                    "SELECT * FROM recommendation_packages WHERE job_candidate_id=? ORDER BY version DESC LIMIT 1",
+                    (int(package["job_candidate_id"]),),
+                ).fetchone()
+                return {
+                    "ok": True,
+                    "package": self._package_brief(existing),
+                    "previous_version": int(package["version"]),
+                    "upgraded": False,
+                    "already_upgraded": True,
+                }
+            row = conn.execute(
+                "SELECT * FROM recommendation_packages WHERE id=?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return {
+            "ok": True,
+            "package": self._package_brief(row),
+            "previous_version": int(package["version"]),
+            "upgraded": True,
+            "already_upgraded": False,
+        }
 
     def record_package_feedback(
         self,
