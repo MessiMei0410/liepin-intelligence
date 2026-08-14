@@ -408,3 +408,28 @@
 - 复核对象：`analytics.py` 的 `CLIENT_WAIT_TOKENS`（已推荐/待客户/客户反馈/客户确认/待反馈/报告已发）对 `clean_stage + last_event_type + last_event_summary` 的文本命中。
 - 结论：覆盖链路完整无缺陷——顾问确认「推给客户」动作落库 `clean_stage=已推荐给客户`（`service_candidate_actions.py` 阶段映射表），token「已推荐」必命中，lane 正确归入 `waiting_client`。
 - 真实库（v3，只读复核）当前最远阶段为 已触达（32）/S3 已联系待回复（1），尚无任何「已推荐给客户」记录，lane 为 0 是业务真实现状而非口径缺陷。此项后续不必再列为待办。
+
+## 五十二、P2-1 超大文件拆分收官（2026-08-14）
+
+- 四个超大文件全部按「Mixin 组合 + facade re-export」模式拆分完毕，方法体逐字节迁移（AST 逐节点比对），tests/ 零改动，全量 pytest 通过数不降：
+  - `capability_runtime.py` 4357 行 → base/search/assessment/jobs/delivery 五 Mixin（PR #7）
+  - `asa_core/service.py` 3673 行 → `service_candidate_actions.py` / `service_copilot_bridge.py` / `service_workflow_ops.py` + 901 行 facade（PR #10）
+  - `a_system_agent/workflow.py` 3569 行 → `workflow_plan.py` / `workflow_execute.py` / `workflow_review.py` + 41 行 facade（PR #13）
+  - `a_system_agent/copilot_routing.py` 2775 行 → `copilot_impl.py` + `copilot_skill_routes.py` + 28 行 facade（PR #12）
+- 拆分后依赖方向单向、facade 保持对象同一性（re-export 名字 `is` 断言通过），后续改动定位到领域文件即可，不再面对单文件数千行。
+
+## 五十三、P3-a 推荐包升版后端合同落地（2026-08-14，PR #14）
+
+- 按 `docs/P3a_推荐包升版_设计.md` 实施：GET 推荐包详情返回证据指纹与 `upgradeable`/`latest_assessment_id`；`POST .../upgrade/preflight`（一次性 token + upgradeable 校验，409 中文 detail）+ `POST .../upgrade/commit`（Idempotency-Key 幂等）。
+- 升版生成 `version+1` 新包（继承 summary、证据快照换当前有效评估），`UNIQUE(job_candidate_id, version)` 并发兜底；历史版本只读，只允许对最新版本升版；评估无变化升版返回 409。
+- 测试 `test_recommendation_package_upgrade.py` 13 条覆盖设计稿 5 要点（CI 按既有环境依赖清单 ignore，待 P2-4 环境参数化后放回）。
+
+## 五十四、P3-c 技能本体扩四族（2026-08-14，PR #16）
+
+- `kb_skill_ontology_semiconductor_v1.json` 5 族 → 9 族：新增 fab_process（11 技能）、quality（8）、yield_enhancement（7）、fpga（10），沿用 `name/aliases/related/evidence` 结构；四个 seed 原型空 `skills_ontology_nodes` 已回填 canonical 词。
+- 加载冒烟 9 族 83 技能无降级告警；本体映射与知识提案测试 35 条通过。
+
+## 五十五、P3-d 回放推荐率双口径（2026-08-14，PR #15）
+
+- `strategy_replay_eval.py` 推荐率改为双口径：有真实顾问确认数据时优先真实口径并标注来源；无数据时显式回落 `recommendation_rate_proxy` 并继续标注「proxy 非真实口径」，指标随业务数据成熟自动过渡，不伪造。
+- 真实库当前顾问确认类事件近零（`candidate_assessment_advisor_action` 2 条），回落路径是当前实际生效路径；39 条定向测试通过。
