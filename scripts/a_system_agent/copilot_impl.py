@@ -467,6 +467,73 @@ def _generate_copilot_model_answer(
     return "", tool_results, references
 
 
+_ATTACHMENT_NAME_LABEL_RE = re.compile(r"姓\s*名\s*[：:]\s*([一-龥·]{2,6})")
+_ATTACHMENT_NAME_RE = re.compile(r"[一-龥·]{2,4}")
+# 候选指向动作：这些动作在缺 candidate_id 时才会因“哪位人选”被追问。
+_ATTACHMENT_CANDIDATE_ACTIONS = {"recommendation", "salary", "candidate_review", "candidate_outreach"}
+
+
+def _attachment_candidate_identity(self, evidence: dict[str, Any]) -> dict[str, Any]:
+    """从上传附件（文件名/正文）识别候选人。
+
+    返回 {"name", "file_name", "customer", "position", "resume_text",
+    "job_candidate_id"}；识别不出姓名时返回 {}。job_candidate_id 为 None
+    表示 attachment-only（候选人不在 DB）。
+    """
+    items = [item for item in (evidence.get("items") or []) if isinstance(item, dict)][:2]
+    name = ""
+    file_name = ""
+    resume_text = ""
+    for item in items:
+        text = str(item.get("extracted_text") or "")
+        if not resume_text and text:
+            resume_text = text
+        if not file_name:
+            file_name = str(item.get("file_name") or "")
+        match = _ATTACHMENT_NAME_LABEL_RE.search(text)
+        if match:
+            name = match.group(1)
+            break
+    customer = ""
+    position = ""
+    if file_name:
+        # 嘉驰简历命名：嘉驰国际-{客户}-{岗位}-{姓名}.docx（可能带 (1) 副本后缀）
+        stem = re.sub(r"\.[A-Za-z0-9]+$", "", file_name)
+        parts = [part.strip() for part in re.split(r"[-—–]", stem) if part.strip()]
+        if not name and parts:
+            candidate = re.sub(r"[（(]\d+[）)]$", "", parts[-1]).strip()
+            if _ATTACHMENT_NAME_RE.fullmatch(candidate):
+                name = candidate
+        if len(parts) >= 4:
+            customer, position = parts[1], parts[2]
+    if not name:
+        return {}
+    identity: dict[str, Any] = {
+        "name": name,
+        "file_name": file_name,
+        "customer": customer,
+        "position": position,
+        "resume_text": resume_text[:18000],
+        "job_candidate_id": None,
+    }
+    conn = self._connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT jc.id FROM job_candidates jc
+            JOIN people p ON p.id=jc.person_id
+            WHERE p.display_name=?
+            ORDER BY jc.updated_at DESC, jc.id DESC
+            """,
+            (name,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if rows:
+        identity["job_candidate_id"] = int(rows[0]["id"])
+    return identity
+
+
 def _copilot_impl(
     self,
     message: str,
@@ -497,6 +564,10 @@ def _copilot_impl(
     )
     conversation_history = self._copilot_conversation_history(session_id)
     selected_facts = self._copilot_context_facts(selected)
+    # 提前收集上传附件证据：意图解释需要附件摘要来解析“这个人选”等指代
+    # （此前在下方 ~1900 行才收集，意图 LLM 看不到附件内容）；后面仍会把
+    # 它写入 selected_payload 供模型回答与引用卡使用。
+    uploaded_attachment_evidence = self._uploaded_attachment_evidence(raw_context, session_id)
     plan_reply = _plan_confirmation_reply(message)
     latest_plan_anchor = _latest_assistant_plan_anchor(self, session_id) if plan_reply else {}
     anchored_plan_ref, anchored_plan_state = (
@@ -555,6 +626,7 @@ def _copilot_impl(
             conversation_history,
             last_assistant_message,
             confirmation_plan_ref,
+            uploaded_attachment_evidence=uploaded_attachment_evidence,
         )
     clarification_bound = False
     if raw_context.get("clarification_binding") and isinstance(existing_focus, dict):
@@ -899,6 +971,50 @@ def _copilot_impl(
     # 规则优先：明确指令词（记住/别忘了等）覆盖 LLM 意图理解，避免被预算事实等分支抢先。
     if semantic_action != "memory_capture" and self._copilot_action_kind(message) == "memory_capture":
         semantic_action = "memory_capture"
+    # 上传附件候选人解析（copilot_da64e131281b）：候选人只存在于刚上传的简历
+    # 附件（尚未入库）时，意图层无法把“这个人选”绑定到 DB 候选人，会误报缺
+    # candidate_id 并追问“请问具体是哪位人选？”。先用附件证据（文件名/正文中的
+    # 姓名）解析人选：DB 命中则等价于顾问手动选中该候选人；未命中则走
+    # attachment-only 路径（不走 create_goal，直接技能路由生成报告）。
+    attachment_only_candidate: dict[str, Any] = {}
+    if (
+        semantic_action in _ATTACHMENT_CANDIDATE_ACTIONS
+        and selected.get("type") != "candidate"
+        and uploaded_attachment_evidence.get("content_available")
+    ):
+        attachment_identity = _attachment_candidate_identity(self, uploaded_attachment_evidence)
+        candidate_name = str(attachment_identity.get("name") or "")
+        if candidate_name:
+            missing_fields = [str(field) for field in (intent_understanding.get("missing_fields") or [])]
+            candidate_clarification = bool(
+                intent_understanding.get("needs_clarification")
+                and any(
+                    any(token in field for token in ("candidate", "候选人", "人选"))
+                    for field in missing_fields
+                )
+            )
+            if candidate_clarification:
+                intent_understanding["needs_clarification"] = False
+                intent_understanding["missing_fields"] = []
+                intent_understanding["clarification_question"] = ""
+            if attachment_identity.get("job_candidate_id"):
+                selected = {
+                    "type": "candidate",
+                    "id": int(attachment_identity["job_candidate_id"]),
+                    "page": "candidates",
+                    "filters": {},
+                }
+                selected_facts = self._copilot_context_facts(selected)
+                focus_conflicts = []
+                intent_understanding["target"] = {
+                    "type": "candidate",
+                    "id": int(attachment_identity["job_candidate_id"]),
+                    "client": "",
+                    "label": candidate_name,
+                }
+            else:
+                attachment_only_candidate = attachment_identity
+                selected = {"type": "candidate", "id": None, "page": "candidates", "filters": {}}
     workflow_outcome_question = bool(
         "寻访" in message
         and re.search(r"(?:什么结果|结果如何|结果怎样|结果怎么样|进展如何|进展怎么样|情况如何|情况怎么样)", message)
@@ -1171,6 +1287,9 @@ def _copilot_impl(
         bool(raw_context.get("suppress_goal_intent"))
         or workflow_outcome_question
         or workflow_strategy_question
+        # attachment-only 候选人不在系统内，create_goal 的对象校验必定失败；
+        # 跳过目标工作流，让技能路由直接生成“简历→模板”的报告。
+        or bool(attachment_only_candidate)
     )
     context_conflicts: list[dict[str, Any]] = []
     if forced_answer is None and not suppress_goal_intent:
@@ -1982,7 +2101,6 @@ def _copilot_impl(
                 bool(item.get("content_available"))
                 for item in attachment_evidence.get("items") or []
             )
-    uploaded_attachment_evidence = self._uploaded_attachment_evidence(raw_context, session_id)
     if uploaded_attachment_evidence:
         selected_payload["uploaded_attachment_evidence"] = uploaded_attachment_evidence
         for item in uploaded_attachment_evidence.get("items") or []:
@@ -2170,6 +2288,8 @@ def _copilot_impl(
                 # 自动取当前岗位 A 级候选人的 jc_id 作为触达队列；优先级按消息中关键词或默认 P1
                 _jc_ids, _prios = self._default_outreach_queue_inputs(message, selected)
                 skill_inputs = {"job_candidate_ids": _jc_ids, "priorities": _prios}
+            elif skill_id == "recommendation_report" and attachment_only_candidate:
+                skill_inputs["attachment_candidate"] = attachment_only_candidate
             skill_run = self.execute_skill(skill_id, context=selected, inputs=skill_inputs)
             skill_runs.append(skill_run)
             result = skill_run.get("result") or {}
