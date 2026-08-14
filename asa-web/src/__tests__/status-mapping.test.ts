@@ -64,6 +64,12 @@ describe('mapWorkflowStatus 业务终态映射', () => {
     expect(mapWorkflowStatus({ status: 'cancelled', business_outcome: null })).toMatchObject({ label: '已取消', tone: 'muted', kind: 'default' })
   })
 
+  it('superseded → 已被修订版替代，不渲染英文原形', () => {
+    const mapped = mapWorkflowStatus({ status: 'superseded', business_outcome: null })
+    expect(mapped.label).toBe('已被修订版替代')
+    expect(mapped.label).not.toContain('superseded')
+  })
+
   it('未知 status → 中文兜底，不渲染英文原形', () => {
     expect(mapWorkflowStatus({ status: 'mystery_state', business_outcome: null }).label).toBe('状态待同步')
   })
