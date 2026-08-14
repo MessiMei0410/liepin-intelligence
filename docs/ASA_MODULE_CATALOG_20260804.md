@@ -390,3 +390,15 @@
 - Agent 工作流人选卡和候选详情来源追踪均显示“Mapping 直挖”及任务卡/候选索引回执；关系复用、未评估和停止状态沿用数据库原事实，不做前端乐观推断。
 - 验证：工作流候选分页与详情 lineage 专项测试通过，既有前端 L1、契约测试及隔离功能 E2E 继续作为回归门禁。
 - 收官复核（2026-08-14，中断后重跑完整门禁）：前端 L1 `ci:fast` 614/614（含候选详情推荐路径的 Mapping“非查询召回”边界文案断言 `recommendation-decision` 12/12）、Python 契约 58/58、后端工作流读取契约 9/9、浮窗上下文+寻访调整契约 6/6、串行隔离 functional E2E 27/27 全部通过；正式库 mtime 停在当日上午受控迁移时点，复核全程未触碰正式库。
+
+## 四十九、电源专家 277 vs 278 口径差异定性（2026-08-14）
+
+- 现象：士兰微「电源专家」（job_id=142）`job_candidates` 278 条 vs `candidates` 按 `position LIKE '%电源专家%'` 277 条，曾被记录为待查口径差异。
+- 结论：非数据缺陷。差异来自田逸帆（candidate_id=1194，台达电源工程师）：2026-07-27 经多渠道寻访进入「技术市场经理/总监（PC电源）」（job 154，job_candidate 576），2026-07-30 经**跨岗位复核**（`cross_position_shortlisted`，VPD/TLVR 模块电源证据高度匹配）新增到「电源专家」（job_candidate 619）；其 `candidates.position` 标签仍为技术市场经理。
+- 口径原则沿用既有规则：`job_candidates` 人岗关系是唯一事实来源，`candidates.position` 旧标签不做岗位归属推断；同一人允许合法持有多个岗位关系，不合并、不“修复”。
+- 验证：job 142 无 `person_id+raw_position` 重复关系、无孤儿 `source_candidate_id`；`audit-client --client 士兰微 --strict` 返回 `{"ok": true, "mismatches": []}`。此差异后续线程不必再列为待办。
+
+## 五十、P3-a 推荐包升版设计稿状态核实（2026-08-14）
+
+- `docs/P3a_推荐包升版_设计.md`（评估指纹 + preflight/commit 幂等升版，68 行）当前完好存在于 main：直推 main 的 `6035da7` 及其 revert `8e5ad59` 已在历史整理中移除，`6035da7` 内容经 PR #1 合并链路保留。
+- 实施前提不变：等 P2-1 `capability_runtime` 拆分完成后由后端侧实施（避免 `service.py` 并发改动冲突）；前端仅有只读“证据已过期”提示，不伪造升版入口。
