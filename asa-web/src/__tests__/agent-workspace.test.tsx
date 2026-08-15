@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentObjectEmbed } from '../agent/AgentObjectEmbed'
-import { AgentWorkspace } from '../agent/AgentWorkspace'
+import { AgentWorkspace, buildSessionMarkdown } from '../agent/AgentWorkspace'
 import type { Workbench } from '../api'
 import type { AgentContext, AgentReference } from '../agent/transport'
 import { candidateDetail, mockResponse, plannedWorkflow } from './helpers'
@@ -362,6 +362,84 @@ describe('Agent workspace', () => {
     fireEvent.click(within(menu).getByRole('menuitem', { name: /复制会话 ID/ }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('task-1'))
     expect(screen.queryByRole('menu', { name: '任务操作' })).not.toBeInTheDocument()
+  })
+
+  it('buildSessionMarkdown 按天分节并标注角色与元信息', () => {
+    const markdown = buildSessionMarkdown({
+      title: '找人',
+      sessionId: 'task-9',
+      focus: '士兰微 / 电源专家',
+      exportedAt: '2026/08/16 10:00',
+      messages: [
+        { role: 'user', content: '先看看地图', created_at: '2026-08-15 09:00' },
+        { role: 'assistant', content: '已给出地图', created_at: '2026-08-15 09:01' },
+        { role: 'user', content: '第二天再问', created_at: '2026-08-16 08:00' },
+      ],
+    })
+    expect(markdown).toContain('# ASA 任务：找人')
+    expect(markdown).toContain('消息数：3')
+    expect(markdown).toContain('任务焦点：士兰微 / 电源专家')
+    expect(markdown).toContain('**你** · 2026-08-15 09:00')
+    expect(markdown).toContain('**ASA** · 2026-08-15 09:01')
+    expect(markdown.match(/## 2026-08-15/g)).toHaveLength(1)
+    expect(markdown).toContain('## 2026-08-16')
+  })
+
+  it('右键任务卡可导出会话：分页拉全量并下载 Markdown', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    const capturedBlobs: Blob[] = []
+    const createObjectURL = vi.fn((blob: Blob) => { capturedBlobs.push(blob); return 'blob:mock' })
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      const pageOne = Array.from({ length: 200 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `第${index + 1}条` }))
+      const pageTwo = [
+        { role: 'user' as const, content: '最早的问题', created_at: '2026-08-01 09:00' },
+        { role: 'assistant' as const, content: '最早的回答', created_at: '2026-08-01 09:01' },
+      ]
+      const fetchMock = vi.fn<typeof fetch>(async input => {
+        const url = String(input)
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '已恢复任务' }], total: 202, has_more: true })
+        }
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=200')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: { client: '士兰微', job: { title: '电源专家' } }, messages: pageOne, total: 202, has_more: true })
+        }
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=200&offset=200')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: pageTwo, total: 202, has_more: false })
+        }
+        return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 202, updated_at: '2026-08-03' }] })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      renderWorkspace({ type: 'page', page: 'agent' })
+
+      expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
+      const rail = screen.getByRole('complementary', { name: '任务历史' })
+      const card = within(rail).getByText('继续找人').closest('article')
+      fireEvent.contextMenu(card as HTMLElement)
+      fireEvent.click(within(screen.getByRole('menu', { name: '任务操作' })).getByRole('menuitem', { name: /导出会话/ }))
+
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+      const markdown = await capturedBlobs[0].text()
+      expect(markdown).toContain('# ASA 任务：继续找人')
+      expect(markdown).toContain('消息数：202')
+      expect(markdown).toContain('任务焦点')
+      // 跨天分节：早于当天的消息带日期小节标题。
+      expect(markdown).toContain('## 2026-08-01')
+      expect(markdown).toContain('最早的问题')
+      expect(markdown).toContain('第200条')
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      const anchorDownload = clickSpy.mock.instances[0] as HTMLAnchorElement
+      expect(anchorDownload.download).toMatch(/^ASA任务-继续找人-\d{8}-\d{4}\.md$/)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock')
+      // 对话头也有导出入口（当前会话激活时）。
+      expect(screen.getByRole('button', { name: '导出会话', hidden: false })).toBeInTheDocument()
+    } finally {
+      clickSpy.mockRestore()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('右键任务卡菜单可点击空白或按 Escape 关闭', async () => {
