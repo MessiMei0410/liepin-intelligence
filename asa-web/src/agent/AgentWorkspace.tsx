@@ -1,5 +1,5 @@
 import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
+import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, Download, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
@@ -82,6 +82,43 @@ const isArchiveAllTasksCommand = (value: string) => {
     || /^(?:请|帮我|麻烦)?归档(?:右侧|右边|任务栏(?:里|中|里的|中的)?)?(?:所有|全部)(?:历史)?任务(?:掉)?$/.test(compact)
     || /^(?:请|帮我|麻烦)?清空(?:右侧|右边)?任务栏$/.test(compact)
 }
+
+// 会话导出（纯函数，便于单测）：任务元信息 + 按天分节的对话正文（Markdown）。
+// 助手消息本身就是 Markdown，原样嵌入；created_at 取服务端本地时间字符串。
+export const buildSessionMarkdown = (options: {
+  title: string
+  sessionId: string
+  focus?: string
+  exportedAt: string
+  messages: Array<{ role: string; content: string; created_at?: string }>
+}) => {
+  const heading = options.title.trim() || options.sessionId
+  const lines = [`# ASA 任务：${heading}`, '']
+  lines.push(`- 导出时间：${options.exportedAt}`)
+  lines.push(`- 会话 ID：\`${options.sessionId}\``)
+  if (options.focus) lines.push(`- 任务焦点：${options.focus}`)
+  lines.push(`- 消息数：${options.messages.length}`)
+  let lastDay = ''
+  for (const message of options.messages) {
+    const day = (message.created_at || '').slice(0, 10)
+    if (day && day !== lastDay) {
+      lines.push('', '---', '', `## ${day}`)
+      lastDay = day
+    }
+    lines.push('', `**${message.role === 'user' ? '你' : 'ASA'}**${message.created_at ? ` · ${message.created_at}` : ''}`, '')
+    lines.push(message.content?.trim() || '（无文本内容）')
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+// 导出文件名：去掉路径不安全字符，限长，避免超长标题撑爆文件名。
+const sessionExportFileName = (title: string, sessionId: string, now = new Date()) => {
+  const safeTitle = title.replace(/[\\/:*?"<>|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40)
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+  return `ASA任务-${safeTitle || sessionId}-${stamp}.md`
+}
+
 
 const focusLabel = (focus?: Record<string, unknown> | null) => {
   if (!focus) return ''
@@ -713,6 +750,39 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       // 复制失败保持静默：任务右键菜单中的低频操作，无需打断用户。
     }
   }
+  // 导出会话：分页拉全量消息（每页 200，上限 50 页防异常循环）→ Markdown 下载。
+  // 导出的是服务端持久化全量，而不是当前已加载窗口——翻页加载过更早消息与否不影响导出完整性。
+  const exportSession = async (sessionId: string, title: string) => {
+    try {
+      const messages: AgentMessage[] = []
+      let focus: Record<string, unknown> | null | undefined
+      for (let page = 0; page < 50; page += 1) {
+        const result = await api.agentSession(sessionId, 200, messages.length)
+        focus = result.business_focus ?? focus
+        messages.push(...result.messages)
+        if (!result.has_more) break
+      }
+      const markdown = buildSessionMarkdown({
+        title,
+        sessionId,
+        focus: focusLabel(focus) || undefined,
+        exportedAt: new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date()),
+        messages,
+      })
+      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = sessionExportFileName(title, sessionId)
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch (value) {
+      setTaskError(`导出失败：${value instanceof Error ? value.message : String(value)}`)
+    }
+  }
+  const sessionTitle = (id: string) => sessions.find(item => item.session_id === id)?.title || id
   useEffect(() => {
     if (!taskMenu) return
     const closeOnEscape = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setTaskMenu(undefined) }
@@ -818,7 +888,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
 
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
-      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
+      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title="导出会话" aria-label="导出会话" onClick={() => void exportSession(sessionId, sessionTitle(sessionId))}><Download/></button>}<button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
       {contextConflict && <div className="agent-context-conflict" role="alert"><span>你正带着新的业务上下文进入，当前任务焦点为 {contextConflict.label}</span><div><button className="button primary" onClick={resolveConflictWithNewTask}>以新上下文新建任务</button><button className="button" onClick={resolveConflictKeepCurrent}>继续当前任务</button></div></div>}
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
@@ -920,13 +990,14 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       </div>
       <ModelAuditPanel open={modelAuditOpen} onClose={() => setModelAuditOpen(false)}/>
     </section>
-    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 112; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
+    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 156; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
       {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{item.preview}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></button>}
       <div className="agent-task-actions"><button className="icon-btn" disabled={!!taskBusy} aria-label={`重命名任务：${item.title}`} title="重命名任务" onClick={() => { setRenamingId(item.session_id); setRenameValue(item.title); setArchiveConfirmId(''); setTaskError('') }}><Pencil/></button>{archiveConfirmId === item.session_id ? <button className="button danger" disabled={taskBusy === item.session_id} aria-label={`确认归档任务：${item.title}`} onClick={() => void archiveTask(item)}>确认归档</button> : <button className="icon-btn" disabled={!!taskBusy} aria-label={`归档任务：${item.title}`} title="归档任务" onClick={() => { setArchiveConfirmId(item.session_id); setRenamingId(''); setTaskError('') }}><Archive/></button>}</div>
     </article>)}{!visibleSessions.length && <p>{taskQuery ? '没有匹配任务' : '暂无历史任务'}</p>}</div></>}</aside>
     {taskMenu && <div className="agent-task-menu-backdrop" role="presentation" onClick={() => setTaskMenu(undefined)} onContextMenu={event => { event.preventDefault(); setTaskMenu(undefined) }}>
       <div className="agent-task-menu" role="menu" aria-label="任务操作" style={{ left: taskMenu.x, top: taskMenu.y }}>
         <button role="menuitem" aria-label={`复制会话 ID：${taskMenu.sessionId}`} onClick={() => { void copySessionId(taskMenu.sessionId); setTaskMenu(undefined) }}><ClipboardCopy/><span>复制会话 ID<small>{taskMenu.sessionId}</small></span></button>
+        <button role="menuitem" aria-label={`导出会话：${taskMenu.sessionId}`} onClick={() => { void exportSession(taskMenu.sessionId, sessionTitle(taskMenu.sessionId)); setTaskMenu(undefined) }}><Download/><span>导出会话<small>下载完整对话 Markdown</small></span></button>
       </div>
     </div>}
     {bulkArchiveOpen && <div className="action-dialog-backdrop" role="presentation" onClick={() => { if (!bulkArchiveBusy) setBulkArchiveOpen(false) }}><section ref={bulkArchiveDialogRef} className="action-dialog agent-bulk-archive-dialog" role="alertdialog" aria-modal="true" aria-labelledby="bulk-archive-title" onClick={event => event.stopPropagation()}>
