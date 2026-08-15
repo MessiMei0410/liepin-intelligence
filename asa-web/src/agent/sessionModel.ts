@@ -64,6 +64,9 @@ const sessionSchema = z.object({
   session_id: z.string().min(1),
   messages: z.array(messageSchema),
   business_focus: structuredRecord.nullable().optional(),
+  // 会话历史分页（Core 支持 offset 后返回；旧 Core 缺字段时按 0/false 兜底）。
+  total: z.number().int().nonnegative().optional().default(0),
+  has_more: z.boolean().optional().default(false),
 })
 
 const sessionUpdateSchema = z.object({

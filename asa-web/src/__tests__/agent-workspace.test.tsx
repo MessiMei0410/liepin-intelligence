@@ -1063,27 +1063,44 @@ describe('Agent workspace', () => {
     expect(await screen.findByRole('status', { name: '当前任务焦点' })).toHaveTextContent('士兰微 / 电源专家')
   })
 
-  it('恢复拉满 100 条消息时提示仅显示最近 100 条', async () => {
+  it('恢复有更早历史的会话时提供「加载更早」入口并按 offset 翻页', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-1')
-    const messages = Array.from({ length: 100 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `历史消息 ${index + 1}` }))
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-1?limit=100')
-      ? mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages })
-      : mockResponse({ ok: true, sessions: [] })))
+    const recent = Array.from({ length: 100 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `历史消息 ${index + 1}` }))
+    const earlier = Array.from({ length: 20 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `更早消息 ${index + 1}` }))
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) {
+        return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: recent, total: 120, has_more: true })
+      }
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100&offset=100')) {
+        return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: earlier, total: 120, has_more: false })
+      }
+      return mockResponse({ ok: true, sessions: [] })
+    })
+    vi.stubGlobal('fetch', fetchMock)
     renderWorkspace({ type: 'page', page: 'agent' })
 
-    expect(await screen.findByText('仅显示最近 100 条消息')).toBeInTheDocument()
+    expect(await screen.findByText('加载更早的消息（还有 20 条）')).toBeInTheDocument()
     expect(screen.getByText('历史消息 100')).toBeInTheDocument()
+    expect(screen.queryByText('更早消息 1')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '加载更早的消息（还有 20 条）' }))
+    expect(await screen.findByText('更早消息 1')).toBeInTheDocument()
+    expect(screen.getByText('历史消息 100')).toBeInTheDocument()
+    // 最后一页加载完：入口消失。
+    expect(screen.queryByRole('button', { name: /加载更早的消息/ })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(call => String(call[0]).endsWith('/api/v1/copilot/sessions/task-1?limit=100&offset=100'))).toBe(true)
   })
 
-  it('恢复消息不足 100 条时不显示截断提示', async () => {
+  it('恢复无更早历史的会话时不显示「加载更早」入口', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-1')
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-1?limit=100')
-      ? mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '已恢复任务' }] })
+      ? mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '已恢复任务' }], total: 1, has_more: false })
       : mockResponse({ ok: true, sessions: [] })))
     renderWorkspace({ type: 'page', page: 'agent' })
 
     expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
-    expect(screen.queryByText('仅显示最近 100 条消息')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /加载更早的消息/ })).not.toBeInTheDocument()
   })
 
   it('发送对话时附带当前页面桥接摘要', async () => {

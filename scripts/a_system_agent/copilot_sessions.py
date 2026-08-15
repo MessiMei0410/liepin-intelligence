@@ -748,18 +748,28 @@ def _persist_copilot_focus(
     return self.get_copilot_focus(session_id) or focus
 
 
-def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, Any]:
+def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
     session_id = str(session_id or "").strip()
     if not session_id:
-        return {"ok": True, "session_id": "", "messages": [], "business_focus": None}
+        return {"ok": True, "session_id": "", "messages": [], "business_focus": None, "total": 0, "has_more": False}
     conn = self._connect()
     try:
+        # 会话历史分页：limit/offset 语义与 jobs、candidates 等列表端点一致
+        #（ORDER BY id DESC + OFFSET，返回时反转回时间正序）。offset 以"最新消息"为原点，
+        # 前端"加载更早"每页递增 offset。total 为会话消息总数，has_more 标识是否还有更早消息。
+        page_limit = max(1, min(int(limit or 100), 200))
+        page_offset = max(0, int(offset or 0))
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS total FROM agent_copilot_messages WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        total = int(total_row["total"] or 0) if total_row else 0
         rows = conn.execute(
             """
             SELECT role,content,context_type,context_id,structured_json,created_at
-            FROM agent_copilot_messages WHERE session_id=? ORDER BY id DESC LIMIT ?
+            FROM agent_copilot_messages WHERE session_id=? ORDER BY id DESC LIMIT ? OFFSET ?
             """,
-            (session_id, max(1, min(int(limit or 100), 200))),
+            (session_id, page_limit, page_offset),
         ).fetchall()
         messages = []
         for row in reversed(rows):
@@ -824,6 +834,8 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
             "session_id": session_id,
             "messages": messages,
             "business_focus": self.get_copilot_focus(session_id),
+            "total": total,
+            "has_more": page_offset + len(rows) < total,
         }
     finally:
         conn.close()

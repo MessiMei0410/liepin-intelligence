@@ -233,7 +233,11 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const [focusError, setFocusError] = useState('')
   const [focusBusy, setFocusBusy] = useState(false)
   const [turnProgress, setTurnProgress] = useState('')
-  const [historyTruncated, setHistoryTruncated] = useState(false)
+  // 会话历史分页：「加载更早」按钮与滚动锚定（服务端 offset/total/has_more 契约）。
+  const [hasEarlierHistory, setHasEarlierHistory] = useState(false)
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const prependHeightRef = useRef<number | null>(null)
   const [searchUnavailable, setSearchUnavailable] = useState(false)
   const [taskMenu, setTaskMenu] = useState<{ sessionId: string; x: number; y: number } | undefined>(undefined)
   const [interactionError, setInteractionError] = useState('')
@@ -294,14 +298,14 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     const generation = ++generationRef.current
     setContextConflict(undefined)
     setTurnProgress('')
-    setHistoryTruncated(false)
+    setHasEarlierHistory(false); setHistoryTotal(0)
     dispatch({ type: 'restore_started' })
     try {
       const result = await api.agentSession(id)
       if (generation !== generationRef.current) return
       const restoredFocus = result.business_focus || null
       setSessionId(result.session_id); dispatch({ type: 'restore_succeeded', messages: result.messages }); setFocus(restoredFocus)
-      setHistoryTruncated(result.messages.length >= SESSION_MESSAGE_LIMIT)
+      setHasEarlierHistory(result.has_more); setHistoryTotal(result.total)
       const restoredContext = focusContext(restoredFocus)
       const incoming = attachedContextRef.current
       const incomingIsBusiness = Boolean(incoming.type && incoming.type !== 'page')
@@ -357,6 +361,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   }, [taskQuery])
   useEffect(() => {
     // 空任务首页是工作台，不是对话记录；首次进入必须从顶部开始阅读。
+    // 「加载更早」插入历史页时例外：交给滚动锚定 effect 保持原视口，不跳底部。
+    if (prependHeightRef.current !== null) return
     if ((messages.length || loading) && typeof endRef.current?.scrollIntoView === 'function') {
       endRef.current.scrollIntoView({ block: 'end' })
     }
@@ -366,7 +372,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const startTaskWithContext = (next: AgentContext) => {
     controllerRef.current?.abort(); generationRef.current += 1; setSessionId(''); dispatch({ type: 'task_reset' }); setFocus(null); setDraft(''); setLastTurn(undefined)
     attachmentGenerationRef.current += 1; attachmentsRef.current = []; setAttachmentNotice('')
-    setAttachedContext(next); setAttachments([]); setContextConflict(undefined); setFocusError(''); setTurnProgress(''); setHistoryTruncated(false)
+    setAttachedContext(next); setAttachments([]); setContextConflict(undefined); setFocusError(''); setTurnProgress(''); setHasEarlierHistory(false); setHistoryTotal(0)
     localStorage.removeItem(ACTIVE_SESSION_KEY); setHistoryOpen(false)
   }
   const replaceAttachments = (update: (current: QueuedAgentAttachment[]) => QueuedAgentAttachment[]) => {
@@ -563,6 +569,33 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
   const jumpToBottom = () => endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  // 「加载更早」：offset=当前已加载条数请求更早一页；服务端并发变化导致页间重叠时按
+  // created_at+content 去重；插入后由下方锚定 effect 把视口钉回原消息位置。
+  const loadEarlierMessages = async () => {
+    if (!sessionId || loadingEarlier || loading || restoring) return
+    prependHeightRef.current = messagesRef.current?.scrollHeight ?? null
+    setLoadingEarlier(true)
+    try {
+      const result = await api.agentSession(sessionId, SESSION_MESSAGE_LIMIT, messages.length)
+      const seen = new Set(messages.map(message => `${message.created_at || ''}\n${message.content}`))
+      const earlier = result.messages.filter(message => !seen.has(`${message.created_at || ''}\n${message.content}`))
+      if (earlier.length) dispatch({ type: 'history_prepended', messages: earlier })
+      else prependHeightRef.current = null
+      setHasEarlierHistory(result.has_more)
+      setHistoryTotal(result.total)
+    } catch {
+      // 加载失败保持现状：按钮可重试，清锚点避免误触发滚动锚定。
+      prependHeightRef.current = null
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }
+  // 滚动锚定：插入早页后消息区高度增长，把增量全部留在视口上方——阅读位置不跳。
+  useEffect(() => {
+    const el = messagesRef.current
+    if (el && prependHeightRef.current !== null) el.scrollTop = el.scrollHeight - prependHeightRef.current
+    prependHeightRef.current = null
+  }, [messages.length])
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() }
   }
@@ -790,7 +823,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
       <div ref={messagesRef} className="agent-messages">
-        {historyTruncated && <p className="agent-truncated">仅显示最近 100 条消息</p>}
+        {hasEarlierHistory && <div className="agent-truncated"><button type="button" className="agent-load-earlier" onClick={() => void loadEarlierMessages()} disabled={loadingEarlier || loading || restoring}>{loadingEarlier ? '正在加载更早消息…' : historyTotal > messages.length ? `加载更早的消息（还有 ${historyTotal - messages.length} 条）` : '加载更早的消息'}</button></div>}
         {!messages.length && !restoring && <AgentHome jobs={jobs} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} onQuickCommand={runQuickCommand} />}
         {restoring && <div className="agent-loading"><LoaderCircle className="spin"/>恢复任务</div>}
         {messages.map((message, index) => {

@@ -18,6 +18,7 @@ export type AgentConversationAction =
   | { type: 'task_reset' }
   | { type: 'restore_started' }
   | { type: 'restore_succeeded'; messages: AgentMessage[] }
+  | { type: 'history_prepended'; messages: AgentMessage[] }
   | { type: 'restore_failed'; error: string }
   | { type: 'turn_started'; requestId: string; message: string; context: AgentContext; retry: boolean; continuation?: boolean }
   | { type: 'turn_text'; requestId: string; content: string }
@@ -33,6 +34,9 @@ export const agentConversationReducer = (
   if (action.type === 'task_reset') return initialAgentConversationState
   if (action.type === 'restore_started') return { ...initialAgentConversationState, phase: 'restoring' }
   if (action.type === 'restore_succeeded') return { ...initialAgentConversationState, messages: action.messages }
+  // 「加载更早」：早页消息插到最前，phase/activeRequestId 原样保留——
+  // 进行中的流式轮次（streaming）不受影响，避免打断生成。
+  if (action.type === 'history_prepended') return { ...state, messages: [...action.messages, ...state.messages] }
   if (action.type === 'restore_failed') return { ...initialAgentConversationState, phase: 'failed', error: action.error }
   if (action.type === 'turn_started') {
     const retained = action.retry

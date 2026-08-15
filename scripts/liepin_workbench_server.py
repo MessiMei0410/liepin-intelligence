@@ -8365,7 +8365,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 query = urllib.parse.parse_qs(parsed.query)
                 session_id = clean((query.get("session_id") or [""])[-1])
                 limit = parse_optional_int((query.get("limit") or [""])[-1]) or 100
-                json_response(self, self.state.agent_service.get_copilot_session(session_id, limit))
+                offset = parse_optional_int((query.get("offset") or [""])[-1]) or 0
+                json_response(self, self.state.agent_service.get_copilot_session(session_id, limit, offset))
             elif parsed.path == "/api/agent/copilot/sessions":
                 if not agent_origin_allowed(self):
                     json_response(self, {"ok": False, "error": "拒绝非本地 A 系统页面读取对话历史"}, HTTPStatus.FORBIDDEN)

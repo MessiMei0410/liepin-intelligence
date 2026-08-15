@@ -20,4 +20,14 @@ describe('Agent session boundary', () => {
     expect(() => parseAgentSessionList({ ok: true, sessions: [{ session_id: 'task-1' }] })).toThrow()
     expect(() => parseAgentSession({ ok: true, session_id: 'task-1', messages: [{ role: 'tool', content: 'x' }] })).toThrow()
   })
+
+  it('parses history paging fields and falls back for legacy Core payloads', () => {
+    const paged = parseAgentSession({ ok: true, session_id: 'task-1', messages: [], total: 120, has_more: true })
+    expect(paged.total).toBe(120)
+    expect(paged.has_more).toBe(true)
+    // 旧 Core 无 offset 契约时按 0/false 兜底，前端不误报更早历史。
+    const legacy = parseAgentSession({ ok: true, session_id: 'task-1', messages: [] })
+    expect(legacy.total).toBe(0)
+    expect(legacy.has_more).toBe(false)
+  })
 })
