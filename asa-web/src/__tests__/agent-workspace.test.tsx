@@ -404,8 +404,28 @@ describe('Agent workspace', () => {
     expect(screen.queryByText('已恢复任务')).not.toBeInTheDocument()
   })
 
-  it('? 打开快捷键帮助面板，Esc 关闭；输入框内不触发', async () => {
+  it('主题按钮循环 auto→light→dark 并落到 html data-theme', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
+      ? mockResponse({ ok: true, sessions: [] })
+      : mockResponse({})))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    const autoButton = screen.getByRole('button', { name: /主题：跟随系统/ })
+    fireEvent.click(autoButton)
+    expect(await screen.findByRole('button', { name: /主题：浅色/ })).toBeInTheDocument()
+    expect(document.documentElement.dataset.theme).toBe('light')
+
+    fireEvent.click(screen.getByRole('button', { name: /主题：浅色/ }))
+    expect(await screen.findByRole('button', { name: /主题：深色/ })).toBeInTheDocument()
+    expect(document.documentElement.dataset.theme).toBe('dark')
+
+    fireEvent.click(screen.getByRole('button', { name: /主题：深色/ }))
+    expect(await screen.findByRole('button', { name: /主题：跟随系统/ })).toBeInTheDocument()
+    // auto 在 jsdom（无深色系统偏好）解析回 light。
+    expect(document.documentElement.dataset.theme).toBe('light')
+  })
+
+  it('? 打开快捷键帮助面板，Esc 关闭；输入框内不触发', async () => {    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
       ? mockResponse({ ok: true, sessions: [] })
       : mockResponse({})))
     renderWorkspace({ type: 'page', page: 'agent' })
