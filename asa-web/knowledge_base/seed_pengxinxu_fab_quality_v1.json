@@ -74,7 +74,7 @@
   "level_mapping": {
     "level_band": "expert",
     "job_title_range": "高级工程师/主任工程师/专家",
-    "accepted_candidate_levels": ["高级工程师", "资深工程师", "主任工程师", "专家"],
+    "accepted_candidate_levels": ["资深工程师", "主任工程师", "专家"],
     "note": "主任工程师落 kb_level_mapping expert 带（别名含主任工程师）；按产线质量闭环负责范围定档而非 title",
     "applies_to": "fab_quality_reliability 原型；半导体质量/可靠性岗可复用"
   }

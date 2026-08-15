@@ -2,22 +2,22 @@
   "meta": {
     "version": "v1.0",
     "created": "2026-08-05",
-    "source": "cases/case_changyue_equipment_v1.json（长越四岗之一：电气，20-30k×16薪，杭州；cross_position_insights.salary_band_seed + execution_priority_v1.1 软件>电气>机械>FA）",
-    "usage": "长越封测设备电气岗原型：策略生成与简历评估直接消费；与 changyue_bonding_motion_control（软件）/changyue_precision_equipment_mechanical（机械）同客户同场景",
-    "governance": "client_scoped=true：仅长越科技岗位命中，不污染其他客户；T1 名单沿用运动控制原型顾问校准口径，电气岗优先级待顾问逐案校准"
+    "source": "cases/case_changyue_equipment_v1.json（长越四岗之一：电气，20-30k×16薪，杭州；positions[1]『电气高级工程师（化学品供应系统）』）",
+    "usage": "长越化学品/特气供应系统电气岗原型：策略生成与简历评估直接消费；与 changyue_bonding_motion_control（自动化软件）/changyue_precision_equipment_mechanical（机械）/changyue_failure_analysis（失效分析）同客户同场景",
+    "governance": "client_scoped=true：仅长越科技岗位命中，不污染其他客户；2026-08-16 纠正：原『键合设备电气』栈（TwinCAT/Codesys/EtherCAT/温控压力闭环）系运动控制原型误复制，实为化学品供应系统电气（防爆 ATEX/SIS/SEMI S2·S8/EPLAN/TIA Portal）"
   },
   "job_archetype": {
     "archetype_id": "changyue_bonding_electrical",
-    "title": "键合设备电气高级工程师",
+    "title": "电气高级工程师（化学品供应系统）",
     "client": "长越科技",
     "client_scoped": true,
-    "essence": "键合/封装设备电气控制系统：PLC（TwinCAT/Codesys）开发、EtherCAT 总线、温控/压力闭环、整机电气设计与现场调试。",
+    "essence": "化学品/危险气体输送系统的电气与控制设计：防爆（ATEX/Ex）、SIS 安全联锁、PLC/HMI（TIA Portal/Studio 5000）、SEMI S2/S8 合规、腐蚀性流体材料兼容。",
     "directions": [
       {
-        "name": "先进封装键合设备",
-        "customers": ["封测厂", "先进封装产线"],
-        "products": ["键合机", "固晶机", "多轴精密平台"],
-        "competitors": ["ASMPT", "K&S", "BESI", "华封科技"]
+        "name": "半导体化学品/特气供应系统",
+        "customers": ["晶圆厂/封测厂", "气体化学品输送系统集成商"],
+        "products": ["化学品供应系统", "特气输送系统", "供液/供气柜"],
+        "competitors": ["至纯科技", "正帆科技", "亚翔集成"]
       }
     ],
     "location_policy": "杭州本地优先；异地人选正常进入召回，推进前确认 relocation",
@@ -25,34 +25,28 @@
   },
   "target_company_pool": {
     "T1_same_layer": {
-      "label": "T1 键合及封装设备同行",
+      "label": "T1 特气/化学品输送系统同行",
       "path": "same_layer",
       "tier": "T1",
-      "confidence": "high",
-      "rationale": "设备场景与电气控制技术栈同时对口（名单沿用运动控制原型顾问校准口径）",
+      "confidence": "medium-high",
+      "rationale": "化学品/特气输送系统电气与控制技术栈完全对口（防爆/SIS/SEMI S2），名单沿用 case positions[1] 顾问校准口径",
       "companies": [
-        {"name": "ASMPT"},
-        {"name": "K&S（库力索法）"},
-        {"name": "BESI"},
-        {"name": "新益昌"},
-        {"name": "凯格精机"},
-        {"name": "华封科技"},
-        {"name": "恩纳基智能装备"},
-        {"name": "普莱信"},
-        {"name": "大族封测"},
-        {"name": "快克智能"}
+        {"name": "至纯科技"},
+        {"name": "正帆科技"},
+        {"name": "亚翔集成"},
+        {"name": "新莱应材"}
       ]
     },
     "T2_adjacent": {
-      "label": "T2 半导体及精密设备电气岗",
+      "label": "T2 半导体厂务/设备电气岗",
       "path": "adjacent",
       "tier": "T2",
       "confidence": "medium",
-      "rationale": "电气控制能力可迁移，需补封装工艺场景（待顾问校准）",
+      "rationale": "电气控制与防爆安全能力可迁移，需补化学品/特气系统场景（待顾问校准）",
       "companies": [
         {"name": "中微公司"},
         {"name": "北方华创"},
-        {"name": "汇川技术"}
+        {"name": "汉钟精机"}
       ]
     }
   },
@@ -60,25 +54,26 @@
     {
       "group": "electrical_core",
       "targets": "T1/T2 电气控制核心词",
-      "terms": ["PLC", "TwinCAT", "Codesys", "EtherCAT", "电气设计", "电气控制"]
+      "terms": ["PLC", "HMI", "TIA Portal", "Studio 5000", "EPLAN", "电气设计", "电气控制"]
     },
     {
-      "group": "control_loops",
-      "targets": "闭环与执行器兜底词",
-      "terms": ["温控", "压力控制", "闭环控制", "伺服", "传感器", "键合机", "封装设备"]
+      "group": "safety_compliance",
+      "targets": "防爆与安全合规兜底词",
+      "terms": ["防爆", "ATEX", "Ex", "SIS", "安全联锁", "SEMI S2", "SEMI S8", "化学品供应", "特气输送", "二次配"]
     }
   ],
   "negative_rules": [
-    "纯电气选型/配盘、无控制系统开发证据的候选人不进入优先池",
-    "只命中技能标签但无项目证据时必须标记待核验，不得直接判定满足硬门槛",
+    "纯电气选型/配盘、无系统控制或防爆安全设计证据的候选人不进入优先池",
+    "防爆 ATEX/Ex 与 SIS 安全联锁经验是硬门槛，无证据必须标记待核验",
     "异地不是召回排除项，但推进前必须确认杭州 relocation 意愿"
   ],
-  "skills_ontology_nodes": ["PLC", "TwinCAT", "Codesys", "EtherCAT", "闭环控制", "温控", "压力控制", "键合机", "封装设备"],
+  "skills_ontology_nodes": ["PLC", "闭环控制", "压力控制"],
+  "skills_ontology_note": "化学品供应系统电气岗核心技能（防爆/SIS/SEMI S2/特气输送）尚未纳入本体；现有本体仅 PLC/闭环控制/压力控制 为 canonical 回填词，防爆安全类技能待本体扩充",
   "level_mapping": {
     "level_band": "senior",
     "job_title_range": "高级工程师/资深工程师",
     "accepted_candidate_levels": ["高级工程师", "资深工程师", "技术经理"],
-    "note": "按整机电气系统负责范围定档，不按 title 机械过滤（沿用 kb_level_mapping senior 带口径：5-10年）",
-    "applies_to": "changyue_bonding_electrical 原型；长越设备电气岗可复用"
+    "note": "按整机电气与防爆安全系统负责范围定档，不按 title 机械过滤（沿用 kb_level_mapping senior 带口径：5-10年）",
+    "applies_to": "changyue_bonding_electrical 原型；长越化学品供应系统电气岗可复用"
   }
 }

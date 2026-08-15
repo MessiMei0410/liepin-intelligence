@@ -61,7 +61,7 @@
     {
       "group": "ye_tools",
       "targets": "检测/量测手段兜底词",
-      "terms": ["KLA", "检测设备", "量测", "数据分析", "8D"]
+      "terms": ["KLA", "检测设备", "量测", "数据分析"]
     }
   ],
   "negative_rules": [

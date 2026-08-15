@@ -10,14 +10,14 @@
     "archetype_id": "fab_td_process_expert",
     "title": "Fab TD/工艺技术专家（PIE/CMP/CVD/PVD/Etch/WET/Litho）",
     "client": "",
-    "client_profile": "12 寸晶圆代工/IDM（40nm/28nm 成熟逻辑制程）工艺整合与模块工艺岗",
-    "essence": "12 寸成熟逻辑制程的工艺整合（PIE/TD）与模块工艺（CMP/CVD/PVD/Etch/WET/Litho/IMP）：量产工艺优化、缺陷与良率协同、工艺 transfer 与新产线量产导入。产线代际是硬过滤：只看 12 寸背景。",
+    "client_profile": "12 寸晶圆代工（先进逻辑 FinFET，7nm/5nm/3nm）工艺整合与模块工艺岗",
+    "essence": "12 寸先进逻辑 FinFET 制程（7nm/5nm/3nm）的工艺整合（PIE/TD）与模块工艺（CMP/CVD/PVD/Etch/WET/Litho/IMP/EPI）：量产工艺优化、缺陷与良率协同、工艺 transfer 与新产线量产导入。产线代际是硬过滤：只看 12 寸背景。",
     "directions": [
       {
-        "name": "40/28nm 成熟逻辑代工",
+        "name": "先进逻辑 FinFET 代工（7nm/5nm/3nm）",
         "customers": ["芯片设计公司（fabless）"],
-        "products": ["40nm", "28nm", "成熟逻辑制程"],
-        "competitors": ["中芯国际", "华虹", "晶合集成"]
+        "products": ["7nm", "5nm", "3nm", "先进逻辑 FinFET"],
+        "competitors": ["中芯国际", "中芯南方", "台积电"]
       }
     ],
     "location_policy": "深圳（坪山区为主）；异地人选正常进入召回，推进前确认 relocation",
@@ -29,9 +29,12 @@
       "path": "same_layer",
       "tier": "T1",
       "confidence": "medium",
-      "rationale": "12 寸产线 + 相近制程世代，模块工艺与工艺整合能力直接迁移（按 fab 常识推导，待顾问校准）",
+      "rationale": "12 寸产线 + 先进逻辑 FinFET 制程世代，模块工艺与工艺整合能力直接迁移（HR 备注目标源含 TSMC/中芯南方/ICRD；待顾问校准）",
       "companies": [
         {"name": "中芯国际"},
+        {"name": "中芯南方"},
+        {"name": "ICRD（上海集成电路研发中心）"},
+        {"name": "台积电"},
         {"name": "华虹"},
         {"name": "晶合集成"},
         {"name": "粤芯半导体"},
@@ -57,7 +60,7 @@
     {
       "group": "td_module",
       "targets": "T1/T2 工艺模块词",
-      "terms": ["TD", "PIE", "工艺整合", "CMP", "CVD", "PVD", "Etch", "WET", "Litho", "IMP", "Device"]
+      "terms": ["TD", "PIE", "工艺整合", "CMP", "CVD", "PVD", "Etch", "WET", "Litho", "IMP", "EPI", "OPC", "量测", "Device"]
     },
     {
       "group": "fab_common",
