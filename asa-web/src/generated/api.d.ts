@@ -2210,6 +2210,16 @@ export interface components {
             business_focus?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
         };
         /** CopilotSessionListResponse */
         CopilotSessionListResponse: {
@@ -4604,6 +4614,7 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                offset?: number;
             };
             header?: never;
             path: {

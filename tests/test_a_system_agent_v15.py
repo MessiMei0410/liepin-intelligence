@@ -78,6 +78,39 @@ class AgentV15ServiceTest(AgentDbCase):
         self.assertEqual(sessions["sessions"][0]["title"], "这个人选缺什么？")
         service.close()
 
+    def test_copilot_session_history_paging_semantics(self) -> None:
+        """会话历史分页：limit/offset 以最新消息为原点，total/has_more 支撑前端「加载更早」。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="继续推进。"))
+        service.submit_assessment(30, wait=True)
+        for index in range(3):
+            service.copilot(
+                f"第{index + 1}轮：现在进展如何？",
+                session_id="page-test",
+                context={"type": "candidate", "id": 30},
+            )
+        full = service.get_copilot_session("page-test", 200)
+        total = len(full["messages"])
+        self.assertGreaterEqual(total, 6)
+        self.assertEqual(full["total"], total)
+        self.assertFalse(full["has_more"])
+        first_page = service.get_copilot_session("page-test", 4)
+        self.assertEqual(len(first_page["messages"]), 4)
+        self.assertEqual(first_page["total"], total)
+        self.assertTrue(first_page["has_more"])
+        second_page = service.get_copilot_session("page-test", 4, 4)
+        self.assertEqual(len(second_page["messages"]), total - 4)
+        self.assertEqual(second_page["total"], total)
+        self.assertFalse(second_page["has_more"])
+        # 两页拼接（早页在前）与全量历史逐条一致，保证时间正序不因分页错乱。
+        paged = [item["content"] for item in second_page["messages"] + first_page["messages"]]
+        self.assertEqual(paged, [item["content"] for item in full["messages"]])
+        # offset 越过总数：空页且 has_more=False，不误报还有更早消息。
+        beyond = service.get_copilot_session("page-test", 100, total + 10)
+        self.assertEqual(beyond["messages"], [])
+        self.assertEqual(beyond["total"], total)
+        self.assertFalse(beyond["has_more"])
+        service.close()
+
     def test_dashboard_and_global_copilot_support_contextual_queries(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="当前应优先处理待复核人选。"))
         service.submit_assessment(30, wait=True)

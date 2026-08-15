@@ -198,6 +198,8 @@ class CopilotSessionDetailResponse(BaseModel):
     session_id: str
     messages: list[CopilotMessageResponse] = Field(default_factory=list)
     business_focus: dict[str, Any] | None = None
+    total: int = 0
+    has_more: bool = False
 
 
 class CopilotSessionUpdateResponse(BaseModel):
@@ -1007,8 +1009,12 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         )
 
     @app.get("/api/v1/copilot/sessions/{session_id}", response_model=CopilotSessionDetailResponse)
-    def copilot_session(session_id: str, limit: int = Query(100, ge=1, le=200)) -> dict[str, Any]:
-        result = agent.get_copilot_session(session_id, limit)
+    def copilot_session(
+        session_id: str,
+        limit: int = Query(100, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        result = agent.get_copilot_session(session_id, limit, offset)
         if not result.get("messages") and not result.get("business_focus"):
             raise HTTPException(status_code=404, detail="Agent task not found")
         return result

@@ -129,9 +129,9 @@ def get_copilot_focus(self, session_id: str) -> dict[str, Any] | None:
     return _impl(self, session_id)
 
 
-def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, Any]:
+def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0) -> dict[str, Any]:
     from .copilot_sessions import get_copilot_session as _impl
-    return _impl(self, session_id, limit=limit)
+    return _impl(self, session_id, limit=limit, offset=offset)
 
 
 def list_copilot_sessions(

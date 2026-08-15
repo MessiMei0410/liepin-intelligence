@@ -702,7 +702,7 @@ export const api = {
   dashboard: () => json<Dashboard>('/api/v1/dashboard'),
   workbench: () => json<Workbench>(`/api/v1/workbench?limit=${WORKBENCH_LIMIT}`),
   agentSessions: (limit = 30, q = '') => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`).then(parseAgentSessionList),
-  agentSession: (sessionId: string, limit = 100) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}`).then(parseAgentSession),
+  agentSession: (sessionId: string, limit = 100, offset = 0) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`).then(parseAgentSession),
   health: () => json<{ ok?: boolean; status?: string }>('/api/v1/health'),
   updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
     write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),

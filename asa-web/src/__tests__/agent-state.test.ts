@@ -68,4 +68,24 @@ describe('Agent conversation state machine', () => {
     expect(completed.messages[0].invalidated).toBe(true)
     expect(completed.messages[0].invalidated_reason).toContain('纠正')
   })
+
+  it('history_prepended 把早页插到最前且不打断进行中的流式轮次', () => {
+    const streaming = agentConversationReducer(initialAgentConversationState, {
+      type: 'turn_started', requestId: 'request-1', message: '继续推进', context: { type: 'job', id: 154 }, retry: false,
+    })
+    const prepended = agentConversationReducer(streaming, {
+      type: 'history_prepended',
+      messages: [
+        { role: 'user', content: '很早的问题' },
+        { role: 'assistant', content: '很早的回答' },
+      ],
+    })
+
+    expect(prepended.phase).toBe('streaming')
+    expect(prepended.activeRequestId).toBe('request-1')
+    expect(prepended.messages.map(message => message.content)).toEqual(['很早的问题', '很早的回答', '继续推进', ''])
+    // 插入后流式文本仍落到当前轮（最后一条）。
+    const withText = agentConversationReducer(prepended, { type: 'turn_text', requestId: 'request-1', content: '生成中' })
+    expect(withText.messages[withText.messages.length - 1].content).toBe('生成中')
+  })
 })
