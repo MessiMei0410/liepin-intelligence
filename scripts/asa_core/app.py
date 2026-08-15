@@ -202,6 +202,22 @@ class CopilotSessionDetailResponse(BaseModel):
     has_more: bool = False
 
 
+class CopilotMessageSearchMatchResponse(BaseModel):
+    role: str
+    created_at: str | None = None
+    content: str = ""
+    snippet: str = ""
+    newer_count: int = Field(ge=0)
+
+
+class CopilotMessageSearchResponse(BaseModel):
+    ok: bool = True
+    session_id: str
+    query: str = ""
+    matches: list[CopilotMessageSearchMatchResponse] = Field(default_factory=list)
+    total: int = 0
+
+
 class CopilotSessionUpdateResponse(BaseModel):
     ok: bool = True
     session_id: str
@@ -1018,6 +1034,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         if not result.get("messages") and not result.get("business_focus"):
             raise HTTPException(status_code=404, detail="Agent task not found")
         return result
+
+    @app.get("/api/v1/copilot/sessions/{session_id}/messages/search", response_model=CopilotMessageSearchResponse)
+    def copilot_session_message_search(
+        session_id: str,
+        q: str = Query("", max_length=200),
+        limit: int = Query(20, ge=1, le=50),
+    ) -> dict[str, Any]:
+        return agent.search_copilot_session_messages(session_id, q, limit)
 
     @app.patch("/api/v1/copilot/sessions/{session_id}", response_model=CopilotSessionUpdateResponse)
     def copilot_session_update(

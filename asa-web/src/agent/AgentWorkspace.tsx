@@ -1,6 +1,6 @@
 import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
 import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, Download, FileText, Filter, History, Keyboard, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
-import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
+import { api, AgentMessage, AgentSessionSearchMatch, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
 import { AgentPageContextBar } from './AgentPageContextBar'
@@ -125,6 +125,10 @@ const isTypingTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false
   return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
 }
+
+// 消息复合身份：created_at+role+内容前缀，与历史分页去重键一致，搜索跳转也用其定位。
+const messageIdentity = (message: { role?: string; content?: string; created_at?: string | null }) =>
+  `${message.created_at || ''}\n${message.role || ''}\n${(message.content || '').slice(0, 60)}`
 
 
 const focusLabel = (focus?: Record<string, unknown> | null) => {
@@ -282,6 +286,15 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
   const [historyTotal, setHistoryTotal] = useState(0)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const prependHeightRef = useRef<number | null>(null)
+  // 搜索跳转：待提交后定位的消息身份（与自动滚底互斥）。
+  const pendingJumpRef = useRef<string | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchMatches, setSearchMatches] = useState<AgentSessionSearchMatch[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const messageSearchSeqRef = useRef(0)
   const [searchUnavailable, setSearchUnavailable] = useState(false)
   const [taskMenu, setTaskMenu] = useState<{ sessionId: string; x: number; y: number } | undefined>(undefined)
   const [interactionError, setInteractionError] = useState('')
@@ -346,6 +359,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     setContextConflict(undefined)
     setTurnProgress('')
     setHasEarlierHistory(false); setHistoryTotal(0)
+    setSearchOpen(false); setSearchQuery(''); setSearchMatches([]); setSearchError('')
     dispatch({ type: 'restore_started' })
     try {
       const result = await api.agentSession(id)
@@ -407,6 +421,20 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     return () => window.clearTimeout(timer)
   }, [taskQuery])
   useEffect(() => {
+    // 搜索跳转：分页补齐后定位到目标消息（居中 + 短暂高亮），优先级最高。
+    if (pendingJumpRef.current) {
+      const key = pendingJumpRef.current
+      pendingJumpRef.current = null
+      const nodes = messagesRef.current?.querySelectorAll<HTMLElement>('.agent-message')
+      const idx = messages.findIndex(message => messageIdentity(message) === key)
+      const target = nodes?.[idx]
+      if (target) {
+        target.scrollIntoView({ block: 'center' })
+        target.classList.add('search-hit')
+        window.setTimeout(() => target.classList.remove('search-hit'), 1800)
+      }
+      return
+    }
     // 空任务首页是工作台，不是对话记录；首次进入必须从顶部开始阅读。
     // 「加载更早」插入历史页时例外：交给滚动锚定 effect 保持原视口，不跳底部。
     // 用户上翻浏览历史（pinnedToBottomRef=false）时流式输出不自动吸底，
@@ -423,7 +451,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
   const startTaskWithContext = (next: AgentContext) => {
     controllerRef.current?.abort(); generationRef.current += 1; setSessionId(''); dispatch({ type: 'task_reset' }); setFocus(null); setDraft(''); setLastTurn(undefined)
     attachmentGenerationRef.current += 1; attachmentsRef.current = []; setAttachmentNotice('')
-    setAttachedContext(next); setAttachments([]); setContextConflict(undefined); setFocusError(''); setTurnProgress(''); setHasEarlierHistory(false); setHistoryTotal(0)
+    setAttachedContext(next); setAttachments([]); setContextConflict(undefined); setFocusError(''); setTurnProgress(''); setHasEarlierHistory(false); setHistoryTotal(0); setSearchOpen(false); setSearchQuery(''); setSearchMatches([]); setSearchError('')
     localStorage.removeItem(ACTIVE_SESSION_KEY); setHistoryOpen(false)
   }
   const replaceAttachments = (update: (current: QueuedAgentAttachment[]) => QueuedAgentAttachment[]) => {
@@ -588,15 +616,22 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
   }, [draft])
-  // 全局快捷键：⌘K 聚焦输入 / ⌘⇧N 新建任务 / ? 帮助面板。
+  // 会话内搜索面板开合（提前声明供快捷键句柄引用；依赖的 state/ref 均在上方）。
+  const toggleSearch = () => {
+    setSearchOpen(value => !value)
+    setSearchMatches([]); setSearchError('')
+    if (!searchOpen) window.setTimeout(() => searchInputRef.current?.focus(), 0)
+  }
+  // 全局快捷键：⌘K 聚焦输入 / ⌘⇧N 新建任务 / ⌘⇧F 会话搜索 / ? 帮助面板。
   // 动作句柄经"latest ref"取最新闭包（newTask 依赖当轮 context），订阅 effect 只挂一次；
   // ref 写入放 effect（渲染期写 ref 违反 react-hooks/refs 规则），每次渲染后刷新。
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
-  const shortcutActionsRef = useRef({ newTask: () => {}, openShortcuts: () => {} })
+  const shortcutActionsRef = useRef({ newTask: () => {}, openShortcuts: () => {}, toggleSearch: () => {} })
   useEffect(() => {
     shortcutActionsRef.current = {
       newTask: () => newTask(),
       openShortcuts: () => setShortcutsOpen(true),
+      toggleSearch: () => toggleSearch(),
     }
   })
   useEffect(() => {
@@ -610,6 +645,11 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
       if (meta && event.shiftKey && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         shortcutActionsRef.current.newTask()
+        return
+      }
+      if (meta && event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        shortcutActionsRef.current.toggleSearch()
         return
       }
       if (event.key === '?' && !isTypingTarget(event.target)) {
@@ -651,15 +691,15 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
   // 「加载更早」：offset=当前已加载条数请求更早一页；服务端并发变化导致页间重叠时按
-  // created_at+content 去重；插入后由下方锚定 effect 把视口钉回原消息位置。
+  // messageIdentity 去重；插入后由下方锚定 effect 把视口钉回原消息位置。
   const loadEarlierMessages = async () => {
     if (!sessionId || loadingEarlier || loading || restoring) return
     prependHeightRef.current = messagesRef.current?.scrollHeight ?? null
     setLoadingEarlier(true)
     try {
       const result = await api.agentSession(sessionId, SESSION_MESSAGE_LIMIT, messages.length)
-      const seen = new Set(messages.map(message => `${message.created_at || ''}\n${message.content}`))
-      const earlier = result.messages.filter(message => !seen.has(`${message.created_at || ''}\n${message.content}`))
+      const seen = new Set(messages.map(messageIdentity))
+      const earlier = result.messages.filter(message => !seen.has(messageIdentity(message)))
       if (earlier.length) dispatch({ type: 'history_prepended', messages: earlier })
       else prependHeightRef.current = null
       setHasEarlierHistory(result.has_more)
@@ -671,12 +711,68 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
       setLoadingEarlier(false)
     }
   }
+  // 消息数组快照 ref：跨 async 循环读取最新已加载条数（React state 在闭包内是旧值）。
+  const messagesStateRef = useRef({ messages, sessionId })
+  useEffect(() => { messagesStateRef.current = { messages, sessionId } }, [messages, sessionId])
+  // 连续分页补齐，直到覆盖目标 newer_count（搜索跳转用）；逐页去重并推进快照。
+  const loadEarlierUntil = async (newerCount: number) => {
+    for (let page = 0; page < 50; page += 1) {
+      const current = messagesStateRef.current
+      if (current.messages.length > newerCount || !current.sessionId) return
+      const result = await api.agentSession(current.sessionId, SESSION_MESSAGE_LIMIT, current.messages.length)
+      const seen = new Set(current.messages.map(messageIdentity))
+      const earlier = result.messages.filter(message => !seen.has(messageIdentity(message)))
+      if (!earlier.length) return
+      dispatch({ type: 'history_prepended', messages: earlier })
+      messagesStateRef.current = { sessionId: current.sessionId, messages: [...earlier, ...current.messages] }
+      setHasEarlierHistory(result.has_more); setHistoryTotal(result.total)
+      if (!result.has_more) return
+    }
+  }
   // 滚动锚定：插入早页后消息区高度增长，把增量全部留在视口上方——阅读位置不跳。
   useEffect(() => {
     const el = messagesRef.current
+    // 滚动锚定必须直接改 scrollTop：把早页增量留在视口上方，阅读位置不跳。
+    // eslint-disable-next-line react-hooks/immutability
     if (el && prependHeightRef.current !== null) el.scrollTop = el.scrollHeight - prependHeightRef.current
     prependHeightRef.current = null
   }, [messages.length])
+  // 会话内搜索：服务端按内容 LIKE 匹配，返回定位锚点（newer_count）。
+  const runSessionSearch = async (query: string) => {
+    const trimmed = query.trim()
+    if (!sessionId || !trimmed) return
+    const seq = ++messageSearchSeqRef.current
+    setSearchBusy(true); setSearchError(''); setSearchMatches([])
+    try {
+      const result = await api.agentSessionMessageSearch(sessionId, trimmed)
+      if (seq !== messageSearchSeqRef.current) return
+      setSearchMatches(result.matches)
+      if (!result.matches.length) setSearchError('没有匹配的消息')
+    } catch (value) {
+      if (seq === messageSearchSeqRef.current) setSearchError(value instanceof Error ? value.message : String(value))
+    } finally {
+      if (seq === messageSearchSeqRef.current) setSearchBusy(false)
+    }
+  }
+  // 定位消息：目标比已加载窗口更早则分页补齐；提交后由消息区 effect 滚动居中并高亮。
+  const scrollToMessageKey = (key: string) => {
+    const nodes = messagesRef.current?.querySelectorAll<HTMLElement>('.agent-message')
+    if (!nodes) return
+    const idx = messages.findIndex(message => messageIdentity(message) === key)
+    const target = nodes[idx]
+    if (!target) return
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    target.classList.add('search-hit')
+    window.setTimeout(() => target.classList.remove('search-hit'), 1800)
+  }
+  const jumpToMatch = async (match: AgentSessionSearchMatch) => {
+    const key = messageIdentity(match)
+    const needsLoad = messages.length <= match.newer_count
+    if (needsLoad) pendingJumpRef.current = key
+    await loadEarlierUntil(match.newer_count)
+    scrollToMessageKey(key)
+    setSearchOpen(false)
+  }
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // 中文输入法组词确认的 Enter 不发送：组合态（isComposing / keyCode 229）直接放行给 IME。
     if (event.nativeEvent.isComposing || event.keyCode === 229) return
@@ -934,10 +1030,22 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
 
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
-      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title="导出会话" aria-label="导出会话" onClick={() => void exportSession(sessionId, sessionTitle(sessionId))}><Download/></button>}<button className="icon-btn" title="快捷键" aria-label="快捷键" onClick={() => setShortcutsOpen(true)}><Keyboard/></button><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
+      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title="会话内搜索" aria-label="会话内搜索" onClick={toggleSearch}><Search/></button>}{sessionId && <button className="icon-btn" title="导出会话" aria-label="导出会话" onClick={() => void exportSession(sessionId, sessionTitle(sessionId))}><Download/></button>}<button className="icon-btn" title="快捷键" aria-label="快捷键" onClick={() => setShortcutsOpen(true)}><Keyboard/></button><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
       {contextConflict && <div className="agent-context-conflict" role="alert"><span>你正带着新的业务上下文进入，当前任务焦点为 {contextConflict.label}</span><div><button className="button primary" onClick={resolveConflictWithNewTask}>以新上下文新建任务</button><button className="button" onClick={resolveConflictKeepCurrent}>继续当前任务</button></div></div>}
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
+      {searchOpen && sessionId && <div className="agent-search" role="search" aria-label="会话内搜索">
+        <form onSubmit={event => { event.preventDefault(); void runSessionSearch(searchQuery) }}>
+          <Search/>
+          <input ref={searchInputRef} aria-label="搜索消息" value={searchQuery} onChange={event => { setSearchQuery(event.target.value); setSearchMatches([]); setSearchError('') }} placeholder="在会话中搜索…" autoFocus/>
+          {searchQuery && <button type="button" className="icon-btn" aria-label="清空搜索" onClick={() => { setSearchQuery(''); setSearchMatches([]); setSearchError('') }}><X/></button>}
+          <button type="submit" className="button" disabled={searchBusy}>{searchBusy ? '搜索中…' : '搜索'}</button>
+        </form>
+        {searchError && <p className="agent-search-error" role="status">{searchError}</p>}
+        {searchMatches.length > 0 && <ul className="agent-search-results" role="listbox" aria-label="搜索结果">
+          {searchMatches.map((match, index) => <li key={`${match.created_at || ''}:${index}`}><button type="button" role="option" onClick={() => void jumpToMatch(match)}><small>{match.role === 'user' ? '你' : 'ASA'}{match.created_at ? ` · ${match.created_at}` : ''}</small><span>{match.snippet}</span></button></li>)}
+        </ul>}
+      </div>}
       <div ref={messagesRef} className="agent-messages">
         {hasEarlierHistory && <div className="agent-truncated"><button type="button" className="agent-load-earlier" onClick={() => void loadEarlierMessages()} disabled={loadingEarlier || loading || restoring}>{loadingEarlier ? '正在加载更早消息…' : historyTotal > messages.length ? `加载更早的消息（还有 ${historyTotal - messages.length} 条）` : '加载更早的消息'}</button></div>}
         {!messages.length && !restoring && <AgentHome jobs={jobs} workbench={workbench} templates={templates} templateBusyId={templateBusyId} focusType={String(focusContext(focus)?.type || attachedContext.type || 'page')} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} onQuickCommand={runQuickCommand} />}
@@ -1050,6 +1158,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
       <div className="agent-shortcut-list">
         <div><kbd>⌘ K</kbd><span>聚焦输入框</span></div>
         <div><kbd>⌘ ⇧ N</kbd><span>新建任务</span></div>
+        <div><kbd>⌘ ⇧ F</kbd><span>会话内搜索</span></div>
         <div><kbd>Enter</kbd><span>发送消息</span></div>
         <div><kbd>Shift ⇧ Enter</kbd><span>输入框内换行</span></div>
         <div><kbd>Esc</kbd><span>关闭弹窗或菜单</span></div>
