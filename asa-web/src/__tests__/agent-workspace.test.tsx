@@ -1116,6 +1116,47 @@ describe('Agent workspace', () => {
     expect(listCalls[listCalls.length - 1]).not.toContain('q=')
   })
 
+  it('⌘⇧F 打开会话内搜索，命中可跳转定位并高亮', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    const restored = Array.from({ length: 6 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: index === 0 ? '候选人张航在杭州' : `历史消息 ${index + 1}`, created_at: `2026-08-15 0${index}:00` }))
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) {
+        return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: restored, total: 6, has_more: false })
+      }
+      if (url.includes('/messages/search?q=')) {
+        return mockResponse({
+          ok: true, session_id: 'task-1', query: '张航', total: 6,
+          matches: [{ role: 'user', created_at: '2026-08-15 00:00', content: '候选人张航在杭州', snippet: '候选人张航在杭州', newer_count: 5 }],
+        })
+      }
+      return mockResponse({ ok: true, sessions: [] })
+    }))
+    const scrollSpy = vi.fn()
+    const original = window.HTMLElement.prototype.scrollIntoView
+    window.HTMLElement.prototype.scrollIntoView = scrollSpy
+    try {
+      renderWorkspace({ type: 'page', page: 'agent' })
+      expect(await screen.findByText('候选人张航在杭州')).toBeInTheDocument()
+
+      fireEvent.keyDown(window, { key: 'f', metaKey: true, shiftKey: true })
+      const searchInput = await screen.findByLabelText('搜索消息')
+      fireEvent.change(searchInput, { target: { value: '张航' } })
+      fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+
+      const option = await screen.findByRole('option')
+      fireEvent.click(option)
+
+      // 搜索结果面板关闭，目标消息被高亮定位（scrollIntoView 被调用）。
+      await waitFor(() => expect(screen.queryByRole('search', { name: '会话内搜索' })).not.toBeInTheDocument())
+      expect(scrollSpy).toHaveBeenCalled()
+      const hit = document.querySelector('.agent-message.search-hit')
+      expect(hit).not.toBeNull()
+    } finally {
+      window.HTMLElement.prototype.scrollIntoView = original
+    }
+  })
+
   it('progress 事件显示为临时状态行，正文到达后清除且不写入消息列表', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>(resolve => { release = resolve })
@@ -1336,6 +1377,67 @@ describe('Agent workspace', () => {
     // 再点一次关闭按钮，名单正常关闭且不影响后续恢复逻辑
     fireEvent.click(screen.getByLabelText('关闭名单'))
     expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+  })
+
+  it('中文输入法组词确认的 Enter 不发送，非组合态 Enter 正常发送', async () => {
+    let streamCalled = false
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) {
+        streamCalled = true
+        return streamResponse('event: text\ndata: {"content":"好"}\n\nevent: done\ndata: {"ok":true,"session_id":"s-ime","answer":"好"}\n\n')
+      }
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    const input = screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）')
+    fireEvent.change(input, { target: { value: '推荐 张三' } })
+    // IME 组词回车：不触发发送
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(streamCalled).toBe(false)
+    expect(input).toHaveValue('推荐 张三')
+    // 非组合态回车：正常发送
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: false })
+    await waitFor(() => expect(streamCalled).toBe(true))
+  })
+
+  it('上翻浏览历史时流式输出不拽回底部，回到底部按钮恢复跟随', async () => {
+    const scrollSpy = vi.fn()
+    const originalScrollIntoView = window.HTMLElement.prototype.scrollIntoView
+    window.HTMLElement.prototype.scrollIntoView = scrollSpy
+    try {
+      vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+        const url = String(input)
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '第一条回答' }], total: 1, has_more: false })
+        if (url.endsWith('/api/v1/copilot/sessions/task-2?limit=100')) return mockResponse({ ok: true, session_id: 'task-2', business_focus: null, messages: [{ role: 'assistant', content: '第二条回答' }], total: 1, has_more: false })
+        if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '任务一', preview: '第一条回答', message_count: 1, updated_at: '2026-08-03' }, { session_id: 'task-2', title: '任务二', preview: '第二条回答', message_count: 1, updated_at: '2026-08-04' }] })
+        return mockResponse({})
+      }))
+      localStorage.setItem('asaAgentSessionId', 'task-1')
+      const { container } = renderWorkspace({ type: 'page', page: 'agent' })
+
+      // 恢复 task-1 后自动吸底一次
+      expect(await screen.findByText('第一条回答')).toBeInTheDocument()
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalledTimes(1))
+
+      // 模拟上翻：距底部 700px，出现「回到底部」，此后不再自动吸底
+      const messages = container.querySelector('.agent-messages') as HTMLElement
+      Object.defineProperty(messages, 'scrollHeight', { configurable: true, value: 1000 })
+      Object.defineProperty(messages, 'scrollTop', { configurable: true, value: 0 })
+      Object.defineProperty(messages, 'clientHeight', { configurable: true, value: 300 })
+      fireEvent.scroll(messages)
+      expect(screen.getByRole('button', { name: '回到底部' })).toBeInTheDocument()
+
+      // 切换到 task-2：消息更新但不应被拽回底部
+      const rail = screen.getByRole('complementary', { name: '任务历史' })
+      fireEvent.click(within(rail).getByText('任务二'))
+      expect(await screen.findByText('第二条回答')).toBeInTheDocument()
+      expect(scrollSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView
+    }
   })
 })
 

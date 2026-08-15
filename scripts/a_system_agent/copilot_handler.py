@@ -134,6 +134,11 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
     return _impl(self, session_id, limit=limit, offset=offset)
 
 
+def search_copilot_session_messages(self, session_id: str, q: str, limit: int = 20) -> dict[str, Any]:
+    from .copilot_sessions import search_copilot_session_messages as _impl
+    return _impl(self, session_id, q=q, limit=limit)
+
+
 def list_copilot_sessions(
     self,
     limit: int = 30,

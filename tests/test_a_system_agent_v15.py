@@ -111,6 +111,32 @@ class AgentV15ServiceTest(AgentDbCase):
         self.assertFalse(beyond["has_more"])
         service.close()
 
+    def test_copilot_session_message_search_returns_anchors(self) -> None:
+        """会话内搜索：返回按时间倒序的匹配与定位锚点（newer_count）。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="继续推进。"))
+        service.submit_assessment(30, wait=True)
+        for index in range(3):
+            service.copilot(
+                f"第{index + 1}轮：关键候选人张航进展如何？",
+                session_id="search-test",
+                context={"type": "candidate", "id": 30},
+            )
+        result = service.search_copilot_session_messages("search-test", "张航")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["total"], 6)
+        # 每个 user 轮都含「张航」，倒序（最新在前），newer_count 递增。
+        self.assertEqual(len(result["matches"]), 3)
+        self.assertTrue(all("张航" in item["snippet"] for item in result["matches"]))
+        self.assertEqual([item["role"] for item in result["matches"]], ["user", "user", "user"])
+        self.assertEqual(
+            [item["newer_count"] for item in result["matches"]],
+            sorted(item["newer_count"] for item in result["matches"]),
+        )
+        # 无命中 / 空查询。
+        self.assertEqual(service.search_copilot_session_messages("search-test", "不存在的词")["matches"], [])
+        self.assertEqual(service.search_copilot_session_messages("search-test", "   ")["matches"], [])
+        service.close()
+
     def test_dashboard_and_global_copilot_support_contextual_queries(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment(), chat_text="当前应优先处理待复核人选。"))
         service.submit_assessment(30, wait=True)
