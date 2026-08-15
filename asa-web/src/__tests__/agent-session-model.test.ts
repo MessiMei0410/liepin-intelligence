@@ -11,9 +11,13 @@ describe('Agent session boundary', () => {
         role: 'assistant',
         content: '已找到候选人',
         references: [{ type: 'candidate', id: 559, label: '衣**' }],
+        pending_command: { command_id: 'cmd-1', status: 'pending', command_hash: 'hash-1' },
+        turn_trace: { version: 'copilot_turn_trace_v1', route: 'confirm' },
       }],
     })
     expect(result.messages[0].references?.[0]).toEqual({ type: 'candidate', id: 559, label: '衣**' })
+    expect(result.messages[0].pending_command).toEqual({ command_id: 'cmd-1', status: 'pending', command_hash: 'hash-1' })
+    expect(result.messages[0].turn_trace).toEqual({ version: 'copilot_turn_trace_v1', route: 'confirm' })
   })
 
   it('rejects drifted list and message payloads', () => {

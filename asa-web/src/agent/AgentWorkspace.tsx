@@ -16,7 +16,7 @@ import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
-import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
+import { CandidateIntentConfirmation, ExecutionReceipt, InteractionCard, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
 import { StrategyPatchCard } from './StrategyPatchCard'
 import { compareCandidatePageContext, CandidatePageConflict } from './pageContextConflict'
 
@@ -68,6 +68,13 @@ const formatMessageTime = (value: string) => {
     day: sameDay ? undefined : 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(date)
+}
+
+const commandExpired = (command: Record<string, unknown> | null | undefined) => {
+  const expiresAt = String(command?.expires_at || '').trim()
+  if (!expiresAt || String(command?.status || 'pending') !== 'pending') return false
+  const timestamp = new Date(expiresAt.replace(' ', 'T')).getTime()
+  return Number.isFinite(timestamp) && timestamp <= Date.now()
 }
 
 const uploadedAttachments = (context?: AgentContext): Array<Partial<UploadedAgentAttachment>> => (
@@ -261,6 +268,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   useCandidateListUpdates(candidateListDialog, updater => setCandidateListDialog(prev => (prev ? updater(prev) : prev)))
 
   const searchSeqRef = useRef(0)
+  const refreshSeqRef = useRef(0)
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
@@ -272,8 +280,11 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const restoring = phase === 'restoring'
 
   const refreshSessions = async () => {
+    // 序号防乱序：挂载/进行中/done 多处并发刷新时，晚发的旧响应不得覆盖新结果。
+    const seq = ++refreshSeqRef.current
     try {
       const result = await api.agentSessions()
+      if (seq !== refreshSeqRef.current) return
       setSessions(Array.isArray(result.sessions) ? result.sessions : [])
     } catch { /* Core upgrade compatibility: chat still works. */ }
   }
@@ -315,6 +326,22 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         setAttachedContext({ type: 'page', page: 'agent' })
       }
       localStorage.setItem(ACTIVE_SESSION_KEY, result.session_id); setHistoryOpen(false)
+      const latestPending = [...result.messages].reverse().find(message => message.role === 'assistant' && message.pending_command)?.pending_command
+      if (commandExpired(latestPending)) {
+        try {
+          const commandId = String(latestPending?.command_id || '')
+          const commandHash = String(latestPending?.command_hash || '')
+          if (commandId && commandHash) {
+            await api.refreshCopilotCommand(commandId, commandHash)
+            const refreshed = await api.agentSession(id)
+            if (generation !== generationRef.current) return
+            dispatch({ type: 'restore_succeeded', messages: refreshed.messages })
+            setFocus(refreshed.business_focus || null)
+          }
+        } catch (value) {
+          if (generation === generationRef.current) setInteractionError(value instanceof Error ? value.message : String(value))
+        }
+      }
     } catch (value) {
       if (generation === generationRef.current) {
         localStorage.removeItem(ACTIVE_SESSION_KEY); setSessionId('')
@@ -436,6 +463,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         if (event.type === 'context') {
           if (!contextSessionId) contextSessionId = event.data.session_id
           setSessionId(event.data.session_id); localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
+          // 会话在 context 事件到达时已由服务端落库：立即刷新右侧任务栏，
+          // 让新会话在思考/生成过程中就出现，而不是等到 done 之后才可见。
+          void refreshSessions()
         } else if (event.type === 'progress') {
           // 受理/阶段进度提示：临时状态行，首个 text/done/error 到达后清除。
           setTurnProgress(event.data.message)
@@ -477,6 +507,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     } finally {
       if (controllerRef.current === controller) controllerRef.current = undefined
       if (generation === generationRef.current) setTurnProgress('')
+      // 中途停止/被切换打断时本轮未走完：服务端已落库的会话要重新拉回任务栏，
+      // 否则乐观卡片消失后列表里缺这张卡（需等到下次刷新才回来）。
+      if (contextSessionId && !completed) void refreshSessions()
     }
   }
   const sendMessage = (message: string) => {
@@ -762,6 +795,19 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const visibleSessions = trimmedQuery && searchUnavailable
     ? sessions.filter(item => `${item.title} ${item.preview}`.toLowerCase().includes(trimmedQuery.toLowerCase()))
     : sessions
+  // 生成中的会话尚未进入服务端列表时，用一条乐观卡片占位：新任务在拿到
+  // session_id 之前以 requestId 作为临时键，保证"思考/执行中"右侧任务栏立即可见。
+  const activeRailId = loading ? (sessionId || (lastTurn ? `pending:${lastTurn.requestId}` : '')) : sessionId
+  const railSessions = [...visibleSessions]
+  if (loading && activeRailId && !railSessions.some(item => item.session_id === activeRailId)) {
+    railSessions.unshift({
+      session_id: activeRailId,
+      title: (lastTurn?.message || '新任务').slice(0, 80),
+      preview: turnProgress || '正在处理…',
+      message_count: 0,
+      updated_at: new Date().toISOString(),
+    })
+  }
 
   useEffect(() => {
     const candidateConflict = compareCandidatePageContext(focus, bridgeContext)
@@ -796,6 +842,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         {messages.map((message, index) => {
           const messageKey = `${index}:${message.created_at || ''}`
           const dayLabel = dayLabelFor(message.created_at, messages[index - 1]?.created_at)
+          const hasInteractionCard = Boolean(message.interaction_card || message.pending_command)
           return <Fragment key={messageKey}>
             {dayLabel && <div className="agent-day-divider" role="separator"><span>{dayLabel}</span></div>}
             <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`}>
@@ -806,7 +853,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
               : null}</div>
           {message.role === 'user' && uploadedAttachments(message.context).length > 0 && <div className="agent-message-attachments" aria-label="消息附件">{uploadedAttachments(message.context).map((item, attachmentIndex) => <span key={`${item.attachment_id || item.file_name}:${attachmentIndex}`}><FileText/><b>{item.file_name || '附件'}</b><small>{item.status || '已读取'}</small></span>)}</div>}
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
-          {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
+          {message.role === 'assistant' && !message.invalidated && (hasInteractionCard
+            ? <InteractionCard card={message.interaction_card} command={message.pending_command} onSelectCandidate={option => selectAmbiguousObject(message.interaction_card || message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()} onModify={() => composerRef.current?.focus()} onResolved={() => sessionId ? restoreSession(sessionId) : undefined}/>
+            : <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>)}
           {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
           {message.role === 'assistant' && !message.invalidated && message.strategy_patch && <StrategyPatchCard
             patch={message.strategy_patch}
@@ -815,8 +864,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
             appliedRevision={message.strategy_patch_revision}
             appliedCount={message.strategy_patch_applied_count}
           />}
-          {message.role === 'assistant' && !message.invalidated && !message.pending_intent && <SuggestedActionBar actions={message.suggested_actions} busy={structuredActionBusy} onAction={action => void runStructuredAction(action)}/>}
-          {message.role === 'assistant' && <ExecutionReceipt receipt={message.execution_receipt}/>}
+          {message.role === 'assistant' && !message.invalidated && !message.pending_intent && !message.pending_command && <SuggestedActionBar actions={message.suggested_actions} busy={structuredActionBusy} onAction={action => void runStructuredAction(action)}/>}
+          {message.role === 'assistant' && !hasInteractionCard && !message.pending_command && <ExecutionReceipt receipt={message.execution_receipt}/>}
           {message.role === 'assistant' && interactionError && index === messages.length - 1 && <p className="agent-card-error" role="alert">{interactionError}</p>}
           {message.role === 'assistant' && message.action_card && (message.action_card as SourcingResultCardData).type === 'sourcing_result' && (
             <SourcingResultCard
@@ -887,10 +936,10 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       </div>
       <ModelAuditPanel open={modelAuditOpen} onClose={() => setModelAuditOpen(false)}/>
     </section>
-    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 112; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
-      {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{item.preview}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></button>}
-      <div className="agent-task-actions"><button className="icon-btn" disabled={!!taskBusy} aria-label={`重命名任务：${item.title}`} title="重命名任务" onClick={() => { setRenamingId(item.session_id); setRenameValue(item.title); setArchiveConfirmId(''); setTaskError('') }}><Pencil/></button>{archiveConfirmId === item.session_id ? <button className="button danger" disabled={taskBusy === item.session_id} aria-label={`确认归档任务：${item.title}`} onClick={() => void archiveTask(item)}>确认归档</button> : <button className="icon-btn" disabled={!!taskBusy} aria-label={`归档任务：${item.title}`} title="归档任务" onClick={() => { setArchiveConfirmId(item.session_id); setRenamingId(''); setTaskError('') }}><Archive/></button>}</div>
-    </article>)}{!visibleSessions.length && <p>{taskQuery ? '没有匹配任务' : '暂无历史任务'}</p>}</div></>}</aside>
+    <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{loading && <LoaderCircle className="spin agent-rail-running" size={16} aria-label="任务执行中"/>}{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{railSessions.map(item => { const running = loading && item.session_id === activeRailId; const pending = item.session_id.startsWith('pending:'); return <article key={item.session_id} className={`${item.session_id === activeRailId ? 'active' : ''} ${running ? 'running' : ''}`} onContextMenu={event => { if (!pending && renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 112; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
+      {renamingId === item.session_id && !pending ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" disabled={pending} onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b>{running ? <><span className="agent-task-status"><LoaderCircle className="spin" size={10}/>处理中</span>{turnProgress && <small className="agent-task-progress">{turnProgress}</small>}</> : <><span>最近：{item.preview}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></>}</button>}
+      {!pending && <div className="agent-task-actions"><button className="icon-btn" disabled={!!taskBusy} aria-label={`重命名任务：${item.title}`} title="重命名任务" onClick={() => { setRenamingId(item.session_id); setRenameValue(item.title); setArchiveConfirmId(''); setTaskError('') }}><Pencil/></button>{archiveConfirmId === item.session_id ? <button className="button danger" disabled={taskBusy === item.session_id} aria-label={`确认归档任务：${item.title}`} onClick={() => void archiveTask(item)}>确认归档</button> : <button className="icon-btn" disabled={!!taskBusy} aria-label={`归档任务：${item.title}`} title="归档任务" onClick={() => { setArchiveConfirmId(item.session_id); setRenamingId(''); setTaskError('') }}><Archive/></button>}</div>}
+    </article>})}{!railSessions.length && <p>{taskQuery ? '没有匹配任务' : '暂无历史任务'}</p>}</div></>}</aside>
     {taskMenu && <div className="agent-task-menu-backdrop" role="presentation" onClick={() => setTaskMenu(undefined)} onContextMenu={event => { event.preventDefault(); setTaskMenu(undefined) }}>
       <div className="agent-task-menu" role="menu" aria-label="任务操作" style={{ left: taskMenu.x, top: taskMenu.y }}>
         <button role="menuitem" aria-label={`复制会话 ID：${taskMenu.sessionId}`} onClick={() => { void copySessionId(taskMenu.sessionId); setTaskMenu(undefined) }}><ClipboardCopy/><span>复制会话 ID<small>{taskMenu.sessionId}</small></span></button>
@@ -976,5 +1025,5 @@ function AgentHome({ jobs, workbench, templates, onAction, onOpenAnalysis, onRun
   const visibleLanes = workbenchLoading
     ? agentHomeLanes
     : agentHomeLanes.filter(config => workbenchLaneCount(workbench, config.lane) > 0)
-  return <div className="agent-home"><header><h2>今天从哪里开始？</h2><p>ASA 已连接岗位、人选和工作流上下文。</p></header><section className="agent-home-quick" aria-label="快捷指令">{agentHomeQuickCommands.map(item => <button key={item.command} title={item.command} onClick={() => onQuickCommand(item.command)}>{item.icon}<b>{item.label}</b><small>{item.command}</small></button>)}</section>{visibleLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => <div className="agent-analysis-row" key={item.template_id}><button onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span><em>{item.last_run_id ? '查看' : '运行'}</em></button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>)}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
+  return <div className="agent-home"><header><h2>今天从哪里开始？</h2></header><section className="agent-home-quick" aria-label="快捷指令">{agentHomeQuickCommands.map(item => <button key={item.command} title={item.command} onClick={() => onQuickCommand(item.command)}>{item.icon}<b>{item.label}</b></button>)}</section>{visibleLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => <div className="agent-analysis-row" key={item.template_id}><button onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span><em>{item.last_run_id ? '查看' : '运行'}</em></button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>)}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
 }

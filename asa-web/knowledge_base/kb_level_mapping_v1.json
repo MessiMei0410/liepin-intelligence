@@ -11,7 +11,7 @@
       "band": "engineer",
       "label": "工程师",
       "aliases": ["工程师", "研发工程师", "助理工程师"],
-      "accepted": ["工程师", "高级工程师"],
+      "accepted": ["工程师"],
       "years_hint": "5年+（量产模块普遍口径）",
       "basis": "case_pengxinxu level_year_mapping：工程师 5年+；部分模块本科8年/硕士5年（如 YE）"
     },

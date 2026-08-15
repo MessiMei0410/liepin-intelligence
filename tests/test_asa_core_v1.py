@@ -517,7 +517,12 @@ def test_agent_mode_hides_executable_suggestions_without_a_real_workflow(db_path
 
 def test_agent_mode_claim_guard_catches_verb_first_wording(db_path: Path) -> None:
     """红线守卫须覆盖「已启动寻访/已开始搜索」语序，不能只认「寻访已启动」。"""
-    for wording in ("已启动寻访，稍后会同步进展。", "我已经开始搜索人选。", "寻访已启动。"):
+    for wording in (
+        "已启动寻访，稍后会同步进展。",
+        "我已经开始搜索人选。",
+        "寻访已启动。",
+        "寻访已经启动了，而且不止一个岗位在跑。",
+    ):
         with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
             client.app.state.core.agent_service.copilot = lambda *_args, **_kwargs: {
                 "ok": True,

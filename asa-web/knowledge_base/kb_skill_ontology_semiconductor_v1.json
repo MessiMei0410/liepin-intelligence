@@ -2,7 +2,7 @@
   "meta": {
     "version": "v1",
     "created": "2026-08-05",
-    "source": "seed_silan_tme_v1.json（计算电源 TME）/ seed_changyue_motion_control_v1.json / seed_changyue_precision_mechanical_v1.json（长越封测设备）/ kb_seed_jiachi_equipment_v1.json（1168 职位分类法）/ cases/case_*.json 真实技能词归纳 / seed_pengxinxu_fab_process_v1.json / seed_pengxinxu_fab_quality_v1.json / seed_pengxinxu_fab_yield_v1.json（彭芯旭 12 寸 fab 工艺/质量/良率）/ seed_sukesi_fpga_v1.json（FPGA/嵌入式硬件）",
+    "source": "seed_silan_tme_v1.json（计算电源 TME）/ seed_changyue_motion_control_v1.json / seed_changyue_precision_mechanical_v1.json（长越封测设备）/ kb_seed_jiachi_equipment_v1.json（1168 职位分类法）/ cases/case_*.json 真实技能词归纳 / seed_pengxinxu_fab_process_v1.json / seed_pengxinxu_fab_quality_v1.json / seed_pengxinxu_fab_yield_v1.json（鹏新旭 12 寸 fab 工艺/质量/良率）/ seed_sukesi_fpga_v1.json（FPGA/嵌入式硬件）",
     "updated": "2026-08-14（P3-c：扩 fab_process/quality/yield_enhancement/fpga 四族，来源为对应 seed 原型的真实岗位技能词）",
     "usage": "半导体/硬件招聘技能本体：技能族→技能→别名/中英文同义词→相关技能→常见证据形式。策略生成做关键词别名归一与相关词提示；简历评估做技能证据归一比对。运行时只读。",
     "governance": "本体只用于召回增强与证据比对，命中别名单独不构成技能证据；只命中技能标签无项目证据的人选必须标记待核验（沿用 seed 负向规则口径）"
@@ -46,7 +46,8 @@
           "name": "VPD",
           "aliases": ["垂直供电", "vertical power delivery", "vpd"],
           "related": ["VRM", "TLVR", "模块电源"],
-          "evidence": ["垂直供电方案研发", "模块电源量产项目"]
+          "evidence": ["垂直供电方案研发", "模块电源量产项目"],
+          "note": "VPD＝垂直供电（Vertical Power Delivery），不是『电压调节』（『电压调节』是 VRM 电压调节模块的含义）"
         },
         {
           "name": "TLVR",
@@ -64,11 +65,12 @@
           "name": "板级电源",
           "aliases": ["三次电源", "服务器电源", "板级供电"],
           "related": ["POL", "多相控制器", "eFuse"],
-          "evidence": ["服务器/PC 板级电源设计", "整机厂电源工程师经历"]
+          "evidence": ["服务器/PC 板级电源设计", "整机厂电源工程师经历"],
+          "note": "『三次电源/服务器电源』在此指服务器/PC 板级电源（POL/VRM/多相控制器+DrMOS 这一级），不含服务器 AC/DC 整机 PSU（属一次电源）"
         },
         {
           "name": "DC-DC",
-          "aliases": ["dcdc", "直流变换", "Buck", "降压变换", "开关电源"],
+          "aliases": ["dcdc", "直流变换", "Buck", "降压变换"],
           "related": ["多相控制器", "POL", "AC-DC"],
           "evidence": ["DC-DC 电源设计", "电源管理 IC 应用"]
         },
@@ -158,19 +160,19 @@
       "skills": [
         {
           "name": "键合机",
-          "aliases": ["键合设备", "键合", "die bonder", "die bond", "焊线机", "wire bonder", "wire bond"],
+          "aliases": ["键合设备", "键合", "焊线机", "wire bonder", "wire bond"],
           "related": ["固晶机", "贴片机", "封装设备"],
           "evidence": ["键合设备整机研发/交付", "键合工艺调试"]
         },
         {
           "name": "固晶机",
-          "aliases": ["固晶", "die attach", "固晶设备"],
+          "aliases": ["固晶", "die attach", "die bonder", "die bond", "固晶设备"],
           "related": ["键合机", "贴片机", "封装设备"],
           "evidence": ["固晶设备研发", "固晶工艺项目"]
         },
         {
           "name": "贴片机",
-          "aliases": ["贴片", "贴装设备", "SMT贴片机", "SMT"],
+          "aliases": ["贴片", "贴装设备"],
           "related": ["固晶机", "封装设备"],
           "evidence": ["贴装设备研发", "贴片产线项目"]
         },
@@ -182,13 +184,13 @@
         },
         {
           "name": "检测设备",
-          "aliases": ["量检测设备", "AOI", "测试设备", "量测设备"],
+          "aliases": ["量检测设备", "AOI", "量测设备"],
           "related": ["封装设备", "半导体设备"],
           "evidence": ["检测/量测设备研发", "AOI 光学检测项目"]
         },
         {
           "name": "半导体设备",
-          "aliases": ["半导体装备", "前道设备", "设备研发"],
+          "aliases": ["半导体装备", "设备研发"],
           "related": ["封装设备", "检测设备", "精密运动平台"],
           "evidence": ["半导体设备整机研发", "设备厂研发岗位经历"]
         }
@@ -260,7 +262,7 @@
         },
         {
           "name": "光栅尺",
-          "aliases": ["光栅", "编码器", "encoder", "光栅尺反馈"],
+          "aliases": ["光栅", "光栅编码器", "直线编码器", "光栅尺反馈"],
           "related": ["精密定位", "闭环控制"],
           "evidence": ["位置反馈系统选型", "全闭环控制项目"]
         },
@@ -326,7 +328,7 @@
       "skills": [
         {
           "name": "工艺整合",
-          "aliases": ["PIE", "TD", "工艺集成", "process integration", "整合工程师", "pie"],
+          "aliases": ["PIE", "工艺集成", "process integration", "整合工程师", "pie"],
           "related": ["光刻", "刻蚀", "器件", "良率提升"],
           "evidence": ["新工艺 transfer/量产导入负责", "WAT/CP 参数闭环改善项目", "工艺窗口建立"]
         },
@@ -380,7 +382,7 @@
         },
         {
           "name": "量产导入",
-          "aliases": ["工艺transfer", "工艺转移", "NPI", "新产线导入", "ramp"],
+          "aliases": ["工艺transfer", "工艺转移", "新产线导入", "ramp"],
           "related": ["工艺整合", "良率爬坡"],
           "evidence": ["新工艺/新产线 transfer 经历", "量产爬坡项目负责"]
         },
@@ -476,7 +478,7 @@
         },
         {
           "name": "缺陷检测",
-          "aliases": ["KLA", "缺陷扫描", "defect inspection", "检测机台"],
+          "aliases": ["缺陷扫描", "defect inspection", "检测机台"],
           "related": ["检测设备", "缺陷分析"],
           "evidence": ["KLA 等检测程式（recipe）开发", "检测灵敏度/捕获率优化"]
         },
@@ -542,7 +544,7 @@
         },
         {
           "name": "原理图设计",
-          "aliases": ["原理图", "PCB", "硬件原理图", "schematic", "layout", "pcb"],
+          "aliases": ["原理图", "硬件原理图", "schematic"],
           "related": ["嵌入式硬件", "高速接口"],
           "evidence": ["原理图/PCB 设计项目", "高速板 layout 评审记录"]
         },

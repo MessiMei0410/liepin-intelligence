@@ -13,8 +13,13 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,6 +32,8 @@ from a_system_agent.batch_stop import (  # noqa: E402
 from a_system_agent.copilot_intent import _requests_batch_stop  # noqa: E402
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment  # noqa: E402
 from a_system_agent import AgentService, FakeLLM  # noqa: E402
+from asa_core.app import create_app  # noqa: E402
+from asa_core.database import MIGRATIONS, ensure_idempotency_recovery_schema  # noqa: E402
 
 
 def _make_db() -> Path:
@@ -145,7 +152,7 @@ class CopilotBatchStopIntegrationTest(AgentDbCase):
         conn.commit()
         conn.close()
 
-    def test_copilot_batch_stop_writes_and_receipts(self) -> None:
+    def test_copilot_batch_stop_requires_confirmation_then_writes(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment()))
         self.addCleanup(service.close)
         result = service.copilot(
@@ -159,11 +166,222 @@ class CopilotBatchStopIntegrationTest(AgentDbCase):
         rows = {row["id"]: row for row in conn.execute("SELECT id, clean_stage, stop_reason FROM job_candidates WHERE id IN (30, 31)")}
         conn.close()
 
-        self.assertEqual(rows[31]["clean_stage"], "H5 最近寻访/初筛不通过")
+        self.assertEqual(rows[31]["clean_stage"], "S1 新增寻访/待复核")
         self.assertNotIn("初筛不通过", str(rows[30]["clean_stage"] or ""))
-        self.assertIn("已执行批量停止推进", str(result.get("answer") or ""))
-        receipt = result.get("batch_stop_receipt") or {}
-        self.assertEqual(int(receipt.get("applied") or 0), 1)
+        self.assertIn("当前尚未写入", str(result.get("answer") or ""))
+        command = result.get("pending_command") or {}
+        self.assertEqual(command.get("status"), "pending")
+        self.assertEqual(int((command.get("impact") or {}).get("affected_count") or 0), 1)
+
+        preflight = service.preflight_copilot_command(str(command["command_id"]))
+        decision = service.decide_copilot_command(
+            str(command["command_id"]),
+            decision="approve",
+            confirmation_token=str(preflight["confirmation_token"]),
+        )
+        self.assertEqual(int((decision.get("receipt") or {}).get("succeeded") or 0), 1)
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=31").fetchone()
+        conn.close()
+        self.assertEqual(row[0], "H5 最近寻访/初筛不通过")
+        self.assertEqual(service.get_copilot_context_state("batch-stop-test").get("pending_command"), {})
+        restored = service.get_copilot_session("batch-stop-test")
+        assistant = next(message for message in reversed(restored["messages"]) if message["role"] == "assistant")
+        self.assertIsNone(assistant.get("pending_command"))
+        self.assertTrue((assistant.get("execution_receipt") or {}).get("verified"))
+
+        replayed = service.decide_copilot_command(
+            str(command["command_id"]),
+            decision="approve",
+            confirmation_token=str(preflight["confirmation_token"]),
+        )
+        self.assertTrue(replayed.get("replayed"))
+        self.assertEqual(replayed.get("receipt"), decision.get("receipt"))
+        conn = sqlite3.connect(self.db_path)
+        duplicate_count = conn.execute(
+            "SELECT COUNT(*) FROM candidate_events WHERE job_candidate_id=31 AND event_type='resume_review_completed'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(duplicate_count, 1)
+
+    def test_short_confirmation_only_executes_immediately_previous_command(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        initial = service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-short-confirm",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        self.assertTrue((initial.get("pending_command") or {}).get("command_id"))
+        confirmed = service.copilot(
+            "可以",
+            session_id="batch-stop-short-confirm",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        self.assertTrue((confirmed.get("execution_receipt") or {}).get("verified"))
+        self.assertEqual((confirmed.get("interaction_card") or {}).get("action_label"), "停止推进候选人")
+
+        service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-intervened",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        service.copilot(
+            "现在名单里有多少人？",
+            session_id="batch-stop-intervened",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        after_question = service.copilot(
+            "可以",
+            session_id="batch-stop-intervened",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        self.assertFalse(bool((after_question.get("execution_receipt") or {}).get("verified")))
+
+    def test_restored_expired_command_refreshes_once_without_business_write(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        created = service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-refresh",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        command = dict(created.get("pending_command") or {})
+        self.assertTrue(command.get("command_id"))
+        self.assertEqual((created.get("interaction_card") or {}).get("state"), "pending")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE agent_copilot_commands SET expires_at='2000-01-01 00:00:00' WHERE command_id=?", (command["command_id"],))
+        conn.commit()
+        conn.close()
+
+        refreshed = service.refresh_copilot_command(
+            str(command["command_id"]), request_id="refresh-command-1",
+            expected_command_hash=str(command["command_hash"]),
+        )
+        replacement = dict(refreshed.get("command") or {})
+        self.assertTrue(refreshed.get("refreshed"))
+        self.assertNotEqual(replacement.get("command_id"), command.get("command_id"))
+        replay = service.refresh_copilot_command(
+            str(command["command_id"]), request_id="refresh-command-1",
+            expected_command_hash=str(command["command_hash"]),
+        )
+        self.assertEqual((replay.get("command") or {}).get("command_id"), replacement.get("command_id"))
+        conn = sqlite3.connect(self.db_path)
+        stage = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=31").fetchone()[0]
+        command_count = conn.execute("SELECT COUNT(*) FROM agent_copilot_commands WHERE session_id='batch-stop-refresh'").fetchone()[0]
+        conn.close()
+        self.assertEqual(stage, "S1 新增寻访/待复核")
+        self.assertEqual(command_count, 2)
+        restored = service.get_copilot_session("batch-stop-refresh")
+        assistant = next(message for message in reversed(restored["messages"]) if message["role"] == "assistant")
+        self.assertEqual((assistant.get("pending_command") or {}).get("command_id"), replacement.get("command_id"))
+        self.assertEqual((assistant.get("interaction_card") or {}).get("state"), "pending")
+        user = next(message for message in reversed(restored["messages"]) if message["role"] == "user")
+        self.assertIsNone(user.get("pending_command"))
+
+    def test_concurrent_refresh_reuses_one_replacement_command(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        created = service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-refresh-concurrent",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        command = dict(created.get("pending_command") or {})
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE agent_copilot_commands SET expires_at='2000-01-01 00:00:00' WHERE command_id=?",
+            (command["command_id"],),
+        )
+        conn.commit()
+        conn.close()
+        barrier = threading.Barrier(2)
+
+        def refresh() -> dict:
+            barrier.wait()
+            return service.refresh_copilot_command(
+                str(command["command_id"]),
+                request_id="refresh-command-concurrent",
+                expected_command_hash=str(command["command_hash"]),
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: refresh(), range(2)))
+        replacement_ids = {(result.get("command") or {}).get("command_id") for result in results}
+        self.assertEqual(len(replacement_ids), 1)
+        conn = sqlite3.connect(self.db_path)
+        command_count = conn.execute(
+            "SELECT COUNT(*) FROM agent_copilot_commands WHERE session_id='batch-stop-refresh-concurrent'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(command_count, 2)
+
+    def test_intervening_turn_supersedes_command_condition_version(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        initial = service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-version-drift",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        command_id = str((initial.get("pending_command") or {}).get("command_id") or "")
+        self.assertTrue(command_id)
+        service.copilot(
+            "先说下现在有多少人？",
+            session_id="batch-stop-version-drift",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        with self.assertRaisesRegex(ValueError, "superseded"):
+            service.preflight_copilot_command(command_id)
+        self.assertEqual(service.get_copilot_command(command_id)["command"]["status"], "superseded")
+
+    def test_command_http_preflight_and_decision_routes(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        result = service.copilot(
+            "把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+            session_id="batch-stop-http",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        command_id = str((result.get("pending_command") or {}).get("command_id") or "")
+        self.assertTrue(command_id)
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(MIGRATIONS[0][2])
+        conn.row_factory = sqlite3.Row
+        ensure_idempotency_recovery_schema(conn)
+        conn.commit()
+        conn.close()
+
+        with patch("asa_core.app.migrate", return_value={"applied": []}), TestClient(
+            create_app(db_path=Path(self.db_path), start_legacy=False)
+        ) as client:
+            loaded = client.get(f"/api/v1/copilot/commands/{command_id}")
+            self.assertEqual(loaded.status_code, 200)
+            preflight = client.post(
+                f"/api/v1/copilot/commands/{command_id}/preflight",
+                json={"request_id": "command-http-preflight"},
+            )
+            self.assertEqual(preflight.status_code, 200)
+            decision_body = {
+                "request_id": "command-http-decision",
+                "decision": "approve",
+                "confirmation_token": preflight.json()["confirmation_token"],
+            }
+            decision = client.post(
+                f"/api/v1/copilot/commands/{command_id}/decision",
+                headers={"Idempotency-Key": "command-http-decision-key"},
+                json=decision_body,
+            )
+            self.assertEqual(decision.status_code, 200)
+            self.assertTrue(decision.json()["receipt"]["verified"])
+            replay = client.post(
+                f"/api/v1/copilot/commands/{command_id}/decision",
+                headers={"Idempotency-Key": "command-http-decision-key"},
+                json=decision_body,
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json()["receipt"]["verified"])
+            self.assertTrue(replay.json()["receipt"]["idempotent_replay"])
 
 
 class CopilotBatchStopUnsupportedDomainGuardTest(AgentDbCase):
@@ -280,8 +498,20 @@ class CopilotBatchStopSoftwareTest(AgentDbCase):
         conn.close()
 
         self.assertNotIn("初筛不通过", str(rows[32]["clean_stage"] or ""))
-        self.assertEqual(rows[33]["clean_stage"], "H5 最近寻访/初筛不通过")
-        self.assertEqual(int((result.get("batch_stop_receipt") or {}).get("applied") or 0), 2)
+        self.assertNotIn("初筛不通过", str(rows[33]["clean_stage"] or ""))
+        command = result.get("pending_command") or {}
+        preflight = service.preflight_copilot_command(str(command["command_id"]))
+        confirmed = service.decide_copilot_command(
+            str(command["command_id"]),
+            decision="approve",
+            confirmation_token=str(preflight["confirmation_token"]),
+        )
+        self.assertEqual(int((confirmed.get("receipt") or {}).get("succeeded") or 0), 2)
+        conn = sqlite3.connect(self.db_path)
+        rows = {row[0]: row[1] for row in conn.execute("SELECT id, clean_stage FROM job_candidates WHERE id IN (32, 33)")}
+        conn.close()
+        self.assertNotIn("初筛不通过", str(rows[32] or ""))
+        self.assertEqual(rows[33], "H5 最近寻访/初筛不通过")
 
 
 if __name__ == "__main__":

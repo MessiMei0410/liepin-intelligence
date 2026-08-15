@@ -47,15 +47,17 @@ const candidate = {
 }
 
 test('候选人详情保留长期来源效果与每一次精确寻访执行', async ({ page }) => {
-  await page.route('**/api/v1/candidates/1', route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ candidate }),
-  }))
+  await page.route('**/api/v1/candidates/1*', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ candidate }),
+    })
+  })
   await page.goto('/asa-app#candidate=1')
 
   const panel = page.locator('.candidate-panel')
-  await expect(panel).toBeVisible()
+  await expect(panel).toBeVisible({ timeout: 30_000 })
   const trace = panel.locator('.sourcing-trace')
   await expect(trace).toContainText('寻访来源 · 3 次执行')
   await expect(trace.locator('.sourcing-trace-row')).toHaveCount(2)

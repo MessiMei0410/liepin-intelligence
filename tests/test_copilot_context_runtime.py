@@ -879,6 +879,51 @@ class CopilotContextReplayTest(AgentDbCase):
         assert effective == ["给软件高级工程师补充8位候选人"]
         assert all("三次电源" not in item for item in effective)
 
+    def test_constraint_ledger_add_replace_remove_runs_through_service(self) -> None:
+        session_id = "constraint_ledger_service_roundtrip"
+        proposal = self.service.copilot(
+            "给机械高级工程师补充10位候选人，必须三次电源经验",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        created = proposal
+        assert created["workflow_id"]
+        assert {item["quote"] for item in proposal["turn_decision"]["effective_constraints"]} >= {
+            "给机械高级工程师补充10位候选人",
+            "必须三次电源经验",
+        }
+        replaced = self.service.copilot(
+            "把必须三次电源经验改成优先服务器电源经验",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        assert replaced["workflow_revision"]["source_workflow_id"] == created["workflow_id"]
+        assert replaced["turn_decision"]["constraint_changes"] == [
+            {
+                "operation": "replace",
+                "previous_quote": "必须三次电源经验",
+                "quote": "优先服务器电源经验",
+                "kind": "must",
+            }
+        ]
+        removed = self.service.copilot(
+            "去掉优先服务器电源经验",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        assert removed["workflow_revision"]["source_workflow_id"] == replaced["workflow_id"]
+        assert removed["turn_decision"]["constraint_changes"] == [
+            {
+                "operation": "remove",
+                "previous_quote": "优先服务器电源经验",
+                "quote": "",
+                "kind": "must",
+            }
+        ]
+        effective = [item["quote"] for item in removed["turn_decision"]["effective_constraints"]]
+        assert "必须三次电源经验" not in effective
+        assert "优先服务器电源经验" not in effective
+
     def test_ambiguous_client_only_list_request_does_not_pick_first_job(self) -> None:
         conn = self.service._connect()
         try:

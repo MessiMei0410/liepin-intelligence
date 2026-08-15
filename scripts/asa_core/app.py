@@ -170,6 +170,8 @@ class CopilotMessageResponse(BaseModel):
     workflow_id: str | None = None
     workflow_progress: dict[str, Any] | None = None
     pending_intent: dict[str, Any] | None = None
+    pending_command: dict[str, Any] | None = None
+    interaction_card: dict[str, Any] | None = None
     action_card: dict[str, Any] | None = None
     model_participation: dict[str, Any] | None = None
     created_at: str | None = None
@@ -227,6 +229,20 @@ class CopilotIntentConfirm(WriteEnvelope):
     preflight_token: str = ""
     message: str = ""
     session_id: str = ""
+
+
+class CopilotCommandPreflight(WriteEnvelope):
+    pass
+
+
+class CopilotCommandDecision(WriteEnvelope):
+    decision: Literal["approve", "reject"]
+    confirmation_token: str = Field(min_length=1)
+    note: str = Field(default="", max_length=500)
+
+
+class CopilotCommandRefresh(WriteEnvelope):
+    expected_command_hash: str = Field(min_length=1, max_length=128)
 
 
 class DiffDecision(BaseModel):
@@ -1137,6 +1153,57 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
                         message=body.message,
                         session_id=body.session_id,
                     ))
+
+    @app.get("/api/v1/copilot/commands/{command_id}")
+    def copilot_command_get(command_id: str) -> dict[str, Any]:
+        return core.get_copilot_command(command_id)
+
+    @app.post("/api/v1/copilot/commands/{command_id}/preflight")
+    def copilot_command_preflight(command_id: str, body: CopilotCommandPreflight) -> dict[str, Any]:
+        try:
+            return core.preflight_copilot_command(command_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/copilot/commands/{command_id}/decision")
+    def copilot_command_decision(
+        command_id: str,
+        body: CopilotCommandDecision,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        def decide() -> dict[str, Any]:
+            result = core.decide_copilot_command(
+                command_id,
+                decision=body.decision,
+                confirmation_token=body.confirmation_token,
+                note=body.note,
+            )
+            execution_receipt = dict(result.pop("receipt", {}) or {})
+            return {**result, "execution_receipt": execution_receipt}
+
+        response = idem(
+            "copilot.command_decision", body, idempotency_key, "copilot_command", command_id,
+            decide,
+        )
+        execution_receipt = dict(response.pop("execution_receipt", {}) or {})
+        audit_receipt = dict(response.get("receipt", {}) or {})
+        response["receipt"] = {**execution_receipt, **audit_receipt}
+        return response
+
+    @app.post("/api/v1/copilot/commands/{command_id}/refresh")
+    def copilot_command_refresh(
+        command_id: str,
+        body: CopilotCommandRefresh,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        return idem(
+            "copilot.command_refresh", body, idempotency_key, "copilot_command", command_id,
+            lambda: core.refresh_copilot_command(
+                command_id,
+                request_id=body.request_id,
+                expected_command_hash=body.expected_command_hash,
+            ),
+        )
 
     # ---- 记忆系统（跨会话） ----
     @app.get("/api/v1/memories")

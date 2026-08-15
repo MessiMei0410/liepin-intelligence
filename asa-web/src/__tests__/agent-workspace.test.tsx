@@ -153,6 +153,152 @@ describe('Agent workspace', () => {
     expect(await screen.findByRole('region', { name: '候选人执行回执' })).toHaveTextContent('已完成服务端回查')
   })
 
+  it('业务命令卡预检后确认，并展示服务端回查结果', async () => {
+    const pendingCommand = {
+      command_id: 'cmd-batch-1', status: 'pending', command_type: 'candidate_batch_stop',
+      target: { type: 'job', id: 10 }, command_hash: 'command-hash-1', requires_r3: false,
+      operations: [
+        { order: 1, action: 'filter_candidates', effect: 'read', label: '筛选当前岗位候选池' },
+        { order: 2, action: 'batch_stop', effect: 'internal_write', label: '停止不匹配人选推进' },
+      ],
+      impact: { affected_count: 3, summary: '方向不符 2 人；薪资不符 1 人', reason_distribution: { 方向不符: 2, 薪资不符: 1 } },
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        `event: context\ndata: {"session_id":"task-command"}\n\nevent: done\ndata: ${JSON.stringify({ ok: true, session_id: 'task-command', answer: '当前尚未写入', pending_command: pendingCommand })}\n\n`,
+      )
+      if (url.endsWith('/api/v1/copilot/commands/cmd-batch-1/preflight')) return mockResponse({
+        ok: true, command: pendingCommand, confirmation_token: 'command-token-1', expires_in: 300,
+      })
+      if (url.endsWith('/api/v1/copilot/commands/cmd-batch-1/decision')) return mockResponse({
+        ok: true, command: { ...pendingCommand, status: 'executed' },
+        receipt: { state: '已完成', summary: '批量停止推进 3 人', succeeded: 3, skipped: 0, failed: 0, verified: true },
+      })
+      if (url.endsWith('/api/v1/copilot/sessions/task-command?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-command', business_focus: null,
+        messages: [{
+          role: 'assistant', content: '批量停止推进 3 人', pending_command: null,
+          execution_receipt: { state: '已完成', summary: '批量停止推进 3 人', succeeded: 3, skipped: 0, failed: 0, verified: true },
+          interaction_card: { state: 'result', action_label: '停止推进候选人', execution_receipt: { state: '已完成', summary: '批量停止推进 3 人', succeeded: 3, skipped: 0, failed: 0, verified: true } },
+        }],
+      })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'job', id: 10 })
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '不匹配的停止推进，再给我名单' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    const card = await screen.findByRole('region', { name: '行动卡' })
+    expect(card).toHaveTextContent('确认后修改 3 条候选人记录')
+    expect(card).toHaveTextContent('方向不符 2 人')
+    fireEvent.click(within(card).getByRole('button', { name: '确认停止推进候选人' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/decision'))).toBe(true))
+    const decisionCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/decision'))
+    expect(JSON.parse(String(decisionCall?.[1]?.body || '{}'))).toMatchObject({
+      confirmation_token: 'command-token-1', decision: 'approve',
+    })
+    expect(await screen.findByRole('region', { name: '行动卡' })).toHaveTextContent('批量停止推进 3 人')
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/sessions/task-command?limit=100'))).toBe(true)
+  })
+
+  it('工作流命令确认后恢复会话并展示真实工作流对象卡', async () => {
+    const pendingCommand = {
+      command_id: 'cmd-workflow-1', status: 'pending', command_type: 'workflow_create',
+      target: { type: 'job', id: 10, client: '长越科技', label: '机械高级工程师' },
+      command_hash: 'workflow-command-hash-1', requires_r3: true,
+      operations: [
+        { order: 1, action: 'validate_workflow_context', effect: 'read', label: '核验客户、岗位和条件版本' },
+        { order: 2, action: 'create_workflow', effect: 'internal_write', label: '创建可审计工作流' },
+      ],
+      impact: { affected_count: 1, unit: 'workflow', summary: '为长越科技机械高级工程师创建工作流' },
+    }
+    const workflowReceipt = {
+      state: '已完成', summary: '工作流已创建：长越科技｜机械高级工程师｜第1轮寻访',
+      succeeded: 1, skipped: 0, failed: 0, verified: true, workflow_id: 'workflow-created-1',
+      references: [{ type: 'workflow', id: 'workflow-created-1', label: '长越科技｜机械高级工程师｜第1轮寻访', subtitle: '确认推进方案' }],
+      suggested_actions: [{ type: 'open_workflow', id: 'workflow-created-1', label: '打开工作流' }],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        `event: context\ndata: {"session_id":"task-workflow-command"}\n\nevent: done\ndata: ${JSON.stringify({ ok: true, session_id: 'task-workflow-command', answer: '确认前不会创建任务', pending_command: pendingCommand })}\n\n`,
+      )
+      if (url.endsWith('/api/v1/copilot/commands/cmd-workflow-1/preflight')) return mockResponse({
+        ok: true, command: pendingCommand, confirmation_token: 'workflow-command-token-1', expires_in: 300,
+      })
+      if (url.endsWith('/api/v1/copilot/commands/cmd-workflow-1/decision')) return mockResponse({
+        ok: true, command: { ...pendingCommand, status: 'executed', workflow_id: 'workflow-created-1' }, receipt: workflowReceipt,
+      })
+      if (url.endsWith('/api/v1/copilot/sessions/task-workflow-command?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-workflow-command', business_focus: { context: { type: 'workflow', id: 'workflow-created-1' } },
+        messages: [{
+          role: 'assistant', content: workflowReceipt.summary, pending_command: null,
+          references: workflowReceipt.references, suggested_actions: workflowReceipt.suggested_actions,
+          execution_receipt: workflowReceipt, workflow_id: 'workflow-created-1',
+          interaction_card: { state: 'result', action_label: '创建寻访工作流', execution_receipt: workflowReceipt },
+          workflow_progress: { workflow_id: 'workflow-created-1', status: 'planned', completed: 0, total: 5, label: '确认推进方案', pending_approvals: [] },
+        }],
+      })
+      if (url.endsWith('/api/v1/workflows/workflow-created-1/summary')) return mockResponse({
+        workflow_id: 'workflow-created-1', status: 'planned', progress: { completed: 0, total: 5 },
+      })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'job', id: 10 })
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '给这个岗位补充10位候选人' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    const card = await screen.findByRole('region', { name: '行动卡' })
+    expect(card).toHaveTextContent('确认后创建 1 个工作流')
+    expect(card).toHaveTextContent('外部寻访仍需 R3 审批')
+    fireEvent.click(within(card).getByRole('button', { name: '确认创建寻访工作流' }))
+
+    expect(await screen.findByRole('button', { name: '展开长越科技｜机械高级工程师｜第1轮寻访' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '行动卡' })).toHaveTextContent('工作流已创建')
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/copilot/sessions/task-workflow-command?limit=100'))).toBe(true)
+  })
+
+  it('恢复过期命令时自动刷新，并只展示替代行动卡', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-expired-command')
+    const expired = {
+      command_id: 'cmd-expired-1', command_hash: 'expired-hash-1', status: 'pending',
+      command_type: 'recommendation_report', expires_at: '2000-01-01 00:00:00',
+      target: { type: 'attachment_candidate', id: 'att-1', label: '验收顾问', client: '验收客户', job: '高级电气工程师' },
+      impact: { affected_count: 1, unit: 'report' },
+    }
+    const replacement = { ...expired, command_id: 'cmd-fresh-1', command_hash: 'fresh-hash-1', expires_at: '2099-01-01 00:00:00' }
+    let reads = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-expired-command?limit=100')) {
+        reads += 1
+        return mockResponse({ ok: true, session_id: 'task-expired-command', business_focus: null, messages: [{
+          role: 'assistant', content: '请确认', pending_command: reads === 1 ? expired : replacement,
+          interaction_card: reads === 1 ? { state: 'pending', pending_command: expired } : {
+            state: 'pending', action_label: '生成推荐报告', pending_command: replacement,
+            target: replacement.target, impact_text: '确认后生成 1 份报告草稿，不会自动对外发送',
+          },
+        }] })
+      }
+      if (url.endsWith('/api/v1/copilot/commands/cmd-expired-1/refresh')) return mockResponse({ ok: true, command: replacement, refreshed: true })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+    const card = await screen.findByRole('region', { name: '行动卡' })
+    expect(card).toHaveTextContent('验收顾问')
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/refresh'))).toHaveLength(1))
+    expect(reads).toBe(2)
+    expect(screen.getAllByRole('region', { name: '行动卡' })).toHaveLength(1)
+  })
+
   it('done 事件到达后挂载策略建议卡并默认选中全部建议', async () => {
     const strategyPatch = {
       workflow_id: 'workflow-strategy-1',
@@ -1033,6 +1179,60 @@ describe('Agent workspace', () => {
     release()
     expect(await screen.findByText('部分答案')).toBeInTheDocument()
     expect(screen.queryByText('正在处理：梳理岗位需求')).not.toBeInTheDocument()
+  })
+
+  it('新任务思考期间右侧任务栏即时显示运行中的乐观卡片，并在拿到会话后刷新', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const chunks = [
+      'event: progress\ndata: {"message":"请求已受理，正在处理"}\n\n',
+      'event: context\ndata: {"session_id":"task-live"}\n\nevent: text\ndata: {"content":"正在生成"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-live","answer":"正在生成"}\n\n',
+    ]
+    let index = 0
+    let sessionCommitted = false
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/copilot/stream')) {
+        return ({
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (index > 0) await gate
+                if (index < chunks.length) {
+                  const chunk = chunks[index++]
+                  if (chunk.includes('event: context')) sessionCommitted = true
+                  return { value: new TextEncoder().encode(chunk), done: false }
+                }
+                return { value: undefined, done: true }
+              },
+            }),
+          },
+        }) as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions?')) {
+        return mockResponse({ ok: true, sessions: sessionCommitted ? [{ session_id: 'task-live', title: '推进一下', preview: '正在生成', message_count: 2 }] : [] })
+      }
+      return mockResponse({ ok: true, session_id: 'task-live', messages: [], business_focus: null })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '推进一下' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    // 思考期（progress 已到、context 未到）：任务栏即时出现以用户消息为标题的乐观卡片，并带动态进行态。
+    const rail = screen.getByLabelText('任务历史', { selector: 'aside' })
+    expect(await within(rail).findByText('推进一下')).toBeInTheDocument()
+    expect(within(rail).getByText('处理中')).toBeInTheDocument()
+    expect(within(rail).getByText('推进一下').closest('article')).toHaveClass('running')
+    // 尚未拿到 session_id 时，乐观卡片不可被当作真实任务点击恢复。
+    expect(within(rail).getByText('推进一下').closest('article')?.querySelector('.agent-task-main')).toBeDisabled()
+
+    release()
+    // 拿到会话后服务端列表刷新出真实会话，进行态提示消失。
+    expect(await within(rail).findByText('最近：正在生成')).toBeInTheDocument()
+    expect(within(rail).queryByText('处理中')).not.toBeInTheDocument()
   })
 
   it('服务端焦点有值时优先于本地附着上下文文案，冲突提示不受影响', async () => {

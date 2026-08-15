@@ -268,6 +268,31 @@ ON agent_action_proposals(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_proposals_candidate
 ON agent_action_proposals(job_candidate_id, status, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS agent_copilot_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
+    source_message TEXT NOT NULL,
+    command_type TEXT NOT NULL,
+    target_json TEXT NOT NULL DEFAULT '{}',
+    command_json TEXT NOT NULL DEFAULT '{}',
+    snapshot_json TEXT NOT NULL DEFAULT '{}',
+    impact_json TEXT NOT NULL DEFAULT '{}',
+    condition_version INTEGER NOT NULL DEFAULT 0,
+    command_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    workflow_id TEXT,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL,
+    confirmed_at TEXT,
+    executed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_copilot_commands_session
+ON agent_copilot_commands(session_id, status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_stage_recommendations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_candidate_id INTEGER NOT NULL,

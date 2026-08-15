@@ -11,7 +11,7 @@
     "title": "失效分析（FA）高级工程师",
     "client": "长越科技",
     "client_scoped": true,
-    "essence": "半导体设备/器件失效分析：故障定位、切片/SEM 等物性分析手段、8D 报告与研发闭环改进，支撑键合设备整机可靠性。",
+    "essence": "半导体设备/器件失效分析：故障定位、切片/SEM/EDS 等物性分析、焊点失效（IMC/回流）与可靠性试验（uHAST/TCT/Drop）、8D 报告与研发闭环改进，支撑键合设备整机可靠性。",
     "directions": [
       {
         "name": "先进封装键合设备",
@@ -61,6 +61,11 @@
       "group": "fa_scene",
       "targets": "设备/封装场景兜底词",
       "terms": ["封装设备", "键合机", "半导体设备", "封装", "器件"]
+    },
+    {
+      "group": "solder_fa",
+      "targets": "焊点失效画像兜底词（倒装/回流/IMC/可靠性试验）",
+      "terms": ["焊点", "C2W", "C4", "回流", "IMC", "EDS", "SAM", "X-Ray", "uHAST", "TCT", "Drop"]
     }
   ],
   "negative_rules": [
@@ -68,8 +73,8 @@
     "纯质量体系/文控背景、无分析手段实操经历的降级为备选",
     "异地不是召回排除项，但推进前必须确认杭州 relocation 意愿"
   ],
-  "skills_ontology_nodes": ["封装设备", "键合机", "半导体设备"],
-  "skills_ontology_note": "失效分析族尚未纳入 kb_skill_ontology_semiconductor_v1；仅封装/设备场景节点引用 canonical，本体扩族后回填",
+  "skills_ontology_nodes": ["失效分析", "缺陷分析", "封装设备", "半导体设备"],
+  "skills_ontology_note": "失效分析/缺陷分析族已纳入本体 yield_enhancement；本原型引用 canonical：失效分析、缺陷分析 + 封装/设备场景节点",
   "level_mapping": {
     "level_band": "senior",
     "job_title_range": "高级工程师/资深工程师",

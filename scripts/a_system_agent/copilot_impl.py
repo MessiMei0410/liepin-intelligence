@@ -15,6 +15,7 @@ from ._shared import (
     _latest_event,
 )
 from .privacy import sanitize_payload
+from .llm import LLMError
 from .policy import is_stopped
 from .context import build_candidate_context
 from .copilot_tools import generate_proactive_suggestions
@@ -243,7 +244,8 @@ def _understanding_card(
                     "updated_at": option.get("updated_at"),
                 })
     needs = bool(understanding.get("needs_clarification") or conflicts)
-    needs = needs or bool(changes) or action != "none" or str(decision.get("effect") or "") in {"create_plan", "start_plan", "revise_plan", "clarify"}
+    # 普通查询和观察不需要额外解释卡；仅在歧义、条件变更或待确认计划时打断对话。
+    needs = needs or bool(changes) or str(decision.get("effect") or "") in {"create_plan", "start_plan", "revise_plan", "clarify", "confirm_command"}
     if not needs:
         return None
     operation = {
@@ -259,17 +261,31 @@ def _understanding_card(
     target_label = str(target.get("label") or "").strip()
     if not target_label:
         target_label = str((focus or {}).get("job", {}).get("title") or (focus or {}).get("client") or "当前上下文") if isinstance(focus, dict) else "当前上下文"
+    focus_job = (focus or {}).get("job") if isinstance((focus or {}).get("job"), dict) else {}
+    focus_candidate = (focus or {}).get("candidate") if isinstance((focus or {}).get("candidate"), dict) else {}
+    target_type = str(target.get("type") or selected.get("type") or "global")
     return {
         "version": "understanding_card_v1",
         "show": True,
         "message": message,
-        "target": {"type": target.get("type") or selected.get("type") or "global", "id": target.get("id") or selected.get("id"), "label": target_label},
+        "target": {
+            "type": target_type,
+            "id": target.get("id") or selected.get("id"),
+            "label": target_label,
+            "client": str(target.get("client") or (focus or {}).get("client") or ""),
+            "job": str(target.get("job") or focus_job.get("title") or ""),
+            "candidate": str(
+                target_label if target_type in {"candidate", "attachment_candidate"}
+                else focus_candidate.get("name") or ""
+            ),
+        },
         "action": action,
         "action_label": operation,
         "objective": str(understanding.get("objective") or message)[:500],
         "confidence": float(understanding.get("confidence") or 0),
         "inherited_constraints": [str((item or {}).get("quote") or item) for item in effective if isinstance(item, dict)],
         "constraint_changes": changes,
+        "operations": list(understanding.get("operations") or []),
         "missing_fields": list(understanding.get("missing_fields") or []),
         "clarification_question": str(understanding.get("clarification_question") or ""),
         "blocked_reason": str(decision.get("blocked_reason") or ""),
@@ -277,6 +293,121 @@ def _understanding_card(
         "safe_for_action": bool(decision.get("safe_for_action")),
         "candidate_options": ambiguity_options[:3],
         "next_step": "请确认范围后继续" if needs else "",
+    }
+
+
+def _interaction_card(
+    understanding: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    selected: dict[str, Any],
+    focus: dict[str, Any] | None,
+    message: str,
+    pending_command: dict[str, Any] | None = None,
+    execution_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Project one compact action card while keeping the legacy cards readable."""
+    conflicts = list((focus or {}).get("conflicts") or []) if isinstance(focus, dict) else []
+    changes = list(decision.get("constraint_changes") or [])
+    action = str(understanding.get("action") or "none")
+    write_command = isinstance(pending_command, dict) and bool(pending_command.get("command_id"))
+    ambiguous = bool(understanding.get("needs_clarification") or conflicts)
+    important_change = bool(changes)
+    if not (write_command or ambiguous or important_change or execution_receipt):
+        return None
+
+    target = dict((pending_command or {}).get("target") or {})
+    if not target:
+        target = dict(understanding.get("target") or {})
+    if not target:
+        target = dict(selected or {})
+    target = {key: value for key, value in target.items() if value not in (None, "")}
+    target_type = str(target.get("type") or selected.get("type") or "global")
+    target_label = str(target.get("label") or target.get("candidate") or target.get("job") or "").strip()
+    if target_type == "attachment_candidate" and target_label:
+        target["candidate"] = target_label
+
+    action_labels = {
+        "recommendation_report": "生成推荐报告",
+        "candidate_batch_stop": "停止推进候选人",
+        "workflow_create": "创建寻访工作流",
+        "candidate_review": "复核候选池",
+        "candidate_sourcing": "继续寻访",
+        "none": "查看信息",
+    }
+    command_type = str((pending_command or {}).get("command_type") or action)
+    action_label = action_labels.get(command_type, action_labels.get(action, action or "查看信息"))
+    impact = dict((pending_command or {}).get("impact") or {})
+    if write_command and not impact:
+        impact = {"affected_count": 1, "summary": action_label}
+    unit = str(impact.get("unit") or "")
+    count = int(impact.get("affected_count") or 0)
+    if unit == "report":
+        impact_text = f"确认后生成 {count or 1} 份报告草稿，不会自动对外发送"
+    elif unit == "workflow":
+        impact_text = f"确认后创建 {count or 1} 个工作流，外部寻访仍需 R3 审批"
+    elif write_command:
+        impact_text = f"确认后修改 {count or 0} 条候选人记录"
+    elif execution_receipt:
+        impact_text = str(execution_receipt.get("summary") or "本轮已完成服务端回查")
+    else:
+        impact_text = "仅确认对象和业务范围，不会写入业务数据"
+
+    inherited = [
+        str((item or {}).get("quote") or item).strip()
+        for item in (decision.get("effective_constraints") or [])
+        if (isinstance(item, dict) and str(item.get("quote") or "").strip()) or isinstance(item, str)
+    ]
+    changed = [
+        str((item or {}).get("quote") or (item or {}).get("value") or (item or {}).get("label") or item).strip()
+        for item in changes
+        if str((item or {}).get("quote") or (item or {}).get("value") or (item or {}).get("label") or item).strip()
+    ]
+    key_conditions: list[str] = []
+    for value in changed + inherited:
+        if value and value not in key_conditions:
+            key_conditions.append(value)
+    options = []
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            continue
+        option_type = {
+            "ambiguous_job": "job", "ambiguous_client": "client",
+            "context_client_mismatch": "client", "ambiguous_candidate": "candidate",
+        }.get(str(conflict.get("type") or ""), "global")
+        for option in conflict.get("candidates") or []:
+            if isinstance(option, dict) and option.get("id"):
+                options.append({
+                    "type": option_type, "id": option.get("id"),
+                    "client": option.get("client"),
+                    "label": option.get("job") or option.get("name") or "未命名对象",
+                    "status": option.get("status"), "updated_at": option.get("updated_at"),
+                })
+    state = "clarify" if ambiguous else "result" if execution_receipt else "pending" if write_command else "review"
+    return {
+        "version": "interaction_card_v1",
+        "show": True,
+        "state": state,
+        "target": target,
+        "action": command_type,
+        "action_label": action_label,
+        "impact": impact,
+        "impact_text": impact_text,
+        "key_conditions": key_conditions[:8],
+        "candidate_options": options[:3],
+        "clarification_question": str(understanding.get("clarification_question") or "") if ambiguous else "",
+        "requires_r3": bool((pending_command or {}).get("requires_r3")),
+        "pending_command": pending_command if write_command else None,
+        "execution_receipt": execution_receipt,
+        "details": {
+            "objective": str(understanding.get("objective") or message)[:500],
+            "inherited_constraints": inherited,
+            "constraint_changes": changes,
+            "operations": list((pending_command or {}).get("operations") or understanding.get("operations") or []),
+            "source_quotes": [str(item) for item in (understanding.get("source_quotes") or [message]) if str(item).strip()],
+            "confidence": float(understanding.get("confidence") or 0),
+            "command_hash": str((pending_command or {}).get("command_hash") or ""),
+        },
     }
 
 
@@ -467,6 +598,61 @@ def _generate_copilot_model_answer(
     return "", tool_results, references
 
 
+def _model_unavailable_answer(
+    self,
+    *,
+    message: str,
+    selected: dict[str, Any],
+    selected_facts: dict[str, Any],
+    understanding: dict[str, Any],
+    workflow_context: dict[str, Any],
+) -> str:
+    """Keep deterministic reads useful and fail closed for uncertain writes."""
+    workflow = workflow_context.get("workflow") if isinstance(workflow_context.get("workflow"), dict) else {}
+    if workflow.get("workflow_id"):
+        progress = workflow_context.get("progress") if isinstance(workflow_context.get("progress"), dict) else {}
+        approvals = [
+            item for item in workflow_context.get("approvals") or []
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
+        approval_note = "；当前仍待独立 R3 审批" if any(item.get("risk_level") == "R3" for item in approvals) else ""
+        return (
+            f"当前工作流 {workflow['workflow_id']} 状态为“{workflow.get('status') or '状态待同步'}”"
+            f"，已完成 {int(progress.get('completed') or 0)}/{int(progress.get('total') or 0)} 步{approval_note}。"
+        )
+    if selected.get("type") == "job" and selected.get("id") and re.search(r"(?:多少|几个|人数|有几).{0,12}(?:人选|候选人|人)?", message):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT count(*) AS total FROM job_candidates WHERE job_id=?",
+                (int(selected["id"]),),
+            ).fetchone()
+        finally:
+            conn.close()
+        job = selected_facts.get("job") if isinstance(selected_facts.get("job"), dict) else {}
+        return f"{job.get('title') or '当前岗位'}目前共有 {int(row['total'] or 0)} 位候选人。"
+    if selected.get("type") == "candidate" and selected.get("id") and re.search(r"(?:阶段|状态|进展)", message):
+        candidate = selected_facts.get("candidate") if isinstance(selected_facts.get("candidate"), dict) else {}
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT clean_stage FROM job_candidates WHERE id=?", (int(selected["id"]),)
+            ).fetchone()
+        finally:
+            conn.close()
+        return f"{candidate.get('name') or '当前人选'}目前阶段为“{str(row['clean_stage'] or '状态待同步') if row else '状态待同步'}”。"
+    uncertain_write = not re.search(r"[?？]|(?:吗|呢|如何|怎么|为什么|多少|几个|是否|要不要)", message) and bool(
+        re.search(r"(?:处理|推进|停止|联系|触达|推荐|创建|修改|执行|开始|启动|生成|发布|找|搜|筛|过滤)", message)
+    )
+    if uncertain_write:
+        understanding["needs_clarification"] = True
+        understanding["safe_for_action"] = False
+        understanding["clarification_question"] = "请明确要操作的对象和具体动作，或稍后重试。"
+        understanding["missing_fields"] = ["唯一对象", "具体动作"]
+        return "模型暂不可用，无法可靠理解这条业务写指令；本轮未执行、未写入业务表。请明确对象和动作，或稍后重试。"
+    return "模型暂不可用，当前确定性查询无法完整回答；本轮未执行任何业务写入，请稍后重试。"
+
+
 _ATTACHMENT_NAME_LABEL_RE = re.compile(r"姓\s*名\s*[：:]\s*([一-龥·]{2,6})")
 _ATTACHMENT_NAME_RE = re.compile(r"[一-龥·]{2,4}")
 # 候选指向动作：这些动作在缺 candidate_id 时才会因“哪位人选”被追问。
@@ -509,6 +695,7 @@ def _attachment_candidate_identity(self, evidence: dict[str, Any]) -> dict[str, 
     if not name:
         return {}
     identity: dict[str, Any] = {
+        "attachment_id": str(items[0].get("attachment_id") or "") if items else "",
         "name": name,
         "file_name": file_name,
         "customer": customer,
@@ -568,6 +755,7 @@ def _copilot_impl(
     # （此前在下方 ~1900 行才收集，意图 LLM 看不到附件内容）；后面仍会把
     # 它写入 selected_payload 供模型回答与引用卡使用。
     uploaded_attachment_evidence = self._uploaded_attachment_evidence(raw_context, session_id)
+    pending_command: dict[str, Any] = {}
     plan_reply = _plan_confirmation_reply(message)
     latest_plan_anchor = _latest_assistant_plan_anchor(self, session_id) if plan_reply else {}
     anchored_plan_ref, anchored_plan_state = (
@@ -600,6 +788,206 @@ def _copilot_impl(
         ),
         "",
     )
+    short_confirmation = re.sub(r"[\s。.!！?？,，、]+", "", message)
+    approve_command = short_confirmation in {
+        "确认", "可以", "行", "继续", "按这个来", "就这样", "确认执行", "确认创建",
+    }
+    reject_command = short_confirmation in {"取消", "算了", "别执行", "不要执行", "取消执行", "取消命令"}
+    if approve_command or reject_command:
+        pending_command = self.latest_confirmable_copilot_command(session_id)
+        pending_target = dict((pending_command or {}).get("target") or {})
+        if (
+            approve_command
+            and pending_command
+            and selected.get("type") in {"job", "candidate", "workflow"}
+            and selected.get("id") is not None
+            and (
+                str(pending_target.get("type") or "") != str(selected.get("type") or "")
+                or str(pending_target.get("id") or "") != str(selected.get("id") or "")
+            )
+        ):
+            pending_command = {}
+        if pending_command:
+            preflight = self.preflight_copilot_command(str(pending_command["command_id"]))
+            decision_result = self.decide_copilot_command(
+                str(pending_command["command_id"]),
+                decision="approve" if approve_command else "reject",
+                confirmation_token=str(preflight["confirmation_token"]),
+                note="会话紧邻短确认" if approve_command else "会话紧邻取消",
+            )
+            receipt = (
+                dict(decision_result.get("receipt") or {})
+                if approve_command
+                else {
+                    "version": "execution_receipt_v1",
+                    "state": "已取消",
+                    "summary": "本次命令已取消，未修改业务数据。",
+                    "succeeded": 0, "skipped": 1, "failed": 0,
+                    "verified": True, "scope": pending_target,
+                }
+            )
+            answer = str(receipt.get("summary") or "命令已执行并完成服务端回查。")
+            receipt_references = list(receipt.get("references") or [])
+            receipt_actions = list(receipt.get("suggested_actions") or [])
+            workflow_id = str(receipt.get("workflow_id") or "")
+            workflow_payload = self.get_workflow(workflow_id) if workflow_id else {}
+            resolved_focus = self.get_copilot_focus(session_id)
+            command_type = str(pending_command.get("command_type") or "")
+            command_action = {
+                "workflow_create": "candidate_sourcing",
+                "recommendation_report": "recommendation_report",
+                "candidate_batch_stop": "candidate_stop",
+            }.get(command_type, command_type or "none")
+            command_action_label = {
+                "recommendation_report": "生成推荐报告",
+                "workflow_create": "创建寻访工作流",
+                "candidate_batch_stop": "停止推进候选人",
+            }.get(command_type, command_action)
+            intent_understanding = {
+                "version": "copilot_turn_understanding_v3",
+                "speech_act": "execute" if approve_command else "cancel",
+                "action": command_action,
+                "primary_action": command_action,
+                "target": pending_target,
+                "references": [{"type": "command", "id": pending_command.get("command_id")}],
+                "objective": str(pending_command.get("source_message") or ""),
+                "observations": [], "fact_updates": [], "constraint_changes": [],
+                "operations": list(pending_command.get("operations") or []),
+                "effect": "execute" if approve_command else "cancel",
+                "confidence": 1.0, "needs_clarification": False,
+                "clarification_question": "", "source_quotes": [display_message],
+                "source_message": display_message, "safe_for_action": approve_command,
+                "action_evidence": [display_message],
+            }
+            turn_decision = {
+                "version": "turn_decision_v2",
+                "observations": [{"type": "command_hash", "value": pending_command.get("command_hash")}],
+                "goal": {
+                    "action": command_action,
+                    "objective": str(pending_command.get("source_message") or ""),
+                    "target": pending_target,
+                },
+                "constraint_changes": [], "effective_constraints": [],
+                "effect": "execute_command" if approve_command else "cancel_command",
+                "pending_plan_ref": {},
+                "authorization": {
+                    "mode": "confirmed_command" if approve_command else "rejected_command",
+                    "workflow_id": workflow_id or None,
+                    "version": None,
+                    "plan_hash": str(pending_command.get("command_hash") or ""),
+                    "evidence": [display_message],
+                },
+                "blocked_reason": "", "safe_for_action": approve_command,
+            }
+            turn_trace = {
+                "version": "copilot_turn_trace_v1",
+                "user_message": display_message,
+                "page_context": sanitize_payload(raw_context),
+                "business_focus": resolved_focus,
+                "understanding": intent_understanding,
+                "condition_ledger_changes": [],
+                "route": "command",
+                "tool": {
+                    "operations": list(pending_command.get("operations") or []),
+                    "command_id": str(pending_command.get("command_id") or "") or None,
+                    "workflow_id": workflow_id or None,
+                    "model_tool_calls": [],
+                },
+                "receipt": receipt,
+                "final_answer": answer,
+            }
+            context_type = str(selected.get("type") or "global")
+            context_id = selected.get("id")
+            conn = self._connect()
+            try:
+                conn.executemany(
+                    """
+                    INSERT INTO agent_copilot_messages
+                    (session_id,context_type,context_id,role,content,structured_json)
+                    VALUES (?,?,?,?,?,?)
+                    """,
+                    [
+                        (session_id, context_type, context_id, "user", display_message, _dumps({})),
+                        (
+                            session_id, context_type, context_id, "assistant", answer,
+                            _dumps({
+                                "references": receipt_references,
+                                "suggested_actions": receipt_actions,
+                "execution_receipt": receipt,
+                                "interaction_card": {
+                                    "version": "interaction_card_v1", "show": True, "state": "result",
+                                    "target": pending_target, "action": command_action,
+                                    "action_label": command_action_label,
+                                    "impact_text": str(receipt.get("summary") or "本轮已完成服务端回查"),
+                                    "impact": dict((decision_result.get("command") or {}).get("impact") or {}),
+                                    "key_conditions": [], "requires_r3": bool(pending_command.get("requires_r3")),
+                                    "execution_receipt": receipt, "pending_command": None,
+                                    "details": {"objective": str(pending_command.get("source_message") or ""), "command_hash": str(pending_command.get("command_hash") or "")},
+                                },
+                                "confirmed_command": decision_result.get("command"),
+                                "business_focus": resolved_focus,
+                                "intent_understanding": intent_understanding,
+                                "turn_decision": turn_decision,
+                                "turn_trace": turn_trace,
+                                "model_participation": {"mode": "rules", "label": "规则生成"},
+                            }),
+                        ),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            try:
+                self.record_copilot_event(
+                    session_id,
+                    "turn_decision",
+                    {
+                        "intent": intent_understanding["speech_act"],
+                        "target": pending_target,
+                        "action": command_action,
+                        "effect": turn_decision["effect"],
+                        "workflow_created": bool(workflow_id),
+                        "evidence": [display_message],
+                        "fact_receipt": None,
+                        "confirmation_mode": "command_short_confirm" if approve_command else "command_short_cancel",
+                        "command_id": str(pending_command.get("command_id") or ""),
+                    },
+                )
+            except Exception:
+                pass
+            return {
+                "ok": True, "session_id": session_id, "answer": answer,
+                "context": {"type": context_type, "id": context_id},
+                "references": receipt_references, "suggested_actions": receipt_actions,
+                "execution_receipt": receipt,
+                "interaction_card": {
+                    "version": "interaction_card_v1", "show": True, "state": "result",
+                    "target": pending_target, "action": command_action,
+                    "action_label": command_action_label,
+                    "impact_text": str(receipt.get("summary") or "本轮已完成服务端回查"),
+                    "impact": dict((decision_result.get("command") or {}).get("impact") or {}),
+                    "key_conditions": [], "requires_r3": bool(pending_command.get("requires_r3")),
+                    "execution_receipt": receipt, "pending_command": None,
+                    "details": {"objective": str(pending_command.get("source_message") or ""), "command_hash": str(pending_command.get("command_hash") or "")},
+                },
+                "pending_command": None, "business_focus": resolved_focus,
+                "intent_understanding": intent_understanding,
+                "turn_decision": turn_decision,
+                "turn_trace": turn_trace,
+                "workflow_id": workflow_id or None,
+                "workflow": workflow_payload.get("workflow") if workflow_id else None,
+                "model_participation": {"mode": "rules", "label": "规则生成"},
+                **({
+                    "workflow_id": workflow_id,
+                    "goal": workflow_payload.get("goal"),
+                    "workflow": workflow_payload.get("workflow"),
+                    "plan_ref": workflow_payload.get("plan_ref"),
+                    "plan_summary": workflow_payload.get("plan_summary"),
+                    "progress": workflow_payload.get("progress"),
+                    "approvals": workflow_payload.get("approvals"),
+                } if workflow_id else {}),
+            }
+    self.supersede_latest_confirmable_copilot_command(session_id)
     structured_action = raw_context.get("structured_action")
     intent_understanding = _structured_action_understanding(
         structured_action,
@@ -930,18 +1318,18 @@ def _copilot_impl(
     )
     if _is_candidate_list_query(message):
         if _requests_batch_stop(message):
-            # 分级过滤 + 明确停止措辞：这是内部写库动作，而不是只读名单查询。
+            # 分级过滤 + 明确停止措辞：先冻结对象快照并等待确认，首轮不写业务表。
             turn_decision.update({
-                "effect": "execute",
+                "effect": "confirm_command",
                 "authorization": {
-                    "mode": "explicit_execute",
+                    "mode": "preflight_required",
                     "workflow_id": None,
                     "version": None,
                     "plan_hash": None,
                     "evidence": list(intent_understanding.get("action_evidence") or [message]),
                 },
                 "blocked_reason": "",
-                "safe_for_action": True,
+                "safe_for_action": False,
             })
         else:
             # 候选池过滤、比较和名单查询是只读动作。保留解析出的动作/约束，
@@ -1454,7 +1842,6 @@ def _copilot_impl(
     # 名单拦截永远执行不到（kimi review #5）。
     candidate_list_answer = ""
     candidate_list_card: dict[str, Any] = {}
-    batch_stop_receipt: dict[str, Any] = {}
     if (
         forced_answer is None
         and not suppress_goal_intent
@@ -1546,35 +1933,23 @@ def _copilot_impl(
                             "groups": _grade_groups,
                         }
                         if _requests_batch_stop(message):
-                            # 用户明确要求“不匹配的就停止推进”：直接按分级结果批量落库，
-                            # 并附上执行回执。写库失败时降级为只读名单，不让用户空手。
+                            # 冻结待停止对象及原因；确认前只展示筛选结果，不写业务表。
                             try:
-                                from .batch_stop import apply_batch_stop, batch_stop_summary, build_batch_stop_items
+                                from .batch_stop import build_batch_stop_items
 
                                 _stop_items = build_batch_stop_items(_filter_result)
                                 if _stop_items:
-                                    _stop_result = apply_batch_stop(
-                                        self.db_path,
-                                        list_job_id,
-                                        _stop_items,
-                                        actor="copilot",
-                                        source="copilot_batch_stop",
+                                    pending_command = self.create_batch_stop_command(
+                                        session_id=session_id,
+                                        source_message=display_message,
+                                        job_id=list_job_id,
+                                        items=_stop_items,
+                                        condition_version=int(conversation_state.get("revision") or 0) + 1,
                                     )
-                                    _stop_summary = batch_stop_summary(_stop_items)
-                                    _remaining = int(_filter_result.get("total") or 0) - int(_stop_result.get("applied") or 0)
                                     candidate_list_answer = format_grade_list(_filter_result) + (
-                                        f"\n\n已执行批量停止推进：共 {_stop_result.get('applied')} 人"
-                                        f"（{_stop_summary}）。当前岗位剩余可推进约 {_remaining} 人。"
+                                        f"\n\n已筛出 {int((pending_command.get('impact') or {}).get('affected_count') or 0)} "
+                                        "名待停止人选。当前尚未写入；请在确认卡核对影响后执行。"
                                     )
-                                    batch_stop_receipt = {
-                                        "version": "batch_stop_receipt_v1",
-                                        "state": "已完成",
-                                        "job_id": list_job_id,
-                                        "applied": int(_stop_result.get("applied") or 0),
-                                        "skipped": int(_stop_result.get("skipped") or 0),
-                                        "events": int(_stop_result.get("events") or 0),
-                                        "summary": _stop_summary,
-                                    }
                             except Exception as _stop_exc:
                                 import logging
                                 logging.getLogger("copilot.batch_stop").exception(
@@ -1703,6 +2078,41 @@ def _copilot_impl(
         forced_answer = str(intent_understanding.get("clarification_question") or "").strip() or (
             f"我还缺少{missing_text}，确认后才能继续。" if missing_text else "我还不能唯一确定你的对象或动作，请再确认一句。"
         )
+    report_requested = semantic_action == "recommendation" and any(
+        token in message for token in ("推荐报告", "推荐材料", "候选人报告", "报告草稿", "用模板")
+    )
+    if (
+        forced_answer is None
+        and report_requested
+        and semantic_speech_act in {"propose", "execute", "confirm"}
+        and not intent_understanding.get("needs_clarification")
+        and (attachment_only_candidate or (selected.get("type") == "candidate" and selected.get("id")))
+    ):
+        try:
+            pending_command = self.create_recommendation_report_command(
+                session_id=session_id,
+                source_message=display_message,
+                candidate_id=int(selected["id"]) if selected.get("id") else None,
+                attachment_candidate=attachment_only_candidate,
+                condition_version=int(conversation_state.get("revision") or 0) + 1,
+                requires_r3=any(token in message for token in ("推荐给客户", "提交客户", "推给客户")),
+            )
+            target_label = str((pending_command.get("target") or {}).get("label") or "当前人选")
+            forced_answer = f"已确认报告对象为{target_label}。报告尚未生成，请核对命令卡后确认。"
+            turn_decision.update({
+                "effect": "confirm_command",
+                "safe_for_action": False,
+                "authorization": {
+                    "mode": "preflight_required",
+                    "workflow_id": None,
+                    "version": None,
+                    "plan_hash": None,
+                    "evidence": list(intent_understanding.get("action_evidence") or [message]),
+                },
+            })
+            suppress_goal_intent = True
+        except ValueError as exc:
+            forced_answer = f"结论：暂未生成报告命令。\n\n下一步：{str(exc)[:180]}。"
     stopped_candidate_action_blocked = False
     if selected.get("type") == "candidate" and selected.get("id"):
         try:
@@ -1862,6 +2272,17 @@ def _copilot_impl(
     selected_payload: dict[str, Any] = dict(selected)
     selected_payload["intent_understanding"] = intent_understanding
     selected_payload["turn_decision"] = turn_decision
+    # 待确认命令的事实源是命令表和助手消息；用户消息只保留原话及附件证据。
+    if candidate_list_card:
+        selected_payload["recent_candidate_set"] = {
+            "job_id": int((candidate_list_card.get("context") or {}).get("id") or 0),
+            "candidate_ids": [
+                int(candidate.get("id") or 0)
+                for group in candidate_list_card.get("groups") or []
+                for candidate in (group.get("candidates") or [])
+                if isinstance(candidate, dict) and candidate.get("id")
+            ][:200],
+        }
     current_workflow_context: dict[str, Any] = {}
     if goal_workflow:
         workflow = goal_workflow.get("workflow") or {}
@@ -1907,6 +2328,30 @@ def _copilot_impl(
                     current_workflow_context,
                     expanded=_copilot_response_detail(message) == "expanded",
                 )
+    elif workflow_outcome_question and isinstance(existing_focus, dict):
+        # “刚才那个任务进展如何” may arrive from the global Agent page. The
+        # job focus is useful for outcome aggregation, but the concrete recent
+        # workflow remains the object whose status must be returned and audited.
+        selected_payload["business_focus"] = existing_focus
+        recent_workflow = (
+            existing_focus.get("current_workflow")
+            if isinstance(existing_focus.get("current_workflow"), dict)
+            else {}
+        ) or (
+            existing_focus.get("pending_workflow")
+            if isinstance(existing_focus.get("pending_workflow"), dict)
+            else {}
+        )
+        recent_workflow_id = str(recent_workflow.get("workflow_id") or "")
+        if recent_workflow_id:
+            try:
+                current_workflow_context = _compact_workflow_context(
+                    self.get_workflow(recent_workflow_id)
+                )
+            except (sqlite3.Error, ValueError):
+                current_workflow_context = {}
+            if current_workflow_context:
+                selected_payload["workflow_detail"] = current_workflow_context
     elif existing_focus:
         selected_payload["business_focus"] = existing_focus
     references: list[dict[str, Any]] = []
@@ -2478,14 +2923,27 @@ def _copilot_impl(
     else:
         if rule_evidence:
             payload["rule_evidence"] = rule_evidence
-        answer, model_tool_calls, tool_references = _generate_copilot_model_answer(
-            self,
-            sanitize_payload(payload),
-        )
+        try:
+            answer, model_tool_calls, tool_references = _generate_copilot_model_answer(
+                self,
+                sanitize_payload(payload),
+            )
+        except LLMError:
+            answer = _model_unavailable_answer(
+                self,
+                message=display_message,
+                selected=selected,
+                selected_facts=selected_facts,
+                understanding=intent_understanding,
+                workflow_context=current_workflow_context,
+            )
+            model_tool_calls, tool_references = [], []
+            answer_source = "rules"
+        else:
+            answer_source = "model_tools" if model_tool_calls else "model"
         references.extend(tool_references)
         if not answer:
             answer = rule_evidence or "当前查询已完成，但暂时没有生成可用结论。"
-        answer_source = "model_tools" if model_tool_calls else "model"
     references = _dedupe_copilot_references(references)
     suggested_actions = _normalize_action_suggestions(
         suggested_actions,
@@ -2519,18 +2977,65 @@ def _copilot_impl(
         decision=turn_decision,
         selected=selected,
     )
-    if batch_stop_receipt:
+    if pending_command:
+        command_type = str(pending_command.get("command_type") or "")
         execution_receipt = {
             "version": "execution_receipt_v1",
-            "state": "已完成",
-            "summary": f"批量停止推进 {batch_stop_receipt.get('applied')} 人（{batch_stop_receipt.get('summary')}）",
-            "succeeded": int(batch_stop_receipt.get("applied") or 0),
-            "skipped": int(batch_stop_receipt.get("skipped") or 0),
-            "failed": 0,
-            "verified": True,
-            "scope": {"type": "job", "id": int(batch_stop_receipt.get("job_id") or 0)},
-            "next_step": "查看岗位候选池最新状态",
+            "state": "待确认",
+            "summary": (
+                "已生成报告预检命令，确认前未生成报告文件"
+                if command_type == "recommendation_report"
+                else "已生成写入预检命令，确认前未修改候选人状态"
+            ),
+            "verified": False,
+            "scope": dict(pending_command.get("target") or {}),
+            "next_step": "核对影响范围后确认、修改或取消",
         }
+    interaction_card = _interaction_card(
+        intent_understanding,
+        turn_decision,
+        selected=selected,
+        focus={**(business_focus or {}), "conflicts": focus_conflicts or (business_focus or {}).get("conflicts") or []},
+        message=message,
+        pending_command=pending_command or None,
+        execution_receipt=execution_receipt if execution_receipt and execution_receipt.get("verified") else None,
+    )
+    trace_workflow = (
+        goal_workflow.get("workflow")
+        if goal_workflow else current_workflow_context.get("workflow") or {}
+    )
+    trace_route = (
+        "clarify"
+        if intent_understanding.get("needs_clarification")
+        else "confirm"
+        if pending_command or str(turn_decision.get("effect") or "") in {"confirm", "propose_plan"}
+        else "workflow"
+        if (trace_workflow or {}).get("workflow_id")
+        else "read"
+    )
+    turn_trace = {
+        "version": "copilot_turn_trace_v1",
+        "user_message": display_message,
+        "page_context": sanitize_payload(raw_context),
+        "business_focus": business_focus or {},
+        "understanding": intent_understanding,
+        "condition_ledger_changes": list(intent_understanding.get("constraint_changes") or []),
+        "route": trace_route,
+        "tool": {
+            "operations": list(intent_understanding.get("operations") or []),
+            "command_id": str((pending_command or {}).get("command_id") or "") or None,
+            "workflow_id": str((trace_workflow or {}).get("workflow_id") or "") or None,
+            "model_tool_calls": model_tool_calls,
+        },
+        "receipt": execution_receipt or {
+            "version": "execution_receipt_v1",
+            "state": "read_only",
+            "summary": "本轮未触发业务写入",
+            "verified": True,
+            "scope": dict(intent_understanding.get("target") or {}),
+        },
+        "final_answer": answer,
+    }
     assistant_structured = {
         "references": references,
         "suggested_actions": suggested_actions,
@@ -2563,7 +3068,9 @@ def _copilot_impl(
         "turn_decision": turn_decision,
         "understanding_card": understanding_card,
         "execution_receipt": execution_receipt,
-        "batch_stop_receipt": batch_stop_receipt or None,
+        "interaction_card": interaction_card,
+        "pending_command": pending_command or None,
+        "turn_trace": turn_trace,
         "tool_calls": model_tool_calls,
         "model_participation": {
             "mode": answer_source,
@@ -2731,7 +3238,8 @@ def _copilot_impl(
         "suggested_actions": suggested_actions,
         "understanding_card": understanding_card,
         "execution_receipt": execution_receipt,
-        "batch_stop_receipt": batch_stop_receipt or None,
+        "interaction_card": interaction_card,
+        "pending_command": pending_command or None,
         "skill_runs": skill_runs,
         "model_participation": assistant_structured["model_participation"],
         "goal_id": goal_workflow["goal"]["goal_id"] if goal_workflow else None,
@@ -2784,6 +3292,7 @@ def _copilot_impl(
         "intent_understanding": intent_understanding,
         "fact_receipt": fact_receipt or None,
         "turn_decision": turn_decision,
+        "turn_trace": turn_trace,
         "tool_calls": model_tool_calls,
         "proactive_suggestions": generate_proactive_suggestions(str(self.db_path)),
         "action_card": assistant_structured.get("action_card"),

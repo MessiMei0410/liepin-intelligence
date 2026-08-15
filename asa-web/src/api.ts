@@ -105,6 +105,10 @@ export type ContractAnchor = [
   paths['/api/v1/copilot/sessions']['get'],
   paths['/api/v1/copilot/sessions/{session_id}']['get'],
   paths['/api/v1/copilot/stream']['post'],
+  paths['/api/v1/copilot/commands/{command_id}']['get'],
+  paths['/api/v1/copilot/commands/{command_id}/preflight']['post'],
+  paths['/api/v1/copilot/commands/{command_id}/decision']['post'],
+  paths['/api/v1/copilot/commands/{command_id}/refresh']['post'],
   paths['/api/v1/workbench']['get'],
   paths['/api/v1/analytics/runs']['post'],
   paths['/api/v1/analytics/runs/{run_id}']['get'],
@@ -878,6 +882,22 @@ export const api = {
     intent: { kind: 'candidate_action'; action: string; message?: string } & Record<string, unknown>
     intent_hash: string; candidate_id: number; preflight_token: string; message?: string; session_id?: string
   }) => write<Record<string, unknown>>('/api/v1/copilot/intents/confirm', payload),
+  copilotCommand: (commandId: string) =>
+    json<{ ok: boolean; command: Record<string, unknown> }>(`/api/v1/copilot/commands/${encodeURIComponent(commandId)}`),
+  preflightCopilotCommand: (commandId: string) =>
+    write<{ ok: boolean; command: Record<string, unknown>; confirmation_token: string; expires_in: number }>(
+      `/api/v1/copilot/commands/${encodeURIComponent(commandId)}/preflight`, {},
+    ),
+  decideCopilotCommand: (commandId: string, confirmationToken: string, decision: 'approve' | 'reject', note = '') =>
+    write<{ ok: boolean; command: Record<string, unknown>; receipt?: Record<string, unknown> }>(
+      `/api/v1/copilot/commands/${encodeURIComponent(commandId)}/decision`,
+      { confirmation_token: confirmationToken, decision, note },
+    ),
+  refreshCopilotCommand: (commandId: string, expectedCommandHash: string) =>
+    write<{ ok: boolean; command: Record<string, unknown>; refreshed: boolean; replayed?: boolean }>(
+      `/api/v1/copilot/commands/${encodeURIComponent(commandId)}/refresh`,
+      { expected_command_hash: expectedCommandHash },
+    ),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
   approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
   preflight: (candidate_id: number, action: string) => {

@@ -40,10 +40,10 @@ NON_BUSINESS_COPILOT_ACTIONS = {
 def _without_workflow_source_claim(answer: Any) -> str:
     """Do not let an Agent-mode analysis imply sourcing ran without a workflow."""
     text = str(answer or "")
-    # 两种语序都要拦截：“寻访已启动”与“已启动寻访/我已经开始搜索人选”。
+    # 两种语序都要拦截：“寻访已经启动”与“已启动寻访/我已经开始搜索人选”。
     if re.search(
-        r"(?:寻访|搜索).{0,8}(?:已启动|已开始|已经开始|已执行)"
-        r"|(?:已启动|已开始|已经开始|已执行).{0,6}(?:寻访|搜索)",
+        r"(?:寻访|搜索).{0,8}(?:已启动|已经启动|已开始|已经开始|已执行)"
+        r"|(?:已启动|已经启动|已开始|已经开始|已执行).{0,6}(?:寻访|搜索)",
         text,
     ):
         return "已完成查询和分析，尚未创建寻访工作流，因此没有启动寻访。"
@@ -58,6 +58,11 @@ _COPILOT_CORRECTION_RE = re.compile(
 
 def _is_copilot_correction(message: str) -> bool:
     return bool(_COPILOT_CORRECTION_RE.search(" ".join(str(message or "").split())))
+
+
+def _is_short_confirmation(message: str) -> bool:
+    compact = re.sub(r"[\s。.!！?？,，、]+", "", str(message or ""))
+    return compact in {"确认", "可以", "行", "好", "好的", "按这个来", "就这样", "确认执行"}
 
 
 def _is_sourcing_result_action_card(card: Any) -> bool:
@@ -179,6 +184,9 @@ class CopilotBridgeMixin:
         if not self.agent_service:
             raise RuntimeError("copilot service unavailable")
         raw_context = dict(context or {})
+        adjacent_confirmation = self._confirm_adjacent_candidate_intent(message, session_id, raw_context)
+        if adjacent_confirmation is not None:
+            return adjacent_confirmation
         correction_turn = _is_copilot_correction(message)
         if correction_turn:
             raw_context["correction_turn"] = True
@@ -358,6 +366,29 @@ class CopilotBridgeMixin:
             result["answer"] = "这条指令尚未写入 ASA：当前没有唯一定位到人岗关系，请先打开对应候选人后重试。"
             result["write_blocked"] = True
         result = _enforce_copilot_action_boundary(result)
+        turn_trace = dict(result.get("turn_trace") or {})
+        trace_tool = dict(turn_trace.get("tool") or {})
+        if pending_intent:
+            turn_trace.update({
+                "route": "confirm",
+                "final_answer": result.get("answer"),
+                "receipt": {
+                    "version": "execution_receipt_v1", "state": "待确认",
+                    "summary": "候选人状态尚未写入", "verified": False,
+                    "scope": {"type": "candidate", "id": candidate_id},
+                },
+            })
+            trace_tool["candidate_intent"] = {
+                "kind": pending_intent.get("kind"), "action": pending_intent.get("action"),
+                "candidate_id": candidate_id, "intent_hash": pending_intent.get("intent_hash"),
+            }
+        elif action_result:
+            turn_trace.update({"route": "execute", "final_answer": result.get("answer")})
+        elif pending_blocked or pending_unresolved:
+            turn_trace.update({"route": "clarify", "final_answer": result.get("answer")})
+        if turn_trace:
+            turn_trace["tool"] = trace_tool
+            result["turn_trace"] = turn_trace
         if action or update_type or pending_intent or workflow_card:
             result_session_id = str(result.get("session_id") or session_id or "")
             if result_session_id:
@@ -379,7 +410,10 @@ class CopilotBridgeMixin:
                     "business_focus": result.get("business_focus") or {},
                     "understanding_card": result.get("understanding_card"),
                     "execution_receipt": result.get("execution_receipt"),
+                    "interaction_card": result.get("interaction_card"),
+                    "turn_trace": result.get("turn_trace"),
                     "pending_intent": result.get("pending_intent"),
+                    "pending_command": result.get("pending_command"),
                     "action_card": result.get("action_card"),
                     "action_cards": result.get("action_cards") or [],
                 })
@@ -416,6 +450,78 @@ class CopilotBridgeMixin:
                         (result["answer"], json.dumps(structured, ensure_ascii=False), result_session_id),
                     )
         return result
+
+    def _confirm_adjacent_candidate_intent(
+        self, message: str, session_id: str, context: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Allow a short acknowledgement to confirm only the immediately previous candidate intent."""
+        if not session_id or not _is_short_confirmation(message):
+            return None
+        with transaction(self.db_path) as conn:
+            row = conn.execute(
+                """SELECT role,context_type,context_id,structured_json
+                     FROM agent_copilot_messages WHERE session_id=? ORDER BY id DESC LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+        if row is None or str(row["role"] or "") != "assistant":
+            return None
+        try:
+            structured = json.loads(row["structured_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return None
+        pending = structured.get("pending_intent") if isinstance(structured, dict) else None
+        if not isinstance(pending, dict) or pending.get("invalidated") or structured.get("pending_command"):
+            return None
+        candidate = pending.get("candidate") if isinstance(pending.get("candidate"), dict) else {}
+        candidate_id = int(candidate.get("id") or 0)
+        if not candidate_id:
+            return None
+        confirmed = self.confirm_copilot_intent(
+            {"kind": pending.get("kind"), "action": pending.get("action"), "message": pending.get("message")},
+            intent_hash=str(pending.get("intent_hash") or ""),
+            candidate_id=candidate_id,
+            preflight_token=str(pending.get("preflight_token") or ""),
+            message=str(pending.get("message") or ""),
+            session_id=session_id,
+        )
+        receipt = dict(confirmed.get("execution_receipt") or {})
+        answer = str(confirmed.get("answer") or "")
+        resolved_context = {
+            "type": str(context.get("type") or row["context_type"] or "candidate"),
+            "id": context.get("id") if context.get("id") is not None else row["context_id"],
+        }
+        turn_trace = {
+            "version": "copilot_turn_trace_v1", "user_message": message,
+            "page_context": resolved_context, "business_focus": self.agent_service.get_copilot_focus(session_id),
+            "understanding": {
+                "speech_act": "confirm", "action": "candidate_review",
+                "primary_action": "candidate_review", "target": {"type": "candidate", "id": candidate_id},
+                "source_quotes": [message], "needs_clarification": False, "confidence": 1.0,
+            },
+            "condition_ledger_changes": [], "route": "execute",
+            "tool": {"candidate_intent": {"action": pending.get("action"), "candidate_id": candidate_id}},
+            "receipt": receipt, "final_answer": answer,
+        }
+        assistant_structured = {
+            "pending_intent": None, "execution_receipt": receipt, "turn_trace": turn_trace,
+            "business_focus": turn_trace["business_focus"], "references": [], "suggested_actions": [],
+        }
+        with transaction(self.db_path) as conn:
+            conn.executemany(
+                """INSERT INTO agent_copilot_messages
+                   (session_id,context_type,context_id,role,content,structured_json)
+                   VALUES (?,?,?,?,?,?)""",
+                [
+                    (session_id, resolved_context["type"], resolved_context["id"], "user", message, json.dumps(resolved_context, ensure_ascii=False)),
+                    (session_id, resolved_context["type"], resolved_context["id"], "assistant", answer, json.dumps(assistant_structured, ensure_ascii=False)),
+                ],
+            )
+        return {
+            "ok": True, "session_id": session_id, "answer": answer, "context": resolved_context,
+            "references": [], "suggested_actions": [], "pending_intent": None,
+            "execution_receipt": receipt, "turn_trace": turn_trace,
+            "business_focus": turn_trace["business_focus"],
+        }
 
     def _invalidate_copilot_pending_actions(self, session_id: str, message: str) -> list[dict[str, Any]]:
         """撤销依赖旧约束的待执行动作，并把旧理解保留为可审计快照。"""
@@ -730,6 +836,7 @@ class CopilotBridgeMixin:
                 "understanding_card": result.get("understanding_card"),
                 "execution_receipt": result.get("execution_receipt"),
                 "pending_intent": result.get("pending_intent"),
+                "pending_command": result.get("pending_command"),
                 "action_card": result.get("action_card"),
                 "action_cards": result.get("action_cards") or [],
             })
@@ -775,6 +882,37 @@ class CopilotBridgeMixin:
         ]
         self._persist_agent_action_cards(result)
         return result
+
+    def get_copilot_command(self, command_id: str) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("Agent service unavailable")
+        return self.agent_service.get_copilot_command(command_id)
+
+    def preflight_copilot_command(self, command_id: str) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("Agent service unavailable")
+        return self.agent_service.preflight_copilot_command(command_id)
+
+    def refresh_copilot_command(
+        self, command_id: str, *, request_id: str, expected_command_hash: str,
+    ) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("Agent service unavailable")
+        return self.agent_service.refresh_copilot_command(
+            command_id, request_id=request_id, expected_command_hash=expected_command_hash,
+        )
+
+    def decide_copilot_command(
+        self, command_id: str, *, decision: str, confirmation_token: str, note: str = ""
+    ) -> dict[str, Any]:
+        if not self.agent_service:
+            raise RuntimeError("Agent service unavailable")
+        return self.agent_service.decide_copilot_command(
+            command_id,
+            decision=decision,
+            confirmation_token=confirmation_token,
+            note=note,
+        )
 
     def record_copilot_event(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Copilot 埋点（PRD §9），委托 agent_service 落 agent_copilot_events 表。"""

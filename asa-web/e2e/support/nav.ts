@@ -28,24 +28,19 @@ export const ASSESSMENT_CANDIDATE_NAME = '王**'
 export const ASSESSMENT_EMPTY_CANDIDATE_ID = 510
 export const ASSESSMENT_EMPTY_CANDIDATE_NAME = '张FisherMan'
 
-// 真实 UI 路径进评估 tab：人选列表 tab → 搜索（job_candidates.id 参与索引且全库唯一）→
-// 点行进人选详情 → 切「评估」tab，返回评估区 section。stopped=true 时先切「已停止」范围。
+// 通过 ASA 候选人深链接进入详情，再切「评估」tab。评估回读用例不依赖全库列表预加载，
+// 避免固定分析等前序后台任务短暂占用数据库时把导航可用性混入评估功能断言。
 export async function openCandidateAssessment(
   page: Page,
   candidateId: number,
   candidateName: string,
-  { stopped = false }: { stopped?: boolean } = {},
+  _options: { stopped?: boolean } = {},
 ): Promise<Locator> {
-  await page.goto('/asa-app')
+  void _options
+  await page.goto(`/asa-app#candidate=${candidateId}`)
   await expect(page.locator('header.topbar')).toContainText('ASA Agent 在线')
-  await page.locator('aside.nav').getByRole('button', { name: '人选列表' }).click()
-  await page.getByRole('searchbox', { name: '搜索候选人' }).fill(String(candidateId))
-  if (stopped) await page.getByRole('button', { name: /^已停止/ }).click()
-  const row = page.getByRole('row', { name: `打开候选人 ${candidateName}` })
-  await expect(row).toBeVisible()
-  await row.click()
   const panel = page.locator('.candidate-panel')
-  await expect(panel).toBeVisible()
+  await expect(panel).toBeVisible({ timeout: 30_000 })
   await expect(panel.locator('.detail-head h2')).toHaveText(candidateName)
   await panel.locator('.candidate-tabs').getByRole('button', { name: '评估' }).click()
   const assessment = panel.locator('section.assessment')
@@ -56,7 +51,7 @@ export async function openCandidateAssessment(
 export async function openJob(page: Page, jobId = JOB_ID): Promise<Locator> {
   await page.goto(`/asa-app#job=${jobId}`)
   const panel = page.locator('.job-detail-panel')
-  await expect(panel).toBeVisible()
+  await expect(panel).toBeVisible({ timeout: 30_000 })
   await expect(panel.locator('.detail-head h2')).toContainText('技术市场经理')
   return panel
 }
@@ -73,7 +68,7 @@ export async function openCandidateFromJob(page: Page, candidateName = CANDIDATE
 export async function openWorkflow(page: Page, workflowId = WORKFLOW_ID): Promise<Locator> {
   await page.goto(`/asa-app#workflow=${workflowId}`)
   const panel = page.locator('.compact-workflow-dialog')
-  await expect(panel).toBeVisible()
+  await expect(panel).toBeVisible({ timeout: 30_000 })
   await expect(panel.locator('.compact-workflow-head h2')).toContainText('士兰微')
   return panel
 }

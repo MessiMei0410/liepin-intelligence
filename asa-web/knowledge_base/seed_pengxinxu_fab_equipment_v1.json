@@ -75,7 +75,7 @@
   "level_mapping": {
     "level_band": "expert",
     "job_title_range": "高级工程师/专家",
-    "accepted_candidate_levels": ["高级工程师", "资深工程师", "专家", "主任工程师"],
+    "accepted_candidate_levels": ["资深工程师", "专家", "主任工程师"],
     "note": "设备专家按 12 寸产线模块负责范围与装机/量产导入经历定档；专家档年限参考本科10年/硕士7年+（case_pengxinxu level_year_mapping）",
     "applies_to": "fab_equipment_expert 原型；fab 设备岗可复用"
   }

@@ -1004,6 +1004,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/copilot/commands/{command_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Copilot Command Get */
+        get: operations["copilot_command_get_api_v1_copilot_commands__command_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/copilot/commands/{command_id}/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copilot Command Preflight */
+        post: operations["copilot_command_preflight_api_v1_copilot_commands__command_id__preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/copilot/commands/{command_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copilot Command Decision */
+        post: operations["copilot_command_decision_api_v1_copilot_commands__command_id__decision_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/copilot/commands/{command_id}/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copilot Command Refresh */
+        post: operations["copilot_command_refresh_api_v1_copilot_commands__command_id__refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/memories": {
         parameters: {
             query?: never;
@@ -2056,6 +2124,35 @@ export interface components {
             ok: boolean;
             attachment: components["schemas"]["CopilotAttachmentResponseItem"];
         };
+        /** CopilotCommandDecision */
+        CopilotCommandDecision: {
+            /** Request Id */
+            request_id: string;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "approve" | "reject";
+            /** Confirmation Token */
+            confirmation_token: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** CopilotCommandPreflight */
+        CopilotCommandPreflight: {
+            /** Request Id */
+            request_id: string;
+        };
+        /** CopilotCommandRefresh */
+        CopilotCommandRefresh: {
+            /** Request Id */
+            request_id: string;
+            /** Expected Command Hash */
+            expected_command_hash: string;
+        };
         /** CopilotEvent */
         CopilotEvent: {
             /** Request Id */
@@ -2153,6 +2250,14 @@ export interface components {
             } | null;
             /** Pending Intent */
             pending_intent?: {
+                [key: string]: unknown;
+            } | null;
+            /** Pending Command */
+            pending_command?: {
+                [key: string]: unknown;
+            } | null;
+            /** Interaction Card */
+            interaction_card?: {
                 [key: string]: unknown;
             } | null;
             /** Action Card */
@@ -4799,6 +4904,154 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_command_get_api_v1_copilot_commands__command_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_command_preflight_api_v1_copilot_commands__command_id__preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotCommandPreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_command_decision_api_v1_copilot_commands__command_id__decision_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotCommandDecision"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_command_refresh_api_v1_copilot_commands__command_id__refresh_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotCommandRefresh"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

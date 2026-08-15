@@ -136,7 +136,7 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
   }, {})
 
   return <div>
-    <p style={{ color: 'var(--muted, #6b7a72)', margin: '0 0 12px' }}>
+    <p style={{ color: 'var(--muted, #68736b)', margin: '0 0 12px' }}>
       本周榜单（{scan.scan_date}）：信号全部来自公开信息，「可能意味着」是推测，仅供顾问本人判断；系统不自动触达任何人选。
     </p>
     {notice && <div className="toast" role="status" style={{ position: 'static', marginBottom: 12 }}>{notice}</div>}
@@ -149,12 +149,12 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
       <header style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <Radar size={16} />
         <strong>{index + 1}. {entry.company}</strong>
-        <small className="radar-reason" style={{ color: 'var(--muted, #6b7a72)' }}>信号强度 {entry.score} · {entry.reason}</small>
+        <small className="radar-reason" style={{ color: 'var(--muted, #68736b)' }}>信号强度 {entry.score} · {entry.reason}</small>
       </header>
       <ul style={{ margin: '8px 0', paddingLeft: 18 }}>
         {(signalsByCompany[entry.company] || []).map((signal, i) => <li key={i} className="radar-signal" style={{ marginBottom: 4 }}>
           <b>【{SIGNAL_TYPE_LABELS[signal.type] || signal.type}】</b>{signal.summary}（{signal.as_of}）
-          {signal.implication ? <span style={{ color: 'var(--muted, #6b7a72)' }}>｜可能意味着：{signal.implication}（推测）</span> : null}
+          {signal.implication ? <span style={{ color: 'var(--muted, #68736b)' }}>｜可能意味着：{signal.implication}（推测）</span> : null}
           {' '}<a href={signal.source_urls[0]} target="_blank" rel="noreferrer">来源</a>
         </li>)}
       </ul>
@@ -185,17 +185,17 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
           <strong>库里有这些人 · {activateCompany}</strong>
           <button className="button" onClick={closeActivate}>关闭</button>
         </header>
-        <p style={{ color: 'var(--muted, #6b7a72)' }}>清单只读展示；是否触达、怎么触达由顾问本人决定，系统不自动触达。</p>
+        <p style={{ color: 'var(--muted, #68736b)' }}>清单只读展示；是否触达、怎么触达由顾问本人决定，系统不自动触达。</p>
         {activateState === 'loading' && <div className="empty" role="status">正在读取人才库人选…</div>}
         {activateState === 'error' && <div className="empty" role="alert">
           <p>{activateError || '人选清单加载失败，请稍后重试。'}</p>
           <button className="button" onClick={() => void loadActivate(activateCompany)}>重新加载人选</button>
         </div>}
         {activateState === 'ready' && !activateItems.length && <div className="empty">人才库里暂时没有这家公司的人选。</div>}
-        {activateState === 'ready' && activateItems.map(item => <div key={`${item.tenure}-${item.id}`} className="radar-activate-item" style={{ display: 'flex', gap: 10, padding: '8px 0', borderTop: '1px solid var(--line, #e3eae6)' }}>
+        {activateState === 'ready' && activateItems.map(item => <div key={`${item.tenure}-${item.id}`} className="radar-activate-item" style={{ display: 'flex', gap: 10, padding: '8px 0', borderTop: '1px solid var(--line, #e0e4de)' }}>
           <b>{item.name_masked}</b>
           <span>{item.current_title}</span>
-          <small style={{ color: 'var(--muted, #6b7a72)' }}>
+          <small style={{ color: 'var(--muted, #68736b)' }}>
             {item.tenure} · {item.stage || '未入流程'} · 最近动作 {item.last_action_at || '—'}
           </small>
         </div>)}

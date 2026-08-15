@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 
-STATE_VERSION = "copilot_context_state_v2"
-TURN_VERSION = "copilot_turn_understanding_v2"
+STATE_VERSION = "copilot_context_state_v3"
+TURN_VERSION = "copilot_turn_understanding_v3"
 TERMINAL_WORKFLOW_STATUSES = {"completed", "cancelled", "superseded", "archived", "failed"}
 
 _SPEECH_ACTS = {
@@ -36,28 +36,45 @@ _FACT_LABELS = {
 _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "candidate_sourcing": (
         r"(?:给|为).{0,40}(?:找|寻访|搜索|搜寻|补充|补池).{0,30}(?:人选|候选人)",
-        r"(?:找|寻访|搜索|搜寻|补池|补充).{0,24}(?:人选|候选人)",
-        r"(?:人选|候选人).{0,24}(?:再找|继续找|补充|补池|寻访|搜索)",
+        r"(?:给|为|继续给|继续为).{0,24}(?:这个|当前|该)?.{0,8}(?:岗位|职位).{0,20}(?:找人|再找|寻访|搜索|补充|补池)",
+        r"(?:这个|当前|该)?.{0,8}(?:岗位|职位).{0,16}(?:再找|补充|补池)\s*(?:\d+|[一二两三四五六七八九十]+)\s*(?:位|个|名|人)?",
+        r"(?:找|寻访|搜索|搜寻|补池).{0,24}(?:人选|候选人)",
+        r"(?:人选|候选人).{0,24}(?:再找|继续找|补池|寻访|搜索)",
         r"(?:跑|开|启动|开始|继续|重新|再跑).{0,12}(?:一轮|新一轮)?.{0,12}(?:寻访|搜索)",
+        r"(?:生成|发起|启动|开始|做).{0,24}(?:新一轮|下一轮|一轮).{0,12}(?:寻访|搜索)",
+        r"(?:这个|当前|该).{0,12}(?:岗位|职位).{0,12}(?:再发起|再开|启动|开始).{0,12}(?:新一轮|下一轮|一轮)?.{0,8}(?:寻访|搜索)",
+        r"(?:直接搜|直接搜索|按当前条件继续|继续找|继续补池)",
+        r"(?:再找|再补|继续补)\s*(?:\d+|[一二两三四五六七八九十]+)\s*(?:位|个|名|人)?$",
+        r"按(?:刚才|之前|当前)(?:的)?条件继续",
         r"(?:这个|当前|该).{0,12}(?:岗位|职位).{0,12}(?:再来|再跑|继续).{0,8}(?:一轮|新一轮)",
         r"(?:再触达|补充触达|补充并触达|再联系).{0,24}(?:一些|一批|新)?.{0,8}(?:人选|候选人)",
     ),
     "strategy_revision": (
         r"(?:修改|调整|修订|更新|优化|重做).{0,30}(?:寻访策略|搜索策略|计划|公司池|关键词|排除规则)",
         r"(?:寻访策略|搜索策略|计划|公司池|关键词|排除规则).{0,30}(?:修改|调整|修订|更新|优化|重做)",
+        r"(?:规划|制定|生成).{0,20}(?:下一轮|新一轮)?.{0,12}(?:搜索词|关键词|渠道策略)",
     ),
     "candidate_outreach": (
         r"(?:帮我|请|现在|立即|开始|继续|批量)?.{0,12}(?:联系|触达|开聊|沟通|发消息).{0,30}(?:人选|候选人|这批|他们|他|她)",
         r"(?:人选|候选人|这批).{0,24}(?:联系|触达|开聊|沟通|发消息)",
     ),
     "candidate_review": (
-        r"(?:帮我|请|开始|重新|批量)?.{0,12}(?:评估|复核|分析|筛选|判断).{0,30}(?:人选|候选人|简历|匹配度)",
+        r"(?:推进|继续推进|停止推进|停掉|淘汰).{0,12}(?:这个|当前|该)?.{0,6}(?:人选|候选人)",
+        r"(?:这个|当前|该)?.{0,6}(?:人选|候选人).{0,12}(?:推进|继续推进|停止推进|停掉|淘汰)",
+        r"(?:帮我|请|开始|重新|批量)?.{0,12}(?:评估|复核|分析|筛选|筛出|判断).{0,30}(?:人选|候选人|简历|匹配度)",
         r"(?:人选|候选人|简历).{0,24}(?:评估|复核|分析|筛选|判断)",
         r"(?:过滤|筛选|分级|分层|按证据|按硬性|按匹配度).{0,40}(?:候选池|候选人|人选|名单|列表|输出)",
         r"(?:候选池|候选人|人选|名单|列表).{0,40}(?:过滤|筛选|分级|分层|按证据|按硬性|按匹配度)",
+        r"(?:候选池|候选人|人选).{0,24}(?:名单|列表).{0,16}(?:给我|列出|展示|输出|看)?",
+        r"(?:名单|列表).{0,20}(?:筛一下|筛选|给我|列出|展示|输出)",
+        r"(?:名单|列表).{0,20}(?:怎么|为何|为什么)",
+        r"(?:展示|列出|输出).{0,20}(?:触达|候选|人选).{0,8}\d+\s*人",
+        r"(?:候选池|候选人|人选).{0,20}筛出.{0,30}(?:的人|名单)",
+        r"(?:不匹配|不合适).{0,16}(?:停止推进|停掉|淘汰)",
+        r"(?:把|将)?.{0,10}(?:前|这|那)?\s*(?:\d+|一|二|两|三|四|五|六|七|八|九|十)+\s*(?:个|人|名)?.{0,12}(?:停止推进|停掉|淘汰)",
         r"(?:比较|对比|排序).{0,30}(?:前|top|TOP)?\s*\d*\s*(?:位|个|名)?(?:候选池|候选人|人选)",
         r"(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d+\s*(?:位|个|名|人)",
-        r"(?:候选池|候选人|人选).{0,30}(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d*",
+        r"(?:候选池|候选人|人选).{0,16}(?:之间)?(?:对比|排序).{0,20}(?:前|top|TOP)?\s*\d*",
     ),
     "job_publish": (
         r"(?:发布|上架|发到猎聘|准备发布).{0,24}(?:岗位|职位)",
@@ -74,6 +91,8 @@ _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
     "recommendation": (
         r"(?:帮我|请|生成|整理|制作|提交|开始)?.{0,12}(?:推荐报告|推荐材料|推荐给客户|推给客户|提交客户)",
         r"(?:把|将).{0,20}(?:人选|候选人|他|她).{0,20}(?:推荐给客户|推给客户|提交客户)",
+        r"(?:推荐|推给客户|提交客户).{0,12}(?:这个|当前|该)?.{0,6}(?:人选|候选人)",
+        r"(?:这个|当前|该)?.{0,6}(?:人选|候选人).{0,12}(?:推荐给客户|推给客户|提交客户)",
     ),
     "salary": (
         r"(?:帮我|请|立即|现在|开始|执行|启动|生成|整理|制作|处理|做一份).{0,20}(?:谈薪|薪资谈判|谈薪方案|薪资核验|薪资报告|谈薪风险|薪资材料)",
@@ -337,6 +356,24 @@ def enrich_turn_understanding(
     action = _clean(result.get("action"), 48).lower()
     if action not in _ACTIONS:
         action = "none"
+    # The model may return action=none for an explicit colloquial command.
+    # Promote only deterministic, non-question, non-observation evidence.
+    observation_only = _looks_like_observation(message) and not re.search(
+        r"(?:帮我|请|给我|继续|再找|重新|开始|执行|启动|停止推进|停掉)", _clean(message)
+    )
+    reported_summary = bool(re.match(r"【(?:顾问|Hermes).{0,16}整理", _clean(message), re.I))
+    if action == "none" and not _looks_like_question(message) and not observation_only and not reported_summary:
+        matched_actions = [
+            candidate
+            for candidate, patterns in _ACTION_PATTERNS.items()
+            if any(re.search(pattern, _clean(message), re.I) for pattern in patterns)
+        ]
+        if "candidate_review" in matched_actions and any(
+            token in _clean(message) for token in ("名单", "列表", "展示", "列出", "筛选", "筛出", "过滤", "分级")
+        ):
+            action = "candidate_review"
+        elif matched_actions:
+            action = matched_actions[0]
     topic = _detect_topic(message, action, result.get("topic"))
     fact_updates = _validated_fact_updates(message, result.get("fact_updates"))
     result.update({"speech_act": speech_act, "action": action, "topic": topic, "fact_updates": fact_updates})
@@ -370,12 +407,58 @@ def enrich_turn_understanding(
         "correct": "correction",
         "cancel": "cancellation",
     }.get(speech_act, "other")
+    source_quotes = [_clean(item) for item in result.get("source_quotes") or [] if _clean(item)]
+    for quote in [message, *(item.get("quote") for item in fact_updates if isinstance(item, dict))]:
+        cleaned = _clean(quote)
+        if cleaned and cleaned in _clean(message) and cleaned not in source_quotes:
+            source_quotes.append(cleaned)
+    operations: list[dict[str, Any]] = []
+    text = _clean(message)
+    if action == "candidate_review":
+        operations.append({"order": 1, "action": "filter_candidates", "effect": "read"})
+        if re.search(
+            r"(?:不匹配|不合适).{0,12}(?:停止推进|停掉|停止|淘汰)"
+            r"|(?:前|这|那)?(?:\d+|一|二|两|三|四|五|六|七|八|九|十)+(?:个|人|名)?.{0,12}(?:停止推进|停掉|淘汰)",
+            text,
+        ):
+            operations.append({"order": 2, "action": "batch_stop", "effect": "internal_write", "depends_on": [1]})
+        if any(token in text for token in ("名单", "列表", "给我人选")):
+            operations.append({
+                "order": len(operations) + 1,
+                "action": "list_candidates",
+                "effect": "read",
+                "depends_on": [operations[-1]["order"]] if operations else [],
+            })
+    elif action != "none":
+        operations.append({"order": 1, "action": action, "effect": "confirm"})
+    model_operations = [dict(item) for item in result.get("operations") or [] if isinstance(item, dict)]
+    if model_operations and not operations:
+        operations = model_operations[:8]
+    observations = [
+        {"quote": item.get("quote"), "value": item.get("value")}
+        for item in fact_updates
+        if isinstance(item, dict) and item.get("kind") == "workflow_observation"
+    ]
+    objective = _clean(result.get("objective"))
+    if not objective and action != "none" and not observations:
+        objective = text
     result.update({
         "version": TURN_VERSION,
         "speech_act": speech_act,
         "action": action,
+        "primary_action": action,
         "topic": topic,
         "turn_kind": turn_kind,
+        "references": list(result.get("references") or []),
+        "objective": objective,
+        "observations": observations,
+        "operations": operations,
+        "effect": (
+            "internal_write" if any(item.get("effect") == "internal_write" for item in operations)
+            else "confirm" if any(item.get("effect") == "confirm" for item in operations)
+            else "read" if operations else "none"
+        ),
+        "source_quotes": source_quotes[-12:],
         "action_evidence": evidence,
         "safe_for_action": bool(
             action != "none"
@@ -420,6 +503,8 @@ def build_context_state(
     understanding: dict[str, Any],
     decision: dict[str, Any],
     workflow_intent: dict[str, Any] | None,
+    pending_command: dict[str, Any] | None = None,
+    recent_candidate_set: dict[str, Any] | None = None,
     now: str,
 ) -> dict[str, Any]:
     state = copy.deepcopy(previous) if isinstance(previous, dict) else {}
@@ -596,6 +681,8 @@ def build_context_state(
         "active_goal": active_goal,
         "open_questions": open_questions[-8:],
         "pending_plan": pending_plan,
+        "pending_command": dict(pending_command or {}),
+        "recent_candidate_set": dict(recent_candidate_set or state.get("recent_candidate_set") or {}),
         "last_turn": {
             "kind": _clean(understanding.get("turn_kind"), 32),
             "topic": _clean(understanding.get("topic"), 48),

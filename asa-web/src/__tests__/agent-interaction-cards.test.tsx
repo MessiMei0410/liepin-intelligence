@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from '../agent/AgentInteractionCards'
+import { ExecutionReceipt, InteractionCard, SuggestedActionBar, UnderstandingCard } from '../agent/AgentInteractionCards'
 
 describe('Agent interaction cards', () => {
   it('理解卡展示对象、目标、判断和无选项澄清问题', () => {
@@ -41,5 +41,24 @@ describe('Agent interaction cards', () => {
     expect(card).toHaveTextContent('失败 2')
     expect(card).toHaveTextContent('机械高级工程师候选池')
     expect(card).toHaveTextContent('复核失败人选')
+  })
+
+  it('行动卡只展示附件人选、动作、影响和一次关键条件', () => {
+    render(<InteractionCard card={{
+      state: 'pending', action_label: '生成推荐报告',
+      target: { type: 'attachment_candidate', candidate: '验收顾问', client: '验收客户', job: '高级电气工程师' },
+      impact_text: '确认后生成 1 份报告草稿，不会自动对外发送',
+      key_conditions: ['嘉驰通用模板'],
+      pending_command: { command_id: 'cmd-report-1', command_type: 'recommendation_report' },
+      details: { objective: '给这个人选做份推荐报告，用嘉驰通用的模板', confidence: 0.9 },
+    }}/>)
+    const card = screen.getByRole('region', { name: '行动卡' })
+    expect(card).toHaveTextContent('验收顾问')
+    expect(card).toHaveTextContent('验收客户')
+    expect(card).toHaveTextContent('高级电气工程师')
+    expect(card).toHaveTextContent('确认后生成 1 份报告草稿，不会自动对外发送')
+    expect(card).toHaveTextContent('嘉驰通用模板')
+    expect(card).not.toHaveTextContent('待确认')
+    expect(screen.getByRole('button', { name: '确认生成推荐报告' })).toBeInTheDocument()
   })
 })
