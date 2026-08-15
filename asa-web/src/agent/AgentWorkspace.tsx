@@ -1,5 +1,5 @@
 import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
+import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, Monitor, Moon, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Sun, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
@@ -19,6 +19,7 @@ import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSi
 import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
 import { StrategyPatchCard } from './StrategyPatchCard'
 import { compareCandidatePageContext, CandidatePageConflict } from './pageContextConflict'
+import { readThemePreference, setThemePreference, type ThemeMode } from './theme'
 
 const ACTIVE_SESSION_KEY = 'asaAgentSessionId'
 const RadarPage = lazy(() => import('../pages/Radar').then(module => ({ default: module.RadarPage })))
@@ -238,6 +239,13 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const [historyTotal, setHistoryTotal] = useState(0)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const prependHeightRef = useRef<number | null>(null)
+  const [themeMode, setThemeMode] = useState<ThemeMode>(readThemePreference)
+  const cycleTheme = () => {
+    const order: ThemeMode[] = ['auto', 'light', 'dark']
+    const next = order[(order.indexOf(themeMode) + 1) % order.length]
+    setThemeMode(next); setThemePreference(next)
+  }
+  const themeLabel = themeMode === 'auto' ? '跟随系统' : themeMode === 'light' ? '浅色' : '深色'
   const [searchUnavailable, setSearchUnavailable] = useState(false)
   const [taskMenu, setTaskMenu] = useState<{ sessionId: string; x: number; y: number } | undefined>(undefined)
   const [interactionError, setInteractionError] = useState('')
@@ -818,7 +826,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
 
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
-      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
+      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div><button className="icon-btn" title={`主题：${themeLabel}`} aria-label={`主题：${themeLabel}`} onClick={cycleTheme}>{themeMode === 'auto' ? <Monitor/> : themeMode === 'light' ? <Sun/> : <Moon/>}</button><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
       {contextConflict && <div className="agent-context-conflict" role="alert"><span>你正带着新的业务上下文进入，当前任务焦点为 {contextConflict.label}</span><div><button className="button primary" onClick={resolveConflictWithNewTask}>以新上下文新建任务</button><button className="button" onClick={resolveConflictKeepCurrent}>继续当前任务</button></div></div>}
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}

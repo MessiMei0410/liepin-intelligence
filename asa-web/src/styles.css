@@ -1390,3 +1390,61 @@ button:disabled{cursor:not-allowed;opacity:.58}
 .bare-shell .candidate-dialog{position:static;left:auto;top:auto;transform:none;width:100%;max-width:none;height:100vh;border:0;border-radius:0;box-shadow:none;animation:none}
 .bare-list-loading,.bare-empty{padding:48px 20px;text-align:center;color:var(--muted)}
 @media(max-width:650px){.agent-page-context-conflict{align-items:stretch;flex-direction:column}.agent-page-context-conflict>div{width:100%}.agent-page-context-conflict .button{flex:1}}
+/* ============================================================================
+   Dark theme v1（2026-08-16）：Agent 会话面 + 外壳 chrome。
+   入口单一：[data-theme="dark"]（由 src/agent/theme.ts 在运行时设置，
+   auto 模式跟随系统）。令牌层先翻，再覆盖仍硬编码浅色的高频表面。
+   ============================================================================ */
+:root[data-theme="dark"]{
+  --bg:#151a17;--surface:#1d231f;--surface-sub:#252c27;--line:#333b35;--line-soft:#2a312c;
+  --muted:#98a199;--text:#e4e9e5;--green:#5da37b;--green-soft:#1f2e25;--amber:#d5a74a;
+  --amber-soft:#332b16;--red:#d98c8c;--red-soft:#3a2424;--focus:#7fb3ff;
+  --shadow-1:0 1px 2px rgba(0,0,0,.5);--shadow-2:0 8px 24px rgba(0,0,0,.55);
+  --shadow-3:0 1px 2px rgba(0,0,0,.5),0 12px 32px rgba(0,0,0,.55);
+  --shadow-4:0 24px 70px rgba(0,0,0,.7);--scrim:rgba(0,0,0,.62);
+}
+:root[data-theme="dark"] body{color:var(--text)}
+/* 外壳 chrome */
+:root[data-theme="dark"] .nav{background:#181d19;border-color:var(--line)}
+:root[data-theme="dark"] .nav nav button{color:#a6aea7}
+:root[data-theme="dark"] .nav nav button:hover,:root[data-theme="dark"] .nav nav button.active{background:var(--surface);color:#d7e6dc}
+:root[data-theme="dark"] .topbar{background:rgba(21,26,23,.92)}
+:root[data-theme="dark"] .icon-btn,:root[data-theme="dark"] .button,:root[data-theme="dark"] .search{background:var(--surface)}
+:root[data-theme="dark"] .button.primary{background:var(--green);color:#0f1a14;border-color:var(--green)}
+/* 通用卡片/表头浅色背景 */
+:root[data-theme="dark"] .section,:root[data-theme="dark"] .metric,:root[data-theme="dark"] .stage,
+:root[data-theme="dark"] .detail-panel,:root[data-theme="dark"] .workflow-panel,
+:root[data-theme="dark"] .diagnostics dl{background:var(--surface)}
+:root[data-theme="dark"] .section-head,:root[data-theme="dark"] .stage header,
+:root[data-theme="dark"] .table-wrap th{background:var(--surface-sub)}
+:root[data-theme="dark"] .table-wrap td{border-color:var(--line-soft)}
+:root[data-theme="dark"] .table-wrap tbody tr:hover,:root[data-theme="dark"] .work-row:hover,
+:root[data-theme="dark"] .detail-body>aside,:root[data-theme="dark"] .workflow-body>aside{background:var(--surface-sub)}
+:root[data-theme="dark"] .empty{background:var(--surface-sub)}
+/* Agent 会话面 */
+:root[data-theme="dark"] .agent-workspace{background:var(--bg)}
+:root[data-theme="dark"] .agent-conversation{background:var(--surface)}
+:root[data-theme="dark"] .agent-task-rail{background:var(--surface-sub);border-color:var(--line)}
+:root[data-theme="dark"] .agent-task-search{background:var(--surface)}
+:root[data-theme="dark"] .agent-focus-bar{background:#1c2733;border-color:#2c3c52;color:#8ab4f8}
+:root[data-theme="dark"] .agent-focus-bar.conflict{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}
+:root[data-theme="dark"] .agent-message-role{background:var(--surface);color:#b6bdc7}
+:root[data-theme="dark"] .agent-message.assistant .agent-message-role{background:#1d2735;border-color:#2c3c52;color:#8ab4f8}
+:root[data-theme="dark"] .agent-message-content{color:var(--text)}
+:root[data-theme="dark"] .agent-message-copy{background:var(--surface);border-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .agent-composer{background:var(--surface);border-color:var(--line);box-shadow:0 8px 28px rgba(0,0,0,.4)}
+:root[data-theme="dark"] .agent-composer.drag-active{background:#1c2733;border-color:#4f76ad}
+:root[data-theme="dark"] .agent-home-quick>button,:root[data-theme="dark"] .agent-home-band,
+:root[data-theme="dark"] .agent-analysis-row,:root[data-theme="dark"] .agent-home-tools .button{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .agent-home-quick>button:hover{background:var(--surface-sub);border-color:var(--green)}
+:root[data-theme="dark"] .agent-truncated .agent-load-earlier{background:var(--surface)}
+:root[data-theme="dark"] .agent-search{background:var(--surface)}
+:root[data-theme="dark"] .agent-search-results button:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-day-divider span{background:var(--surface)}
+:root[data-theme="dark"] .agent-day-divider::before{background:var(--line-soft)}
+/* 对话框 */
+:root[data-theme="dark"] .action-dialog,:root[data-theme="dark"] .candidate-dialog,
+:root[data-theme="dark"] .workflow-section-dialog{background:var(--surface)}
+:root[data-theme="dark"] .action-dialog header,:root[data-theme="dark"] .candidate-dialog header{background:var(--surface-sub)}
+/* 浮窗（窄屏/独立窗口） */
+:root[data-theme="dark"] .bare-shell{background:var(--bg)}
