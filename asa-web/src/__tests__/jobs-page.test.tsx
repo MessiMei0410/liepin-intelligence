@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Jobs } from '../pages/Jobs'
 import type { Job } from '../api'
 
@@ -20,6 +20,11 @@ const makeJob = (id: number, extra: Partial<Job> = {}): Job => ({
 const rowTitles = () => screen.getAllByRole('row').slice(1).map(row => row.textContent)
 
 describe('岗位列表 Jobs', () => {
+  beforeEach(() => {
+    // 页面筛选状态现在走 sessionStorage 持久化：用例间重置，避免互相污染。
+    sessionStorage.clear()
+  })
+
   it('默认 P0 视图展示对应岗位，各筛选按钮带联动计数', () => {
     const items = [
       makeJob(1, { priority: 'P0', lifecycle_stage: 'active_pipeline' }),
@@ -178,5 +183,23 @@ describe('岗位列表 Jobs', () => {
     rerender(<Jobs items={[makeJob(1, { priority: 'P1', lifecycle_stage: 'closed' })]} onSelect={() => {}} />)
     expect(screen.getByRole('status')).toHaveTextContent('共 0 个结果')
     expect(screen.getByText('没有符合当前条件的岗位。')).toBeInTheDocument()
+  })
+
+  it('搜索/范围跨卸载与刷新保持（sessionStorage 持久化）', () => {
+    const items = [makeJob(1, { priority: 'P0' }), makeJob(2, { priority: 'P1', lifecycle_stage: 'closed' })]
+    const { unmount } = render(<Jobs items={items} onSelect={() => {}} />)
+    // 切到「全部」并搜索「岗位2」，结果只剩岗位2
+    fireEvent.click(screen.getByRole('button', { name: /全部 2/ }))
+    fireEvent.change(screen.getByLabelText('搜索岗位'), { target: { value: '岗位2' } })
+    expect(screen.getByText('岗位2')).toBeInTheDocument()
+    expect(screen.queryByText('岗位1')).not.toBeInTheDocument()
+
+    // 卸载（模拟切 tab）后重新挂载：搜索词与范围均保留
+    unmount()
+    render(<Jobs items={items} onSelect={() => {}} />)
+    expect(screen.getByLabelText('搜索岗位')).toHaveValue('岗位2')
+    expect(screen.getByText('岗位2')).toBeInTheDocument()
+    expect(screen.queryByText('岗位1')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /全部 1/ })).toHaveAttribute('aria-pressed', 'true')
   })
 })

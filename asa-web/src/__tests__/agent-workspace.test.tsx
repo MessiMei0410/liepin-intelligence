@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentObjectEmbed } from '../agent/AgentObjectEmbed'
-import { AgentWorkspace } from '../agent/AgentWorkspace'
+import { AgentWorkspace, buildSessionMarkdown } from '../agent/AgentWorkspace'
 import type { Workbench } from '../api'
 import type { AgentContext, AgentReference } from '../agent/transport'
 import { candidateDetail, mockResponse, plannedWorkflow } from './helpers'
@@ -362,6 +362,123 @@ describe('Agent workspace', () => {
     fireEvent.click(within(menu).getByRole('menuitem', { name: /复制会话 ID/ }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('task-1'))
     expect(screen.queryByRole('menu', { name: '任务操作' })).not.toBeInTheDocument()
+  })
+
+  it('buildSessionMarkdown 按天分节并标注角色与元信息', () => {
+    const markdown = buildSessionMarkdown({
+      title: '找人',
+      sessionId: 'task-9',
+      focus: '士兰微 / 电源专家',
+      exportedAt: '2026/08/16 10:00',
+      messages: [
+        { role: 'user', content: '先看看地图', created_at: '2026-08-15 09:00' },
+        { role: 'assistant', content: '已给出地图', created_at: '2026-08-15 09:01' },
+        { role: 'user', content: '第二天再问', created_at: '2026-08-16 08:00' },
+      ],
+    })
+    expect(markdown).toContain('# ASA 任务：找人')
+    expect(markdown).toContain('消息数：3')
+    expect(markdown).toContain('任务焦点：士兰微 / 电源专家')
+    expect(markdown).toContain('**你** · 2026-08-15 09:00')
+    expect(markdown).toContain('**ASA** · 2026-08-15 09:01')
+    expect(markdown.match(/## 2026-08-15/g)).toHaveLength(1)
+    expect(markdown).toContain('## 2026-08-16')
+  })
+
+  it('⌘⇧N 新建任务：清空当前会话回到空任务首页', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-1', business_focus: null,
+        messages: [{ role: 'assistant', content: '已恢复任务' }], total: 1, has_more: false,
+      })
+      return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 1, updated_at: '2026-08-03' }] })
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'n', metaKey: true, shiftKey: true })
+
+    expect(await screen.findByText('今天从哪里开始？')).toBeInTheDocument()
+    expect(screen.queryByText('已恢复任务')).not.toBeInTheDocument()
+  })
+
+  it('? 打开快捷键帮助面板，Esc 关闭；输入框内不触发', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
+      ? mockResponse({ ok: true, sessions: [] })
+      : mockResponse({})))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.keyDown(document.body, { key: '?' })
+    const dialog = await screen.findByRole('dialog', { name: '快捷键' })
+    expect(within(dialog).getByText('聚焦输入框')).toBeInTheDocument()
+    expect(within(dialog).getByText('新建任务')).toBeInTheDocument()
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '快捷键' })).not.toBeInTheDocument())
+
+    // 焦点在输入框时按 ? 是打字，不弹帮助。
+    const composer = screen.getByLabelText('Agent 消息')
+    fireEvent.keyDown(composer, { key: '?' })
+    expect(screen.queryByRole('dialog', { name: '快捷键' })).not.toBeInTheDocument()
+  })
+
+  it('右键任务卡可导出会话：分页拉全量并下载 Markdown', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    const capturedBlobs: Blob[] = []
+    const createObjectURL = vi.fn((blob: Blob) => { capturedBlobs.push(blob); return 'blob:mock' })
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      const pageOne = Array.from({ length: 200 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `第${index + 1}条` }))
+      const pageTwo = [
+        { role: 'user' as const, content: '最早的问题', created_at: '2026-08-01 09:00' },
+        { role: 'assistant' as const, content: '最早的回答', created_at: '2026-08-01 09:01' },
+      ]
+      const fetchMock = vi.fn<typeof fetch>(async input => {
+        const url = String(input)
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '已恢复任务' }], total: 202, has_more: true })
+        }
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=200')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: { client: '士兰微', job: { title: '电源专家' } }, messages: pageOne, total: 202, has_more: true })
+        }
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=200&offset=200')) {
+          return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: pageTwo, total: 202, has_more: false })
+        }
+        return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 202, updated_at: '2026-08-03' }] })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+      renderWorkspace({ type: 'page', page: 'agent' })
+
+      expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
+      const rail = screen.getByRole('complementary', { name: '任务历史' })
+      const card = within(rail).getByText('继续找人').closest('article')
+      fireEvent.contextMenu(card as HTMLElement)
+      fireEvent.click(within(screen.getByRole('menu', { name: '任务操作' })).getByRole('menuitem', { name: /导出会话/ }))
+
+      await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+      const markdown = await capturedBlobs[0].text()
+      expect(markdown).toContain('# ASA 任务：继续找人')
+      expect(markdown).toContain('消息数：202')
+      expect(markdown).toContain('任务焦点')
+      // 跨天分节：早于当天的消息带日期小节标题。
+      expect(markdown).toContain('## 2026-08-01')
+      expect(markdown).toContain('最早的问题')
+      expect(markdown).toContain('第200条')
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      const anchorDownload = clickSpy.mock.instances[0] as HTMLAnchorElement
+      expect(anchorDownload.download).toMatch(/^ASA任务-继续找人-\d{8}-\d{4}\.md$/)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock')
+      // 对话头也有导出入口（当前会话激活时）。
+      expect(screen.getByRole('button', { name: '导出会话', hidden: false })).toBeInTheDocument()
+    } finally {
+      clickSpy.mockRestore()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('右键任务卡菜单可点击空白或按 Escape 关闭', async () => {
@@ -999,6 +1116,47 @@ describe('Agent workspace', () => {
     expect(listCalls[listCalls.length - 1]).not.toContain('q=')
   })
 
+  it('⌘⇧F 打开会话内搜索，命中可跳转定位并高亮', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    const restored = Array.from({ length: 6 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: index === 0 ? '候选人张航在杭州' : `历史消息 ${index + 1}`, created_at: `2026-08-15 0${index}:00` }))
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) {
+        return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: restored, total: 6, has_more: false })
+      }
+      if (url.includes('/messages/search?q=')) {
+        return mockResponse({
+          ok: true, session_id: 'task-1', query: '张航', total: 6,
+          matches: [{ role: 'user', created_at: '2026-08-15 00:00', content: '候选人张航在杭州', snippet: '候选人张航在杭州', newer_count: 5 }],
+        })
+      }
+      return mockResponse({ ok: true, sessions: [] })
+    }))
+    const scrollSpy = vi.fn()
+    const original = window.HTMLElement.prototype.scrollIntoView
+    window.HTMLElement.prototype.scrollIntoView = scrollSpy
+    try {
+      renderWorkspace({ type: 'page', page: 'agent' })
+      expect(await screen.findByText('候选人张航在杭州')).toBeInTheDocument()
+
+      fireEvent.keyDown(window, { key: 'f', metaKey: true, shiftKey: true })
+      const searchInput = await screen.findByLabelText('搜索消息')
+      fireEvent.change(searchInput, { target: { value: '张航' } })
+      fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+
+      const option = await screen.findByRole('option')
+      fireEvent.click(option)
+
+      // 搜索结果面板关闭，目标消息被高亮定位（scrollIntoView 被调用）。
+      await waitFor(() => expect(screen.queryByRole('search', { name: '会话内搜索' })).not.toBeInTheDocument())
+      expect(scrollSpy).toHaveBeenCalled()
+      const hit = document.querySelector('.agent-message.search-hit')
+      expect(hit).not.toBeNull()
+    } finally {
+      window.HTMLElement.prototype.scrollIntoView = original
+    }
+  })
+
   it('progress 事件显示为临时状态行，正文到达后清除且不写入消息列表', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>(resolve => { release = resolve })
@@ -1219,6 +1377,67 @@ describe('Agent workspace', () => {
     // 再点一次关闭按钮，名单正常关闭且不影响后续恢复逻辑
     fireEvent.click(screen.getByLabelText('关闭名单'))
     expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+  })
+
+  it('中文输入法组词确认的 Enter 不发送，非组合态 Enter 正常发送', async () => {
+    let streamCalled = false
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) {
+        streamCalled = true
+        return streamResponse('event: text\ndata: {"content":"好"}\n\nevent: done\ndata: {"ok":true,"session_id":"s-ime","answer":"好"}\n\n')
+      }
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    const input = screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）')
+    fireEvent.change(input, { target: { value: '推荐 张三' } })
+    // IME 组词回车：不触发发送
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(streamCalled).toBe(false)
+    expect(input).toHaveValue('推荐 张三')
+    // 非组合态回车：正常发送
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: false })
+    await waitFor(() => expect(streamCalled).toBe(true))
+  })
+
+  it('上翻浏览历史时流式输出不拽回底部，回到底部按钮恢复跟随', async () => {
+    const scrollSpy = vi.fn()
+    const originalScrollIntoView = window.HTMLElement.prototype.scrollIntoView
+    window.HTMLElement.prototype.scrollIntoView = scrollSpy
+    try {
+      vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+        const url = String(input)
+        if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) return mockResponse({ ok: true, session_id: 'task-1', business_focus: null, messages: [{ role: 'assistant', content: '第一条回答' }], total: 1, has_more: false })
+        if (url.endsWith('/api/v1/copilot/sessions/task-2?limit=100')) return mockResponse({ ok: true, session_id: 'task-2', business_focus: null, messages: [{ role: 'assistant', content: '第二条回答' }], total: 1, has_more: false })
+        if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '任务一', preview: '第一条回答', message_count: 1, updated_at: '2026-08-03' }, { session_id: 'task-2', title: '任务二', preview: '第二条回答', message_count: 1, updated_at: '2026-08-04' }] })
+        return mockResponse({})
+      }))
+      localStorage.setItem('asaAgentSessionId', 'task-1')
+      const { container } = renderWorkspace({ type: 'page', page: 'agent' })
+
+      // 恢复 task-1 后自动吸底一次
+      expect(await screen.findByText('第一条回答')).toBeInTheDocument()
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalledTimes(1))
+
+      // 模拟上翻：距底部 700px，出现「回到底部」，此后不再自动吸底
+      const messages = container.querySelector('.agent-messages') as HTMLElement
+      Object.defineProperty(messages, 'scrollHeight', { configurable: true, value: 1000 })
+      Object.defineProperty(messages, 'scrollTop', { configurable: true, value: 0 })
+      Object.defineProperty(messages, 'clientHeight', { configurable: true, value: 300 })
+      fireEvent.scroll(messages)
+      expect(screen.getByRole('button', { name: '回到底部' })).toBeInTheDocument()
+
+      // 切换到 task-2：消息更新但不应被拽回底部
+      const rail = screen.getByRole('complementary', { name: '任务历史' })
+      fireEvent.click(within(rail).getByText('任务二'))
+      expect(await screen.findByText('第二条回答')).toBeInTheDocument()
+      expect(scrollSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView
+    }
   })
 })
 

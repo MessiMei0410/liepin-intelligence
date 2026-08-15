@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Progress } from '../pages/Progress'
 import type { Candidate } from '../api'
 
@@ -18,6 +18,11 @@ const makeCandidate = (id: number, stage: string, extra: Partial<Candidate> = {}
 const cardButtons = () => screen.getAllByRole('button', { name: /候选人\d+/ })
 
 describe('人选进度 Progress', () => {
+  beforeEach(() => {
+    // 页面筛选状态现在走 sessionStorage 持久化：用例间重置，避免互相污染。
+    sessionStorage.clear()
+  })
+
   it('按阶段分组并展示总人数与阶段数', () => {
     render(<Progress items={[makeCandidate(1, '初筛'), makeCandidate(2, '初筛'), makeCandidate(3, '复试')]} openCandidate={() => {}} />)
     expect(screen.getByRole('status')).toHaveTextContent('共 3 位人选 · 2 个阶段')

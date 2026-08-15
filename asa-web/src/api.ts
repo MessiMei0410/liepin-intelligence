@@ -5,13 +5,13 @@ import { parseWorkflowCandidatesPage, parseWorkflowStepDetail, parseWorkflowSumm
 import type { WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 import { parseSourcingFunnel } from './workflow/sourcingFunnel'
 import type { SourcingFunnel } from './workflow/sourcingFunnel'
-import { parseAgentSession, parseAgentSessionList, parseAgentSessionUpdate } from './agent/sessionModel'
+import { parseAgentSession, parseAgentSessionList, parseAgentSessionSearch, parseAgentSessionUpdate } from './agent/sessionModel'
 import type { CandidateListCardData } from './workflows/CandidateListCard'
 
 export type { Workflow } from './workflow/workflowModel'
 export type { WorkflowCandidateItem, WorkflowCandidatesPage, WorkflowSummary } from './workflow/workflowSummary'
 export type { SourcingFunnel, SourcingFunnelChannel, SourcingFunnelRun } from './workflow/sourcingFunnel'
-export type { AgentMessage, AgentSession, AgentSessionSummary } from './agent/sessionModel'
+export type { AgentMessage, AgentSession, AgentSessionSearchMatch, AgentSessionSummary } from './agent/sessionModel'
 
 export type Job = {
   id: number; title: string; client: string; location?: string; status?: string;
@@ -703,6 +703,7 @@ export const api = {
   workbench: () => json<Workbench>(`/api/v1/workbench?limit=${WORKBENCH_LIMIT}`),
   agentSessions: (limit = 30, q = '') => json<unknown>(`/api/v1/copilot/sessions?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ''}`).then(parseAgentSessionList),
   agentSession: (sessionId: string, limit = 100, offset = 0) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}?limit=${limit}${offset > 0 ? `&offset=${offset}` : ''}`).then(parseAgentSession),
+  agentSessionMessageSearch: (sessionId: string, q: string) => json<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}/messages/search?q=${encodeURIComponent(q)}`).then(parseAgentSessionSearch),
   health: () => json<{ ok?: boolean; status?: string }>('/api/v1/health'),
   updateAgentSession: (sessionId: string, patch: { title?: string; archived?: boolean; clear_focus?: boolean }) =>
     write<unknown>(`/api/v1/copilot/sessions/${encodeURIComponent(sessionId)}`, patch, 'PATCH').then(parseAgentSessionUpdate),

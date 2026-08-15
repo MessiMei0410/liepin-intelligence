@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Candidates } from '../pages/Candidates'
 import type { Candidate } from '../api'
 
@@ -21,6 +21,11 @@ const makeCandidate = (id: number, extra: Partial<Candidate> = {}): Candidate =>
 const rowNames = () => screen.getAllByRole('row').slice(1).map(row => row.textContent)
 
 describe('候选人列表 Candidates', () => {
+  beforeEach(() => {
+    // 页面筛选状态现在走 sessionStorage 持久化：用例间重置，避免互相污染。
+    sessionStorage.clear()
+  })
+
   it('未超页时一次展示全部，并显示总数', () => {
     render(<Candidates items={[makeCandidate(1), makeCandidate(2)]} openCandidate={() => {}} />)
     expect(screen.getAllByRole('row')).toHaveLength(3)

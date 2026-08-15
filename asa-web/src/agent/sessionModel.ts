@@ -74,6 +74,22 @@ const sessionUpdateSchema = z.object({
   business_focus: structuredRecord.nullable().optional(),
 })
 
+const sessionSearchMatchSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  created_at: z.string().nullable().optional(),
+  content: z.string(),
+  snippet: z.string(),
+  newer_count: z.number().int().nonnegative(),
+})
+
+const sessionSearchSchema = z.object({
+  ok: z.boolean(),
+  session_id: z.string(),
+  query: z.string(),
+  matches: z.array(sessionSearchMatchSchema),
+  total: z.number().int().nonnegative().optional().default(0),
+})
+
 export type AgentSessionSummary = z.infer<typeof sessionSummarySchema>
 export type AgentMessage = Omit<z.infer<typeof messageSchema>, 'context' | 'references'> & {
   context?: AgentContext
@@ -81,7 +97,9 @@ export type AgentMessage = Omit<z.infer<typeof messageSchema>, 'context' | 'refe
 }
 export type AgentSession = Omit<z.infer<typeof sessionSchema>, 'messages'> & { messages: AgentMessage[] }
 export type AgentSessionUpdate = z.infer<typeof sessionUpdateSchema>
+export type AgentSessionSearchMatch = z.infer<typeof sessionSearchMatchSchema>
 
 export const parseAgentSessionList = (value: unknown): { ok: boolean; sessions: AgentSessionSummary[] } => sessionListSchema.parse(value)
 export const parseAgentSession = (value: unknown): AgentSession => sessionSchema.parse(value) as AgentSession
+export const parseAgentSessionSearch = (value: unknown): z.infer<typeof sessionSearchSchema> => sessionSearchSchema.parse(value)
 export const parseAgentSessionUpdate = (value: unknown): AgentSessionUpdate => sessionUpdateSchema.parse(value)

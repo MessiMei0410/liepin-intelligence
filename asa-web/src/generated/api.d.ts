@@ -927,6 +927,23 @@ export interface paths {
         patch: operations["copilot_session_update_api_v1_copilot_sessions__session_id__patch"];
         trace?: never;
     };
+    "/api/v1/copilot/sessions/{session_id}/messages/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Copilot Session Message Search */
+        get: operations["copilot_session_message_search_api_v1_copilot_sessions__session_id__messages_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/copilot/stream": {
         parameters: {
             query?: never;
@@ -2167,6 +2184,47 @@ export interface components {
             created_at?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** CopilotMessageSearchMatchResponse */
+        CopilotMessageSearchMatchResponse: {
+            /** Role */
+            role: string;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Content
+             * @default
+             */
+            content: string;
+            /**
+             * Snippet
+             * @default
+             */
+            snippet: string;
+            /** Newer Count */
+            newer_count: number;
+        };
+        /** CopilotMessageSearchResponse */
+        CopilotMessageSearchResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /** Session Id */
+            session_id: string;
+            /**
+             * Query
+             * @default
+             */
+            query: string;
+            /** Matches */
+            matches?: components["schemas"]["CopilotMessageSearchMatchResponse"][];
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
         };
         /** CopilotReferenceResponse */
         CopilotReferenceResponse: {
@@ -4668,6 +4726,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CopilotSessionUpdateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_session_message_search_api_v1_copilot_sessions__session_id__messages_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotMessageSearchResponse"];
                 };
             };
             /** @description Validation Error */

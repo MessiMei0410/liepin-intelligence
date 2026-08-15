@@ -176,6 +176,7 @@ from .copilot_handler import (
     _copilot_workflow_outcome_context as _h_copilot_workflow_outcome_context,
     _persist_copilot_focus as _h_persist_copilot_focus,
     get_copilot_session as _h_get_copilot_session,
+    search_copilot_session_messages as _h_search_copilot_session_messages,
     list_copilot_sessions as _h_list_copilot_sessions,
     update_copilot_session as _h_update_copilot_session,
     archive_all_copilot_sessions as _h_archive_all_copilot_sessions,
@@ -1707,6 +1708,7 @@ AgentService._copilot_context_from_focus = _h_copilot_context_from_focus
 AgentService._copilot_workflow_outcome_context = _h_copilot_workflow_outcome_context
 AgentService._persist_copilot_focus = _h_persist_copilot_focus
 AgentService.get_copilot_session = _h_get_copilot_session
+AgentService.search_copilot_session_messages = _h_search_copilot_session_messages
 AgentService.list_copilot_sessions = _h_list_copilot_sessions
 AgentService.update_copilot_session = _h_update_copilot_session
 AgentService.archive_all_copilot_sessions = _h_archive_all_copilot_sessions

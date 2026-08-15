@@ -841,6 +841,59 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
         conn.close()
 
 
+def _like_escape(value: str) -> str:
+    """LIKE 通配符转义（配合 ESCAPE '\\'）：用户输入的 %/_ 按字面匹配。"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_copilot_session_messages(self, session_id: str, q: str, limit: int = 20) -> dict[str, Any]:
+    """会话内消息搜索：返回匹配消息的定位锚点（newer_count=比它新的消息数）。
+
+    前端用 newer_count 判断目标是否已加载（newer_count < 已加载条数即可见），
+    不足时按 offset 分页补齐到覆盖位置，再滚动定位。content 全文返回用于
+    created_at+content 复合键比对（与前端去重键一致）。
+    """
+    session_id = str(session_id or "").strip()
+    query = str(q or "").strip()
+    if not session_id or not query:
+        return {"ok": True, "session_id": session_id, "query": query, "matches": [], "total": 0}
+    conn = self._connect()
+    try:
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS total FROM agent_copilot_messages WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        total = int(total_row["total"] or 0) if total_row else 0
+        rows = conn.execute(
+            """
+            SELECT id,role,content,created_at FROM agent_copilot_messages
+            WHERE session_id=? AND content LIKE ? ESCAPE '\\'
+            ORDER BY id DESC LIMIT ?
+            """,
+            (session_id, f"%{_like_escape(query)}%", max(1, min(int(limit or 20), 50))),
+        ).fetchall()
+        matches = []
+        for row in rows:
+            newer = conn.execute(
+                "SELECT COUNT(*) AS c FROM agent_copilot_messages WHERE session_id=? AND id>?",
+                (session_id, row["id"]),
+            ).fetchone()
+            content = row["content"] or ""
+            pos = content.find(query)
+            start = max(0, pos - 24)
+            end = min(len(content), pos + 56)
+            matches.append({
+                "role": row["role"],
+                "created_at": row["created_at"],
+                "content": content,
+                "snippet": ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else ""),
+                "newer_count": int(newer["c"] or 0) if newer else 0,
+            })
+        return {"ok": True, "session_id": session_id, "query": query, "matches": matches, "total": total}
+    finally:
+        conn.close()
+
+
 def list_copilot_sessions(
     self,
     limit: int = 30,

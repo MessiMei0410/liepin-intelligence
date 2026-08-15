@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { CircleCheck, LoaderCircle, TriangleAlert } from 'lucide-react'
 import { api } from '../api'
 import { copilotText } from '../shared/text'
+import { setDirtyForm } from '../shared/dirtyForm'
 
 // 生命周期一等事件（面试/Offer/入职）记录表单：类型+时间+备注。
 // 枚举是后端契约常量（asa_core/service.py LIFECYCLE_EVENT_TYPES），硬编码省去额外请求与加载态。
@@ -21,6 +22,12 @@ export function LifecycleEventForm({candidateId, onRecorded}:{candidateId:number
   const [busy,setBusy]=useState(false)
   const [receipt,setReceipt]=useState('')
   const [error,setError]=useState('')
+  // 脏状态登记：填了时间或备注还没提交时，切 tab/进 Agent/关面板先确认再丢弃。
+  const dirty=Boolean(occurredAt.trim()||notes.trim())
+  useEffect(()=>{
+    setDirtyForm(`lifecycle:${candidateId}`,dirty)
+    return ()=>setDirtyForm(`lifecycle:${candidateId}`,false)
+  },[candidateId,dirty])
   const submit=async()=>{
     if(busy)return
     setBusy(true);setError('');setReceipt('')

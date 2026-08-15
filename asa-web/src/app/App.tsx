@@ -13,6 +13,8 @@ import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
 import { isBareDetached } from '../shared/nativeBridge'
 import { BareCandidateList } from '../agent/BareCandidateList'
 import { CANDIDATE_UPDATED_EVENT, type CandidateUpdatedDetail } from '../shared/candidateEvents'
+import { LeaveConfirmDialog } from '../components/LeaveConfirmDialog'
+import { hasDirtyForms, subscribeDirtyForms } from '../shared/dirtyForm'
 
 // 浮层/次屏组件按需懒加载（P2-2）：四个主 tab 首屏保持直出，点击打开面板时才拉取对应 chunk
 const JobPanel = lazy(() => import('../panels/JobPanel').then(module => ({ default: module.JobPanel })))
@@ -47,6 +49,12 @@ const analysisTime = (value: string) => {
   }).format(timestamp)
 }
 
+/** hash 中的 tab 参数只接受四个主入口，非法值忽略（保持当前 tab）。 */
+const tabFromHashValue = (value: string | null): Tab | undefined => {
+  if (!value) return undefined
+  return tabs.some(([id]) => id === value) ? (value as Tab) : undefined
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>('agent')
   const [boot, setBoot] = useState<Bootstrap>()
@@ -71,8 +79,12 @@ export function App() {
   const [coreOffline, setCoreOffline] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [agentContext, setAgentContext] = useState<AgentContext>({ type: 'page', page: 'agent', mode: 'page_review' })
+  // 丢弃型导航守卫：存在未提交表单时先弹确认（React 对话框，禁原生 confirm）。
+  const [pendingLeave, setPendingLeave] = useState<() => void>()
+  const [dirtyCount, setDirtyCount] = useState(0)
   const candidateStateRef = useRef<CandidateDetail | undefined>(undefined)
   const workflowStateRef = useRef<Workflow | undefined>(undefined)
+  const jobStateRef = useRef<JobDetail | undefined>(undefined)
   const coreFailuresRef = useRef(0)
   const workbenchRefreshRef = useRef(0)
   const jobsRefreshRef = useRef(0)
@@ -257,9 +269,28 @@ export function App() {
 
   useEffect(() => { candidateStateRef.current = candidate }, [candidate])
   useEffect(() => { workflowStateRef.current = workflow }, [workflow])
+  useEffect(() => { jobStateRef.current = job }, [job])
+  useEffect(() => subscribeDirtyForms(setDirtyCount), [])
+
+  // 压入一条视图 hash（tab 或对象）。相同 hash 不重复入栈，避免连点产生死历史条目。
+  const pushHash = (next: string) => {
+    if (location.hash.slice(1) === next) return
+    history.pushState(null, '', `${location.pathname}${location.search}#${next}`)
+  }
+
+  // 丢弃型导航统一走守卫：干净时立即执行，有未提交表单时先确认再执行。
+  const guardedNavigate = (action: () => void) => {
+    if (hasDirtyForms()) setPendingLeave(() => action)
+    else action()
+  }
+  const confirmLeave = () => {
+    const action = pendingLeave
+    setPendingLeave(undefined)
+    action?.()
+  }
 
   const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); pushHash(`candidate=${id}${isBareDetached() ? '&bare=1' : ''}`) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
@@ -268,7 +299,7 @@ export function App() {
     await refreshCandidateList()
   }
   const openJob = async (id: number) => {
-    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await api.job(id)).job); setTab('jobs'); pushHash(`job=${id}${isBareDetached() ? '&bare=1' : ''}`) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshJobDetail = async (id: number) => {
     const fresh = (await api.job(id)).job
@@ -281,8 +312,9 @@ export function App() {
       workflowStateRef.current = resolved.value
       setWorkflow(resolved.value)
       const nextHash = `workflow=${encodeURIComponent(resolved.id)}${isBareDetached() ? '&bare=1' : ''}`
-      if (resolved.id !== id) history.replaceState(null, '', `${location.pathname}${location.search}#${nextHash}`)
-      else location.hash = nextHash
+      // 打开对象压入历史（返回键可回到上一视图）；revision 规范化或重复打开时原位替换，不新增条目。
+      if (resolved.id !== id || location.hash.slice(1) === nextHash) history.replaceState(null, '', `${location.pathname}${location.search}#${nextHash}`)
+      else pushHash(nextHash)
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshWorkflowDetail = async (id: string) => {
@@ -317,14 +349,19 @@ export function App() {
       const jobId = Number(hash.get('job'))
       const sourcingCandidatesId = hash.get('sourcing_candidates')
       const candidateList = hash.get('candidate_list')
+      const tabId = tabFromHashValue(hash.get('tab'))
       if (candidateList) { setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(true); return }
       setBareList(false)
+      if (tabId) setTab(tabId)
       if (sourcingCandidatesId) { openSourcingCandidates(sourcingCandidatesId); return }
       if (analysisId) { void openAnalysis(analysisId); return }
       if (candidateId) { void openCandidate(candidateId); return }
       if (workflowId) { void openWorkflow(workflowId); return }
       if (jobId) { void openJob(jobId); return }
+      // 回到无对象的 tab 视图（多为浏览器返回）：清空 overlay，并通知名单暂存恢复。
+      const hadFullObject = Boolean(candidateStateRef.current || workflowStateRef.current || jobStateRef.current)
       setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
+      if (hadFullObject) notifyFullObjectClosed()
     }
     queueMicrotask(openHash)
     addEventListener('hashchange', openHash)
@@ -391,11 +428,16 @@ export function App() {
     finally { setAnalysisBusy('') }
   }
   const closeOverlay = () => {
-    // 纯净模式（独立窗口）：优先退回上一页（如从名单点进详情），无历史再清空。
-    if (isBareDetached() && history.length > 1) { history.back(); return }
-    workflowStateRef.current = undefined
-    setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false); history.replaceState(null, '', `${location.pathname}${location.search}`)
-    notifyFullObjectClosed()
+    const close = () => {
+      // 纯净模式（独立窗口）：优先退回上一页（如从名单点进详情），无历史再清空。
+      if (isBareDetached() && history.length > 1) { history.back(); return }
+      workflowStateRef.current = undefined
+      setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false)
+      // 关闭后回到当前 tab 的基础视图（replace 不新增历史；返回键仍可回到更早的对象视图）。
+      history.replaceState(null, '', `${location.pathname}${location.search}#tab=${tab}`)
+      notifyFullObjectClosed()
+    }
+    guardedNavigate(close)
   }
   const workflowContext = workflow?.goal.context as Record<string, unknown> | undefined
   const workflowJobId = Number(workflowContext?.id || 0)
@@ -418,8 +460,13 @@ export function App() {
           ? { type: 'page', page: tab, mode: 'page_review' }
           : { type: 'page', page: tab, mode: 'page_review' }
   const showAgent = useCallback((context: AgentContext) => {
-    setAgentContext(context); setTab('agent'); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
-    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    // 交给 Agent 也压入历史：从 Agent 按返回可回到先前的对象/页面视图（不再是单程门）。
+    const enter = () => {
+      setAgentContext(context); setTab('agent'); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
+      if (location.hash.slice(1) !== 'tab=agent') history.pushState(null, '', `${location.pathname}${location.search}#tab=agent`)
+    }
+    if (hasDirtyForms()) setPendingLeave(() => enter)
+    else enter()
   }, [])
   const openAgent = (context: AgentContext = activeContext) => showAgent(context)
   useEffect(() => {
@@ -457,9 +504,12 @@ export function App() {
     return null
   }
   const navigateTab = (id: Tab) => {
-    workflowStateRef.current = undefined
-    setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
-    history.replaceState(null, '', `${location.pathname}${location.search}`)
+    guardedNavigate(() => {
+      workflowStateRef.current = undefined
+      setTab(id); setJob(undefined); setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId('')
+      // tab 进 hash：刷新/分享后恢复当前入口；push 而非 replace，返回键可回上一 tab。
+      pushHash(`tab=${id}`)
+    })
   }
 
   const handleWorkbenchAction = (item: WorkbenchItem) => {
@@ -485,6 +535,7 @@ export function App() {
         {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
       </Suspense>
       {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
+      {pendingLeave && <LeaveConfirmDialog dirtyCount={dirtyCount} onConfirm={confirmLeave} onCancel={() => setPendingLeave(undefined)} />}
       {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     </div>
   }
@@ -507,7 +558,7 @@ export function App() {
           {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
           {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
         </Suspense>
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} templateBusyId={analysisBusy} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}
@@ -521,7 +572,7 @@ export function App() {
         {!!analysis.caveats.length && <section><header><ShieldAlert/><h2>数据提示</h2></header>{analysis.caveats.map(item => <p key={item}>{item}</p>)}</section>}
       </> : <>
         <section><header><Activity/><h2>今日节奏</h2></header><dl><div><dt>待处理</dt><dd>{workbench?.summary?.pending ?? dashboard?.counts?.pending_candidates ?? '-'}</dd></div><div><dt>运行中</dt><dd>{workbench?.summary?.running ?? '-'}</dd></div><div><dt>已交付</dt><dd>{workbench?.summary?.delivered ?? '-'}</dd></div></dl></section>
-        <section><header><Pin/><h2>固定分析</h2></header><div className="rail-links">{templates.slice(0, 6).map(item => <button key={item.template_id} onClick={() => void runTemplate(item.template_id)}>{item.name}</button>)}{!templates.length && <p>暂无固定分析</p>}</div></section>
+        <section><header><Pin/><h2>固定分析</h2></header><div className="rail-links">{templates.slice(0, 6).map(item => { const busy = analysisBusy === item.template_id; return <button key={item.template_id} disabled={busy} onClick={() => void runTemplate(item.template_id)}>{busy ? `${item.name} · 运行中…` : item.name}</button> })}{!templates.length && <p>暂无固定分析</p>}</div></section>
         <section><header><Database/><h2>数据连接</h2></header><p>v3 统一库</p><span className="rail-online"><i/>实时连接</span></section>
       </>}
     </aside>}
@@ -530,6 +581,7 @@ export function App() {
       {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
       {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
       {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
+      {pendingLeave && <LeaveConfirmDialog dirtyCount={dirtyCount} onConfirm={confirmLeave} onCancel={() => setPendingLeave(undefined)} />}
     </Suspense>
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}
