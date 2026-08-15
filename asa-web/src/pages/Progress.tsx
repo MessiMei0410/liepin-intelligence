@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Search, UserRoundSearch } from 'lucide-react'
 import { Candidate } from '../api'
 import { candidateStopped, parseDate, sourceLabel } from '../shared/format'
 import { pageInfo, PageBar } from '../shared/Pagination'
+import { usePageFilterState } from '../shared/pageFilterState'
 
 const PAGE_SIZE = 10
 
@@ -45,8 +46,9 @@ const compareStages = (a: readonly [string, Candidate[]], b: readonly [string, C
 }
 
 export function Progress({ items, openCandidate }: { items: Candidate[]; openCandidate: (id: number) => void }) {
-  const [query, setQuery] = useState('')
-  const [stagePages, setStagePages] = useState<Record<string, number>>({})
+  // 搜索词与各阶段页码跨 tab 切换与刷新保持。
+  const [query, setQuery] = usePageFilterState<string>('progress.query', '')
+  const [stagePages, setStagePages] = usePageFilterState<Record<string, number>>('progress.stagePages', {})
 
   const keyword = query.trim().toLowerCase()
   const searched = useMemo(() => (items ?? []).filter(candidate => matchesQuery(candidate, keyword)), [items, keyword])
@@ -64,12 +66,14 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
   }, [searched])
 
   // 搜索变化回到各阶段第一页；数据收缩时把各阶段页码状态也夹回有效范围。
+  // 恢复持久化搜索词的首挂载不重置页码（否则恢复动作自己清空了自己）。
+  const previousKeywordRef = useRef(keyword)
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (previousKeywordRef.current === keyword) return
+    previousKeywordRef.current = keyword
     setStagePages({})
-  }, [keyword])
+  }, [keyword, setStagePages])
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStagePages(prev => {
       const clamped: Record<string, number> = {}
       for (const [stage, list] of groups) {
@@ -77,7 +81,7 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
       }
       return clamped
     })
-  }, [groups])
+  }, [groups, setStagePages])
 
   const goStagePage = (stage: string, next: number) => setStagePages(prev => ({ ...prev, [stage]: next }))
 
