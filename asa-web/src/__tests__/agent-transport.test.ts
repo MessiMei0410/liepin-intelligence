@@ -44,6 +44,14 @@ describe('Agent transport', () => {
     }) })
   })
 
+  it('从 done 事件保留可恢复的待确认业务命令', () => {
+    const events = parseAgentSse('event: done\ndata: {"ok":true,"session_id":"task-1","answer":"请确认","pending_command":{"command_id":"cmd-1","status":"pending","command_hash":"hash-1"},"turn_trace":{"version":"copilot_turn_trace_v1","route":"confirm"}}\n\n')
+    expect(events[0]).toEqual({ type: 'done', data: expect.objectContaining({
+      pending_command: { command_id: 'cmd-1', status: 'pending', command_hash: 'hash-1' },
+      turn_trace: { version: 'copilot_turn_trace_v1', route: 'confirm' },
+    }) })
+  })
+
   it('从 workflow/progress/approvals 合成前端可渲染的工作流摘要', () => {
     const events = parseAgentSse('event: done\ndata: {"ok":true,"session_id":"task-1","answer":"已建立目标","workflow_id":"wf-1","workflow":{"status":"planned","current_stage":"确认推进方案"},"progress":{"completed":0,"total":5},"approvals":[{"approval_id":"a1","status":"pending","risk_level":"R3"}]}\n\n')
 

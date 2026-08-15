@@ -20,6 +20,7 @@ export type AgentTurnResult = {
   suggested_actions?: Array<Record<string, unknown>>
   understanding_card?: Record<string, unknown> | null
   execution_receipt?: Record<string, unknown> | null
+  interaction_card?: Record<string, unknown> | null
   business_focus?: Record<string, unknown> | null
   workflow_id?: string | null
   workflow_progress?: Record<string, unknown> | null
@@ -29,6 +30,8 @@ export type AgentTurnResult = {
   plan_summary?: Array<Record<string, unknown>>
   goal?: Record<string, unknown> | null
   pending_intent?: Record<string, unknown> | null
+  pending_command?: Record<string, unknown> | null
+  turn_trace?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
   strategy_patch?: Record<string, unknown> | null
@@ -72,9 +75,12 @@ const doneEventSchema = z.object({
   approvals: z.array(structuredRecord).optional(), plan_summary: z.array(structuredRecord).optional(),
   goal: structuredRecord.nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
+  pending_command: structuredRecord.nullable().optional(),
+  turn_trace: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
+  interaction_card: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
   strategy_patch: structuredRecord.nullable().optional(),
   strategy_patch_applied: z.boolean().optional(),

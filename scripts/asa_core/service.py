@@ -442,8 +442,11 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
         clauses = ["1=1"]
         params: list[Any] = []
         if query:
-            clauses.append("(p.display_name LIKE ? OR p.current_company LIKE ? OR p.current_title LIKE ? OR j.title LIKE ?)")
-            params.extend([f"%{query}%"] * 4)
+            clauses.append(
+                "(CAST(jc.id AS TEXT) LIKE ? OR p.display_name LIKE ? OR p.current_company LIKE ? "
+                "OR p.current_title LIKE ? OR j.title LIKE ?)"
+            )
+            params.extend([f"%{query}%"] * 5)
         if job_id:
             clauses.append("jc.job_id=?")
             params.append(job_id)
@@ -463,7 +466,19 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
                     f"""SELECT jc.id,p.id person_id,p.display_name name,p.current_company,p.current_title,
                                p.city,p.education,p.experience,j.id job_id,j.title job,c.name client,
                                jc.clean_stage,jc.flow_bucket,jc.raw_status,jc.updated_at,
-                               COALESCE(sp.source_type,CASE WHEN jc.source_candidate_id IS NOT NULL THEN 'liepin' END,'talent_pool') source_type
+                               CASE
+                                 WHEN EXISTS (
+                                   SELECT 1 FROM candidate_events ce
+                                    WHERE ce.job_candidate_id=jc.id
+                                      AND ce.event_type='mapping_intake'
+                                      AND ce.source_table='mapping_task'
+                                 ) THEN 'mapping'
+                                 ELSE COALESCE(
+                                   sp.source_type,
+                                   CASE WHEN jc.source_candidate_id IS NOT NULL THEN 'liepin' END,
+                                   'talent_pool'
+                                 )
+                               END source_type
                           FROM job_candidates jc JOIN people p ON p.id=jc.person_id
                           LEFT JOIN jobs j ON j.id=jc.job_id LEFT JOIN clients c ON c.id=j.client_id
                           LEFT JOIN source_profiles sp ON sp.id=(SELECT sp2.id FROM source_profiles sp2 WHERE sp2.person_id=p.id ORDER BY sp2.id DESC LIMIT 1)
@@ -699,6 +714,12 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
                     }
                 )
             item["source_lineage"] = source_lineage
+            item["source_type"] = (
+                "mapping"
+                if any(row.get("source_type") == "mapping" for row in source_lineage)
+                else str((profiles[0] if profiles else {}).get("source_type") or "").strip()
+                or ("liepin" if item.get("source_candidate_id") is not None else "talent_pool")
+            )
             report_rows = conn.execute(
                 """
                 SELECT DISTINCT a.id,a.artifact_id,a.workflow_id,a.artifact_type,a.title,

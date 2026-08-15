@@ -185,7 +185,7 @@ def test_intent_payload_includes_uploaded_attachment_excerpt(db_path: Path, fake
         service.close()
 
 
-def test_attachment_only_candidate_generates_report_without_clarification(
+def test_attachment_only_candidate_requires_confirmation_without_clarification(
     db_path: Path, fake_jiashi_runtime
 ) -> None:
     llm = ClarifyingRecommendationLLM()
@@ -196,19 +196,32 @@ def test_attachment_only_candidate_generates_report_without_clarification(
         assert result["ok"] is True
         assert "哪位人选" not in result["answer"]
         assert result["intent_understanding"]["needs_clarification"] is False
-        # attachment-only：不走 create_goal（对象校验必失败），直接技能路由生成报告
+        # attachment-only：不走 create_goal，不追问姓名；首轮只创建持久化命令。
         assert result["goal_id"] is None
         assert result["workflow_id"] is None
         assert result["context"] == {"type": "candidate", "id": None}
-        report_runs = [
-            run for run in result["skill_runs"] if (run.get("skill") or {}).get("id") == "recommendation_report"
-        ]
-        assert report_runs, "未路由 recommendation_report 技能"
-        report_run = report_runs[0]
-        assert report_run.get("ok") is True, report_run.get("error")
-        report_result = report_run.get("result") or {}
-        assert not report_result.get("blocked"), report_result.get("summary")
-        artifacts = report_result.get("artifacts") or []
+        assert result["skill_runs"] == []
+        assert fake_jiashi_runtime == []
+        command = result.get("pending_command") or {}
+        assert command.get("command_type") == "recommendation_report"
+        assert (command.get("target") or {}).get("label") == "蔡敏明"
+        assert (command.get("snapshot") or {}).get("attachment", {}).get("attachment_id") == "att_resume"
+        interaction_card = result.get("interaction_card") or {}
+        assert interaction_card.get("state") == "pending"
+        assert (interaction_card.get("target") or {}).get("candidate") == "蔡敏明"
+        assert (interaction_card.get("target") or {}).get("client") == "产能三佳"
+        assert (interaction_card.get("target") or {}).get("job") == "高级电气工程师"
+
+        preflight = service.preflight_copilot_command(str(command["command_id"]))
+        decision = service.decide_copilot_command(
+            str(command["command_id"]),
+            decision="approve",
+            confirmation_token=str(preflight["confirmation_token"]),
+        )
+        receipt = decision.get("receipt") or {}
+        assert receipt.get("verified") is True
+        assert receipt.get("state") == "已完成"
+        artifacts = receipt.get("artifacts") or []
         assert artifacts, "推荐报告未产出 artifact"
         metadata = artifacts[0].get("metadata") or {}
         assert metadata.get("source") == "attachment_resume"
@@ -216,6 +229,51 @@ def test_attachment_only_candidate_generates_report_without_clarification(
         assert metadata.get("attached_to_candidate") is False
         assert "复核" in str(metadata.get("review_notice") or "")
         assert artifacts[0].get("file_path"), "artifact 缺少文件路径"
+    finally:
+        service.close()
+
+
+def test_attachment_report_refresh_preserves_key_condition(
+    db_path: Path, fake_jiashi_runtime,
+) -> None:
+    service = AgentService(db_path, ClarifyingRecommendationLLM())
+    try:
+        token = _insert_attachment(db_path, file_name=ATTACHMENT_FILE, text=RESUME_TEXT)
+        result = service.copilot(
+            REPORT_REQUEST,
+            session_id="attachment-refresh-card",
+            context=_attachment_context(token, file_name=ATTACHMENT_FILE),
+        )
+        command = dict(result.get("pending_command") or {})
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT id,structured_json FROM agent_copilot_messages WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+            ("attachment-refresh-card",),
+        ).fetchone()
+        structured = json.loads(row[1])
+        structured["interaction_card"]["key_conditions"] = ["用嘉驰通用的模板"]
+        conn.execute(
+            "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
+            (json.dumps(structured, ensure_ascii=False), row[0]),
+        )
+        conn.execute(
+            "UPDATE agent_copilot_commands SET expires_at='2000-01-01 00:00:00' WHERE command_id=?",
+            (command["command_id"],),
+        )
+        conn.commit()
+        conn.close()
+
+        refreshed = service.refresh_copilot_command(
+            str(command["command_id"]),
+            request_id="attachment-refresh-card-1",
+            expected_command_hash=str(command["command_hash"]),
+        )
+        restored = service.get_copilot_session("attachment-refresh-card")
+        assistant = next(message for message in reversed(restored["messages"]) if message["role"] == "assistant")
+        assert (assistant.get("pending_command") or {}).get("command_id") == (
+            refreshed.get("command") or {}
+        ).get("command_id")
+        assert (assistant.get("interaction_card") or {}).get("key_conditions") == ["用嘉驰通用的模板"]
     finally:
         service.close()
 
@@ -228,16 +286,22 @@ def test_attachment_candidate_matching_db_uses_existing_candidate_flow(db_path: 
         token = _insert_attachment(db_path, file_name=file_name, text=RESUME_TEXT.replace("蔡敏明", "张航"))
         result = service.copilot(REPORT_REQUEST, context=_attachment_context(token, file_name=file_name))
         assert "哪位人选" not in result["answer"]
-        # DB 命中：等价于顾问手动选中该候选人，走既有候选人流程
+        # DB 命中：等价于顾问手动选中该候选人，先进入统一报告命令确认。
         assert result["context"] == {"type": "candidate", "id": 30}
-        report_runs = [
-            run for run in result["skill_runs"] if (run.get("skill") or {}).get("id") == "recommendation_report"
-        ]
-        assert report_runs, "未路由 recommendation_report 技能"
-        report_result = report_runs[0].get("result") or {}
-        # 既有 S6-3 门禁不变：无判人评估时不生成报告
-        assert report_result.get("blocked") is True
-        assert "判人评估" in str(report_result.get("summary") or "")
+        command = result.get("pending_command") or {}
+        assert command.get("command_type") == "recommendation_report"
+        assert (command.get("target") or {}).get("id") == 30
+        preflight = service.preflight_copilot_command(str(command["command_id"]))
+        decision = service.decide_copilot_command(
+            str(command["command_id"]),
+            decision="approve",
+            confirmation_token=str(preflight["confirmation_token"]),
+        )
+        # 既有 S6-3 门禁不变：无判人评估时不生成报告，并给出真实阻塞回执。
+        receipt = decision.get("receipt") or {}
+        assert receipt.get("state") == "流程阻塞"
+        assert receipt.get("verified") is True
+        assert "判人评估" in str(receipt.get("summary") or "")
     finally:
         service.close()
 

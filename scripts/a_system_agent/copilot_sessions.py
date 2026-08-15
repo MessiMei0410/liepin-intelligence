@@ -24,6 +24,7 @@ from .conversation_state import (
 # Cross-module references (split from copilot_handler.py)
 from .copilot_evidence import _continued_sourcing_requested, _copilot_context_job_id, _copilot_context_job_record, _copilot_focus_from_joined_row, _explicitly_mentioned_job_ids, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested
 from .copilot_intent import _COPILOT_SEMANTIC_ACTIONS
+from .copilot_commands import _public_command, interaction_card_for_command
 
 
 def _format_workflow_strategy_answer(workflow_context: dict[str, Any], *, expanded: bool = False) -> str:
@@ -707,6 +708,8 @@ def _persist_copilot_focus(
         understanding=understanding,
         decision=turn_decision,
         workflow_intent=workflow_intent,
+        pending_command=(structured.get("pending_command") if isinstance(structured.get("pending_command"), dict) else None),
+        recent_candidate_set=(structured.get("recent_candidate_set") if isinstance(structured.get("recent_candidate_set"), dict) else None),
         now=stamp,
     )
     focus["conversation_state"] = conversation_state
@@ -793,8 +796,10 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "workflow_progress": structured.get("workflow_progress"),
                     "business_focus": structured.get("business_focus"),
                     "turn_decision": structured.get("turn_decision"),
+                    "turn_trace": structured.get("turn_trace"),
                     "understanding_card": structured.get("understanding_card"),
                     "execution_receipt": structured.get("execution_receipt"),
+                    "interaction_card": structured.get("interaction_card"),
                     "invalidated": bool(structured.get("invalidated")),
                     "invalidated_reason": str(structured.get("invalidated_reason") or (
                         "用户纠正或修改条件" if structured.get("invalidated") else ""
@@ -803,6 +808,7 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     # R9/R12-b：透传持久化的 pending_intent，浮窗恢复会话时可重渲染确认卡
                     #（确认/取消终态是 UI 本地态；过期或已执行的意图确认时会走 409 漂移路径）。
                     "pending_intent": structured.get("pending_intent"),
+                    "pending_command": structured.get("pending_command"),
                     "action_card": structured.get("action_card"),
                     "action_cards": structured.get("action_cards") or [],
                     "model_participation": structured.get("model_participation"),
@@ -819,6 +825,22 @@ def get_copilot_session(self, session_id: str, limit: int = 100) -> dict[str, An
                     "created_at": row["created_at"],
                 }
             )
+        # 兼容旧版本：命令曾被写在用户消息，助手消息只有理解卡/回执。
+        # 恢复时以命令表最新 pending 为准补到最近助手消息，保证确认入口可见。
+        pending_row = conn.execute(
+            "SELECT * FROM agent_copilot_commands WHERE session_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if pending_row:
+            pending_command = _public_command(pending_row)
+            for item in reversed(messages):
+                if item.get("role") != "assistant":
+                    continue
+                if not isinstance(item.get("pending_command"), dict):
+                    item["pending_command"] = pending_command
+                if not isinstance(item.get("interaction_card"), dict):
+                    item["interaction_card"] = interaction_card_for_command(pending_command)
+                break
         return {
             "ok": True,
             "session_id": session_id,

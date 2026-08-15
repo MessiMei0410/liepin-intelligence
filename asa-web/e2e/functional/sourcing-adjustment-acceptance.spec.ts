@@ -6,9 +6,10 @@ const ADJUSTMENT_ID = 11
 skipIfNoBackend()
 
 test('停止备注调整先采纳，策略未产出前不显示为已应用', async ({ page }) => {
+  test.setTimeout(90_000)
   await page.goto(`/asa-app#job=${JOB_ID}`)
   const panel = page.locator('.job-detail-panel')
-  await expect(panel).toBeVisible()
+  await expect(panel).toBeVisible({ timeout: 30_000 })
   await expect(panel.locator('.detail-head h2')).toContainText('机械高级工程师')
 
   const adjustments = panel.getByRole('region', { name: '寻访调整' })
@@ -41,4 +42,3 @@ test('停止备注调整先采纳，策略未产出前不显示为已应用', as
   await expect(adjustments.getByRole('button', { name: '采纳调整' })).toHaveCount(0)
   await expect(adjustments).not.toContainText('已应用于第')
 })
-

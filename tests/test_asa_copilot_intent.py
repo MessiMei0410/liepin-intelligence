@@ -86,6 +86,22 @@ def _post_message(client: TestClient, message: str, context: dict | None = None)
     return response.json()
 
 
+def _post_session_message(client: TestClient, session_id: str, message: str) -> dict:
+    request_id = f"intent-{uuid.uuid4().hex[:12]}"
+    response = client.post(
+        "/api/v1/copilot/messages",
+        headers={"Idempotency-Key": request_id},
+        json={
+            "request_id": request_id,
+            "session_id": session_id,
+            "message": message,
+            "context": {"type": "candidate", "id": CANDIDATE_ID, "source": "asa_floating"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _post_confirm(
     client: TestClient,
     pending: dict,
@@ -238,6 +254,36 @@ def test_pending_intent_confirm_full_chain(db_path: Path) -> None:
         replay = _post_confirm(client, pending, request_id=confirm_id, session_id=confirm_session)
         assert replay.status_code == 200
         assert replay.json()["candidate_action"]["action"] == "stop"
+
+
+def test_adjacent_short_confirmation_executes_candidate_intent(db_path: Path) -> None:
+    _set_candidate_stage(db_path, ACTIVE_STAGE)
+    session_id = f"intent-short-confirm-{uuid.uuid4().hex[:8]}"
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        pending = _post_session_message(client, session_id, "这人不合适，停了吧")
+        assert pending["pending_intent"]["action"] == "stop"
+        assert _candidate_row(db_path) == ACTIVE_STAGE
+
+        confirmed = _post_session_message(client, session_id, "可以")
+        assert confirmed["execution_receipt"]["verified"] is True
+        assert confirmed["turn_trace"]["route"] == "execute"
+        assert confirmed.get("pending_intent") is None
+        assert _candidate_row(db_path) == STOPPED_STAGE
+
+
+def test_intervening_turn_invalidates_candidate_short_confirmation(db_path: Path) -> None:
+    _set_candidate_stage(db_path, ACTIVE_STAGE)
+    session_id = f"intent-short-intervened-{uuid.uuid4().hex[:8]}"
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        pending = _post_session_message(client, session_id, "这人不合适，停了吧")
+        assert pending["pending_intent"]["action"] == "stop"
+        question = _post_session_message(client, session_id, "他目前在哪个阶段？")
+        assert question.get("pending_intent") is None
+
+        confirmation = _post_session_message(client, session_id, "可以")
+        assert confirmation.get("pending_intent") is None
+        assert not bool((confirmation.get("execution_receipt") or {}).get("succeeded"))
+        assert _candidate_row(db_path) == ACTIVE_STAGE
 
 
 def test_pending_intent_confirm_state_drift_returns_409(db_path: Path) -> None:

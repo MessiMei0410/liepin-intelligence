@@ -204,7 +204,7 @@ def build_turn_decision(
     needs_clarification = bool(understanding.get("needs_clarification"))
     confidence = float(understanding.get("confidence") or 0.0)
     pending_ref = dict(pending_plan_ref or {})
-    changes = derive_constraint_changes(
+    changes = [] if speech_act in {"ask", "discuss", "other"} else derive_constraint_changes(
         message,
         understanding.get("constraints"),
         previous_constraints,

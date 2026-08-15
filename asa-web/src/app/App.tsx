@@ -27,6 +27,19 @@ const panelFallback = <div className="empty"><LoaderCircle className="spin"/>面
 
 const emptyWorkbench: Workbench = { ok: true, version: 'loading', summary: { pending: 0, running: 0, delivered: 0, total: 0 }, items: [] }
 
+const readWithRetry = async <T,>(load: () => Promise<T>, attempts = 3): Promise<T> => {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await load()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) await new Promise(resolve => window.setTimeout(resolve, attempt * 300))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || '读取失败'))
+}
+
 const analysisScopeLabels: Record<string, string> = {
   days: '统计周期', job_id: '岗位', candidate_id: '候选人', client: '客户', job: '岗位名称',
   candidate: '候选人名称', channel: '渠道', start_date: '开始日期', end_date: '结束日期',
@@ -110,19 +123,26 @@ export function App() {
     api.bootstrap()
       .then(value => { if (active) setBoot(value) })
       .catch(e => { if (active) setError(String(e.message || e)) })
-    Promise.allSettled([api.dashboard(), api.allJobs(), api.allCandidates()])
+    const dashboardRequest = api.dashboard().then(value => {
+      if (active) setDashboard(value)
+      return value
+    })
+    const jobsRequest = api.allJobs().then(value => {
+      if (active && jobsRefreshId === jobsRefreshRef.current) setJobs(value.items)
+      return value
+    })
+    const candidatesRequest = api.allCandidates().then(value => {
+      if (active && candidatesRefreshId === candidatesRefreshRef.current) setCandidates(value.items)
+      return value
+    })
+    Promise.allSettled([dashboardRequest, jobsRequest, candidatesRequest])
       .then(results => {
         if (!active) return
         const [dashboardResult, jobsResult, candidatesResult] = results
         const failures: string[] = []
-        if (dashboardResult.status === 'fulfilled') setDashboard(dashboardResult.value)
-        else failures.push(`经营概况：${String(dashboardResult.reason?.message || dashboardResult.reason)}`)
-        if (jobsResult.status === 'fulfilled') {
-          if (jobsRefreshId === jobsRefreshRef.current) setJobs(jobsResult.value.items)
-        } else failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
-        if (candidatesResult.status === 'fulfilled') {
-          if (candidatesRefreshId === candidatesRefreshRef.current) setCandidates(candidatesResult.value.items)
-        } else failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
+        if (dashboardResult.status === 'rejected') failures.push(`经营概况：${String(dashboardResult.reason?.message || dashboardResult.reason)}`)
+        if (jobsResult.status === 'rejected') failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
+        if (candidatesResult.status === 'rejected') failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
         if (failures.length) setError(`部分模块加载失败。${failures.join('；')}`)
         else setError('')
       })
@@ -259,7 +279,7 @@ export function App() {
   useEffect(() => { workflowStateRef.current = workflow }, [workflow])
 
   const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); location.hash = `candidate=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await readWithRetry(() => api.candidate(id))).candidate); location.hash = `candidate=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
@@ -268,7 +288,7 @@ export function App() {
     await refreshCandidateList()
   }
   const openJob = async (id: number) => {
-    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await api.job(id)).job); setTab('jobs'); location.hash = `job=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setCandidate(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setJob((await readWithRetry(() => api.job(id))).job); setTab('jobs'); location.hash = `job=${id}${isBareDetached() ? '&bare=1' : ''}` } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
   const refreshJobDetail = async (id: number) => {
     const fresh = (await api.job(id)).job
@@ -277,7 +297,7 @@ export function App() {
   const openWorkflow = async (id: string) => {
     try {
       setJob(undefined); setCandidate(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setSourcingCandidatesWorkflowId(''); setBareList(false)
-      const resolved = await resolveWorkflowRevision(id, api.workflow)
+      const resolved = await readWithRetry(() => resolveWorkflowRevision(id, api.workflow))
       workflowStateRef.current = resolved.value
       setWorkflow(resolved.value)
       const nextHash = `workflow=${encodeURIComponent(resolved.id)}${isBareDetached() ? '&bare=1' : ''}`
@@ -506,8 +526,9 @@ export function App() {
         <Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>页面加载中…</div>}>
           {sourcingCandidatesWorkflowId && <SourcingCandidatesPage workflowId={sourcingCandidatesWorkflowId} onBack={closeOverlay} onOpenCandidate={openCandidate} />}
           {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
+          {/* Agent 工作台常驻挂载：切 Tab/打开分析只隐藏不卸载，进行中的会话与任务栏状态不丢失 */}
+          <div className="agent-keepalive" hidden={!!sourcingCandidatesWorkflowId || !!analysis || tab !== 'agent'}><AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} /></div>
         </Suspense>
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}

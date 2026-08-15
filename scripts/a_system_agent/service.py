@@ -192,6 +192,17 @@ from .copilot_handler import (
     _ensure_copilot_summaries_table as _h_ensure_copilot_summaries_table,
     record_copilot_event as _h_record_copilot_event,
 )
+from .copilot_commands import (
+    create_batch_stop_command as _h_create_batch_stop_command,
+    create_recommendation_report_command as _h_create_recommendation_report_command,
+    create_workflow_command as _h_create_workflow_command,
+    decide_copilot_command as _h_decide_copilot_command,
+    get_copilot_command as _h_get_copilot_command,
+    latest_confirmable_copilot_command as _h_latest_confirmable_copilot_command,
+    preflight_copilot_command as _h_preflight_copilot_command,
+    refresh_copilot_command as _h_refresh_copilot_command,
+    supersede_latest_confirmable_copilot_command as _h_supersede_latest_confirmable_copilot_command,
+)
 from .sourcing_handler import (
     _ensure_sourcing_attribution as _h_ensure_sourcing_attribution,
     record_sourcing_business_signal as _h_record_sourcing_business_signal,
@@ -313,6 +324,7 @@ class AgentService:
         self._active_panel_by_snapshot: dict[tuple[int, str], str] = {}
         self._learning_confirmations: dict[str, dict[str, Any]] = {}
         self._proposal_confirmations: dict[str, dict[str, Any]] = {}
+        self._copilot_command_confirmations: dict[str, dict[str, Any]] = {}
         conn = self._connect()
         try:
             ensure_schema(conn)
@@ -1725,6 +1737,15 @@ AgentService._copilot_conversation_context = _h_copilot_conversation_context
 AgentService._maybe_summarize_copilot_conversation = _h_maybe_summarize_copilot_conversation
 AgentService._ensure_copilot_summaries_table = _h_ensure_copilot_summaries_table
 AgentService.record_copilot_event = _h_record_copilot_event
+AgentService.create_batch_stop_command = _h_create_batch_stop_command
+AgentService.create_recommendation_report_command = _h_create_recommendation_report_command
+AgentService.create_workflow_command = _h_create_workflow_command
+AgentService.get_copilot_command = _h_get_copilot_command
+AgentService.preflight_copilot_command = _h_preflight_copilot_command
+AgentService.refresh_copilot_command = _h_refresh_copilot_command
+AgentService.decide_copilot_command = _h_decide_copilot_command
+AgentService.latest_confirmable_copilot_command = _h_latest_confirmable_copilot_command
+AgentService.supersede_latest_confirmable_copilot_command = _h_supersede_latest_confirmable_copilot_command
 
 # Sourcing
 AgentService._ensure_sourcing_attribution = _h_ensure_sourcing_attribution

@@ -753,6 +753,8 @@ class WorkflowPlanMixin:
             raise ValueError("目标不能为空")
         raw_context = dict(context or {})
         selected = self._resolve_context(objective, raw_context)
+        if raw_context.get("copilot_command_id"):
+            selected["copilot_command_id"] = str(raw_context["copilot_command_id"])
         grounding = raw_context.get("goal_grounding") if isinstance(raw_context.get("goal_grounding"), dict) else {}
         if grounding:
             selected["grounding"] = {
@@ -1221,4 +1223,3 @@ class WorkflowPlanMixin:
             except Exception:
                 pass
         return self.get_workflow(source_workflow_id)
-

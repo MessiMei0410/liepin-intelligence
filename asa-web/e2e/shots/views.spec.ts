@@ -73,17 +73,33 @@ test('Agent 对话工作区', async ({ page }) => {
           { type: 'job', id: 154, label: '士兰微 · 技术市场经理', subtitle: '12 位人选 · 4 位待处理' },
           { type: 'candidate', id: 559, label: '衣**', subtitle: 'S1 新增寻访 / 待复核' },
         ] },
+        { role: 'user', content: '给这个人选做份推荐报告，用嘉驰通用的模板。' },
+        { role: 'assistant', content: '已确认报告对象，请核对后生成。', pending_command: {
+          command_id: 'cmd_agent_shot', status: 'pending', command_type: 'recommendation_report', command_hash: 'agent-shot-command-hash',
+          target: { type: 'attachment_candidate', id: 'att_agent_shot', label: '蔡敏明', client: '产能三佳', job: '高级电气工程师' },
+          impact: { affected_count: 1, unit: 'report' }, expires_at: '2099-08-15 12:00:00',
+        }, interaction_card: {
+          version: 'interaction_card_v1', state: 'pending', action_label: '生成推荐报告',
+          target: { type: 'attachment_candidate', candidate: '蔡敏明', client: '产能三佳', job: '高级电气工程师' },
+          impact_text: '确认后生成 1 份报告草稿，不会自动对外发送', key_conditions: ['嘉驰通用模板'],
+          pending_command: {
+            command_id: 'cmd_agent_shot', status: 'pending', command_type: 'recommendation_report', command_hash: 'agent-shot-command-hash',
+            target: { type: 'attachment_candidate', id: 'att_agent_shot', label: '蔡敏明', client: '产能三佳', job: '高级电气工程师' },
+            impact: { affected_count: 1, unit: 'report' }, expires_at: '2099-08-15 12:00:00',
+          }, details: { objective: '给这个人选做份推荐报告，用嘉驰通用的模板。', confidence: 0.96 },
+        } },
       ],
     } })
-    return route.fulfill({ json: { ok: true, sessions: [{ session_id: 'agent-shot-task', title: '复盘岗位寻访进度', preview: '建议先复核待确认人选', message_count: 2 }] } })
+    return route.fulfill({ json: { ok: true, sessions: [{ session_id: 'agent-shot-task', title: '复盘岗位寻访进度', preview: '已确认报告对象，请核对后生成', message_count: 4 }] } })
   })
   // 任务栏默认折叠：截图用例依赖展开态任务列表，显式设置偏好（浮窗 390px 下无副作用，仍走抽屉）。
   await page.addInitScript(() => localStorage.setItem('asaTaskRailCollapsed', '0'))
   await page.goto('/asa-app')
   if ((page.viewportSize()?.width || 0) < 500) await page.getByRole('button', { name: '任务历史' }).click()
   await page.locator('.agent-task-main').filter({ hasText: '复盘岗位寻访进度' }).click()
-  await expect(page.locator('.agent-message.assistant')).toBeVisible()
+  await expect(page.locator('.agent-message.assistant').last()).toBeVisible()
   await expect(page.locator('.agent-object')).toHaveCount(2)
+  await expect(page.getByRole('region', { name: '行动卡' })).toBeVisible()
   await expectStableViewport(page)
   await expect(page).toHaveScreenshot('agent-conversation.png')
 })

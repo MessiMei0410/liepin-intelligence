@@ -1055,7 +1055,12 @@ def _interpret_copilot_message(
     source_corpus = "\n".join(source_messages)
     constraints: list[dict[str, str]] = []
     seen_quotes: set[str] = set()
-    for item in raw.get("constraints") or []:
+    # Questions and discussion can quote a possible constraint without adopting
+    # it. Keep those turns read-only so phrases such as "要不要继续寻访" do not
+    # become an exclusion in the condition ledger.
+    constraint_inputs = [item for item in source_messages if not _is_explicit_question(item)]
+    model_constraints = [] if speech_act in {"ask", "discuss"} else (raw.get("constraints") or [])
+    for item in model_constraints:
         if not isinstance(item, dict):
             continue
         quote = str(item.get("quote") or "").strip()
@@ -1063,7 +1068,7 @@ def _interpret_copilot_message(
         if quote and quote in source_corpus and quote not in seen_quotes and not _is_plan_control_instruction(quote):
             seen_quotes.add(quote)
             constraints.append({"quote": quote, "kind": kind if kind in _COPILOT_CONSTRAINT_KINDS else "other"})
-    for item in _verbatim_constraint_candidates(source_messages[-8:]):
+    for item in _verbatim_constraint_candidates(constraint_inputs[-8:]):
         if item["quote"] not in seen_quotes:
             seen_quotes.add(item["quote"])
             constraints.append(item)
@@ -1086,7 +1091,7 @@ def _interpret_copilot_message(
         for item in (raw.get("constraint_changes") or [])
         if isinstance(item, dict)
         and not _is_plan_control_instruction(item.get("quote") or item.get("value"))
-    ]
+    ] if speech_act not in {"ask", "discuss", "other"} else []
     understanding = {
         "version": "copilot_understanding_v1",
         "speech_act": speech_act,

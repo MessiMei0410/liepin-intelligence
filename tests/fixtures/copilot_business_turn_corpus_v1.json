@@ -1,0 +1,6764 @@
+{
+  "version": "copilot_business_turn_corpus_v1",
+  "generated_from": "120 anonymized local ASA user turns + 40 adversarial turns",
+  "case_count": 160,
+  "cases": [
+    {
+      "id": "real_001",
+      "source": "local_asa_session_anonymized",
+      "source_id": 894,
+      "message": "补充下这个人选的简历",
+      "context": {
+        "type": "candidate",
+        "id": 976
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "补充下这个人选的简历"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 976
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 976
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_002",
+      "source": "local_asa_session_anonymized",
+      "source_id": 892,
+      "message": "给这个人选做份推荐报告，用模板甲通用的模板",
+      "context": {
+        "type": "candidate",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "recommendation",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给这个人选做份推荐报告，用模板甲通用的模板"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": null
+      },
+      "references": [],
+      "objective": "给这个人选做份推荐报告，用模板甲通用的模板",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "recommendation",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "recommendation"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_003",
+      "source": "local_asa_session_anonymized",
+      "source_id": 890,
+      "message": "给这个人选做份推荐报告，用模板甲通用的膜拜",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "recommendation",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给这个人选做份推荐报告，用模板甲通用的膜拜"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "给这个人选做份推荐报告，用模板甲通用的膜拜",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "recommendation",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "recommendation"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_004",
+      "source": "local_asa_session_anonymized",
+      "source_id": 888,
+      "message": "客户甲的机械岗位人选名单给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的机械岗位人选名单给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲的机械岗位人选名单给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_005",
+      "source": "local_asa_session_anonymized",
+      "source_id": 882,
+      "message": "客户甲的软件岗位，把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的软件岗位，把所有候选人过滤一下，不匹配的就停止推进，再给我名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "客户甲的软件岗位，把所有候选人过滤一下，不匹配的就停止推进，再给我名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "batch_stop",
+          "effect": "internal_write",
+          "depends_on": [
+            1
+          ]
+        },
+        {
+          "order": 3,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            2
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "batch_stop",
+        "list_candidates"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_006",
+      "source": "local_asa_session_anonymized",
+      "source_id": 871,
+      "message": "把所有候选人过滤一下，再看下匹配度，不匹配的就停止推进，然后再给我名单",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把所有候选人过滤一下，再看下匹配度，不匹配的就停止推进，然后再给我名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把所有候选人过滤一下，再看下匹配度，不匹配的就停止推进，然后再给我名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "batch_stop",
+          "effect": "internal_write",
+          "depends_on": [
+            1
+          ]
+        },
+        {
+          "order": 3,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            2
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "batch_stop",
+        "list_candidates"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_007",
+      "source": "local_asa_session_anonymized",
+      "source_id": 869,
+      "message": "客户甲的机械岗位现在推进到什么程度",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的机械岗位现在推进到什么程度"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_008",
+      "source": "local_asa_session_anonymized",
+      "source_id": 867,
+      "message": "你先过滤下这个岗位上的所有候选人，再给我看",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "你先过滤下这个岗位上的所有候选人，再给我看"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "你先过滤下这个岗位上的所有候选人，再给我看",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_009",
+      "source": "local_asa_session_anonymized",
+      "source_id": 865,
+      "message": "客户甲机械岗位现在推进的怎么样",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲机械岗位现在推进的怎么样"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_010",
+      "source": "local_asa_session_anonymized",
+      "source_id": 861,
+      "message": "客户甲机械高级工程师岗，把候选池按A/B/C分级过滤出名单",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲机械高级工程师岗，把候选池按A/B/C分级过滤出名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲机械高级工程师岗，把候选池按A/B/C分级过滤出名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_011",
+      "source": "local_asa_session_anonymized",
+      "source_id": 849,
+      "message": "把客户甲机械岗A级候选人转成触达队列，按P0优先",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_outreach",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲机械岗A级候选人转成触达队列，按P0优先"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲机械岗A级候选人转成触达队列，按P0优先",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_outreach",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_outreach"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_012",
+      "source": "local_asa_session_anonymized",
+      "source_id": 847,
+      "message": "客户甲机械岗 A级才十几个人，去哪补池？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲机械岗 A级才十几个人，去哪补池？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_013",
+      "source": "local_asa_session_anonymized",
+      "source_id": 845,
+      "message": "过滤客户甲机械高级工程师候选池，只要期望35K以下、江浙沪的",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "过滤客户甲机械高级工程师候选池，只要期望35K以下、江浙沪的"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "过滤客户甲机械高级工程师候选池，只要期望35K以下、江浙沪的",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_014",
+      "source": "local_asa_session_anonymized",
+      "source_id": 843,
+      "message": "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_015",
+      "source": "local_asa_session_anonymized",
+      "source_id": 837,
+      "message": "给机械高级工程师岗位的名单筛一下再给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给机械高级工程师岗位的名单筛一下再给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "给机械高级工程师岗位的名单筛一下再给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_016",
+      "source": "local_asa_session_anonymized",
+      "source_id": 835,
+      "message": "帮我记住：客户乙电源专家岗位候选人对加班比较敏感",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "帮我记住：客户乙电源专家岗位候选人对加班比较敏感"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_017",
+      "source": "local_asa_session_anonymized",
+      "source_id": 833,
+      "message": "为客户甲机械高级工程师岗位补几个候选人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "为客户甲机械高级工程师岗位补几个候选人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_018",
+      "source": "local_asa_session_anonymized",
+      "source_id": 831,
+      "message": "这个候选人感觉和机械岗挺匹配的",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个候选人感觉和机械岗挺匹配的"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_019",
+      "source": "local_asa_session_anonymized",
+      "source_id": 829,
+      "message": "机械高级工程师这个岗位预算50w左右",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "机械高级工程师这个岗位预算50w左右"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_020",
+      "source": "local_asa_session_anonymized",
+      "source_id": 821,
+      "message": "过滤客户甲机械高级工程师候选池，按证据分级",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "过滤客户甲机械高级工程师候选池，按证据分级"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "过滤客户甲机械高级工程师候选池，按证据分级",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_021",
+      "source": "local_asa_session_anonymized",
+      "source_id": 819,
+      "message": "帮我看看客户甲的岗位情况",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "帮我看看客户甲的岗位情况"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_022",
+      "source": "local_asa_session_anonymized",
+      "source_id": 817,
+      "message": "客户甲都有哪些岗位在招",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲都有哪些岗位在招"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_023",
+      "source": "local_asa_session_anonymized",
+      "source_id": 813,
+      "message": "把客户甲机械高级工程师候选池过滤一遍，按证据分级输出名单，排除长川系。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲机械高级工程师候选池过滤一遍，按证据分级输出名单，排除长川系。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲机械高级工程师候选池过滤一遍，按证据分级输出名单，排除长川系。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_024",
+      "source": "local_asa_session_anonymized",
+      "source_id": 811,
+      "message": "帮我看看今天有哪些候选人需要跟进",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "帮我看看今天有哪些候选人需要跟进"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_025",
+      "source": "local_asa_session_anonymized",
+      "source_id": 809,
+      "message": "这个岗位有什么要特别注意的？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个岗位有什么要特别注意的？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_026",
+      "source": "local_asa_session_anonymized",
+      "source_id": 807,
+      "message": "你觉得客户甲机械高级工程师这个岗位难找吗？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "你觉得客户甲机械高级工程师这个岗位难找吗？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_027",
+      "source": "local_asa_session_anonymized",
+      "source_id": 805,
+      "message": "客户甲现在几个在招岗位？",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲现在几个在招岗位？"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_028",
+      "source": "local_asa_session_anonymized",
+      "source_id": 803,
+      "message": "【顾问整理 · 客户甲机械高级工程师触达名单15人】P0立即触达6人，P1本周触达7人，P2备选2人；保留岗位条件、分级和触达优先级，人员姓名、公司和联系方式已脱敏。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "【顾问整理 · 客户甲机械高级工程师触达名单15人】P0立即触达6人，P1本周触达7人，P2备选2人；保留岗位条件、分级和触达优先级，人员姓名、公司和联系方式已脱敏。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_029",
+      "source": "local_asa_session_anonymized",
+      "source_id": 801,
+      "message": "客户甲机械高级工程师的候选名单列出来给我看",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲机械高级工程师的候选名单列出来给我看"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲机械高级工程师的候选名单列出来给我看",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_030",
+      "source": "local_asa_session_anonymized",
+      "source_id": 799,
+      "message": "再展示 P1 本周触达 7 人：候选人07、候选人08、候选人09、候选人10、候选人11、候选人12、候选人13。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "再展示 P1 本周触达 7 人：候选人07、候选人08、候选人09、候选人10、候选人11、候选人12、候选人13。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "再展示 P1 本周触达 7 人：候选人07、候选人08、候选人09、候选人10、候选人11、候选人12、候选人13。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_031",
+      "source": "local_asa_session_anonymized",
+      "source_id": 797,
+      "message": "客户甲机械高级工程师岗位（job 137）触达名单已经确认，请展示 P0 优先触达的 6 人：候选人01至候选人06。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲机械高级工程师岗位（job 137）触达名单已经确认，请展示 P0 优先触达的 6 人：候选人01至候选人06。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲机械高级工程师岗位（job 137）触达名单已经确认，请展示 P0 优先触达的 6 人：候选人01至候选人06。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_032",
+      "source": "local_asa_session_anonymized",
+      "source_id": 793,
+      "message": "帮我记住：客户甲是长川科技子公司，长川系候选人一律不挖",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "帮我记住：客户甲是长川科技子公司，长川系候选人一律不挖"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_033",
+      "source": "local_asa_session_anonymized",
+      "source_id": 791,
+      "message": "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "过滤客户甲机械高级工程师候选池，按证据分级输出名单，排除长川系。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_034",
+      "source": "local_asa_session_anonymized",
+      "source_id": 777,
+      "message": "把客户甲机械高级工程师（job 137）候选池过滤一遍，按硬性证据分级输出名单，排除长川系。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲机械高级工程师（job 137）候选池过滤一遍，按硬性证据分级输出名单，排除长川系。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲机械高级工程师（job 137）候选池过滤一遍，按硬性证据分级输出名单，排除长川系。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_035",
+      "source": "local_asa_session_anonymized",
+      "source_id": 773,
+      "message": "补充一个重要约束：客户甲是长川科技的子公司，长川系候选人一律不挖。请把长川科技、杭州长川科技股份有限公司、长川科技及其子公司全部排除，重新过滤客户甲机械高级工程师（job 137）候选池，只保留非长川系的机械人选，按核心匹配度排序输出名单。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "补充一个重要约束：客户甲是长川科技的子公司，长川系候选人一律不挖。请把长川科技、杭州长川科技股份有限公司、长川科技及其子公司全部排除，重新过滤客户甲机械高级工程师（job 137）候选池，只保留非长川系的机械人选，按核心匹配度排序输出名单。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "补充一个重要约束：客户甲是长川科技的子公司，长川系候选人一律不挖。请把长川科技、杭州长川科技股份有限公司、长川科技及其子公司全部排除，重新过滤客户甲机械高级工程师（job 137）候选池，只保留非长川系的机械人选，按核心匹配度排序输出名单。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_036",
+      "source": "local_asa_session_anonymized",
+      "source_id": 769,
+      "message": "按刚才教的过滤规则，把客户甲机械高级工程师（job 137）候选池重新过滤一遍，直接输出名单给我，不要只说已记录。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "按刚才教的过滤规则，把客户甲机械高级工程师（job 137）候选池重新过滤一遍，直接输出名单给我，不要只说已记录。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "按刚才教的过滤规则，把客户甲机械高级工程师（job 137）候选池重新过滤一遍，直接输出名单给我，不要只说已记录。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_037",
+      "source": "local_asa_session_anonymized",
+      "source_id": 767,
+      "message": "【纠正 + 教学】上一轮把“把客户甲的机械人选重新过滤下再把名单给我”理解成纯记录，这是错的。这是明确查询指令：按岗位硬条件过滤候选池，排除非机械方向，输出 A/B/C 分级名单。以后遇到“重新过滤”“把名单给我”“筛选一下”，必须真正查库并返回名单。",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "correct",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "【纠正 + 教学】上一轮把“把客户甲的机械人选重新过滤下再把名单给我”理解成纯记录，这是错的。这是明确查询指令：按岗位硬条件过滤候选池，排除非机械方向，输出 A/B/C 分级名单。以后遇到“重新过滤”“把名单给我”“筛选一下”，必须真正查库并返回名单。"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "【纠正 + 教学】上一轮把“把客户甲的机械人选重新过滤下再把名单给我”理解成纯记录，这是错的。这是明确查询指令：按岗位硬条件过滤候选池，排除非机械方向，输出 A/B/C 分级名单。以后遇到“重新过滤”“把名单给我”“筛选一下”，必须真正查库并返回名单。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_038",
+      "source": "local_asa_session_anonymized",
+      "source_id": 765,
+      "message": "把客户甲的机械人选重新过滤下再把名单给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲的机械人选重新过滤下再把名单给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲的机械人选重新过滤下再把名单给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_039",
+      "source": "local_asa_session_anonymized",
+      "source_id": 763,
+      "message": "这个人选的预算是 100w，期望 110w",
+      "context": {
+        "type": "candidate",
+        "id": 1256
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个人选的预算是 100w，期望 110w"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 1256
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 1256
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_040",
+      "source": "local_asa_session_anonymized",
+      "source_id": 761,
+      "message": "岗位预算 80-120w",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "岗位预算 80-120w"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_041",
+      "source": "local_asa_session_anonymized",
+      "source_id": 759,
+      "message": "预算 80-120w",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "预算 80-120w"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_042",
+      "source": "local_asa_session_anonymized",
+      "source_id": 755,
+      "message": "生成客户甲的软件岗位的新一轮寻访",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "生成客户甲的软件岗位的新一轮寻访"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "生成客户甲的软件岗位的新一轮寻访",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_043",
+      "source": "local_asa_session_anonymized",
+      "source_id": 753,
+      "message": "这个人选完美匹配客户甲这个岗位",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个人选完美匹配客户甲这个岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_044",
+      "source": "local_asa_session_anonymized",
+      "source_id": 731,
+      "message": "这轮只找到两个人选",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这轮只找到两个人选"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_045",
+      "source": "local_asa_session_anonymized",
+      "source_id": 727,
+      "message": "客户甲这个岗位预算 120w",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲这个岗位预算 120w"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_046",
+      "source": "local_asa_session_anonymized",
+      "source_id": 723,
+      "message": "客户甲的机械岗位跑新一轮寻访",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的机械岗位跑新一轮寻访"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲的机械岗位跑新一轮寻访",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_047",
+      "source": "local_asa_session_anonymized",
+      "source_id": 721,
+      "message": "客户乙这个岗位预算 120w",
+      "context": {
+        "type": "candidate",
+        "id": 716
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户乙这个岗位预算 120w"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 716
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 716
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_048",
+      "source": "local_asa_session_anonymized",
+      "source_id": 719,
+      "message": "这个人选完美匹配客户乙这个岗位",
+      "context": {
+        "type": "candidate",
+        "id": 716
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个人选完美匹配客户乙这个岗位"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 716
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 716
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_049",
+      "source": "local_asa_session_anonymized",
+      "source_id": 717,
+      "message": "客户甲的机械人选名单给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的机械人选名单给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "客户甲的机械人选名单给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_050",
+      "source": "local_asa_session_anonymized",
+      "source_id": 707,
+      "message": "这个名单上怎么都是做光刻机的",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个名单上怎么都是做光刻机的"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_051",
+      "source": "local_asa_session_anonymized",
+      "source_id": 705,
+      "message": "把客户甲的机械候选人名单给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲的机械候选人名单给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲的机械候选人名单给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_052",
+      "source": "local_asa_session_anonymized",
+      "source_id": 679,
+      "message": "把客户甲的机械人选名单给我 ASA",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲的机械人选名单给我 ASA"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲的机械人选名单给我 ASA",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_053",
+      "source": "local_asa_session_anonymized",
+      "source_id": 677,
+      "message": "把客户甲的机械人选名单给我，优先筛出做过固晶机/共晶机/键合机的人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲的机械人选名单给我，优先筛出做过固晶机/共晶机/键合机的人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲的机械人选名单给我，优先筛出做过固晶机/共晶机/键合机的人",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_054",
+      "source": "local_asa_session_anonymized",
+      "source_id": 635,
+      "message": "把客户甲的机械人选名单给我",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把客户甲的机械人选名单给我"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把客户甲的机械人选名单给我",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_055",
+      "source": "local_asa_session_anonymized",
+      "source_id": 633,
+      "message": "从当前候选池里先筛出做过固晶机/共晶机/键合机的人，给出优先评估名单",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "从当前候选池里先筛出做过固晶机/共晶机/键合机的人，给出优先评估名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "从当前候选池里先筛出做过固晶机/共晶机/键合机的人，给出优先评估名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_056",
+      "source": "local_asa_session_anonymized",
+      "source_id": 631,
+      "message": "机械岗位最新要求尽量找做固晶机/共晶机/键合机的",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "机械岗位最新要求尽量找做固晶机/共晶机/键合机的"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_057",
+      "source": "local_asa_session_anonymized",
+      "source_id": 629,
+      "message": "为客户甲机械高级工程师启动一轮多渠道寻访，猎聘和 X-SaaS 都要跑，目标 10 人，把候选人完整履历抓回来，然后批量评估",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "为客户甲机械高级工程师启动一轮多渠道寻访，猎聘和 X-SaaS 都要跑，目标 10 人，把候选人完整履历抓回来，然后批量评估"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "为客户甲机械高级工程师启动一轮多渠道寻访，猎聘和 X-SaaS 都要跑，目标 10 人，把候选人完整履历抓回来，然后批量评估",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_058",
+      "source": "local_asa_session_anonymized",
+      "source_id": 627,
+      "message": "为客户甲机械高级工程师重新建立一轮候选人寻访计划。仅建立计划，不启动外部寻访。",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "为客户甲机械高级工程师重新建立一轮候选人寻访计划。仅建立计划，不启动外部寻访。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "为客户甲机械高级工程师重新建立一轮候选人寻访计划。仅建立计划，不启动外部寻访。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_059",
+      "source": "local_asa_session_anonymized",
+      "source_id": 611,
+      "message": "现在就把郭、杨两人的评估重跑，同时把 A/B 类 6 人调出来给你做人工复核",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "现在就把郭、杨两人的评估重跑，同时把 A/B 类 6 人调出来给你做人工复核"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_060",
+      "source": "local_asa_session_anonymized",
+      "source_id": 609,
+      "message": "都做",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "都做"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_061",
+      "source": "local_asa_session_anonymized",
+      "source_id": 607,
+      "message": "寻访的结果呢",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "寻访的结果呢"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_062",
+      "source": "local_asa_session_anonymized",
+      "source_id": 605,
+      "message": "寻访结果呢？",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "寻访结果呢？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_063",
+      "source": "local_asa_session_anonymized",
+      "source_id": 603,
+      "message": "给客户甲的机械岗位找一些候选人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给客户甲的机械岗位找一些候选人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "给客户甲的机械岗位找一些候选人",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_064",
+      "source": "local_asa_session_anonymized",
+      "source_id": 601,
+      "message": "对这个岗位再发起新一轮寻访。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "对这个岗位再发起新一轮寻访。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "对这个岗位再发起新一轮寻访。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_065",
+      "source": "local_asa_session_anonymized",
+      "source_id": 599,
+      "message": "可以，你来清理吧。",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "可以，你来清理吧。"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_066",
+      "source": "local_asa_session_anonymized",
+      "source_id": 597,
+      "message": "怎么电源专家岗位里面有这么多候选人，你做一下筛选和清理。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "怎么电源专家岗位里面有这么多候选人，你做一下筛选和清理。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_067",
+      "source": "local_asa_session_anonymized",
+      "source_id": 595,
+      "message": "就是长川科技，岗位要创建",
+      "context": {
+        "type": "job",
+        "id": 116
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "就是长川科技，岗位要创建"
+      ],
+      "target": {
+        "type": "job",
+        "id": 116
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 116
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_068",
+      "source": "local_asa_session_anonymized",
+      "source_id": 593,
+      "message": "新建岗位并录入驾驶舱 先做寻访策略（主画像/迁移画像/搜索词）",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "job_split",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "新建岗位并录入驾驶舱 先做寻访策略（主画像/迁移画像/搜索词）"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "新建岗位并录入驾驶舱 先做寻访策略（主画像/迁移画像/搜索词）",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "job_split",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "job_split"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_069",
+      "source": "local_asa_session_anonymized",
+      "source_id": 591,
+      "message": "读取文件的职位",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "读取文件的职位"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_070",
+      "source": "local_asa_session_anonymized",
+      "source_id": 585,
+      "message": "分析岗位",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "分析岗位"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_071",
+      "source": "local_asa_session_anonymized",
+      "source_id": 581,
+      "message": "请读取并分析附件：探针台CPO方向新增需求（急）-to猎头(1).xlsx",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请读取并分析附件：探针台CPO方向新增需求（急）-to猎头(1).xlsx"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_072",
+      "source": "local_asa_session_anonymized",
+      "source_id": 579,
+      "message": "这个不是高级制冷岗位，是一些新的岗位",
+      "context": {
+        "type": "job",
+        "id": 116
+      },
+      "history": [],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个不是高级制冷岗位，是一些新的岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 116
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 116
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_073",
+      "source": "local_asa_session_anonymized",
+      "source_id": 577,
+      "message": "请读取并分析附件：杭州长川_CPO探针台_全国对标公司专项_20260806.xlsx",
+      "context": {
+        "type": "job",
+        "id": 116
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请读取并分析附件：杭州长川_CPO探针台_全国对标公司专项_20260806.xlsx"
+      ],
+      "target": {
+        "type": "job",
+        "id": 116
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 116
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_074",
+      "source": "local_asa_session_anonymized",
+      "source_id": 573,
+      "message": "产品工程师 \"1、负责CPO相关的光学耦合设备产品调研，输出对应的调研报告 2、负责CPO相关测试Prober/Handler的关键技术分析，输出对应的技术规划和人力资源需求； 3、负责CPO相关的光学耦合方案开发，包括模块的主要指标定义以及技术实现； 4、负责CPO相关的研发新品开发，负责整体规划+产品架构设计以及关键技术评审； 5、负责CPO相关设备的内部验证以及客户端导入相关工作，具备一定项目管理经验\" 硕士研究生/光电工程、机械电子工程、物理专业等 现有平均水平 男/40以下 16-35K 杭州 具备2年以上3-5人以上团队经验 1 26.08 按需 苏州联讯 森美协尔、深圳矽电、武汉驿天诺、FiconTEC、伊欧陆、森东宝等 高级电气工程师 \"1. 参与项目前期电气相关需求分析，梳理技术指标与应用场景，输出需求拆解文档； 2.负责电气系统方案设计，包括原理图绘制、元器件布局、接线方案规划等核心工作； 3. 主导电气设备的安装调试，解决调试过程中出现的硬件技术问题，确保设备正常运行； 4. 与机械、软件、生产制造等部门开展跨部门协作沟通，推进项目整体落地，协调解决跨专业技术衔接问题。 5.具有精密6轴运动平台、压电平台应用，三维坐标系统开发、光纤耦合算法使用开发经验者优先\" 本科及以上学历，电气自动化、自动化、电子工程、信息工程、机电一体化等相关专业； 现有平均水平 男/40以下 28-35k 杭州 具备2年以上3-5人以上团队经验 1 26.08 按需 高级控制软件工程师 \"1.负责半导体自动化设备运动控制软件系统研发； 2.主导或者参与自动化控制系统架构，设计，核心代码开发，系统优化等工作； 3.配合完成半导体自动化设备软件框架规划和产品方案设计；4.能在工作中研究和管理来自用户和公司内部的产品需求，推进产品功能改进； 5.根据项目要求，编写测试方案，完成软件测试 6.扎实的伺服电机、步进电机应用基础，有固高、雷赛等各类运动控制卡开发经验者优先； 7.具有三维坐标系统开发、光纤耦合算法使用开发经验者优先\" 具有硕士以上学历，计算机、自动化相关专业毕业； 现有平均水平 男/40以下 28-35k 杭州 具备2年以上3-5人以上团队经验 1 26.09 按需",
+      "context": {
+        "type": "job",
+        "id": 3
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "产品工程师 \"1、负责CPO相关的光学耦合设备产品调研，输出对应的调研报告 2、负责CPO相关测试Prober/Handler的关键技术分析，输出对应的技术规划和人力资源需求； 3、负责CPO相关的光学耦合方案开发，包括模块的主要指标定义以及技术实现； 4、负责CPO相关的研发新品开发，负责整体规划+产品架构设计以及关键技术评审； 5、负责CPO相关设备的内部验证以及客户端导入相关工作，具备一定项目管理经验\" 硕士研究生/光电工程、机械电子工程、物理专业等 现有平均水平 男/40以下 16-35K 杭州 具备2年以上3-5人以上团队经验 1 26.08 按需 苏州联讯 森美协尔、深圳矽电、武汉驿天诺、FiconTEC、伊欧陆、森东宝等 高级电气工程师 \"1. 参与项目前期电气相关需求分析，梳理技术指标与应用场景，输出需求拆解文档； 2.负责电气系统方案设计，包括原理图绘制、元器件布局、接线方案规划等核心工作； 3. 主导电气设备的安装调试，解决调试过程中出现的硬件技术问题，确保设备正常运行； 4. 与机械、软件、生产制造等部门开展跨部门协作沟通，推进项目整体落地，协调解决跨专业技术衔接"
+      ],
+      "target": {
+        "type": "job",
+        "id": 3
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 3
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_075",
+      "source": "local_asa_session_anonymized",
+      "source_id": 571,
+      "message": "长川的岗位",
+      "context": {
+        "type": "job",
+        "id": 116
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "长川的岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 116
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 116
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_076",
+      "source": "local_asa_session_anonymized",
+      "source_id": 569,
+      "message": "[本地文件路径]",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "[本地文件路径]"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_077",
+      "source": "local_asa_session_anonymized",
+      "source_id": 559,
+      "message": "结果如何",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "结果如何"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_078",
+      "source": "local_asa_session_anonymized",
+      "source_id": 557,
+      "message": "结果怎么样",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "结果怎么样"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_079",
+      "source": "local_asa_session_anonymized",
+      "source_id": 553,
+      "message": "workflow_8a57e861a20d 寻访结果怎么样",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "workflow_8a57e861a20d 寻访结果怎么样"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_080",
+      "source": "local_asa_session_anonymized",
+      "source_id": 551,
+      "message": "客户乙电源专家第3轮结果怎么样",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户乙电源专家第3轮结果怎么样"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_081",
+      "source": "local_asa_session_anonymized",
+      "source_id": 549,
+      "message": "李先生这个简历是非常匹配客户乙的技术市场岗位的",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "李先生这个简历是非常匹配客户乙的技术市场岗位的"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_082",
+      "source": "local_asa_session_anonymized",
+      "source_id": 547,
+      "message": "现在的策略是怎么样的",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "现在的策略是怎么样的"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_083",
+      "source": "local_asa_session_anonymized",
+      "source_id": 545,
+      "message": "寻访策略是怎么样的？",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "寻访策略是怎么样的？"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_8a57e861a20d"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_8a57e861a20d"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_084",
+      "source": "local_asa_session_anonymized",
+      "source_id": 543,
+      "message": "给客户乙的电源专家岗位找更多的候选人",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给客户乙的电源专家岗位找更多的候选人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "给客户乙的电源专家岗位找更多的候选人",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_085",
+      "source": "local_asa_session_anonymized",
+      "source_id": 541,
+      "message": "[本地文件路径]",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "[本地文件路径]"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_086",
+      "source": "local_asa_session_anonymized",
+      "source_id": 537,
+      "message": "这个人选哪些方面是匹配的？",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个人选哪些方面是匹配的？"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_087",
+      "source": "local_asa_session_anonymized",
+      "source_id": 535,
+      "message": "请全面逐条解释客户乙电源专家岗位的硬门槛、技术含义、相互关系、可迁移边界和容易误判的地方，不要只列关键词。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请全面逐条解释客户乙电源专家岗位的硬门槛、技术含义、相互关系、可迁移边界和容易误判的地方，不要只列关键词。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_088",
+      "source": "local_asa_session_anonymized",
+      "source_id": 533,
+      "message": "请详细逐条解释邓先生哪些证据支持他匹配客户乙电源专家岗位，说明每条证据的技术含义、对应岗位要求、不能证明什么，以及还需要核验什么。",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请详细逐条解释邓先生哪些证据支持他匹配客户乙电源专家岗位，说明每条证据的技术含义、对应岗位要求、不能证明什么，以及还需要核验什么。"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_089",
+      "source": "local_asa_session_anonymized",
+      "source_id": 531,
+      "message": "请重新详细解释：从哪些具体证据判断邓先生做的是三次电源？逐条说明证据、技术含义、与客户乙电源专家岗位的对应关系，以及哪些只是推断、哪些仍需核验。",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请重新详细解释：从哪些具体证据判断邓先生做的是三次电源？逐条说明证据、技术含义、与客户乙电源专家岗位的对应关系，以及哪些只是推断、哪些仍需核验。"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_090",
+      "source": "local_asa_session_anonymized",
+      "source_id": 529,
+      "message": "你给我详细解释下",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "你给我详细解释下"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_091",
+      "source": "local_asa_session_anonymized",
+      "source_id": 527,
+      "message": "从哪些点判断他是做三次电源的？",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "从哪些点判断他是做三次电源的？"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_092",
+      "source": "local_asa_session_anonymized",
+      "source_id": 525,
+      "message": "这个人选哪些方面是匹配客户乙的这个岗位的",
+      "context": {
+        "type": "candidate",
+        "id": 810
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个人选哪些方面是匹配客户乙的这个岗位的"
+      ],
+      "target": {
+        "type": "candidate",
+        "id": 810
+      },
+      "references": [
+        {
+          "type": "candidate",
+          "id": 810
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_093",
+      "source": "local_asa_session_anonymized",
+      "source_id": 523,
+      "message": "1，不用管第2轮寻访（8/3）结果，直接启动新一轮寻访；2，也可以做；3，地域不限制，可以沟通了看",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "1，不用管第2轮寻访（8/3）结果，直接启动新一轮寻访；2，也可以做；3，地域不限制，可以沟通了看"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "1，不用管第2轮寻访（8/3）结果，直接启动新一轮寻访；2，也可以做；3，地域不限制，可以沟通了看",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_094",
+      "source": "local_asa_session_anonymized",
+      "source_id": 521,
+      "message": "规划下一轮的具体搜索词和渠道策略",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "strategy_revision",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "规划下一轮的具体搜索词和渠道策略"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "规划下一轮的具体搜索词和渠道策略",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "strategy_revision",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "strategy_revision"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_095",
+      "source": "local_asa_session_anonymized",
+      "source_id": 519,
+      "message": "给我再好好分析下客户乙的电源专家岗位，职责： 1. 负责VPD垂直供电模块的研发设计，包括定义设计边界、生成仿真模型和计算书、形成完善测试条目、输出整体解决方案。 2. 结合客户高效率、高动态性能应用需求，从控制策略和器件选型等角度优化电源设计。 3. 提出磁件需求规格，协助磁件设计，包括评审、验证、生产流程及磁件供应商导入审核。 4. 深度参与组装/封装工艺优化、散热/机构可靠性验证，以及生产、测试、质量等流程。 要求： 1. 本科及以上学历，电力电子、电气工程、自动化等相关专业；模块电源3年以上研发经验。 2. 熟悉VPD、VRM、垂直供电架构；熟悉Buck控制策略和建模方法；熟悉多相Buck、TLVR工作模态。 3. 了解DrMOS封装形式及寄生参数对电路性能的影响，能够完成应用端器件选型和优化设计。 4. 了解一体成型电感、VR电感、TLVR电感的设计边界和规范。 5. 熟练使用Ansys等有限元仿真工具及SIMPLIS、LTspice等电路设计软件。 6. 具备跨研发、磁件、封装、结构、生产、测试和质量团队的协作与沟通能力。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给我再好好分析下客户乙的电源专家岗位，职责： 1. 负责VPD垂直供电模块的研发设计，包括定义设计边界、生成仿真模型和计算书、形成完善测试条目、输出整体解决方案。 2. 结合客户高效率、高动态性能应用需求，从控制策略和器件选型等角度优化电源设计。 3. 提出磁件需求规格，协助磁件设计，包括评审、验证、生产流程及磁件供应商导入审核。 4. 深度参与组装/封装工艺优化、散热/机构可靠性验证，以及生产、测试、质量等流程。 要求： 1. 本科及以上学历，电力电子、电气工程、自动化等相关专业；模块电源3年以上研发经验。 2. 熟悉VPD、VRM、垂直供电架构；熟悉Buck控制策略和建模方法；熟悉多相Buck、TLVR工作模态。 3. 了解DrMOS封装形式及寄生参数对电路性能的影响，能够完成应用端器件选型和优化设计。 4. 了解一体成型电感、VR电感、TLVR电感的设计边界和规范。 5. 熟练使用Ansys等有限元仿真工具及SIMPLIS、LTspice等电路设计软件。 6. 具备跨研发、磁件、封装、结构、生产、测试和质量团队的协作与沟通能力。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_096",
+      "source": "local_asa_session_anonymized",
+      "source_id": 515,
+      "message": "评估结果是什么样的",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "评估结果是什么样的"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_097",
+      "source": "local_asa_session_anonymized",
+      "source_id": 511,
+      "message": "客户甲的软件岗位现在推进得怎么样",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的软件岗位现在推进得怎么样"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_098",
+      "source": "local_asa_session_anonymized",
+      "source_id": 507,
+      "message": "先核验",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "先核验"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_099",
+      "source": "local_asa_session_anonymized",
+      "source_id": 505,
+      "message": "客户甲的软件岗位现在推进的怎么样",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "客户甲的软件岗位现在推进的怎么样"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_100",
+      "source": "local_asa_session_anonymized",
+      "source_id": 503,
+      "message": "归档右侧所有任务",
+      "context": {
+        "type": "page",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "归档右侧所有任务"
+      ],
+      "target": {
+        "type": "page",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_101",
+      "source": "local_asa_session_anonymized",
+      "source_id": 501,
+      "message": "推动客户甲的软件岗位",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "推动客户甲的软件岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_102",
+      "source": "local_asa_session_anonymized",
+      "source_id": 499,
+      "message": "先推进客户甲的这个软件岗位",
+      "context": {
+        "type": "job",
+        "id": 134
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "先推进客户甲的这个软件岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 134
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 134
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_103",
+      "source": "local_asa_session_anonymized",
+      "source_id": 479,
+      "message": "这个任务的寻访策略是怎么样的",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_1be5342ccb98"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个任务的寻访策略是怎么样的"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_1be5342ccb98"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_1be5342ccb98"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_104",
+      "source": "local_asa_session_anonymized",
+      "source_id": 477,
+      "message": "现在的寻访策略是怎么样的",
+      "context": {
+        "type": "workflow",
+        "id": "workflow_1be5342ccb98"
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "现在的寻访策略是怎么样的"
+      ],
+      "target": {
+        "type": "workflow",
+        "id": "workflow_1be5342ccb98"
+      },
+      "references": [
+        {
+          "type": "workflow",
+          "id": "workflow_1be5342ccb98"
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_105",
+      "source": "local_asa_session_anonymized",
+      "source_id": 473,
+      "message": "寻访策略是怎么样的",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "寻访策略是怎么样的"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_106",
+      "source": "local_asa_session_anonymized",
+      "source_id": 471,
+      "message": "给客户乙的电源专家岗位再找些人选",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给客户乙的电源专家岗位再找些人选"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "给客户乙的电源专家岗位再找些人选",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_107",
+      "source": "local_asa_session_anonymized",
+      "source_id": 467,
+      "message": "直接搜。沿用目标10人；所有推断项标记待确认；外部搜索必须停在R3审批，未批准前不得执行。",
+      "context": {
+        "type": "job",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "直接搜。沿用目标10人；所有推断项标记待确认；外部搜索必须停在R3审批，未批准前不得执行。"
+      ],
+      "target": {
+        "type": "job",
+        "id": null
+      },
+      "references": [],
+      "objective": "直接搜。沿用目标10人；所有推断项标记待确认；外部搜索必须停在R3审批，未批准前不得执行。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_108",
+      "source": "local_asa_session_anonymized",
+      "source_id": 465,
+      "message": "为苏科思 FPGA技术主管启动一轮真实候选人寻访，目标10人。先生成可审计策略并执行内部步骤；猎聘和X-SaaS外部搜索必须停在R3单次审批，未批准前不得执行。",
+      "context": {
+        "type": "job",
+        "id": 1
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "为苏科思 FPGA技术主管启动一轮真实候选人寻访，目标10人。先生成可审计策略并执行内部步骤；猎聘和X-SaaS外部搜索必须停在R3单次审批，未批准前不得执行。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 1
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 1
+        }
+      ],
+      "objective": "为苏科思 FPGA技术主管启动一轮真实候选人寻访，目标10人。先生成可审计策略并执行内部步骤；猎聘和X-SaaS外部搜索必须停在R3单次审批，未批准前不得执行。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_109",
+      "source": "local_asa_session_anonymized",
+      "source_id": 463,
+      "message": "策略做下优化，更多关键词、目标公司",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "strategy_revision",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "策略做下优化，更多关键词、目标公司"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "策略做下优化，更多关键词、目标公司",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "strategy_revision",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "strategy_revision"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_110",
+      "source": "local_asa_session_anonymized",
+      "source_id": 461,
+      "message": "你看下是这个客户乙的电源专家岗位",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "你看下是这个客户乙的电源专家岗位"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_111",
+      "source": "local_asa_session_anonymized",
+      "source_id": 459,
+      "message": "多一些关键词、目标公司",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "多一些关键词、目标公司"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_112",
+      "source": "local_asa_session_anonymized",
+      "source_id": 457,
+      "message": "策略上做下修改",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "策略上做下修改"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_113",
+      "source": "local_asa_session_anonymized",
+      "source_id": 453,
+      "message": "现在的寻访策略还可以补充哪些关键词和对标公司",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "现在的寻访策略还可以补充哪些关键词和对标公司"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "real_114",
+      "source": "local_asa_session_anonymized",
+      "source_id": 451,
+      "message": "可以，根据这个策略搜",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "可以，根据这个策略搜"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_115",
+      "source": "local_asa_session_anonymized",
+      "source_id": 447,
+      "message": "策略方面我感觉你列的关键词不太够，对标公司也不够",
+      "context": {
+        "type": "global",
+        "id": null
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "策略方面我感觉你列的关键词不太够，对标公司也不够"
+      ],
+      "target": {
+        "type": "global",
+        "id": null
+      },
+      "references": [],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_116",
+      "source": "local_asa_session_anonymized",
+      "source_id": 441,
+      "message": "继续修订客户乙电源专家第二轮寻访策略：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。严格沿用原第二轮寻访步骤，不增加岗位库、文档或浏览器读取步骤。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "继续修订客户乙电源专家第二轮寻访策略：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。严格沿用原第二轮寻访步骤，不增加岗位库、文档或浏览器读取步骤。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "继续修订客户乙电源专家第二轮寻访策略：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。严格沿用原第二轮寻访步骤，不增加岗位库、文档或浏览器读取步骤。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_117",
+      "source": "local_asa_session_anonymized",
+      "source_id": 439,
+      "message": "请把客户乙电源专家第二轮寻访工作流的寻访策略按前面已确认的条件进行修订：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "strategy_revision",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "请把客户乙电源专家第二轮寻访工作流的寻访策略按前面已确认的条件进行修订：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "请把客户乙电源专家第二轮寻访工作流的寻访策略按前面已确认的条件进行修订：必须具备三次电源工程经验，量产项目经验优先；预研背景可以看，但需要评估量产转化潜力。",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "strategy_revision",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "strategy_revision"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_118",
+      "source": "local_asa_session_anonymized",
+      "source_id": 437,
+      "message": "现在有客户乙的电源专家的第二轮寻访工作流，可以在寻访策略部分做下修改",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "strategy_revision",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "现在有客户乙的电源专家的第二轮寻访工作流，可以在寻访策略部分做下修改"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "现在有客户乙的电源专家的第二轮寻访工作流，可以在寻访策略部分做下修改",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "strategy_revision",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "strategy_revision"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "real_119",
+      "source": "local_asa_session_anonymized",
+      "source_id": 435,
+      "message": "都可以看，但是有量产经验更好",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "都可以看，但是有量产经验更好"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "real_120",
+      "source": "local_asa_session_anonymized",
+      "source_id": 433,
+      "message": "其实都是电源研发工程，只是具体工作内容和职责里面有具体的工程项目经验，或者是只有预研",
+      "context": {
+        "type": "job",
+        "id": 142
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "其实都是电源研发工程，只是具体工作内容和职责里面有具体的工程项目经验，或者是只有预研"
+      ],
+      "target": {
+        "type": "job",
+        "id": 142
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 142
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_001",
+      "source": "adversarial_v1",
+      "message": "把所有候选人过滤一下，不匹配的停止推进，再给我名单",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把所有候选人过滤一下，不匹配的停止推进，再给我名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把所有候选人过滤一下，不匹配的停止推进，再给我名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "batch_stop",
+          "effect": "internal_write",
+          "depends_on": [
+            1
+          ]
+        },
+        {
+          "order": 3,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            2
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "batch_stop",
+        "list_candidates"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_002",
+      "source": "adversarial_v1",
+      "message": "重新过滤再给名单",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "重新过滤再给名单"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "重新过滤再给名单",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "list_candidates",
+          "effect": "read",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "list_candidates"
+      ],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_003",
+      "source": "adversarial_v1",
+      "message": "这轮只找到 2 人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "user",
+          "content": "再找 10 人"
+        },
+        {
+          "role": "assistant",
+          "content": "已保留目标：再找 10 人"
+        }
+      ],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这轮只找到 2 人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [
+        {
+          "quote": "这轮只找到 2 人",
+          "kind": "workflow_observation"
+        }
+      ],
+      "fact_updates": [
+        {
+          "kind": "workflow_observation",
+          "quote": "这轮只找到 2 人",
+          "value": 2
+        }
+      ],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_004",
+      "source": "adversarial_v1",
+      "message": "再找 10 人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "再找 10 人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_005",
+      "source": "adversarial_v1",
+      "message": "刚才那个任务进展如何",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "工作流 wf_recent 已创建，当前等待结果"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "刚才那个任务进展如何"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_006",
+      "source": "adversarial_v1",
+      "message": "结果出来了吗？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "工作流 wf_recent 已创建，当前等待结果"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "结果出来了吗？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_007",
+      "source": "adversarial_v1",
+      "message": "为什么这轮人数不足？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "工作流 wf_recent 已创建，当前等待结果"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "为什么这轮人数不足？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_008",
+      "source": "adversarial_v1",
+      "message": "可以",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "待确认命令 cmd_recent：停止 3 名人选"
+        }
+      ],
+      "speech_act": "confirm",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "可以"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_009",
+      "source": "adversarial_v1",
+      "message": "确认执行",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "待确认命令 cmd_recent：停止 3 名人选"
+        }
+      ],
+      "speech_act": "confirm",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "确认执行"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_010",
+      "source": "adversarial_v1",
+      "message": "算了，别执行",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "cancel",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "算了，别执行"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_011",
+      "source": "adversarial_v1",
+      "message": "不是这个岗位，是客户乙的软件岗",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "当前对象：客户甲硬件岗"
+        }
+      ],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "不是这个岗位，是客户乙的软件岗"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_012",
+      "source": "adversarial_v1",
+      "message": "把预算改成 80-120 万",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把预算改成 80-120 万"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [
+        {
+          "op": "replace",
+          "kind": "job_budget",
+          "quote": "80-120 万"
+        }
+      ],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_013",
+      "source": "adversarial_v1",
+      "message": "预算不是 80-120 万，改成 100-150 万",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "预算不是 80-120 万，改成 100-150 万"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [
+        {
+          "op": "replace",
+          "kind": "job_budget",
+          "previous_quote": "80-120 万",
+          "quote": "100-150 万"
+        }
+      ],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_014",
+      "source": "adversarial_v1",
+      "message": "去掉必须本科这个条件",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "去掉必须本科这个条件"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [
+        {
+          "op": "remove",
+          "kind": "education",
+          "previous_quote": "必须本科",
+          "quote": "去掉必须本科这个条件"
+        }
+      ],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_015",
+      "source": "adversarial_v1",
+      "message": "再加一个江浙沪优先",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "再加一个江浙沪优先"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [
+        {
+          "op": "add",
+          "kind": "location",
+          "quote": "江浙沪优先"
+        }
+      ],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_016",
+      "source": "adversarial_v1",
+      "message": "这个岗位继续找，先补 20 人，不要触达",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个岗位继续找，先补 20 人，不要触达"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "这个岗位继续找，先补 20 人，不要触达",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_017",
+      "source": "adversarial_v1",
+      "message": "给这个人选做推荐报告，用模板甲通用模板",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "recommendation",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "给这个人选做推荐报告，用模板甲通用模板"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "给这个人选做推荐报告，用模板甲通用模板",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "recommendation",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "recommendation"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_018",
+      "source": "adversarial_v1",
+      "message": "附件里就一个人选，给他做推荐报告",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "recommendation",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "附件里就一个人选，给他做推荐报告"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "附件里就一个人选，给他做推荐报告",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "recommendation",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "recommendation"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": [
+        {
+          "attachment_id": "att_unique_candidate",
+          "candidate_count": 1
+        }
+      ]
+    },
+    {
+      "id": "edge_019",
+      "source": "adversarial_v1",
+      "message": "这两个人同名，推进哪个？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": true,
+      "source_quotes": [
+        "这两个人同名，推进哪个？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "clarify",
+      "expected_business_result": "ask_one_clarifying_question",
+      "attachments": []
+    },
+    {
+      "id": "edge_020",
+      "source": "adversarial_v1",
+      "message": "客户甲和客户乙的岗位都看一下",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": true,
+      "source_quotes": [
+        "客户甲和客户乙的岗位都看一下"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "clarify",
+      "expected_business_result": "ask_one_clarifying_question",
+      "attachments": []
+    },
+    {
+      "id": "edge_021",
+      "source": "adversarial_v1",
+      "message": "你是不是已经启动寻访了？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "你是不是已经启动寻访了？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_022",
+      "source": "adversarial_v1",
+      "message": "能不能直接联系他们？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "能不能直接联系他们？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_023",
+      "source": "adversarial_v1",
+      "message": "讨论一下要不要停掉这批人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "discuss",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "讨论一下要不要停掉这批人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_024",
+      "source": "adversarial_v1",
+      "message": "我觉得这批人不太匹配",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "我觉得这批人不太匹配"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_025",
+      "source": "adversarial_v1",
+      "message": "先别动，我只是问问",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "先别动，我只是问问"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_026",
+      "source": "adversarial_v1",
+      "message": "把不匹配的都停掉",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把不匹配的都停掉"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把不匹配的都停掉",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "batch_stop",
+          "effect": "internal_write",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "batch_stop"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_027",
+      "source": "adversarial_v1",
+      "message": "联系 A 级人选，但不要发消息",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_outreach",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "联系 A 级人选，但不要发消息"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "联系 A 级人选，但不要发消息",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_outreach",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_outreach"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_028",
+      "source": "adversarial_v1",
+      "message": "推荐给客户，再生成推荐报告",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "recommendation",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "推荐给客户，再生成推荐报告"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "推荐给客户，再生成推荐报告",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "recommendation",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "recommendation"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_029",
+      "source": "adversarial_v1",
+      "message": "刚才那批继续推进",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "刚才展示了岗位 137 的候选人集合"
+        }
+      ],
+      "speech_act": "inform",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "刚才那批继续推进"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_030",
+      "source": "adversarial_v1",
+      "message": "把前三个人停掉，原因分别是方向不符、薪资不符、地点不符",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "propose",
+      "primary_action": "candidate_review",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "把前三个人停掉，原因分别是方向不符、薪资不符、地点不符"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "把前三个人停掉，原因分别是方向不符、薪资不符、地点不符",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "filter_candidates",
+          "effect": "read"
+        },
+        {
+          "order": 2,
+          "action": "batch_stop",
+          "effect": "internal_write",
+          "depends_on": [
+            1
+          ]
+        }
+      ],
+      "expected_operation_order": [
+        "filter_candidates",
+        "batch_stop"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_031",
+      "source": "adversarial_v1",
+      "message": "上一条撤回",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "待确认命令 cmd_previous"
+        }
+      ],
+      "speech_act": "cancel",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "上一条撤回"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_032",
+      "source": "adversarial_v1",
+      "message": "不是再找 2 人，是目前只找到 2 人",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "我理解为再找 2 人"
+        }
+      ],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "不是再找 2 人，是目前只找到 2 人"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [
+        {
+          "quote": "不是再找 2 人，是目前只找到 2 人",
+          "kind": "workflow_observation"
+        }
+      ],
+      "fact_updates": [
+        {
+          "kind": "workflow_observation",
+          "quote": "不是再找 2 人，是目前只找到 2 人",
+          "value": 2
+        }
+      ],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_033",
+      "source": "adversarial_v1",
+      "message": "按刚才条件继续",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "user",
+          "content": "地点江浙沪，预算 80-120 万"
+        }
+      ],
+      "speech_act": "propose",
+      "primary_action": "candidate_sourcing",
+      "effect": "confirm",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "按刚才条件继续"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [
+        {
+          "order": 1,
+          "action": "candidate_sourcing",
+          "effect": "confirm"
+        }
+      ],
+      "expected_operation_order": [
+        "candidate_sourcing"
+      ],
+      "expected_route": "confirm",
+      "expected_business_result": "show_confirmation_without_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_034",
+      "source": "adversarial_v1",
+      "message": "刚才那个不是客户甲，是客户乙",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "当前客户甲"
+        }
+      ],
+      "speech_act": "correct",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "刚才那个不是客户甲，是客户乙"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_035",
+      "source": "adversarial_v1",
+      "message": "这个岗位预算多少？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "这个岗位预算多少？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_036",
+      "source": "adversarial_v1",
+      "message": "这批人目前在哪个阶段？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "刚才展示了两个候选人集合，需要确认哪一批"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": true,
+      "source_quotes": [
+        "这批人目前在哪个阶段？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "clarify",
+      "expected_business_result": "ask_one_clarifying_question",
+      "attachments": []
+    },
+    {
+      "id": "edge_037",
+      "source": "adversarial_v1",
+      "message": "寻访失败是什么原因？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "工作流 wf_recent 已创建，当前等待结果"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "寻访失败是什么原因？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_038",
+      "source": "adversarial_v1",
+      "message": "任务阻塞在哪里？",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [
+        {
+          "role": "assistant",
+          "content": "工作流 wf_recent 已创建，当前等待结果"
+        }
+      ],
+      "speech_act": "ask",
+      "primary_action": "none",
+      "effect": "read",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "任务阻塞在哪里？"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "read",
+      "expected_business_result": "return_read_only_result",
+      "attachments": []
+    },
+    {
+      "id": "edge_039",
+      "source": "adversarial_v1",
+      "message": "好",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "confirm",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "好"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    },
+    {
+      "id": "edge_040",
+      "source": "adversarial_v1",
+      "message": "收到",
+      "context": {
+        "type": "job",
+        "id": 137
+      },
+      "history": [],
+      "speech_act": "confirm",
+      "primary_action": "none",
+      "effect": "none",
+      "should_execute": false,
+      "needs_clarification": false,
+      "source_quotes": [
+        "收到"
+      ],
+      "target": {
+        "type": "job",
+        "id": 137
+      },
+      "references": [
+        {
+          "type": "job",
+          "id": 137
+        }
+      ],
+      "objective": "",
+      "observations": [],
+      "fact_updates": [],
+      "constraint_changes": [],
+      "operations": [],
+      "expected_operation_order": [],
+      "expected_route": "none",
+      "expected_business_result": "no_business_write",
+      "attachments": []
+    }
+  ]
+}

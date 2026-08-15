@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let serviceBaseURL = URL(string: "http://127.0.0.1:8765")!
     private lazy var webSecurityPolicy = ASAWebSecurityPolicy(serviceBaseURL: serviceBaseURL)
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.27"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.29"
     }
     private lazy var floatingURL = serviceBaseURL.appendingPathComponent("asa-floating").appending(queryItems: [URLQueryItem(name: "ui", value: appVersion)])
     private lazy var stateURL = serviceBaseURL.appendingPathComponent("api/asa/floating/state")
@@ -505,7 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             defer: false
         )
         mainWindow.title = "ASA Agent"
-        mainWindow.titlebarAppearsTransparent = false
+        blendTitlebarWithWebUI(mainWindow)
         mainWindow.isReleasedWhenClosed = false
         mainWindow.minSize = NSSize(width: 900, height: 620)
         mainWindow.setFrameAutosaveName("ASA Main Window")
@@ -515,6 +515,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         mainWebView.uiDelegate = self
         mainWebView.autoresizingMask = [.width, .height]
         mainWindow.contentView = mainWebView
+    }
+
+    /// Design Language v1：系统深色模式下仍保持浅色标题栏，并与 Web 纸感底色（--bg #f2f3ef）融合，
+    /// 避免原生黑标题栏与浅色 Web 内容割裂。
+    private func blendTitlebarWithWebUI(_ window: NSWindow, hideTitle: Bool = true) {
+        window.appearance = NSAppearance(named: .aqua)
+        window.titlebarAppearsTransparent = true
+        if hideTitle { window.titleVisibility = .hidden }
+        window.backgroundColor = NSColor(calibratedRed: 0.949, green: 0.953, blue: 0.937, alpha: 1)
     }
 
     private func buildPanel() {
@@ -531,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
-        panel.titlebarAppearsTransparent = false
+        blendTitlebarWithWebUI(panel)
         panel.setFrameAutosaveName("ASA Floating Panel")
         panel.minSize = NSSize(width: 360, height: 520)
 
@@ -581,7 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         collapsedButton.isBordered = false
         collapsedButton.wantsLayer = true
         collapsedButton.layer?.cornerRadius = 27
-        collapsedButton.layer?.backgroundColor = NSColor(red: 0.10, green: 0.32, blue: 0.92, alpha: 0.95).cgColor
+        collapsedButton.layer?.backgroundColor = NSColor(red: 0.15, green: 0.33, blue: 0.25, alpha: 0.95).cgColor
         collapsedButton.attributedTitle = NSAttributedString(
             string: "ASA",
             attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
@@ -1629,6 +1638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 defer: false
             )
             window.title = title
+            blendTitlebarWithWebUI(window, hideTitle: false)
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("ASA Detached Dialog")
             window.minSize = NSSize(width: 480, height: 360)
@@ -1672,6 +1682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 defer: false
             )
             window.title = title
+            blendTitlebarWithWebUI(window, hideTitle: false)
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("ASA Detached Candidate List")
             window.minSize = NSSize(width: 380, height: 300)

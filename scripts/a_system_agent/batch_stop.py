@@ -93,6 +93,9 @@ def apply_batch_stop(
             if row is None:
                 skipped += 1
                 continue
+            if int(row["job_id"] or 0) != int(job_id):
+                skipped += 1
+                continue
             current_stage = str(row["clean_stage"] or "")
             if any(token in current_stage for token in ("初筛不通过", "停止", "淘汰", "关闭")):
                 skipped += 1
