@@ -1,8 +1,9 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { ArrowUpDown, Search } from 'lucide-react'
 import { Job } from '../api'
 import { date, parseDate } from '../shared/format'
 import { pageInfo, PageBar } from '../shared/Pagination'
+import { usePageFilterState } from '../shared/pageFilterState'
 
 const PAGE_SIZE = 20
 type Mode = 'p0' | 'pipeline' | 'all'
@@ -47,10 +48,11 @@ const matchesQuery = (job: Job, keyword: string): boolean => {
 }
 
 export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number) => void }) {
-  const [mode, setMode] = useState<Mode>('p0')
-  const [query, setQuery] = useState('')
-  const [sortKey, setSortKey] = useState<SortKey>('updated')
-  const [page, setPage] = useState(0)
+  // 筛选/排序/页码跨 tab 切换与刷新保持：用户调好的视图不因组件卸载而重置。
+  const [mode, setMode] = usePageFilterState<Mode>('jobs.mode', 'p0')
+  const [query, setQuery] = usePageFilterState<string>('jobs.query', '')
+  const [sortKey, setSortKey] = usePageFilterState<SortKey>('jobs.sort', 'updated')
+  const [page, setPage] = usePageFilterState<number>('jobs.page', 0)
 
   const keyword = query.trim().toLowerCase()
 
@@ -77,6 +79,10 @@ export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number)
   }, [searched, mode, sortKey])
 
   const { pageCount, currentPage, from, to } = pageInfo(filtered.length, PAGE_SIZE, page)
+  // 页码钳制：恢复的持久化页码或数据收缩后夹回有效范围，列表回涨时不跳旧页。
+  useEffect(() => {
+    setPage(current => Math.min(current, Math.max(0, pageCount - 1)))
+  }, [pageCount, setPage])
   const shown = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
   const selectMode = (next: Mode) => {
     setMode(next)

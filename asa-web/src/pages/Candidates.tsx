@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { ArrowUpDown, Search } from 'lucide-react'
 import { Candidate } from '../api'
 import { candidateStopped, sourceLabel, stageTone, date, parseDate } from '../shared/format'
 import { pageInfo, PageBar } from '../shared/Pagination'
+import { usePageFilterState } from '../shared/pageFilterState'
 
 const PAGE_SIZE = 20
 type Mode = 'active' | 'all' | 'stopped'
@@ -52,10 +53,11 @@ const compareCandidates = (a: Candidate, b: Candidate, key: SortKey): number => 
 }
 
 export function Candidates({ items, openCandidate, compact = false }: { items: Candidate[]; openCandidate: (id: number) => void; compact?: boolean }) {
-  const [mode, setMode] = useState<Mode>('active')
-  const [query, setQuery] = useState('')
-  const [sortKey, setSortKey] = useState<SortKey>('updated')
-  const [page, setPage] = useState(0)
+  // 筛选/排序/页码跨 tab 切换与刷新保持（compact 内嵌模式不渲染工具栏，不受影响）。
+  const [mode, setMode] = usePageFilterState<Mode>('candidates.mode', 'active')
+  const [query, setQuery] = usePageFilterState<string>('candidates.query', '')
+  const [sortKey, setSortKey] = usePageFilterState<SortKey>('candidates.sort', 'updated')
+  const [page, setPage] = usePageFilterState<number>('candidates.page', 0)
 
   const keyword = query.trim().toLowerCase()
   const searched = useMemo(() => (items ?? []).filter(candidate => matchesQuery(candidate, keyword)), [items, keyword])
@@ -78,9 +80,8 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
   const { pageCount, currentPage, from, to } = pageInfo(filtered.length, PAGE_SIZE, page)
   // 页码钳制：搜索/范围/外部数据变化后把内部页码状态也夹回有效范围，列表回涨时不会跳回旧页。
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPage(current => Math.min(current, Math.max(0, pageCount - 1)))
-  }, [pageCount])
+  }, [pageCount, setPage])
 
   const shown = compact ? filtered : filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
   const selectMode = (next: Mode) => {

@@ -129,4 +129,37 @@ describe('App Core 离线横幅', () => {
     expect(screen.getByRole('heading', { name: '今天从哪里开始？' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'ASA Core 无法连接' })).not.toBeInTheDocument()
   })
+
+  it('切换 tab push 进历史，hashchange 恢复上一入口', async () => {
+    stubFetch(() => false)
+    render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    // 初始在 Agent，无 hash
+    expect(location.hash).toBe('')
+    const initialLength = history.length
+
+    fireEvent.click(screen.getByRole('button', { name: '岗位看板' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(location.hash).toBe('#tab=jobs')
+    expect(history.length).toBeGreaterThan(initialLength)
+    expect(screen.getByRole('heading', { name: '岗位' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '人选进度' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(location.hash).toBe('#tab=progress')
+
+    // 模拟浏览器返回：hash 回到上一入口，openHash 恢复对应 tab。
+    // （jsdom 的 history.back() 为空操作，用 hash 赋值触发 hashchange 等价验证。）
+    act(() => { location.hash = '#tab=jobs' })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByRole('heading', { name: '岗位' })).toBeInTheDocument()
+  })
+
+  it('刷新后从 hash 恢复当前入口', async () => {
+    location.hash = '#tab=candidates'
+    stubFetch(() => false)
+    render(<App />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByRole('heading', { name: '候选人关系' })).toBeInTheDocument()
+  })
 })
