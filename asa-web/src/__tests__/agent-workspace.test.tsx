@@ -385,6 +385,45 @@ describe('Agent workspace', () => {
     expect(markdown).toContain('## 2026-08-16')
   })
 
+  it('⌘⇧N 新建任务：清空当前会话回到空任务首页', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-1')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-1?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-1', business_focus: null,
+        messages: [{ role: 'assistant', content: '已恢复任务' }], total: 1, has_more: false,
+      })
+      return mockResponse({ ok: true, sessions: [{ session_id: 'task-1', title: '继续找人', preview: '已恢复任务', message_count: 1, updated_at: '2026-08-03' }] })
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByText('已恢复任务')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'n', metaKey: true, shiftKey: true })
+
+    expect(await screen.findByText('今天从哪里开始？')).toBeInTheDocument()
+    expect(screen.queryByText('已恢复任务')).not.toBeInTheDocument()
+  })
+
+  it('? 打开快捷键帮助面板，Esc 关闭；输入框内不触发', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/sessions?')
+      ? mockResponse({ ok: true, sessions: [] })
+      : mockResponse({})))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.keyDown(document.body, { key: '?' })
+    const dialog = await screen.findByRole('dialog', { name: '快捷键' })
+    expect(within(dialog).getByText('聚焦输入框')).toBeInTheDocument()
+    expect(within(dialog).getByText('新建任务')).toBeInTheDocument()
+
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '快捷键' })).not.toBeInTheDocument())
+
+    // 焦点在输入框时按 ? 是打字，不弹帮助。
+    const composer = screen.getByLabelText('Agent 消息')
+    fireEvent.keyDown(composer, { key: '?' })
+    expect(screen.queryByRole('dialog', { name: '快捷键' })).not.toBeInTheDocument()
+  })
+
   it('右键任务卡可导出会话：分页拉全量并下载 Markdown', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-1')
     const capturedBlobs: Blob[] = []

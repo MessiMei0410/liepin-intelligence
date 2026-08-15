@@ -1,5 +1,5 @@
 import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Suspense, useEffect, useReducer, useRef, useState } from 'react'
-import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, Download, FileText, Filter, History, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
+import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, Download, FileText, Filter, History, Keyboard, ListChecks, LoaderCircle, Map, MessageSquareText, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
@@ -9,6 +9,7 @@ import { SourcingResultCard, type SourcingResultCardData } from '../workflows/So
 import type { CandidateListCardData } from '../workflows/CandidateListCard'
 import { CandidateListDialog } from './CandidateListDialog'
 import { useDialogFocus } from '../shared/useDialogFocus'
+import { DialogModal } from '../shared/Dialog'
 import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { updateCandidateListDialogData } from './candidateListDialogUpdate'
 import { FULL_OBJECT_CLOSED_EVENT } from './navigation'
@@ -119,6 +120,12 @@ const sessionExportFileName = (title: string, sessionId: string, now = new Date(
   return `ASA任务-${safeTitle || sessionId}-${stamp}.md`
 }
 
+// 纯文本键入目标（输入框/文本域/可编辑区）：单键快捷键（?）在此类目标内不触发。
+const isTypingTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false
+  return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+}
+
 
 const focusLabel = (focus?: Record<string, unknown> | null) => {
   if (!focus) return ''
@@ -217,8 +224,8 @@ const messageReferences = (message: AgentMessage): AgentReference[] => {
   return refs.filter(item => !genericReferenceLabel(item.label) || !refs.some(other => other !== item && other.type === item.type && !genericReferenceLabel(other.label)))
 }
 
-export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onWorkbenchAction, onOpenFullObject }: {
-  jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext;
+export function AgentWorkspace({ jobs = [], workbench, templates, context, templateBusyId = '', onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onWorkbenchAction, onOpenFullObject }: {
+  jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext; templateBusyId?: string;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
   onManageTemplate: (template: AnalysisTemplate) => void; onCreateTemplate: () => void;
   onWorkbenchAction: (item: WorkbenchItem) => void; onOpenFullObject: (reference: AgentReference) => void;
@@ -304,6 +311,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   const searchSeqRef = useRef(0)
   const attachedContextRef = useRef(attachedContext)
   const endRef = useRef<HTMLDivElement>(null)
+  // 是否跟随消息流底部：用户上翻浏览历史时为 false，流式输出不再拽回底部；
+  // 发送新消息或点击「回到底部」恢复跟随。
+  const pinnedToBottomRef = useRef(true)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const attachmentsRef = useRef<QueuedAgentAttachment[]>([])
@@ -399,8 +409,12 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
   useEffect(() => {
     // 空任务首页是工作台，不是对话记录；首次进入必须从顶部开始阅读。
     // 「加载更早」插入历史页时例外：交给滚动锚定 effect 保持原视口，不跳底部。
+    // 用户上翻浏览历史（pinnedToBottomRef=false）时流式输出不自动吸底，
+    // 由「回到底部」按钮或发送新消息恢复跟随。
     if (prependHeightRef.current !== null) return
-    if ((messages.length || loading) && typeof endRef.current?.scrollIntoView === 'function') {
+    if (!(messages.length || loading)) return
+    if (!pinnedToBottomRef.current) return
+    if (typeof endRef.current?.scrollIntoView === 'function') {
       endRef.current.scrollIntoView({ block: 'end' })
     }
   }, [messages, loading])
@@ -544,6 +558,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       ? { ...turnContext, uploaded_attachments: readyAttachments }
       : turnContext
     attachmentGenerationRef.current += 1; attachmentsRef.current = []; setAttachmentNotice('')
+    // 发出自己的消息后恢复跟随底部（即使用户刚才在上翻历史）。
+    pinnedToBottomRef.current = true
     setDraft(''); setAttachments([]); void runTurn(createAgentTurn(sessionId, message, contextWithAttachments))
   }
   const submit = (event?: FormEvent) => {
@@ -572,12 +588,33 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
   }, [draft])
-  // Cmd/Ctrl+K 随时聚焦输入框（消息流滚动后快速回到输入）。
+  // 全局快捷键：⌘K 聚焦输入 / ⌘⇧N 新建任务 / ? 帮助面板。
+  // 动作句柄经"latest ref"取最新闭包（newTask 依赖当轮 context），订阅 effect 只挂一次；
+  // ref 写入放 effect（渲染期写 ref 违反 react-hooks/refs 规则），每次渲染后刷新。
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const shortcutActionsRef = useRef({ newTask: () => {}, openShortcuts: () => {} })
+  useEffect(() => {
+    shortcutActionsRef.current = {
+      newTask: () => newTask(),
+      openShortcuts: () => setShortcutsOpen(true),
+    }
+  })
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      const meta = event.metaKey || event.ctrlKey
+      if (meta && event.key.toLowerCase() === 'k' && !event.shiftKey) {
         event.preventDefault()
         composerRef.current?.focus()
+        return
+      }
+      if (meta && event.shiftKey && event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        shortcutActionsRef.current.newTask()
+        return
+      }
+      if (event.key === '?' && !isTypingTarget(event.target)) {
+        event.preventDefault()
+        shortcutActionsRef.current.openShortcuts()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -594,18 +631,25 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
       // 剪贴板不可用时静默：复制是辅助能力，不打断对话。
     }
   }
-  // 消息流滚动远离底部时显示"回到底部"。
+  // 消息流滚动远离底部时显示"回到底部"；同时维护是否跟随底部的判定。
   const messagesRef = useRef<HTMLDivElement>(null)
   const [showJumpBottom, setShowJumpBottom] = useState(false)
   useEffect(() => {
     const el = messagesRef.current
     if (!el) return
-    const onScroll = () => setShowJumpBottom(el.scrollHeight - el.scrollTop - el.clientHeight > 240)
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+      pinnedToBottomRef.current = distance <= 120
+      setShowJumpBottom(distance > 240)
+    }
     onScroll()
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
-  const jumpToBottom = () => endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const jumpToBottom = () => {
+    pinnedToBottomRef.current = true
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
   // 「加载更早」：offset=当前已加载条数请求更早一页；服务端并发变化导致页间重叠时按
   // created_at+content 去重；插入后由下方锚定 effect 把视口钉回原消息位置。
   const loadEarlierMessages = async () => {
@@ -634,6 +678,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
     prependHeightRef.current = null
   }, [messages.length])
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // 中文输入法组词确认的 Enter 不发送：组合态（isComposing / keyCode 229）直接放行给 IME。
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() }
   }
   const retry = () => {
@@ -888,13 +934,13 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
 
   return <div className={`agent-workspace ${taskRailCollapsed ? 'rail-collapsed' : ''}`}>
     <section className={`agent-conversation ${currentFocus ? 'has-focus' : ''}`} aria-label="Agent 对话">
-      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title="导出会话" aria-label="导出会话" onClick={() => void exportSession(sessionId, sessionTitle(sessionId))}><Download/></button>}<button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
+      <header className="agent-conversation-head"><div><MessageSquareText/><span><b>{sessions.find(item => item.session_id === sessionId)?.title || '新任务'}</b><small>{currentFocus || '通用 ASA 对话'}</small>{sessionId && <small className="agent-session-id">会话 ID：{sessionId}</small>}</span></div><div>{sessionId && <button className="icon-btn" title="导出会话" aria-label="导出会话" onClick={() => void exportSession(sessionId, sessionTitle(sessionId))}><Download/></button>}<button className="icon-btn" title="快捷键" aria-label="快捷键" onClick={() => setShortcutsOpen(true)}><Keyboard/></button><button className="icon-btn" title="模型输出审计" aria-label="模型输出审计" onClick={() => setModelAuditOpen(value => !value)}><Activity/></button><button className="icon-btn agent-history-toggle" title="任务历史" aria-label="任务历史" onClick={() => { setHistoryOpen(true); setRailCollapsed(false) }}><PanelRightOpen/></button><button className="button" onClick={newTask}><Plus/>新任务</button></div></header>
       {contextConflict && <div className="agent-context-conflict" role="alert"><span>你正带着新的业务上下文进入，当前任务焦点为 {contextConflict.label}</span><div><button className="button primary" onClick={resolveConflictWithNewTask}>以新上下文新建任务</button><button className="button" onClick={resolveConflictKeepCurrent}>继续当前任务</button></div></div>}
       {currentFocus && <div className={`agent-focus-bar ${focusNeedsClarification ? 'conflict' : ''}`} role="status" aria-label="当前任务焦点"><span><b>{focusNeedsClarification ? '焦点需要确认' : '当前焦点'}</b>{currentFocus}</span><button className="icon-btn" title="解除任务焦点" aria-label="解除任务焦点" disabled={focusBusy} onClick={() => void clearFocus()}><Unlink/></button></div>}
       {focusError && <div className="agent-error"><span>{focusError}</span></div>}
       <div ref={messagesRef} className="agent-messages">
         {hasEarlierHistory && <div className="agent-truncated"><button type="button" className="agent-load-earlier" onClick={() => void loadEarlierMessages()} disabled={loadingEarlier || loading || restoring}>{loadingEarlier ? '正在加载更早消息…' : historyTotal > messages.length ? `加载更早的消息（还有 ${historyTotal - messages.length} 条）` : '加载更早的消息'}</button></div>}
-        {!messages.length && !restoring && <AgentHome jobs={jobs} workbench={workbench} templates={templates} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} onQuickCommand={runQuickCommand} />}
+        {!messages.length && !restoring && <AgentHome jobs={jobs} workbench={workbench} templates={templates} templateBusyId={templateBusyId} focusType={String(focusContext(focus)?.type || attachedContext.type || 'page')} onAction={onWorkbenchAction} onOpenAnalysis={onOpenAnalysis} onRunTemplate={onRunTemplate} onManageTemplate={onManageTemplate} onCreateTemplate={onCreateTemplate} onQuickCommand={runQuickCommand} />}
         {restoring && <div className="agent-loading"><LoaderCircle className="spin"/>恢复任务</div>}
         {messages.map((message, index) => {
           const messageKey = `${index}:${message.created_at || ''}`
@@ -1000,6 +1046,16 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, onOpe
         <button role="menuitem" aria-label={`导出会话：${taskMenu.sessionId}`} onClick={() => { void exportSession(taskMenu.sessionId, sessionTitle(taskMenu.sessionId)); setTaskMenu(undefined) }}><Download/><span>导出会话<small>下载完整对话 Markdown</small></span></button>
       </div>
     </div>}
+    {shortcutsOpen && <DialogModal onClose={() => setShortcutsOpen(false)} title="快捷键" titleId="agent-shortcuts-title" eyebrow="输入与任务" initialFocus=".action-dialog button">
+      <div className="agent-shortcut-list">
+        <div><kbd>⌘ K</kbd><span>聚焦输入框</span></div>
+        <div><kbd>⌘ ⇧ N</kbd><span>新建任务</span></div>
+        <div><kbd>Enter</kbd><span>发送消息</span></div>
+        <div><kbd>Shift ⇧ Enter</kbd><span>输入框内换行</span></div>
+        <div><kbd>Esc</kbd><span>关闭弹窗或菜单</span></div>
+        <div><kbd>?</kbd><span>打开快捷键帮助</span></div>
+      </div>
+    </DialogModal>}
     {bulkArchiveOpen && <div className="action-dialog-backdrop" role="presentation" onClick={() => { if (!bulkArchiveBusy) setBulkArchiveOpen(false) }}><section ref={bulkArchiveDialogRef} className="action-dialog agent-bulk-archive-dialog" role="alertdialog" aria-modal="true" aria-labelledby="bulk-archive-title" onClick={event => event.stopPropagation()}>
       <header><span className="action-dialog-icon danger"><Archive/></span><div><small>任务管理</small><h3 id="bulk-archive-title">归档全部任务</h3></div><button className="icon-btn" aria-label="关闭" disabled={bulkArchiveBusy} onClick={() => setBulkArchiveOpen(false)}><X/></button></header>
       <div className="action-dialog-body"><dl><div><dt>范围</dt><dd>全部未归档任务</dd></div><div><dt>归档后</dt><dd>从右侧任务栏隐藏</dd></div><div><dt>保留内容</dt><dd>消息、业务焦点与审计记录</dd></div></dl><p>这是批量操作。归档后任务不会被删除，后端记录仍会完整保留。</p>{bulkArchiveError && <div className="action-dialog-error">{bulkArchiveError}</div>}</div>
@@ -1048,6 +1104,19 @@ const agentHomeQuickCommands: Array<{ label: string; command: string; icon: Reac
   { label: '继续寻访', command: '继续寻访', icon: <RefreshCw/> },
 ]
 
+// 快捷指令按当前焦点排序：数值越小越靠前，未命中保持默认顺序（sort 稳定）。
+// 带着岗位/人选上下文进入 Agent 时，最相关的指令置顶，首页更像"这个对象下一步做什么"。
+const quickCommandRank: Record<string, Partial<Record<string, number>>> = {
+  生成推荐报告: { candidate: 0 },
+  继续寻访: { job: 0, workflow: 0 },
+  过滤名单: { job: 1 },
+  人才地图: { job: 2 },
+  今日待办: { page: 0 },
+}
+
+const rankQuickCommand = (command: string, focusType: string): number =>
+  quickCommandRank[command]?.[focusType] ?? 5
+
 function AgentHomeLane({ lane, label, empty, workbench, loading, onAction }: {
   lane: WorkbenchLane; label: string; empty: string; workbench: Workbench; loading: boolean;
   onAction: (item: WorkbenchItem) => void;
@@ -1065,8 +1134,8 @@ function AgentHomeLane({ lane, label, empty, workbench, loading, onAction }: {
   return <section className={`agent-home-band ${collapsed ? 'lane-collapsed' : ''}`} aria-label={label}><header><button className="agent-home-lane-toggle" aria-label={`${collapsed ? '展开' : '收起'}${label}`} aria-expanded={!collapsed} onClick={() => setCollapsed(value => !value)}><ChevronDown size={12}/><h3>{label}</h3></button><span>{summaryLabel}</span></header>{!collapsed && <>{visibleItems.map(item => <button key={item.item_key} onClick={() => onAction(item)}><span><b>{item.title}</b><small>{item.reason || item.subtitle}</small></span><em>{item.status_label}</em></button>)}{(hasMore || visibleLimit > 4) && <div className="agent-home-pagination">{hasMore && <button className="agent-home-more" onClick={() => setVisibleLimit(value => Math.min(items.length, value + 20))}>再显示 {nextBatchSize} 项</button>}{visibleLimit > 4 && <button className="agent-home-collapse" onClick={() => setVisibleLimit(4)}>收起</button>}</div>}{!items.length && <p>{loading ? '正在加载…' : empty}</p>}</>}</section>
 }
 
-function AgentHome({ jobs, workbench, templates, onAction, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onQuickCommand }: {
-  jobs: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; onAction: (item: WorkbenchItem) => void;
+function AgentHome({ jobs, workbench, templates, templateBusyId, focusType, onAction, onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onQuickCommand }: {
+  jobs: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; templateBusyId: string; focusType: string; onAction: (item: WorkbenchItem) => void;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
   onManageTemplate: (template: AnalysisTemplate) => void; onCreateTemplate: () => void;
   onQuickCommand: (command: string) => void;
@@ -1080,5 +1149,9 @@ function AgentHome({ jobs, workbench, templates, onAction, onOpenAnalysis, onRun
   const visibleLanes = workbenchLoading
     ? agentHomeLanes
     : agentHomeLanes.filter(config => workbenchLaneCount(workbench, config.lane) > 0)
-  return <div className="agent-home"><header><h2>今天从哪里开始？</h2><p>ASA 已连接岗位、人选和工作流上下文。</p></header><section className="agent-home-quick" aria-label="快捷指令">{agentHomeQuickCommands.map(item => <button key={item.command} title={item.command} onClick={() => onQuickCommand(item.command)}>{item.icon}<b>{item.label}</b><small>{item.command}</small></button>)}</section>{visibleLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => <div className="agent-analysis-row" key={item.template_id}><button onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span><em>{item.last_run_id ? '查看' : '运行'}</em></button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>)}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
+  // 快捷指令按当前焦点类型重排（稳定排序，未命中的指令保持原相对顺序）。
+  const quickCommands = [...agentHomeQuickCommands].sort(
+    (a, b) => rankQuickCommand(a.command, focusType) - rankQuickCommand(b.command, focusType),
+  )
+  return <div className="agent-home"><header><h2>今天从哪里开始？</h2><p>ASA 已连接岗位、人选和工作流上下文。</p></header><section className="agent-home-quick" aria-label="快捷指令">{quickCommands.map(item => <button key={item.command} title={item.command} onClick={() => onQuickCommand(item.command)}>{item.icon}<b>{item.label}</b><small>{item.command}</small></button>)}</section>{visibleLanes.map(config => <AgentHomeLane key={config.lane} lane={config.lane} label={config.label} empty={config.empty} workbench={workbench} loading={workbenchLoading} onAction={onAction} />)}<section className="agent-home-band agent-home-analyses"><header><h3>固定分析</h3><button className="icon-btn" title="新建固定分析" aria-label="新建固定分析" onClick={onCreateTemplate}><Plus/></button></header>{templates.slice(0, 4).map(item => { const busy = templateBusyId === item.template_id || templateBusyId === 'template-save'; return <div className="agent-analysis-row" key={item.template_id}><button disabled={busy} onClick={() => item.last_run_id ? onOpenAnalysis(item.last_run_id) : onRunTemplate(item.template_id)}><span><b>{item.name}</b><small>{item.last_result?.headline || item.question || '尚未运行'}</small></span>{busy ? <em className="agent-analysis-busy"><LoaderCircle className="spin" size={11}/>运行中</em> : <em>{item.last_run_id ? '查看' : '运行'}</em>}</button><button className="icon-btn" title={`管理固定分析：${item.name}`} aria-label={`管理固定分析：${item.name}`} onClick={() => onManageTemplate(item)}><Settings2/></button></div>})}{!templates.length && <p>暂无固定分析</p>}</section><section className="agent-home-tools"><button className="button" aria-expanded={radarOpen} onClick={() => setRadarOpen(value => !value)}><Radar/>{radarOpen ? '收起人才雷达' : '人才雷达'}</button><button className="button" aria-expanded={knowledgeOpen} onClick={() => setKnowledgeOpen(value => !value)}><BookPlus/>{knowledgeOpen ? '收起知识增补提案' : '知识增补提案'}</button><button className="button" aria-expanded={calibrationOpen} onClick={() => setCalibrationOpen(value => !value)}><Building2/>{calibrationOpen ? '收起核心公司校准' : '核心公司校准'}</button></section>{radarOpen && <section className="agent-home-radar" aria-label="人才雷达"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>人才雷达加载中…</div>}><RadarPage jobs={jobs}/></Suspense></section>}{knowledgeOpen && <section className="agent-home-radar" aria-label="知识增补提案"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>知识增补提案加载中…</div>}><KnowledgeProposalsPanel/></Suspense></section>}{calibrationOpen && <section className="agent-home-radar" aria-label="核心公司校准"><Suspense fallback={<div className="empty"><LoaderCircle className="spin"/>核心公司校准加载中…</div>}><CompanyCalibrationPanel/></Suspense></section>}</div>
 }
