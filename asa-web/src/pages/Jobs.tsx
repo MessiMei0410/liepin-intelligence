@@ -161,7 +161,7 @@ export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number)
             {shown.map(job => (
               <tr key={job.id} tabIndex={0} aria-label={`打开岗位 ${job.client} ${job.title}`} onKeyDown={event => open(event, job.id)} onClick={() => onSelect(job.id)}>
                 <td><b>{job.title}</b><small>{job.client}</small></td>
-                <td>{job.priority?.includes('P0-最急') && <span className="tag warn">P0 最急</span>}{job.filter_model_missing && <span className="tag warn" title="该岗位有活跃人选，但暂无确定性筛选模型：过滤/分级请求将失败关闭，需先补岗位证据模型">无筛选模型</span>}<small>{job.status || job.lifecycle_stage || '待启动'}</small></td>
+                <td>{job.priority?.includes('P0-最急') && <span className="tag warn">P0 最急</span>}{job.filter_model_missing && <span className="tag warn" title="该岗位有活跃人选，但暂无确定性筛选模型：过滤/分级请求将失败关闭，需先补岗位证据模型">无筛选模型</span>}{job.filter_model_draft && <span className="tag info" title="该岗位已有待确认的筛选模型草稿（由岗位画像生成）：确认后过滤/分级才会启用，确认前依旧失败关闭">筛选模型待确认</span>}<small>{job.status || job.lifecycle_stage || '待启动'}</small></td>
                 <td>{job.location || '-'}</td>
                 <td className="num">{job.active_candidate_count || 0}</td>
                 <td>{date(job.updated_at)}</td>

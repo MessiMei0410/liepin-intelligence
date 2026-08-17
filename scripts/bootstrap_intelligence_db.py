@@ -12,6 +12,8 @@ from pathlib import Path
 
 from position_storage import ensure_position_storage_schema, seed_position_snapshots_from_positions
 
+from a_system_agent.filter_models import MODEL_TABLE_DDL
+
 
 DEFAULT_DB = Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db")
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "Codex" / "2026-06-18" / "liepin-intelligence" / "outputs"
@@ -327,6 +329,7 @@ def ensure_schema(conn: sqlite3.Connection) -> list[str]:
     }
     for stmt in SCHEMA_STATEMENTS:
         conn.execute(stmt)
+    conn.execute(MODEL_TABLE_DDL)
     search_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(search_experiments)")
