@@ -1,0 +1,13 @@
+{
+  "name": "asa-dsh-integration",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ASA <- DeepSeek Harness 编排层（工具插件 + profile + 桥接服务）",
+  "type": "module",
+  "scripts": {
+    "dsh": "dsh"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6"
+  }
+}

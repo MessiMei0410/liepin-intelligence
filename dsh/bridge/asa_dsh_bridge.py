@@ -24,7 +24,12 @@ import os
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-DSH_BIN = os.environ.get("DSH_BIN", "/Users/messi/.npm/_npx/1e7f6d9597241db0/node_modules/.bin/dsh")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_DSH = os.path.normpath(os.path.join(_HERE, "..", "node_modules", ".bin", "dsh"))
+_FALLBACK_DSH = "/Users/messi/.npm/_npx/1e7f6d9597241db0/node_modules/.bin/dsh"
+
+# 优先用本仓 dsh/node_modules/.bin/dsh（`dsh/package.json` 固定版本），找不到再退回 npx 缓存。
+DSH_BIN = os.environ.get("DSH_BIN") or (_REPO_DSH if os.path.isfile(_REPO_DSH) else _FALLBACK_DSH)
 DSH_HOME = os.environ.get("DSH_HOME", os.path.expanduser("~/.dsh"))
 CWD = os.environ.get("ASA_DSH_CWD", "/tmp/asa-dsh-spike")
 PORT = int(os.environ.get("ASA_DSH_BRIDGE_PORT", "8890"))
