@@ -163,7 +163,7 @@ export const createAgentTurn = (sessionId: string, message: string, context: Age
   return turn
 }
 
-const DSH_BRIDGE_URL = 'http://127.0.0.1:8890/turn'
+const DSH_BRIDGE_URL = 'http://127.0.0.1:8891/turn'
 
 // 非破坏的 DSH 开关：URL 带 ?brain=dsh 时 Agent 走 DSH 桥接（路 2），否则保持现有 Copilot。
 export const brainMode = (): 'copilot' | 'dsh' => {
@@ -175,7 +175,7 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   const response = await fetch(DSH_BRIDGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: turn.message, context: turn.context }),
+    body: JSON.stringify({ message: turn.message, session_id: turn.sessionId, context: turn.context }),
     signal,
   })
   if (!response.ok) {
