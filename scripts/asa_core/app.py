@@ -47,6 +47,16 @@ from .service import CoreService
 
 ASA_WEB_DIST = Path(os.environ.get("ASA_WEB_DIST", str(REPO_DIR / "asa-web" / "dist"))).expanduser()
 ASA_APP_USER_AGENT_PREFIX = "ASAApp/"
+# DSH 桥接：本地共享密钥（0600）供 Core 下发 + DSH 常驻服务器校验；缺失=未启用鉴权。
+ASA_DSH_TOKEN_FILE = Path(os.environ.get("ASA_DSH_TOKEN_FILE", str(Path.home() / ".dsh" / "asa-bridge-token"))).expanduser()
+ASA_DSH_RESIDENT_URL = os.environ.get("ASA_DSH_RESIDENT_URL", "http://127.0.0.1:8891/turn")
+
+
+def read_dsh_token() -> str:
+    try:
+        return ASA_DSH_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
 TRUSTED_BROWSER_ORIGINS = {
     "http://127.0.0.1:8765",
     "http://localhost:8765",
@@ -1585,6 +1595,13 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         if not index.exists():
             return JSONResponse({"ok": False, "error": "ASA Web 尚未构建", "diagnostic": str(index)}, status_code=503)
         return FileResponse(index)
+
+    @app.get("/api/v1/dsh-config", include_in_schema=False)
+    def dsh_config(request: Request) -> Response:
+        # DSH 桥接配置：仅供 ASA app（UA 前缀）读取，前端据此带 Bearer token 访问 DSH 常驻服务器。
+        if not app_ui_allowed(request):
+            return app_disabled_response()
+        return JSONResponse({"token": read_dsh_token(), "url": ASA_DSH_RESIDENT_URL})
 
     @app.get("/asa-app", include_in_schema=False)
     @app.get("/asa-app/", include_in_schema=False)

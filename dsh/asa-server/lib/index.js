@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
@@ -18,6 +20,15 @@ const name = "asa-resident-runner";
 const inject = ["agentDefaultModel", "agents", "sessions"];
 
 const PORT = Number(process.env.ASA_DSH_RESIDENT_PORT || 8891);
+
+// 鉴权：本地共享密钥（0600），Core 下发、前端带 Bearer。空 = 未启用鉴权（dev 回退）。
+const TOKEN = process.env.ASA_DSH_TOKEN || (() => {
+  try {
+    return readFileSync(process.env.ASA_DSH_TOKEN_FILE || `${homedir()}/.dsh/asa-bridge-token`, "utf8").trim();
+  } catch {
+    return "";
+  }
+})();
 
 /** 把本轮新产生的事件聚合为最终文本 + 结束原因（与 headless 的 summarize 同构）。 */
 function summarize(events, firstSeq) {
@@ -76,7 +87,7 @@ function writeSse(res, type, data) {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
 function apply(ctx) {
@@ -109,6 +120,11 @@ function apply(ctx) {
       }
       const message = String(payload.message || "").trim();
       const sessionId = String(payload.session_id || `asa-${randomUUID()}`);
+      if (TOKEN && (req.headers.authorization || "") !== `Bearer ${TOKEN}`) {
+        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8", ...CORS });
+        res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+        return;
+      }
       if (!message) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8", ...CORS });
         res.end(JSON.stringify({ ok: false, error: "message is required" }));
