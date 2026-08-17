@@ -32,7 +32,7 @@ from .conversation_state import (
 )
 
 # Cross-module references (split from copilot_handler.py)
-from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction
+from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction, _strategy_revision_requested
 from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_batch_stop, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
 from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer
 
@@ -1500,7 +1500,7 @@ def _copilot_impl(
                     _job_title = str(_jrow["title"]) if _jrow is not None else ""
                     from .candidate_pool_filter import filter_job_candidates, format_grade_list, job_filter_domain
                     _filter_domain = job_filter_domain(_job_title)
-                    if _filter_domain not in {"mechanical", "software"}:
+                    if _filter_domain not in {"mechanical", "software", "power"}:
                         # 未支持的职能域（电气、失效分析等）只返回普通名单，
                         # 绝不自动批量写库，避免误停整池。
                         candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
@@ -1513,7 +1513,7 @@ def _copilot_impl(
                         _grade_groups: list[dict[str, Any]] = []
                         _grade_order = (
                             "A-核心", "A-强", "B-中", "C-弱",
-                            "D-无证据", "D-无画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖",
+                            "D-无证据", "U-待补画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖",
                         )
                         for _g in _grade_order:
                             _items = [c for c in (_filter_result.get("candidates") or []) if c.get("grade") == _g]
@@ -1540,8 +1540,9 @@ def _copilot_impl(
                             "context": {"type": "job", "id": list_job_id},
                             "summary": {
                                 "total": _filter_result.get("total") or 0,
-                                "active": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade", "").startswith(("A", "B", "C"))]),
-                                "stopped": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("X-排除", "禁挖", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符")]),
+                                "active": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") not in ("X-排除", "禁挖", "D-期望超限", "D-城市不符")]),
+                                "stopped": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("X-排除", "禁挖", "D-期望超限", "D-城市不符")]),
+                                "pending_evidence": len([c for c in (_filter_result.get("candidates") or []) if c.get("grade") in ("D-无证据", "U-待补画像")]),
                             },
                             "groups": _grade_groups,
                         }
@@ -2608,12 +2609,18 @@ def _copilot_impl(
         assistant_structured["pending_plan_confirmation"] = salary_recap_pending
     if strategy_revision:
         assistant_structured["workflow_revision"] = strategy_revision
-    # 策略建议结构化：本轮未直接执行修订时，从回答中提取可应用的策略补丁
+    # 策略建议只有在顾问明确要求修订或沉淀时才进入可写入卡片；
+    # 普通分析回答中的“建议”不能自动变成待写策略。
+    strategy_patch_requested = _strategy_revision_requested(message) or any(
+        token in " ".join(str(message or "").split())
+        for token in ("沉淀进策略", "写入策略", "纳入策略", "保存策略", "把建议加入策略")
+    )
     strategy_patch = (
         _build_strategy_patch(self, message, answer, selected_payload, conversation_history)
-        if strategy_revision is None and not workflow_strategy_question else None
+        if strategy_patch_requested and strategy_revision is None and not workflow_strategy_question else None
     )
     if strategy_patch:
+        strategy_patch["display_requested"] = True
         assistant_structured["strategy_patch"] = strategy_patch
     if strategy_gate_pending_record:
         assistant_structured["strategy_clarification"] = strategy_gate_pending_record

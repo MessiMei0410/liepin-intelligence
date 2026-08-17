@@ -35,7 +35,7 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "filter_candidates",
-            "description": "按岗位硬性证据分级过滤候选池，输出 A-核心/A-强/B/C 名单并排除禁挖公司。用于'过滤/分级/筛一下候选池'类请求，一次性返回分级结果，不需要逐人查询。",
+            "description": "按岗位专用硬性证据模型分级过滤候选池，当前支持机械、软件和电源岗位；未知岗位失败关闭，不套用其他岗位规则。输出 A-核心/A-强/B/C 名单并排除禁挖公司。",
             "parameters": {
                 "type": "object",
                 "properties": {

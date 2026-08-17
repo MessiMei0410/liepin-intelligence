@@ -407,7 +407,7 @@ class CopilotAgentPatchTest(AgentDbCase):
         workflow_id = created["workflow"]["workflow_id"]
 
         result = self.service.copilot_agent(
-            "策略上还有什么建议",
+            "把这些建议沉淀进策略",
             session_id="sess-agent-patch",
             context={"type": "job", "id": 10},
         )

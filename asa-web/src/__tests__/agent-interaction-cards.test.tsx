@@ -16,6 +16,14 @@ describe('Agent interaction cards', () => {
     expect(card).toHaveTextContent('是否保留地域限制？')
   })
 
+  it('只读回答不展示没有待确认事项的理解卡', () => {
+    render(<UnderstandingCard card={{
+      show: true, confidence: 0.85, action: 'none', action_label: '查询/说明',
+      objective: '查看岗位候选名单', next_step: '查看结果并选择下一步',
+    }}/>)
+    expect(screen.queryByRole('region', { name: 'ASA 理解卡' })).not.toBeInTheDocument()
+  })
+
   it('结构化动作矩阵可直达 handler', () => {
     const onAction = vi.fn()
     render(<SuggestedActionBar onAction={onAction} actions={[
@@ -41,5 +49,12 @@ describe('Agent interaction cards', () => {
     expect(card).toHaveTextContent('失败 2')
     expect(card).toHaveTextContent('机械高级工程师候选池')
     expect(card).toHaveTextContent('复核失败人选')
+  })
+
+  it('未验证的只读回执不占用对话空间', () => {
+    render(<ExecutionReceipt receipt={{
+      state: '已完成', summary: '已读取候选名单', succeeded: 1, verified: false,
+    }}/>)
+    expect(screen.queryByRole('region', { name: '执行回执' })).not.toBeInTheDocument()
   })
 })

@@ -30,6 +30,8 @@ export function UnderstandingCard({ card, onSelectCandidate, onReenter }: {
   const changes = list(card.constraint_changes).map(item => typeof item === 'object' ? record(item) : { value: item }).filter(item => text(item.value || item.quote || item.label))
   const missing = list(card.missing_fields).map(item => text(item)).filter(Boolean)
   const ambiguous = options.length > 0 || Boolean(card.needs_clarification) || text(card.clarification_question)
+  const actionable = ambiguous || Boolean(card.blocked_reason) || missing.length > 0 || card.show_details === true
+  if (!actionable) return null
   return <section className={`agent-understanding-card ${ambiguous ? 'is-ambiguous' : ''}`} aria-label="ASA 理解卡">
     <header><span className="agent-card-mark"><Search size={14}/></span><div><b>我理解为</b><small>{text(card.action_label, '查询/说明')}</small></div><span className="agent-understanding-confidence">置信度 {Math.round(Number(card.confidence || 0) * 100)}%</span></header>
     <dl>
@@ -68,6 +70,8 @@ export function ExecutionReceipt({ receipt }: { receipt?: Record<string, unknown
     { label: '成功', value: receipt.succeeded }, { label: '跳过', value: receipt.skipped }, { label: '失败', value: receipt.failed },
   ].filter(item => item.value !== undefined)
   const reasons = list(receipt.reasons).map(item => text(item)).filter(Boolean)
+  const visibleUnverified = Boolean(text(receipt.failure_reason)) || reasons.length > 0 || /等待|失败|阻塞|部分/.test(state)
+  if (!verified && !visibleUnverified) return null
   return <section className={`agent-execution-receipt ${verified ? 'verified' : ''}`} aria-label="执行回执"><div><b>执行回执</b><strong>{state}</strong></div><p>{text(receipt.summary, '尚未执行写入或外部动作')}</p>{counts.length > 0 && <div className="agent-receipt-counts">{counts.map(item => <span key={item.label}>{item.label} <b>{String(item.value)}</b></span>)}</div>}<small>{verified ? '已完成服务端回查' : '等待真实执行结果'}{text(scope.label || scope.type) && ` · 范围 ${text(scope.label || scope.type)}`}{text(receipt.failure_reason) && ` · ${text(receipt.failure_reason)}`}{reasons.length > 0 && ` · ${reasons.join('；')}`}</small>{text(receipt.next_step) && <p className="agent-understanding-next"><ChevronRight size={14}/>{text(receipt.next_step)}</p>}</section>
 }
 
