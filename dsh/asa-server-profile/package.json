@@ -1,0 +1,16 @@
+{
+  "name": "dsh-profile-asa-server",
+  "private": true,
+  "dependencies": {
+    "@asa/dsh-asa-tools": "file:../asa-tools",
+    "@asa/dsh-asa-server": "file:../asa-server"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@asa/dsh-asa-server"
+      ]
+    }
+  }
+}

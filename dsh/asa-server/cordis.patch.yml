@@ -1,0 +1,25 @@
+# @asa/dsh-asa-server bundle patch：常驻 HTTP 服务器（resident /turn）直接覆盖 dsh-base。
+# 无 Host / HTTP 前端 / 浏览器插件；persona 会被 profile 的 cordis.patch.yml 覆盖为 ASA 身份。
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are an ASA headhunting workbench agent. Your working directory is {{cwd}}.
+
+# 常驻服务器不参与模块热替换，关闭 HMR 行。
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    # 与 Web/headless 表面一致的临时 Code Mode 开关。
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # Code Mode 是核心执行能力，不是 Web 组件。
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+    # 常驻 runner：起 node:http 服务器，暴露 POST /turn（会话复用）。
+    - id: asa-resident-runner
+      name: '@asa/dsh-asa-server'
