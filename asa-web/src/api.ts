@@ -19,6 +19,7 @@ export type Job = {
   priority?: string; risk?: string; stop_condition?: string;
   candidate_count: number; active_candidate_count: number; updated_at?: string;
   filter_domain?: string | null; filter_model_missing?: boolean;
+  filter_model_status?: 'confirmed' | 'draft' | 'missing'; filter_model_draft?: boolean;
 }
 
 export type JobDetail = Job & {

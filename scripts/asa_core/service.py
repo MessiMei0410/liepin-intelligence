@@ -260,11 +260,26 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
             ]
             # 筛选模型覆盖巡检：岗位有活跃候选池但无确定性筛选域时给出显式标记，
             # 避免“系统不认识该岗位却静默错筛”再次无感知上线。
-            from a_system_agent.candidate_pool_filter import job_filter_domain
+            # 三态：confirmed（内置域或库中已确认模型）/ draft（库里有待确认草稿）/
+            # missing（完全没有模型）。草稿不生效，仅提示可确认。
+            from a_system_agent.candidate_pool_filter import job_filter_domain, SUPPORTED_FILTER_DOMAINS
+            from a_system_agent.filter_models import model_status_map
+            job_ids = [int(item["id"]) for item in rows]
+            db_status = model_status_map(conn, job_ids)
             for item in rows:
                 domain = job_filter_domain(str(item.get("title") or ""))
-                item["filter_domain"] = domain
-                item["filter_model_missing"] = domain is None and int(item.get("active_candidate_count") or 0) > 0
+                active = int(item.get("active_candidate_count") or 0) > 0
+                if domain in SUPPORTED_FILTER_DOMAINS:
+                    item["filter_domain"] = domain
+                    item["filter_model_status"] = "confirmed"
+                elif db_status.get(int(item["id"])):
+                    item["filter_domain"] = domain
+                    item["filter_model_status"] = db_status[int(item["id"])]
+                else:
+                    item["filter_domain"] = domain
+                    item["filter_model_status"] = "missing"
+                item["filter_model_missing"] = item["filter_model_status"] == "missing" and active
+                item["filter_model_draft"] = item["filter_model_status"] == "draft" and active
             return {"ok": True, "items": rows, "total": total, "limit": limit, "offset": offset}
         finally:
             conn.close()

@@ -285,10 +285,22 @@ def filter_job_candidates(
         if not domain:
             job_row = conn.execute("SELECT title FROM jobs WHERE id=?", (job_id,)).fetchone()
             domain = job_filter_domain(str(job_row["title"] or "") if job_row else "")
+        model_entry: dict[str, Any] | None = None
         if domain not in SUPPORTED_FILTER_DOMAINS:
-            raise UnsupportedFilterDomainError(
-                f"岗位 {job_id} 暂无受支持的确定性筛选模型，已拒绝套用其他岗位规则"
-            )
+            # 内置域未覆盖时，查库里的已确认筛选模型（position_filter_models 桥：
+            # 岗位级优先、域级其次）。模型由岗位画像生成草稿、人工确认后生效；
+            # 没有已确认模型依旧失败关闭，绝不静默套用其他岗位规则。
+            try:
+                from . import filter_models
+            except ImportError:  # pragma: no cover - 脚本直跑场景
+                import filter_models  # type: ignore
+            model_entry = filter_models.load_model_for_job(conn, job_id, domain)
+            if model_entry:
+                domain = model_entry["domain"]
+            else:
+                raise UnsupportedFilterDomainError(
+                    f"岗位 {job_id} 暂无受支持的确定性筛选模型，已拒绝套用其他岗位规则"
+                )
         if domain == "software":
             keys = hard_keys or SOFTWARE_HARD_KEYS
             excl_tokens = SOFTWARE_EXCL_TITLE
@@ -368,6 +380,18 @@ def filter_job_candidates(
         excl_title = [k for k in excl_tokens if k.lower() in title_text]
         exp_n = _exp_years(r["experience"]) or _exp_years(prof.get("seniority"))
         edu = r["education"] or ""
+        if model_entry is not None:
+            # 数据驱动模型路径：分层证据 + 规则引擎，分级口径随模型数据走
+            out = filter_models.grade_with_model(
+                model_entry["model"], title_text=title_text, txt=txt, edu=edu, exp_n=exp_n
+            )
+            results.append({
+                "id": r["id"], "name": r["display_name"], "company": co, "title": r["current_title"] or "",
+                "city": r["city"] or "", "education": edu, "experience": r["experience"] or "",
+                "stage": stage, "grade": out["grade"], "score": out["score"],
+                "hard_hits": out["hard_hits"][:10], "reason": out["reason"],
+            })
+            continue
         power_direct = [k for k in POWER_DIRECT_KEYS if k.lower() in txt] if domain == "power" else []
         power_support = [k for k in POWER_SUPPORT_KEYS if k.lower() in txt] if domain == "power" else []
         power_adjacent = [k for k in POWER_ADJACENT_KEYS if k.lower() in txt] if domain == "power" else []

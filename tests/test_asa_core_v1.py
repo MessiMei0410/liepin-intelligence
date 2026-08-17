@@ -1092,6 +1092,11 @@ def test_jobs_expose_filter_domain_coverage_alert(db_path: Path) -> None:
         jobs = client.get("/api/v1/jobs?limit=200").json()["items"]
         assert all("filter_domain" in item and "filter_model_missing" in item for item in jobs)
         for item in jobs:
+            # 三态语义：confirmed / draft / missing，missing 且有活跃池才报警
+            assert item["filter_model_status"] in ("confirmed", "draft", "missing")
+            assert item["filter_model_missing"] == (
+                item["filter_model_status"] == "missing" and item["active_candidate_count"] > 0
+            )
             if item["filter_model_missing"]:
                 assert item["filter_domain"] is None
                 assert item["active_candidate_count"] > 0
@@ -1101,6 +1106,7 @@ def test_jobs_expose_filter_domain_coverage_alert(db_path: Path) -> None:
         matched = client.get("/api/v1/jobs", params={"q": "电源专家"}).json()["items"]
         job142 = next(item for item in matched if item["id"] == 142)
         assert job142["filter_domain"] == "power"
+        assert job142["filter_model_status"] == "confirmed"
         assert job142["filter_model_missing"] is False
 
 

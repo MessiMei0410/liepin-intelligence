@@ -97,6 +97,21 @@ describe('岗位列表 Jobs', () => {
     expect(screen.getByRole('row', { name: /岗位3/ })).not.toHaveTextContent('无筛选模型')
   })
 
+  it('有待确认筛选模型草稿的岗位显示待确认标识，且不与无模型警告混淆', () => {
+    const items = [
+      makeJob(1, { priority: 'P0', filter_domain: null, filter_model_missing: true }),
+      makeJob(2, { priority: 'P0', filter_domain: null, filter_model_missing: false, filter_model_draft: true }),
+      makeJob(3, { priority: 'P0', filter_domain: 'power', filter_model_missing: false }),
+    ]
+    render(<Jobs items={items} onSelect={() => {}} />)
+
+    const draftRow = screen.getByRole('row', { name: /岗位2/ })
+    expect(draftRow).toHaveTextContent('筛选模型待确认')
+    expect(draftRow).not.toHaveTextContent('无筛选模型')
+    expect(screen.getByRole('row', { name: /岗位1/ })).toHaveTextContent('无筛选模型')
+    expect(screen.getByRole('row', { name: /岗位3/ })).not.toHaveTextContent('筛选模型待确认')
+  })
+
   it('超过一页时分批展示，翻页与搜索后页码重置', () => {
     const items = Array.from({ length: 45 }, (_, index) => makeJob(index + 1, { priority: 'P0' }))
     render(<Jobs items={items} onSelect={() => {}} />)
