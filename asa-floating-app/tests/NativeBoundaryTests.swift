@@ -62,6 +62,17 @@ struct NativeBoundaryTests {
         precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "https://x-saas.com.cn.evil.example/x")!))
         precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "not-a-url")!))
 
+        // CDP target encoding: every URL-reserved character is percent-encoded,
+        // so query separators and the X-SaaS SPA hash route survive the
+        // "/json/new?…" round trip (CDP decodes the query exactly once).
+        precondition(ExternalLinkRouting.cdpTargetEncoding(URL(string: "https://h.liepin.com/resume/showresumedetail/?showsearchfeedback=1&res_id_encode=e1")!)
+                     == "https%3A%2F%2Fh.liepin.com%2Fresume%2Fshowresumedetail%2F%3Fshowsearchfeedback%3D1%26res_id_encode%3De1")
+        precondition(ExternalLinkRouting.cdpTargetEncoding(URL(string: "https://headhunt.x-saas.com.cn/#/app/candidate/info/42")!)
+                     == "https%3A%2F%2Fheadhunt.x-saas.com.cn%2F%23%2Fapp%2Fcandidate%2Finfo%2F42")
+        precondition(ExternalLinkRouting.cdpTargetEncoding(URL(string: "https://h.liepin.com/")!).contains("#") == false)
+        precondition(ExternalLinkRouting.cdpTargetEncoding(URL(string: "https://h.liepin.com/")!).contains("&") == false)
+        precondition(ExternalLinkRouting.cdpTargetEncoding(URL(string: "https://h.liepin.com/")!).contains("?") == false)
+
         let clipboard = NativeContextPrivacy.clipboardMetadata(hasText: true, changeCount: 7)
         precondition(clipboard["has_text"] as? Bool == true)
         precondition(clipboard["change_count"] as? Int == 7)

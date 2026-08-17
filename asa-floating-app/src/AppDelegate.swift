@@ -88,9 +88,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             return
         }
 
-        // /json/new treats everything after the first '?' as the target URL;
-        // escape target query separators so res_id_encode is not truncated.
-        let cdpTarget = url.absoluteString.replacingOccurrences(of: "&", with: "%26")
+        // /json/new treats everything after the first '?' as the target URL,
+        // percent-decoding it exactly once. Encode the whole target so query
+        // separators ('&') and the X-SaaS SPA hash route ('#') survive.
+        let cdpTarget = ExternalLinkRouting.cdpTargetEncoding(url)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:9223/json/new?\(cdpTarget)")!)
         request.httpMethod = "PUT"
         request.timeoutInterval = 2
