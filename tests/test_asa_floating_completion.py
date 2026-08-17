@@ -30,8 +30,8 @@ class ASAFloatingCompletionTest(unittest.TestCase):
         build_number = re.search(r"<key>CFBundleVersion</key>\s*<string>(\d+)</string>", build)
         self.assertIsNotNone(version)
         self.assertIsNotNone(build_number)
-        self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 2, 23))
-        self.assertGreaterEqual(int(build_number.group(1)), 46)
+        self.assertGreaterEqual(tuple(map(int, version.group(1).split("."))), (0, 2, 30))
+        self.assertGreaterEqual(int(build_number.group(1)), 53)
         self.assertIn("LSMinimumSystemVersion", build)
         self.assertIn('SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"', build)
         self.assertNotIn("&& sign_with_timeout; then", build)
@@ -343,7 +343,7 @@ class ASAFloatingCompletionTest(unittest.TestCase):
             "run-summary compact",
             "目标在网页",
             ".context-panels.empty",
-            "/Users/messi/Applications/ASA Floating.app",
+            "/Users/messi/Applications/ASA.app",
             "display_mode:'floating_compact'",
             "details.msg-section",
             "renderConnectionError(err)",

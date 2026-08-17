@@ -35,7 +35,7 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "filter_candidates",
-            "description": "按岗位硬性证据分级过滤候选池，输出 A-核心/A-强/B/C 名单并排除禁挖公司。用于'过滤/分级/筛一下候选池'类请求，一次性返回分级结果，不需要逐人查询。",
+            "description": "按岗位职能域过滤候选池；优先复用当前有效的人岗评估，无评估时再按简历硬证据分级。支持机械、软件、电力电子，未知职能不会套用默认词库。返回完整分级计数及受 limit 约束的候选明细。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -45,7 +45,7 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "最多返回人数，默认 200",
+                        "description": "最多返回候选明细数，默认 200；统计仍覆盖全部待分级关系",
                     },
                     "max_salary_k": {
                         "type": "integer",
@@ -298,7 +298,7 @@ def execute_filter_candidates(
     max_salary_k: int | None = None,
     cities: list[str] | None = None,
 ) -> dict[str, Any]:
-    """按岗位硬性证据分级过滤候选池（调用 candidate_pool_filter，含禁挖排除）。
+    """按岗位职能域分级过滤候选池（当前评估优先，含禁挖排除）。
 
     max_salary_k: 期望月薪上限(K)，超出者归入 D-期望超限。
     cities: 允许的期望城市关键词，不匹配者归入 D-城市不符。
@@ -309,7 +309,7 @@ def execute_filter_candidates(
     conn.row_factory = sqlite3.Row
     try:
         jrow = conn.execute(
-            "SELECT c.name AS client FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+            "SELECT c.name AS client,j.title AS title FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
             (job_id,),
         ).fetchone()
     finally:
@@ -322,20 +322,44 @@ def execute_filter_candidates(
         )
     except Exception as exc:
         return {"success": False, "error": f"分级过滤失败: {exc}"}
-    candidates = result.get("candidates") or []
+    candidates = list(result.get("candidates") or [])
     grades: dict[str, list[dict[str, Any]]] = {}
     for c in candidates:
         grades.setdefault(c.get("grade") or "未知", []).append(c)
+    grade_counts = dict(result.get("grade_counts") or {})
+    grade_order = (
+        "A-核心", "A-强", "B-中", "C-弱", "C-需确认", "D-暂缓",
+        "D-无证据", "D-无画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖",
+    )
+    ordered_grades = [grade for grade in grade_order if int(grade_counts.get(grade) or 0) > 0]
+    ordered_grades.extend(sorted(set(grade_counts) - set(ordered_grades)))
     return {
         "success": True,
         "data": {
             "job_id": job_id,
             "client": client,
+            "job_title": result.get("job_title") or (str(jrow["title"]) if jrow is not None else ""),
+            "domain": result.get("domain"),
             "total": result.get("total") or 0,
-            "summary": {g: len(items) for g, items in grades.items()},
+            "pool_total": result.get("pool_total") or 0,
+            "eligible_total": result.get("eligible_total") or 0,
+            "analyzed_total": result.get("analyzed_total") or 0,
+            "returned_total": result.get("returned_total") or 0,
+            "skipped_stage_total": result.get("skipped_stage_total") or 0,
+            "truncated": bool(result.get("truncated")),
+            "coverage_note": result.get("coverage_note") or "",
+            "summary": grade_counts,
+            "source_summary": result.get("source_counts") or {},
             "groups": [
-                {"grade": g, "label": g, "candidates": items[:50]}
-                for g, items in sorted(grades.items(), key=lambda kv: -len(kv[1]))
+                {
+                    "grade": grade,
+                    "label": grade,
+                    "total": int(grade_counts.get(grade) or 0),
+                    "returned": len(grades.get(grade) or []),
+                    "truncated": len(grades.get(grade) or []) < int(grade_counts.get(grade) or 0),
+                    "candidates": grades.get(grade) or [],
+                }
+                for grade in ordered_grades
             ],
         },
     }

@@ -78,30 +78,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
-    // Liepin is authenticated in the long-lived CDP Chrome profile, not the
-    // browser selected by NSWorkspace. Open those links through CDP so a
-    // candidate resume does not unexpectedly land on the login page.
+    // Liepin and X-SaaS keep their login sessions in the long-lived CDP Chrome
+    // profile on port 9223, not the browser selected by NSWorkspace. Open
+    // candidate resume / profile links through CDP so they do not unexpectedly
+    // land on a login page; everything else goes straight to the default browser.
     private func openExternalURL(_ url: URL) {
-        let host = (url.host ?? "").lowercased()
-        let isLiepin = host == "liepin.com" || host.hasSuffix(".liepin.com")
-        guard isLiepin else {
+        guard ExternalLinkRouting.viaCDPChrome(url) else {
             NSWorkspace.shared.open(url)
             return
         }
 
-        // /json/new treats everything after the first '?' as the target URL;
-        // escape target query separators so res_id_encode is not truncated.
-        let cdpTarget = url.absoluteString.replacingOccurrences(of: "&", with: "%26")
+        // /json/new treats everything after the first '?' as the target URL,
+        // percent-decoding it exactly once. Encode the whole target so query
+        // separators ('&') and the X-SaaS SPA hash route ('#') survive.
+        let cdpTarget = ExternalLinkRouting.cdpTargetEncoding(url)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:9223/json/new?\(cdpTarget)")!)
         request.httpMethod = "PUT"
         request.timeoutInterval = 2
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200 else {
-                self?.webLogger.error("Liepin CDP open failed; falling back to default browser")
+                self?.webLogger.error("CDP Chrome open failed; falling back to default browser")
                 NSWorkspace.shared.open(url)
                 return
             }
-            self?.webLogger.info("Liepin URL opened in CDP Chrome on port 9223")
+            self?.webLogger.info("Candidate link opened in CDP Chrome on port 9223")
         }.resume()
     }
 

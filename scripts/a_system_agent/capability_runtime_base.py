@@ -42,6 +42,7 @@ SERVICE_HANDLED_CAPABILITY_IDS: frozenset[str] = frozenset({
     "talent_pool_search",
     "candidate_batch_assessment",
     "candidate_pool_filter",
+    "candidate_relationship_cleanup",
     "outreach_queue",
     "pool_gap_advice",
     "reply_triage",

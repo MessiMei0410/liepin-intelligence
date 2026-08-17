@@ -18,6 +18,8 @@ from .llm import LLMError
 from .privacy import sanitize_payload
 from .conversation_state import (
     TERMINAL_WORKFLOW_STATUSES,
+    candidate_relationship_cleanup_requested,
+    candidate_sourcing_request_negated,
     enrich_turn_understanding,
 )
 
@@ -27,6 +29,10 @@ from .copilot_evidence import _copilot_context_job_id, _is_job_budget_fact_updat
 
 @staticmethod
 def _copilot_action_kind(message: str) -> str:
+    if candidate_relationship_cleanup_requested(message):
+        return "candidate_relationship_cleanup"
+    if candidate_sourcing_request_negated(message):
+        return ""
     if _is_job_budget_fact_update(message):
         return ""
     if _strategy_revision_requested(message):
@@ -219,7 +225,8 @@ _COPILOT_SPEECH_ACTS = {
 }
 _COPILOT_SEMANTIC_ACTIONS = {
     "none", "candidate_sourcing", "strategy_revision", "candidate_outreach",
-    "candidate_review", "job_publish", "job_split", "job_archive",
+    "candidate_review", "candidate_relationship_cleanup",
+    "job_publish", "job_split", "job_archive",
     "recommendation", "salary",
 }
 _COPILOT_CONSTRAINT_KINDS = {"must", "prefer", "allow", "exclude", "target_count", "other"}
@@ -246,6 +253,20 @@ def _is_explicit_question(message: str) -> bool:
         for token in (
             "请问", "要不要", "是否", "能不能", "可不可以", "为什么", "怎么", "如何",
             "我是问", "我想问", "问一下", "想了解", "是什么", "怎么样",
+        )
+    )
+
+
+def _fresh_job_sourcing_request(message: str) -> bool:
+    """A complete job-scoped sourcing command starts a new plan, not an old pending one."""
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text) or candidate_sourcing_request_negated(text):
+        return False
+    return bool(
+        re.search(
+            r"(?:岗位|职位).{0,24}(?:再找|继续找|重新找|找找).{0,8}(?:人|人选|候选人)",
+            text,
+            re.I,
         )
     )
 
@@ -502,6 +523,174 @@ def _is_candidate_list_query(message: str) -> bool:
     if any(token in candidate_list_text for token in _QUERY_LIST_EXCLUSIONS):
         return False
     return True
+
+
+_NAV_OPEN_VERB_RE = re.compile(r"(?:打开|拉开|拉起|拉出|调出|弹出|点开|展开)")
+_NAV_VIEW_VERB_RE = re.compile(r"(?:打开|拉开|拉起|拉出|调出|弹出|点开|展开|查看|看一下|看看)")
+_NAV_DETAIL_PAGE_RE = re.compile(r"(?:详情页|详情|主页|资料页|个人页|面板)")
+_NAV_PERSON_RE = re.compile(
+    r"(?:他|她|[Tt][Aa]|这人|这个人|该人选|这位人选|这名人选|这个候选人|该候选人|这位候选人|人选|候选人)"
+)
+_NAV_JOB_RE = re.compile(r"(?:岗位|职位)")
+_NAV_WORKFLOW_RE = re.compile(r"工作流")
+
+
+def _navigation_intent_kind(message: str) -> str:
+    """显式只读导航指令分类：candidate / job / workflow；非导航返回 ""。
+
+    例：「把他详情页拉起来」「把人选的详情页打开」「把这个岗位的详情页打开」
+    「把这个工作流打开」。要求同时具备打开动词与对象指代（候选人/工作流可省
+    略“详情页”），避免命中普通查询；疑问句（“打开了吗”）不算导航指令。
+    """
+    text = " ".join(str(message or "").split())
+    if not text or re.search(r"[吗呢？?]$|(?:了吗|了么|了没)$", text):
+        return ""
+    if (
+        _NAV_OPEN_VERB_RE.search(text)
+        and _NAV_DETAIL_PAGE_RE.search(text)
+        and _NAV_PERSON_RE.search(text)
+    ):
+        return "candidate"
+    if (
+        _NAV_OPEN_VERB_RE.search(text)
+        and _NAV_DETAIL_PAGE_RE.search(text)
+        and _NAV_JOB_RE.search(text)
+    ):
+        return "job"
+    if _NAV_VIEW_VERB_RE.search(text) and _NAV_WORKFLOW_RE.search(text):
+        return "workflow"
+    return ""
+
+
+def _candidate_navigation_requested(message: str) -> bool:
+    """显式只读候选人导航指令：把某人选的详情页打开/拉起来（不产生写入或计划）。"""
+    return _navigation_intent_kind(message) == "candidate"
+
+
+def _object_refs_from_structured(structured: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """从一条 assistant 结构化负载中提取可导航对象引用（去重、保持出现顺序）。
+
+    返回 {"candidates": [...], "jobs": [...], "workflows": [...]}，来源：
+    references 卡、只读工具结果（query_candidate / search_candidates /
+    query_job）、名单 action_card、工作流字段（workflow / workflow_progress /
+    plan_ref）。用于「把他/这个岗位/这个工作流打开」这类导航指令绑定上一轮
+    查询结果中的对象。
+    """
+    refs: dict[str, list[dict[str, Any]]] = {"candidates": [], "jobs": [], "workflows": []}
+    seen: set[tuple[str, Any]] = set()
+
+    def _add(kind: str, object_id: Any, name: str = "", client: str = "", job: str = "") -> None:
+        key = (kind, str(object_id or ""))
+        if not key[1] or key in seen:
+            return
+        if kind in {"candidates", "jobs"}:
+            try:
+                object_id = int(object_id or 0)
+            except (TypeError, ValueError):
+                return
+            if not object_id:
+                return
+        seen.add(key)
+        refs[kind].append({
+            "id": object_id,
+            "name": str(name or ""),
+            "client": str(client or ""),
+            "job": str(job or ""),
+        })
+
+    if not isinstance(structured, dict):
+        return refs
+    for ref in structured.get("references") or []:
+        if not isinstance(ref, dict):
+            continue
+        ref_type = str(ref.get("type") or "")
+        if ref_type in {"candidate", "job_candidate"}:
+            _add("candidates", ref.get("id"), str(ref.get("label") or ""), "", str(ref.get("subtitle") or ""))
+        elif ref_type == "job":
+            _add("jobs", ref.get("id"), str(ref.get("label") or ""), str(ref.get("subtitle") or ""))
+        elif ref_type == "workflow":
+            _add("workflows", str(ref.get("id") or ""), str(ref.get("label") or ""))
+    for call in structured.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "")
+        result = call.get("result") if isinstance(call.get("result"), dict) else {}
+        if not result.get("success"):
+            continue
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        if tool == "query_candidate":
+            _add("candidates", data.get("id"), str(data.get("name") or ""), str(data.get("client") or ""), str(data.get("job") or ""))
+        elif tool == "search_candidates":
+            for item in data.get("candidates") or []:
+                if isinstance(item, dict):
+                    _add("candidates", item.get("id"), str(item.get("name") or ""), str(item.get("client") or ""), str(item.get("job") or ""))
+        elif tool == "query_job":
+            _add("jobs", data.get("id"), str(data.get("title") or ""), str(data.get("client") or ""))
+    card = structured.get("action_card") if isinstance(structured.get("action_card"), dict) else {}
+    card_context = card.get("context") if isinstance(card.get("context"), dict) else {}
+    if str(card_context.get("type") or "") == "job" and card_context.get("id"):
+        _add("jobs", card_context.get("id"), str(card_context.get("title") or card.get("title") or ""))
+    if str(card.get("type") or "") == "candidate_list":
+        for group in card.get("groups") or []:
+            if not isinstance(group, dict):
+                continue
+            for item in group.get("candidates") or []:
+                if isinstance(item, dict):
+                    _add("candidates", item.get("id"), str(item.get("name") or ""))
+    for holder in (
+        structured.get("workflow"),
+        structured.get("workflow_progress"),
+        structured.get("plan_ref"),
+    ):
+        if isinstance(holder, dict) and holder.get("workflow_id"):
+            _add(
+                "workflows",
+                str(holder.get("workflow_id") or ""),
+                str(holder.get("title") or holder.get("label") or holder.get("current_stage") or ""),
+            )
+    return refs
+
+
+def _candidate_refs_from_structured(structured: dict[str, Any]) -> list[dict[str, Any]]:
+    """_object_refs_from_structured 的候选人部分（查询结果回写候选人焦点用）。"""
+    return _object_refs_from_structured(structured)["candidates"]
+
+
+def _recent_assistant_object_refs(self, session_id: str, kind: str, limit: int = 3) -> list[dict[str, Any]]:
+    """最近几条 assistant 消息里的可导航对象引用（按时间倒序）。
+
+    kind ∈ {"candidates", "jobs", "workflows"}，供导航指令绑定上一轮查询结果。
+    """
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return []
+    conn = self._connect()
+    try:
+        if not _table_exists(conn, "agent_copilot_messages"):
+            return []
+        rows = conn.execute(
+            """
+            SELECT structured_json FROM agent_copilot_messages
+            WHERE session_id=? AND role='assistant'
+            ORDER BY id DESC LIMIT ?
+            """,
+            (session_id, int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        for ref in _object_refs_from_structured(_loads(row["structured_json"], {})).get(kind, []):
+            if str(ref["id"]) not in seen:
+                seen.add(str(ref["id"]))
+                refs.append(ref)
+    return refs
+
+
+def _recent_assistant_candidate_refs(self, session_id: str, limit: int = 3) -> list[dict[str, Any]]:
+    """_recent_assistant_object_refs 的候选人部分。"""
+    return _recent_assistant_object_refs(self, session_id, "candidates", limit)
 
 
 def _requests_grade_filter(message: str) -> bool:
@@ -1022,6 +1211,12 @@ def _interpret_copilot_message(
         action = "none"
     if action == "none" and deterministic_action != "none":
         action = deterministic_action
+    if deterministic_action == "candidate_relationship_cleanup":
+        # This boundary is safety-sensitive: the user explicitly asks to remove
+        # only job relations while retaining candidates. Do not let a model
+        # collapse it into candidate_review or candidate deletion.
+        action = "candidate_relationship_cleanup"
+        speech_act = "execute"
     if action == "new_candidate_outreach":
         action = "candidate_sourcing"
     job_budget_fact_update = _is_job_budget_fact_update(message)
@@ -1041,6 +1236,17 @@ def _interpret_copilot_message(
     if refinement_mode:
         action = "strategy_revision"
         speech_act = "correct" if refinement_mode == "revise" else "discuss"
+
+    fresh_plan_command = bool(
+        deterministic_action == "candidate_relationship_cleanup"
+        or (action == "candidate_sourcing" and _fresh_job_sourcing_request(message))
+    )
+    if action == "candidate_sourcing" and _fresh_job_sourcing_request(message):
+        # “岗位再找找人” is a complete execution command. Starting the internal
+        # plan is safe; the external sourcing step still has its own R3 gate.
+        speech_act = "execute"
+    elif fresh_plan_command and speech_act == "confirm":
+        speech_act = "execute"
 
     allowed_target_keys = {(str(item.get("type")), str(item.get("id"))): item for item in known_targets}
     raw_target = raw.get("target") if isinstance(raw.get("target"), dict) else {}
@@ -1076,6 +1282,8 @@ def _interpret_copilot_message(
         confidence = 0.8
     elif not raw and speech_act in {"confirm", "correct", "cancel"} and (existing_focus or {}).get("action"):
         confidence = max(0.8, min(float((existing_focus or {}).get("confidence") or 0.0), 1.0))
+    if fresh_plan_command:
+        confidence = max(confidence, 0.9)
     missing_fields = [str(item).strip()[:80] for item in (raw.get("missing_fields") or []) if str(item).strip()][:6]
     needs_clarification = bool(raw.get("needs_clarification"))
     if plan_reply and action == "none":
@@ -1097,7 +1305,7 @@ def _interpret_copilot_message(
         "constraints": constraints[-12:],
         "fact_updates": list(raw.get("fact_updates") or [])[:8],
         "action_evidence": list(raw.get("action_evidence") or [])[:4],
-        "refers_to_previous": bool(raw.get("refers_to_previous")) or speech_act == "confirm",
+        "refers_to_previous": False if fresh_plan_command else bool(raw.get("refers_to_previous")) or speech_act == "confirm",
         "confidence": round(confidence, 3),
         "needs_clarification": needs_clarification,
         "missing_fields": missing_fields,

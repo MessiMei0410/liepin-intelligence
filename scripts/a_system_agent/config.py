@@ -50,7 +50,7 @@ DEFAULTS: dict[str, Any] = {
             "document_understanding",
             "job_intake", "jd_calibration", "job_library_update", "talent_pool_search", "search_strategy",
             "multi_channel_sourcing", "job_publish_prepare", "job_publish_execute", "resume_export",
-            "candidate_batch_assessment", "candidate_pool_filter", "matching_report", "recommendation_report",
+            "candidate_batch_assessment", "candidate_pool_filter", "candidate_relationship_cleanup", "matching_report", "recommendation_report",
             "outreach_queue", "pool_gap_advice",
             "client_recommendation", "reply_triage", "communication_draft_batch", "outreach_prepare", "outreach_execute", "identity_merge_preflight",
             "interview_followup", "salary_verification", "salary_negotiation", "decision_coaching",

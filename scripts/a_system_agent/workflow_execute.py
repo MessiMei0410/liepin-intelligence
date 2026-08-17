@@ -269,15 +269,51 @@ class WorkflowExecuteMixin:
                 "readback": readback,
                 "exact_content": "正式发布将使用已通过预检读回的岗位字段。",
             }
+        if capability_id == "candidate_relationship_cleanup":
+            from .relationship_cleanup import build_relationship_cleanup_preview
+
+            inputs = _loads(step["input_json"], {})
+            context = self._workflow_context(conn, workflow_id)
+            preview = build_relationship_cleanup_preview(
+                self.service.db_path,
+                int(context.get("id") or 0),
+                scope_mode=str(inputs.get("scope_mode") or "nonmatching"),
+            )
+            return {
+                "confirmation_mode": "batch",
+                "batch_limit": 50,
+                "batch_size": int(preview["relationship_count"]),
+                "scope_mode": preview["scope_mode"],
+                "candidate_records_preserved": True,
+                "relationship_ids": [int(item["jc_id"]) for item in preview["items"]],
+                "items": [
+                    {
+                        "type": "candidate_relationship_cleanup",
+                        "status": "pending",
+                        "job_candidate_id": item.get("jc_id"),
+                        "candidate": item.get("name"),
+                        "company": item.get("company"),
+                        "title": item.get("title"),
+                        "reason": item.get("reason"),
+                        "before": "当前岗位推进关系有效",
+                        "after": "当前岗位关系归档；人才主档保留",
+                    }
+                    for item in preview["items"][:50]
+                ],
+                "exact_content": (
+                    f"批准后归档当前预览中的 {preview['relationship_count']} 条岗位候选关系；"
+                    "不会删除人员或候选人主档，也不会修改人才库全局候选人状态。"
+                ),
+            }
         return {}
 
 
-    def _create_approval(self, conn, goal_id: str, workflow_id: str, step: Any) -> None:
+    def _create_approval(self, conn, goal_id: str, workflow_id: str, step: Any) -> bool:
         existing = conn.execute(
             "SELECT approval_id FROM agent_approvals WHERE step_id=? AND status='pending'", (step["id"],)
         ).fetchone()
         if existing:
-            return
+            return True
         approval_id = f"approval_{secrets.token_hex(6)}"
         workflow_context = self._workflow_context(conn, workflow_id)
         effects = {
@@ -289,6 +325,11 @@ class WorkflowExecuteMixin:
             "client_recommendation": ("客户尚未收到本次推荐", "发送锁定版本的推荐报告并等待渠道回执", "指定客户渠道"),
             "offer_confirmation": ("Offer 条件尚未在 ASA 确认", "记录经人工确认的 Offer 条件，不代表候选人接受", "ASA 内部"),
             "identity_merge_preflight": ("两份人才身份保持独立", "只生成身份对比，不执行合并", "ASA 内部"),
+            "candidate_relationship_cleanup": (
+                "候选人仍在当前岗位推进池",
+                "审批卡列出的岗位关系进入可追溯归档；人才主档和全局状态保持不变",
+                "ASA 内部",
+            ),
             "memory_capture": ("信息尚未进入长期记忆", "经确认的信息进入当前范围记忆，可撤销", "ASA 内部"),
         }
         before, after, channel = effects.get(step["capability_id"], ("当前业务状态不变", "只执行审批卡中的本次动作", "ASA 内部"))
@@ -299,7 +340,43 @@ class WorkflowExecuteMixin:
             "external_effect": step["risk_level"] == "R3",
             "irreversible": step["risk_level"] == "R3",
         }
-        exact_action.update(self._approval_preflight_details(conn, workflow_id, step))
+        try:
+            exact_action.update(self._approval_preflight_details(conn, workflow_id, step))
+        except Exception as exc:
+            from .relationship_cleanup import RelationshipCleanupScopeBlocked
+
+            if not isinstance(exc, RelationshipCleanupScopeBlocked):
+                raise
+            reason = str(exc)
+            conn.execute(
+                "UPDATE agent_workflow_steps SET status='blocked',error=?,finished_at=datetime('now','localtime'),updated_at=datetime('now','localtime') WHERE id=?",
+                (reason[:1000], step["id"]),
+            )
+            conn.execute(
+                "UPDATE agent_workflows SET status='blocked',active_step_id=NULL,updated_at=datetime('now','localtime') WHERE workflow_id=?",
+                (workflow_id,),
+            )
+            conn.execute(
+                "UPDATE agent_goals SET status='blocked',error=?,updated_at=datetime('now','localtime') WHERE goal_id=?",
+                (reason[:1000], goal_id),
+            )
+            self._event(
+                conn,
+                workflow_id,
+                step["id"],
+                "approval_preflight_blocked",
+                "blocked",
+                reason,
+                {"reason": "unsupported_candidate_filter_domain", "scope_mode": "nonmatching"},
+            )
+            return False
+        if step["capability_id"] == "candidate_relationship_cleanup":
+            locked_inputs = _loads(step["input_json"], {})
+            locked_inputs["approved_relationship_ids"] = list(exact_action.get("relationship_ids") or [])
+            conn.execute(
+                "UPDATE agent_workflow_steps SET input_json=?,updated_at=datetime('now','localtime') WHERE id=?",
+                (_dumps(locked_inputs), step["id"]),
+            )
         token = secrets.token_urlsafe(18)
         conn.execute(
             """
@@ -318,6 +395,7 @@ class WorkflowExecuteMixin:
         conn.execute("UPDATE agent_workflow_steps SET status='waiting_approval',updated_at=datetime('now','localtime') WHERE id=?", (step["id"],))
         mode = "批量确认" if exact_action.get("confirmation_mode") == "batch" else "单次确认"
         self._event(conn, workflow_id, step["id"], "approval_required", "waiting_approval", f"{step['business_label']} 等待{mode}", exact_action)
+        return True
 
 
     def _refresh_expired_approvals(self, conn, workflow_id: str) -> bool:
@@ -345,8 +423,8 @@ class WorkflowExecuteMixin:
             (workflow_id,),
         ).fetchall()
         for step in orphan_steps:
-            self._create_approval(conn, step["goal_id"], workflow_id, step)
-            self._event(conn, workflow_id, step["id"], "approval_refreshed", "waiting_approval", f"审批已自动换新：{step['business_label']}")
+            if self._create_approval(conn, step["goal_id"], workflow_id, step):
+                self._event(conn, workflow_id, step["id"], "approval_refreshed", "waiting_approval", f"审批已自动换新：{step['business_label']}")
             changed = True
         return changed
 
@@ -555,7 +633,9 @@ class WorkflowExecuteMixin:
                     return
                 approved = pending["status"] == "approved"
                 if pending["risk_level"] in {"R2", "R3"} and not approved:
-                    self._create_approval(conn, workflow["goal_id"], workflow_id, pending)
+                    if not self._create_approval(conn, workflow["goal_id"], workflow_id, pending):
+                        conn.commit()
+                        return
                     conn.execute("UPDATE agent_workflows SET status='waiting_approval',active_step_id=?,updated_at=datetime('now','localtime') WHERE workflow_id=?", (pending["id"], workflow_id))
                     conn.execute("UPDATE agent_goals SET status='waiting_approval',updated_at=datetime('now','localtime') WHERE goal_id=?", (workflow["goal_id"],))
                     conn.commit()
@@ -1065,15 +1145,19 @@ class WorkflowExecuteMixin:
                 if self._refresh_expired_approvals(conn, workflow_id):
                     conn.commit()
                 return self.get_workflow(workflow_id)
-            if approval["expires_at"] and str(approval["expires_at"]) < datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
+            if (
+                decision == "approve"
+                and approval["expires_at"]
+                and str(approval["expires_at"]) < datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ):
                 conn.execute(
                     "UPDATE agent_approvals SET status=?,decided_at=datetime('now','localtime'),decision_note='点击时已过期，自动换新' WHERE id=?",
                     (f"expired_{approval['approval_id']}", approval["id"]),
                 )
                 step = conn.execute("SELECT s.*,w.goal_id FROM agent_workflow_steps s JOIN agent_workflows w ON w.workflow_id=s.workflow_id WHERE s.id=?", (approval["step_id"],)).fetchone()
                 if step and step["status"] == "waiting_approval":
-                    self._create_approval(conn, step["goal_id"], approval["workflow_id"], step)
-                    self._event(conn, approval["workflow_id"], step["id"], "approval_refreshed", "waiting_approval", f"审批已自动换新：{step['business_label']}")
+                    if self._create_approval(conn, step["goal_id"], approval["workflow_id"], step):
+                        self._event(conn, approval["workflow_id"], step["id"], "approval_refreshed", "waiting_approval", f"审批已自动换新：{step['business_label']}")
                 conn.commit()
                 return self.get_workflow(approval["workflow_id"])
             if decision == "approve" and str(approval["action_type"] or "") == "multi_channel_sourcing":
@@ -1713,4 +1797,3 @@ class WorkflowExecuteMixin:
             return self.get_workflow(step["workflow_id"])
         finally:
             conn.close()
-

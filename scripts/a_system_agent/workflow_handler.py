@@ -25,7 +25,7 @@ from .skills import SkillRegistry, SkillSpec
 from .strategy_handler import execute_outreach_queue
 
 def _execute_workflow_capability(self, capability_id: str, context: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-    locally_specialized = {"talent_pool_search", "candidate_batch_assessment", "candidate_pool_filter", "outreach_queue", "pool_gap_advice", "reply_triage", "communication_draft_batch"}
+    locally_specialized = {"talent_pool_search", "candidate_batch_assessment", "candidate_pool_filter", "candidate_relationship_cleanup", "outreach_queue", "pool_gap_advice", "reply_triage", "communication_draft_batch"}
     if capability_id not in locally_specialized:
         return self.capability_runtime.execute(capability_id, context, inputs)
     context_type = str(context.get("type") or "global")
@@ -105,6 +105,36 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
                 {"type": "candidate", "id": i, "label": item["name"], "subtitle": f"{item['grade']} | {item['company'][:16]} / {item['title'][:12]}"}
                 for i, item in enumerate(candidates[:10])
             ],
+        }
+    if capability_id == "candidate_relationship_cleanup":
+        if context_type != "job" or not context_id:
+            return {"blocked": True, "summary": "岗位候选关系归档需要唯一 job 上下文。"}
+        if inputs.get("_approval_granted") is not True:
+            return {"blocked": True, "summary": "岗位候选关系归档尚未获得本次 R2 审批。"}
+        from .relationship_cleanup import apply_relationship_cleanup
+
+        receipt = apply_relationship_cleanup(
+            self.db_path,
+            context_id,
+            scope_mode=str(inputs.get("scope_mode") or "nonmatching"),
+            actor="workflow",
+            approved_relationship_ids=[
+                int(item)
+                for item in (inputs.get("approved_relationship_ids") or [])
+                if str(item).isdigit() and int(item) > 0
+            ],
+        )
+        return {
+            "summary": (
+                f"已归档 {receipt.get('applied', 0)} 条岗位候选关系；"
+                "人才主档及其全局状态保持不变。"
+            ),
+            "relationship_cleanup": receipt,
+            "postcondition": {
+                "verified": bool(receipt.get("candidate_records_preserved")),
+                "reason": "已读回岗位关系归档结果，候选人主档保留。",
+            },
+            "references": references,
         }
     if capability_id == "outreach_queue":
         # 触达队列：把分级名单的 job_candidate_ids 转成带 P0/P1/P2 优先级的触达提案

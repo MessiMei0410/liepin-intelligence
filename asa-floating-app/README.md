@@ -11,8 +11,10 @@ macOS 系统级 ASA 应用。
 
 ```bash
 bash asa-floating-app/scripts/build.sh
-open "asa-floating-app/build/ASA.app"
+open "$HOME/Applications/ASA.app"
 ```
+
+构建脚本会先在 `build/` 中完成编译和签名验证，再替换用户应用目录中的唯一安装副本；`build/` 不保留可被系统识别的 `.app`。
 
 测试：
 

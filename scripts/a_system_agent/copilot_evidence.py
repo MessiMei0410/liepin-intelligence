@@ -1166,6 +1166,8 @@ def _continued_sourcing_requested(message: str) -> bool:
     return (
         any(token in text for token in ("候选人", "人选"))
         and any(token in text for token in ("再寻访", "继续寻访", "再搜索", "继续搜索", "补搜", "再找", "继续找", "再多找"))
+    ) or bool(
+        re.search(r"(?:岗位|职位).{0,24}(?:再找|继续找|重新找|找找).{0,8}(?:人|人选|候选人)", text)
     )
 
 
@@ -1271,18 +1273,42 @@ def _strategy_revision_instruction(message: str, conversation_history: list[dict
 def _resolve_strategy_revision_workflow(
     self, message: str, selected: dict[str, Any]
 ) -> tuple[str | None, str]:
-    explicit = re.search(r"workflow_[0-9a-zA-Z]+", str(message or ""))
+    explicit_match = re.search(r"workflow_[0-9a-zA-Z]+", str(message or ""))
     selected_workflow_id = str(selected.get("id") or "").strip() if selected.get("type") == "workflow" else ""
-    if not explicit and re.fullmatch(r"workflow_[0-9a-zA-Z]+", selected_workflow_id):
-        explicit = re.match(r"workflow_[0-9a-zA-Z]+", selected_workflow_id)
-    job_id = int(selected.get("id") or 0) if selected.get("type") == "job" else 0
-    if not explicit and not job_id:
-        return None, "请先打开目标岗位，或在消息中明确客户和岗位。"
+    workflow_intent = selected.get("workflow_intent") if isinstance(selected.get("workflow_intent"), dict) else {}
+    business_focus = selected.get("business_focus") if isinstance(selected.get("business_focus"), dict) else {}
+    pending_workflow = business_focus.get("pending_workflow") if isinstance(business_focus.get("pending_workflow"), dict) else {}
+    current_workflow = business_focus.get("current_workflow") if isinstance(business_focus.get("current_workflow"), dict) else {}
+    focus_job = business_focus.get("job") if isinstance(business_focus.get("job"), dict) else {}
+    trusted_workflow_ids = [
+        selected_workflow_id,
+        str(workflow_intent.get("workflow_id") or "").strip(),
+        str(pending_workflow.get("workflow_id") or "").strip(),
+        str(current_workflow.get("workflow_id") or "").strip(),
+    ]
+    bound_workflow_id = next(
+        (value for value in trusted_workflow_ids if re.fullmatch(r"workflow_[0-9a-zA-Z]+", value)),
+        "",
+    )
+    target_workflow_id = explicit_match.group(0) if explicit_match else bound_workflow_id
+    try:
+        job_id = int(
+            selected.get("id")
+            if selected.get("type") == "job"
+            else selected.get("job_id") or focus_job.get("id") or 0
+        )
+    except (TypeError, ValueError):
+        job_id = 0
+    asked_round = _strategy_revision_round(message)
+    # A visible job is scope, not a workflow selection. Only an explicit workflow,
+    # this session's workflow binding, or an explicitly named round may be revised.
+    if not target_workflow_id and not (job_id and asked_round is not None):
+        return None, "当前会话没有明确选中的待修订工作流，请先打开工作流或明确轮次。"
     conn = self._connect()
     try:
         params: list[Any] = []
-        where = "w.workflow_id=?" if explicit else "g.context_type='job' AND g.context_id=?"
-        params.append(explicit.group(0) if explicit else job_id)
+        where = "w.workflow_id=?" if target_workflow_id else "g.context_type='job' AND g.context_id=?"
+        params.append(target_workflow_id or job_id)
         rows = conn.execute(
             f"""
             SELECT w.workflow_id,w.status,w.created_at,g.title,g.objective,g.context_id,g.context_json,
@@ -1301,14 +1327,13 @@ def _resolve_strategy_revision_workflow(
         ).fetchall()
     finally:
         conn.close()
-    if explicit and rows and job_id and int(rows[0]["context_id"] or 0) != job_id:
+    if target_workflow_id and rows and job_id and int(rows[0]["context_id"] or 0) != job_id:
         return None, "消息中的工作流不属于当前岗位，请重新确认目标。"
     eligible = [
         row for row in rows
         if str(row["status"] or "") in {"planned", "queued", "paused", "waiting_approval", "blocked", "failed"}
         and str(row["sourcing_status"] or "") in {"pending", "waiting_approval", "blocked", "failed"}
     ]
-    asked_round = _strategy_revision_round(message)
     if asked_round is not None:
         titles = {str(row["workflow_id"]): str(row["title"] or "") for row in rows}
         eligible = [

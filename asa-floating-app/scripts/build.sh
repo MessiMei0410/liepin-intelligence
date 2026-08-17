@@ -3,16 +3,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_NAME="ASA"
-BUNDLE="$PWD/build/${APP_NAME}.app"
+BUILD_DIR="$PWD/build"
+BUNDLE="$BUILD_DIR/${APP_NAME}.app.staging"
 EXECUTABLE="asa-floating"
-ICONSET="$PWD/build/AppIcon.iconset"
+ICONSET="$BUILD_DIR/AppIcon.iconset"
+INSTALL_DIR="${ASA_INSTALL_DIR:-${HOME}/Applications}"
+INSTALL_BUNDLE="$INSTALL_DIR/${APP_NAME}.app"
+INSTALL_STAGING="$INSTALL_DIR/.${APP_NAME}.app.installing"
+PREVIOUS_BUNDLE="$BUILD_DIR/${APP_NAME}.app.previous"
 SIGN_IDENTITY="ASA Floating Local Code Signing"
 DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGNING_TIMEOUT_SECONDS="${ASA_SIGNING_TIMEOUT_SECONDS:-60}"
 ARCH="$(uname -m)"
 SIGNING_MODE="${ASA_SIGNING_MODE:-stable}"
 
-rm -rf "$BUNDLE" build "$EXECUTABLE"
+rm -rf "$BUILD_DIR" "$EXECUTABLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 
 swiftc \
@@ -22,6 +27,7 @@ swiftc \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
   src/HotKeyRouting.swift \
+  src/ExternalLinkRouting.swift \
   src/DiagnosticsPage.swift \
   src/DetachedCandidateList.swift \
   src/AppDelegate.swift \
@@ -64,9 +70,9 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.27</string>
+  <string>0.2.31</string>
   <key>CFBundleVersion</key>
-  <string>50</string>
+  <string>53</string>
   <key>LSMinimumSystemVersion</key>
   <string>__DEPLOYMENT_TARGET__</string>
   <key>LSUIElement</key>
@@ -130,4 +136,26 @@ case "$SIGNING_MODE" in
 esac
 codesign --verify --deep --strict "$BUNDLE"
 
-echo "$BUNDLE"
+mkdir -p "$INSTALL_DIR"
+rm -rf "$INSTALL_STAGING" "$PREVIOUS_BUNDLE"
+ditto "$BUNDLE" "$INSTALL_STAGING"
+codesign --verify --deep --strict "$INSTALL_STAGING"
+
+if [[ -e "$INSTALL_BUNDLE" ]]; then
+  mv "$INSTALL_BUNDLE" "$PREVIOUS_BUNDLE"
+fi
+if ! mv "$INSTALL_STAGING" "$INSTALL_BUNDLE"; then
+  if [[ -e "$PREVIOUS_BUNDLE" ]]; then
+    mv "$PREVIOUS_BUNDLE" "$INSTALL_BUNDLE"
+  fi
+  exit 1
+fi
+
+# Keep build and rollback directories from being discovered as extra applications.
+rm -rf "$BUNDLE"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -u "$PREVIOUS_BUNDLE" >/dev/null 2>&1 || true
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f "$INSTALL_BUNDLE" >/dev/null 2>&1 || true
+
+echo "$INSTALL_BUNDLE"

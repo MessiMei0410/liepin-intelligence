@@ -581,6 +581,22 @@ def _persist_copilot_focus(
         job = {}
         candidate = {}
         confidence = 0.85
+    if not candidate.get("id"):
+        # 查询结果回写候选人焦点：本轮回答的引用/只读工具结果恰好只涉及同一
+        # 位人选时（由调用方在 persisted_payload.referenced_candidates 里给
+        # 出），把该人选补进 candidate 焦点——context 不移动，仅让下一轮
+        # “把他详情页拉起来”这类指代/导航有对象可绑定。
+        referenced = structured.get("referenced_candidates")
+        if isinstance(referenced, list):
+            first_ref = next(
+                (item for item in referenced if isinstance(item, dict) and item.get("id")),
+                None,
+            )
+            if first_ref:
+                candidate = {
+                    "id": first_ref.get("id"),
+                    "name": str(first_ref.get("name") or ""),
+                }
 
     grounding = selected.get("grounding") if isinstance(selected.get("grounding"), dict) else {}
     direction_text = "\n".join([message, json.dumps(grounding, ensure_ascii=False)])

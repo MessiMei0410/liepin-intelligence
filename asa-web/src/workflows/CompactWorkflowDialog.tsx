@@ -12,6 +12,7 @@ import { elapsed } from '../shared/format'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 import { useWorkflowLiveSync } from './useWorkflowLiveSync'
 import { useWorkflowWriteActions } from './useWorkflowWriteActions'
+import { ApprovalSnapshot } from './ApprovalSnapshot'
 import { activeWorkflowStatuses, humanizeWorkflowError, stepStatusLabel } from './utils'
 
 export type WorkflowDetailSection = 'strategy' | 'candidates' | 'funnel' | 'events' | 'artifacts' | 'full'
@@ -98,6 +99,7 @@ export function CompactWorkflowDialog({
       {pendingApprovals.map(approval => <section className="compact-workflow-approval" key={approval.approval_id} aria-label="待审批操作">
         <ShieldCheck />
         <div><b>{approval.title}</b><span>{approval.risk_level} · {approval.preflight?.channel || 'ASA'} · 单次授权</span></div>
+        <ApprovalSnapshot preflight={approval.preflight} />
         <div className="compact-approval-actions">
           <button className="button" disabled={!!busy} onClick={() => void decide(approval.approval_id, 'reject')}>不执行</button>
           <button className="button primary" disabled={!!busy} onClick={() => void decide(approval.approval_id, 'approve')}>

@@ -1201,7 +1201,7 @@ class WorkflowEngineTest(AgentDbCase):
         assert result["prepare_readback"]["status"] == "prepared"
         assert any(item["type"] == "job_publish_prepare_readback" for item in result["artifacts"])
 
-    def test_expired_approval_is_replaced_without_stalling_workflow(self) -> None:
+    def test_workflow_read_does_not_refresh_expired_approval(self) -> None:
         result = self.service.create_goal(
             "给长越科技机械高级工程师补充10位合适人选",
             {"type": "job", "id": 10},
@@ -1215,15 +1215,57 @@ class WorkflowEngineTest(AgentDbCase):
         conn.commit()
         conn.close()
 
-        refreshed = self.service.get_workflow(workflow_id)
-        pending = [item for item in refreshed["approvals"] if item["status"] == "pending"]
-        assert len(pending) == 1
-        assert pending[0]["approval_id"] != old["approval_id"]
-        assert refreshed["workflow"]["status"] == "waiting_approval"
+        read_state = self.service.get_workflow(workflow_id)
+        pending = [item for item in read_state["approvals"] if item["status"] == "pending"]
+        assert [item["approval_id"] for item in pending] == [old["approval_id"]]
+        conn = self.service._connect()
+        try:
+            approvals_after_read = conn.execute(
+                "SELECT approval_id,status FROM agent_approvals WHERE workflow_id=? ORDER BY id",
+                (workflow_id,),
+            ).fetchall()
+            refresh_events_after_read = conn.execute(
+                "SELECT COUNT(*) FROM agent_step_events WHERE workflow_id=? AND event_type='approval_refreshed'",
+                (workflow_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert [(item["approval_id"], item["status"]) for item in approvals_after_read] == [
+            (old["approval_id"], "pending")
+        ]
+        assert refresh_events_after_read == 0
 
         stale_click = self.service.decide_workflow_approval(old["approval_id"], "approve")
         assert stale_click["workflow"]["status"] == "waiting_approval"
-        assert len([item for item in stale_click["approvals"] if item["status"] == "pending"]) == 1
+        refreshed = [item for item in stale_click["approvals"] if item["status"] == "pending"]
+        assert len(refreshed) == 1
+        assert refreshed[0]["approval_id"] != old["approval_id"]
+
+    def test_expired_approval_can_still_be_rejected_without_refresh(self) -> None:
+        result = self.service.create_goal(
+            "给长越科技机械高级工程师补充10位合适人选",
+            {"type": "job", "id": 10},
+        )
+        workflow_id = result["workflow"]["workflow_id"]
+        self.service.start_workflow(workflow_id)
+        waiting = self.wait_for(workflow_id, {"waiting_approval", "failed"})
+        old = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        conn = self.service._connect()
+        conn.execute(
+            "UPDATE agent_approvals SET expires_at='2000-01-01 00:00:00' WHERE approval_id=?",
+            (old["approval_id"],),
+        )
+        conn.commit()
+        conn.close()
+
+        rejected = self.service.decide_workflow_approval(old["approval_id"], "reject", "不执行")
+
+        assert not [item for item in rejected["approvals"] if item["status"] == "pending"]
+        decided = next(item for item in rejected["approvals"] if item["approval_id"] == old["approval_id"])
+        assert decided["status"] == "rejected"
+        step = next(item for item in rejected["steps"] if item["id"] == old["step_id"])
+        assert step["status"] == "skipped"
+        assert not [item for item in rejected["events"] if item["event_type"] == "approval_refreshed"]
 
     def test_concurrent_decision_loser_produces_no_side_effects(self) -> None:
         # 模拟并发窗口落败方：审批已被另一请求决策（status 非 pending）后再点击，

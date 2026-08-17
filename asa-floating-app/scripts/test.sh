@@ -13,6 +13,7 @@ swiftc \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
   src/HotKeyRouting.swift \
+  src/ExternalLinkRouting.swift \
   src/DiagnosticsPage.swift \
   tests/NativeBoundaryTests.swift
 

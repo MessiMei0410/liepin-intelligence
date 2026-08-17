@@ -456,6 +456,7 @@ class AgentService:
             ("resume_export", "导出结构化简历", "resume_capture", "R1", "script", ("resume_document",)),
             ("candidate_batch_assessment", "批量评估候选人", "assessment", "R1", "native", ()),
             ("candidate_pool_filter", "候选池分级过滤", "assessment", "R0", "native", ("pool_filter_result",)),
+            ("candidate_relationship_cleanup", "归档岗位候选关系", "assessment", "R2", "native", ()),
             ("outreach_queue", "触达队列生成", "outreach", "R1", "native", ("outreach_queue_proposals",)),
             ("pool_gap_advice", "缺口补池建议", "sourcing", "R0", "native", ("pool_gap_advice",)),
             ("matching_report", "生成人岗匹配报告", "recommendation", "R1", "script", ("matching_report",)),
@@ -480,6 +481,7 @@ class AgentService:
             "talent_pool_search": ("global", "page", "job"),
             "search_strategy": ("job",), "multi_channel_sourcing": ("job",), "job_publish_prepare": ("job",),
             "job_publish_execute": ("job",), "resume_export": ("candidate",), "candidate_batch_assessment": ("job", "candidate", "queue"), "candidate_pool_filter": ("job",),
+            "candidate_relationship_cleanup": ("job",),
             "outreach_queue": ("job", "candidate", "queue"), "pool_gap_advice": ("job",),
             "matching_report": ("candidate",), "recommendation_report": ("candidate",), "client_recommendation": ("candidate",),
             "reply_triage": ("global", "page", "job", "candidate", "queue"), "communication_draft_batch": ("global", "page", "job", "candidate", "queue"),
@@ -496,6 +498,7 @@ class AgentService:
             "salary_verification": {"salary_data?": "object"}, "outreach_prepare": {"message?": "string", "queue?": "string", "limit?": "integer"},
             "outreach_execute": {"message?": "string", "cdp_port?": "integer"},
             "client_recommendation": {"channel?": "string"}, "offer_confirmation": {"offer_terms?": "object"},
+            "candidate_relationship_cleanup": {"scope_mode": "string", "preserve_candidate_records": "boolean"},
             "identity_merge_preflight": {"other_job_candidate_id?": "integer"}, "memory_capture": {"confirmed_memory?": "string"},
         }
         for capability_id, label, stage, risk, adapter, artifacts in workflow_capabilities:

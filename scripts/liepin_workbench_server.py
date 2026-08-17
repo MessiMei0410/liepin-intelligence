@@ -136,9 +136,6 @@ ASA_UPLOAD_ROOT = Path.home() / "Library/Application Support/ASA/uploads"
 ASA_UPLOAD_MAX_BASE64_CHARS = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
 ASA_FLOATING_APP_CANDIDATES = [
     Path("/Users/messi/Applications/ASA.app"),
-    Path("/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/asa-floating-app/build/ASA.app"),
-    Path("/Users/messi/Applications/ASA Floating.app"),
-    Path("/Users/messi/Documents/Codex/2026-06-18/liepin-intelligence/asa-floating-app/build/ASA Floating.app"),
 ]
 _TALENT_SYNC_MODULE: Any | None = None
 CANDIDATE_ASSISTANT_EXTENSION_IDS = {

@@ -169,6 +169,49 @@ describe('候选人详情缺省字段防御', () => {
     expect(screen.getByRole('heading', { name: '业务时间线' })).toBeInTheDocument()
     expect(screen.getAllByRole('heading', { name: '岗位关系' }).length).toBeGreaterThan(0)
   })
+
+  it('每个渠道保留最新有效详情链接，不被历史链接覆盖', () => {
+    render(
+      <CandidatePanel
+        value={{
+          ...candidateDetail,
+          source_links: [
+            { source_system: 'liepin', source_entity_type: 'external_profile', source_entity_id: 'new-liepin', source_url: 'https://h.liepin.com/resume/showresumedetail/?showsearchfeedback=1&res_id_encode=new-liepin' },
+            { source_system: 'liepin', source_entity_type: 'external_profile', source_entity_id: 'old-liepin', source_url: 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=old-liepin' },
+            { source_system: 'xsaas', source_entity_type: 'external_profile', source_entity_id: 'new-xsaas', source_url: 'https://headhunt.x-saas.com.cn/#/app/candidate/info/new-xsaas' },
+            { source_system: 'x-saas', source_entity_type: 'external_profile', source_entity_id: 'old-xsaas', source_url: 'https://headhunt.x-saas.com.cn/#/app/candidate/info/old-xsaas' },
+          ],
+        }}
+        close={() => undefined}
+        changed={() => undefined}
+      />,
+    )
+
+    expect(screen.getByRole('link', { name: /猎聘简历/ })).toHaveAttribute('href', 'https://h.liepin.com/resume/showresumedetail/?showsearchfeedback=1&res_id_encode=new-liepin')
+    expect(screen.getByRole('link', { name: /X-SaaS档案/ })).toHaveAttribute('href', 'https://headhunt.x-saas.com.cn/#/app/candidate/info/new-xsaas')
+    expect(document.querySelector('a[href*="old-liepin"]')).toBeNull()
+    expect(document.querySelector('a[href*="old-xsaas"]')).toBeNull()
+  })
+
+  it('忽略非 Web 来源值并使用同渠道下一条有效链接', () => {
+    render(
+      <CandidatePanel
+        value={{
+          ...candidateDetail,
+          source_links: [
+            { source_system: 'liepin', source_entity_type: 'external_profile', source_entity_id: 'relative', source_url: 'resume-id-only' },
+            { source_system: 'liepin', source_entity_type: 'external_profile', source_entity_id: 'script', source_url: 'javascript:alert(1)' },
+            { source_system: 'liepin', source_entity_type: 'external_profile', source_entity_id: 'valid', source_url: 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=valid' },
+          ],
+        }}
+        close={() => undefined}
+        changed={() => undefined}
+      />,
+    )
+
+    expect(screen.getByRole('link', { name: /猎聘简历/ })).toHaveAttribute('href', 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=valid')
+    expect(document.querySelector('a[href^="javascript:"]')).toBeNull()
+  })
 })
 
 

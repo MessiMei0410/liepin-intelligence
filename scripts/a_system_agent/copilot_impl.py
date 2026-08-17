@@ -33,8 +33,8 @@ from .conversation_state import (
 
 # Cross-module references (split from copilot_handler.py)
 from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction
-from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_batch_stop, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
-from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer
+from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _candidate_refs_from_structured, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _navigation_intent_kind, _plan_confirmation_reply, _recent_assistant_object_refs, _requests_batch_stop, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
+from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer, _mentioned_candidate_options
 
 
 _STRUCTURED_ACTION_SEMANTICS: dict[str, tuple[str, str]] = {
@@ -249,11 +249,15 @@ def _understanding_card(
     operation = {
         "candidate_sourcing": "寻访/补池",
         "candidate_review": "评估/复核",
+        "candidate_relationship_cleanup": "归档岗位候选关系",
         "candidate_outreach": "触达/推进",
         "recommendation": "推荐报告",
         "salary": "谈薪",
         "strategy_revision": "调整寻访策略",
         "candidate_pool_filter": "过滤候选池",
+        "open_candidate": "打开人选详情页",
+        "open_job": "打开岗位详情页",
+        "open_workflow": "打开工作流",
         "none": "查询/说明",
     }.get(action, action)
     target_label = str(target.get("label") or "").strip()
@@ -278,6 +282,33 @@ def _understanding_card(
         "candidate_options": ambiguity_options[:3],
         "next_step": "请确认范围后继续" if needs else "",
     }
+
+
+def _relationship_cleanup_scope(
+    message: str,
+    conversation_history: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """Resolve all-vs-nonmatching scope from this command and its immediate user antecedent."""
+    evidence = [str(message or "").strip()]
+    previous_user_message = next(
+        (
+            str(item.get("content") or "").strip()
+            for item in reversed(conversation_history[-4:])
+            if item.get("role") == "user" and str(item.get("content") or "").strip()
+        ),
+        "",
+    )
+    if previous_user_message and re.search(r"(?:清理|解除|移除|停掉|停止推进|淘汰)", previous_user_message):
+        evidence.insert(0, previous_user_message)
+    scope_text = "\n".join(evidence)
+    all_active = bool(
+        re.search(
+            r"(?:全部|所有|全都|都).{0,12}(?:清理|解除|移除|停掉|停止推进|淘汰)"
+            r"|(?:候选池|岗位关联|岗位关系).{0,20}(?:全部|所有|全都|都清理|都解除|都移除)",
+            scope_text,
+        )
+    )
+    return ("all_active" if all_active else "nonmatching"), evidence
 
 
 def _normalize_action_suggestions(actions: Any, *, understanding: dict[str, Any], decision: dict[str, Any], selected: dict[str, Any]) -> list[dict[str, Any]]:
@@ -921,6 +952,15 @@ def _copilot_impl(
         )
     else:
         previous_constraints = []
+    if (
+        str(intent_understanding.get("action") or "none")
+        in {"candidate_sourcing", "candidate_relationship_cleanup"}
+        and not bool(intent_understanding.get("refers_to_previous"))
+        and bool(intent_understanding.get("action_evidence"))
+    ):
+        # A fresh command on the same job must not inherit target counts or
+        # filters from an unrelated pending workflow.
+        previous_constraints = []
     turn_decision = build_turn_decision(
         intent_understanding,
         message=message,
@@ -930,9 +970,20 @@ def _copilot_impl(
     )
     if _is_candidate_list_query(message):
         if _requests_batch_stop(message):
-            # 分级过滤 + 明确停止措辞：这是内部写库动作，而不是只读名单查询。
+            # 批量停止是内部高影响写入，统一进入岗位关系归档 R2 工作流。
+            # 不允许名单直答分支绕过审批直接写 job_candidates/candidates。
+            intent_understanding.update({
+                "speech_act": "execute",
+                "action": "candidate_relationship_cleanup",
+                "objective": message,
+                "action_evidence": [message],
+                "refers_to_previous": False,
+                "needs_clarification": False,
+                "missing_fields": [],
+                "clarification_question": "",
+            })
             turn_decision.update({
-                "effect": "execute",
+                "effect": "create_plan",
                 "authorization": {
                     "mode": "explicit_execute",
                     "workflow_id": None,
@@ -942,7 +993,20 @@ def _copilot_impl(
                 },
                 "blocked_reason": "",
                 "safe_for_action": True,
+                "goal": {
+                    "action": "candidate_relationship_cleanup",
+                    "objective": message,
+                    "target": dict(intent_understanding.get("target") or {}),
+                },
             })
+            turn_decision["observations"] = [
+                {"type": "speech_act", "value": "execute"},
+                *[
+                    item
+                    for item in (turn_decision.get("observations") or [])
+                    if item.get("type") != "speech_act"
+                ],
+            ]
         else:
             # 候选池过滤、比较和名单查询是只读动作。保留解析出的动作/约束，
             # 但不得伪装成待创建计划或进入写入确认链路。
@@ -1170,6 +1234,305 @@ def _copilot_impl(
     mentioned_clients = self._mentioned_client_names(message)
     primary_client = mentioned_clients[0] if mentioned_clients else str((existing_focus or {}).get("client") or "该客户")
     forced_answer = None
+    # 显式只读导航：「把他详情页拉起来」「把这个岗位的详情页打开」「把这个
+    # 工作流打开」绑定对象并发出带 auto 标记的 open_* UI 动作（前端自动打开
+    # 对应面板），不建计划、不输出详情长文。绑定顺序：当前页面选中 > 消息点
+    # 名 > 会话焦点（含查询结果回写）> 最近 assistant 消息里的工具结果/引用卡。
+    navigation: dict[str, Any] = {}
+    nav_kind = (
+        _navigation_intent_kind(message)
+        if not focus_conflicts and not (undo_task_turn or scope_correction_turn or fact_retract_turn)
+        else ""
+    )
+    if nav_kind == "candidate":
+        nav_options: list[dict[str, Any]] = []
+        if selected.get("type") == "candidate" and selected.get("id"):
+            nav_options = [{
+                "id": int(selected["id"]),
+                "name": str((selected_facts.get("candidate") or {}).get("name") or ""),
+                "client": str(selected_facts.get("client") or ""),
+                "job": str((selected_facts.get("job") or {}).get("title") or ""),
+            }]
+        else:
+            mentioned_candidates = _mentioned_candidate_options(self, message)
+            focus_candidate = (
+                existing_focus.get("candidate")
+                if isinstance(existing_focus, dict) and isinstance(existing_focus.get("candidate"), dict)
+                else {}
+            )
+            if mentioned_candidates:
+                nav_options = mentioned_candidates
+            elif focus_candidate.get("id"):
+                nav_options = [dict(focus_candidate)]
+            else:
+                nav_options = _recent_assistant_object_refs(self, session_id, "candidates")
+        distinct_people = {str(item.get("name") or "").strip() or f"#{item.get('id')}" for item in nav_options}
+        nav_target: dict[str, Any] = {}
+        if len(nav_options) == 1:
+            nav_target = dict(nav_options[0])
+        elif nav_options and len(distinct_people) == 1:
+            # 同一人选的多个岗位关系：优先与当前岗位焦点一致的关系。
+            focus_job = existing_focus.get("job") if isinstance(existing_focus, dict) and isinstance(existing_focus.get("job"), dict) else {}
+            focus_job_title = str(focus_job.get("title") or focus_job.get("job") or "").strip()
+            nav_target = dict(next(
+                (
+                    item for item in nav_options
+                    if focus_job_title and focus_job_title in str(item.get("job") or "")
+                ),
+                nav_options[0],
+            ))
+        if nav_target.get("id"):
+            nav_selected = {
+                "type": "candidate", "id": int(nav_target["id"]),
+                "page": "candidates", "filters": {},
+            }
+            nav_facts = self._copilot_context_facts(nav_selected)
+            if nav_facts:
+                selected = nav_selected
+                selected_facts = nav_facts
+                focus_conflicts = []
+                navigation = {
+                    "type": "candidate", "id": int(nav_target["id"]),
+                    "label": str(nav_target.get("name") or ""),
+                }
+                intent_understanding.update({
+                    "speech_act": "execute",
+                    "action": "open_candidate",
+                    "objective": message,
+                    "target": {
+                        "type": "candidate", "id": int(nav_target["id"]),
+                        "client": str(nav_target.get("client") or ""),
+                        "label": str(nav_target.get("name") or ""),
+                    },
+                    "refers_to_previous": True,
+                    "confidence": 0.95,
+                    "needs_clarification": False,
+                    "missing_fields": [],
+                    "clarification_question": "",
+                    "action_evidence": [message],
+                    "safe_for_action": True,
+                })
+                turn_decision.update({
+                    "effect": "answer",
+                    "authorization": {
+                        "mode": "read_only",
+                        "workflow_id": None,
+                        "version": None,
+                        "plan_hash": None,
+                        "evidence": [message],
+                    },
+                    "blocked_reason": "",
+                    "safe_for_action": True,
+                })
+                semantic_action = "open_candidate"
+                semantic_speech_act = "execute"
+        if not navigation:
+            if len(distinct_people) > 1:
+                # 最近涉及多位人选：不猜，请顾问指名。
+                options_text = "；".join(
+                    f"{str(item.get('name') or '未知')}（{str(item.get('client') or '')} / {str(item.get('job') or '')}）"
+                    for item in nav_options[:3]
+                )
+                forced_answer = (
+                    f"结论：还不能确定要打开哪位人选的详情页（最近涉及 {len(distinct_people)} 位：{options_text}）。\n\n"
+                    "下一步：请带上人选姓名，例如「把田逸帆的详情页打开」。"
+                )
+            else:
+                forced_answer = (
+                    "结论：还没有可打开的人选——当前页面未选中候选人，本轮对话最近也没有查询过具体人选。\n\n"
+                    "下一步：先查询或选中一位人选，再说「把TA的详情页打开」。"
+                )
+    elif nav_kind == "job":
+        nav_jobs: list[dict[str, Any]] = []
+        if selected.get("type") == "job" and selected.get("id"):
+            nav_jobs = [{
+                "id": int(selected["id"]),
+                "name": str((selected_facts.get("job") or {}).get("title") or ""),
+                "client": str(selected_facts.get("client") or ""),
+            }]
+        else:
+            mentioned_jobs = self._mentioned_jobs_for_copilot(message)
+            nav_focus_context = (
+                existing_focus.get("context")
+                if isinstance(existing_focus, dict) and isinstance(existing_focus.get("context"), dict)
+                else {}
+            )
+            nav_focus_job = (
+                existing_focus.get("job")
+                if isinstance(existing_focus, dict) and isinstance(existing_focus.get("job"), dict)
+                else {}
+            )
+            if len(mentioned_jobs) == 1:
+                nav_jobs = [{
+                    "id": int(mentioned_jobs[0]["id"]),
+                    "name": str(mentioned_jobs[0].get("job") or mentioned_jobs[0].get("title") or ""),
+                    "client": str(mentioned_jobs[0].get("client") or ""),
+                }]
+            elif nav_focus_context.get("type") == "job" and nav_focus_context.get("id"):
+                nav_jobs = [{
+                    "id": int(nav_focus_context["id"]),
+                    "name": str(nav_focus_job.get("title") or nav_focus_job.get("job") or ""),
+                    "client": str((existing_focus or {}).get("client") or ""),
+                }]
+            elif nav_focus_job.get("id"):
+                nav_jobs = [{
+                    "id": int(nav_focus_job["id"]),
+                    "name": str(nav_focus_job.get("title") or nav_focus_job.get("job") or ""),
+                    "client": str((existing_focus or {}).get("client") or ""),
+                }]
+            else:
+                nav_jobs = _recent_assistant_object_refs(self, session_id, "jobs")
+        distinct_jobs = {str(item.get("id")) for item in nav_jobs}
+        if len(nav_jobs) == 1:
+            nav_selected = {
+                "type": "job", "id": int(nav_jobs[0]["id"]),
+                "page": "positions", "filters": {},
+            }
+            nav_facts = self._copilot_context_facts(nav_selected)
+            if nav_facts:
+                selected = nav_selected
+                selected_facts = nav_facts
+                focus_conflicts = []
+                navigation = {
+                    "type": "job", "id": int(nav_jobs[0]["id"]),
+                    "label": f"{str(nav_facts.get('client') or '')} / {str((nav_facts.get('job') or {}).get('title') or '')}".strip(" /"),
+                }
+                intent_understanding.update({
+                    "speech_act": "execute",
+                    "action": "open_job",
+                    "objective": message,
+                    "target": {
+                        "type": "job", "id": int(nav_jobs[0]["id"]),
+                        "client": str(nav_facts.get("client") or ""),
+                        "label": str((nav_facts.get("job") or {}).get("title") or ""),
+                    },
+                    "refers_to_previous": True,
+                    "confidence": 0.95,
+                    "needs_clarification": False,
+                    "missing_fields": [],
+                    "clarification_question": "",
+                    "action_evidence": [message],
+                    "safe_for_action": True,
+                })
+                turn_decision.update({
+                    "effect": "answer",
+                    "authorization": {
+                        "mode": "read_only",
+                        "workflow_id": None,
+                        "version": None,
+                        "plan_hash": None,
+                        "evidence": [message],
+                    },
+                    "blocked_reason": "",
+                    "safe_for_action": True,
+                })
+                semantic_action = "open_job"
+                semantic_speech_act = "execute"
+        if not navigation:
+            if len(distinct_jobs) > 1:
+                options_text = "；".join(
+                    f"{str(item.get('name') or '未命名岗位')}（{str(item.get('client') or '')}）"
+                    for item in nav_jobs[:3]
+                )
+                forced_answer = (
+                    f"结论：还不能确定要打开哪个岗位的详情页（最近涉及 {len(distinct_jobs)} 个：{options_text}）。\n\n"
+                    "下一步：请带上岗位名称，例如「把机械高级工程师的详情页打开」。"
+                )
+            else:
+                forced_answer = (
+                    "结论：还没有可打开的岗位——当前页面未选中岗位，本轮对话最近也没有查询过具体岗位。\n\n"
+                    "下一步：先查询或选中一个岗位，再说「把这个岗位的详情页打开」。"
+                )
+    elif nav_kind == "workflow":
+        nav_workflow_id = ""
+        nav_workflow_label = ""
+        if selected.get("type") == "workflow" and selected.get("id"):
+            nav_workflow_id = str(selected["id"])
+        else:
+            for holder in (
+                (existing_focus or {}).get("pending_workflow"),
+                (existing_focus or {}).get("current_workflow"),
+            ):
+                if isinstance(holder, dict) and holder.get("workflow_id"):
+                    nav_workflow_id = str(holder["workflow_id"])
+                    nav_workflow_label = str(holder.get("objective") or "")
+                    break
+            if not nav_workflow_id:
+                pending_state_plan = (
+                    conversation_state.get("pending_plan")
+                    if isinstance(conversation_state.get("pending_plan"), dict)
+                    else {}
+                )
+                nav_workflow_id = str(pending_state_plan.get("workflow_id") or "")
+                nav_workflow_label = str(pending_state_plan.get("objective") or "")
+            if not nav_workflow_id:
+                nav_workflows = _recent_assistant_object_refs(self, session_id, "workflows")
+                if len(nav_workflows) == 1:
+                    nav_workflow_id = str(nav_workflows[0]["id"])
+                    nav_workflow_label = str(nav_workflows[0].get("name") or "")
+                elif len(nav_workflows) > 1:
+                    options_text = "；".join(
+                        str(item.get("name") or item.get("id") or "")
+                        for item in nav_workflows[:3]
+                    )
+                    forced_answer = (
+                        f"结论：还不能确定要打开哪个工作流（最近涉及 {len(nav_workflows)} 个：{options_text}）。\n\n"
+                        "下一步：请先在工作流卡里选中一个，或说明具体任务。"
+                    )
+        if nav_workflow_id and not forced_answer:
+            nav_facts = self._copilot_context_facts({"type": "workflow", "id": nav_workflow_id})
+            if nav_facts:
+                selected = {
+                    "type": "workflow", "id": nav_workflow_id,
+                    "page": "flow", "filters": {},
+                }
+                selected_facts = nav_facts
+                focus_conflicts = []
+                navigation = {
+                    "type": "workflow", "id": nav_workflow_id,
+                    "label": str((nav_facts.get("workflow") or {}).get("title") or nav_workflow_label or ""),
+                }
+                intent_understanding.update({
+                    "speech_act": "execute",
+                    "action": "open_workflow",
+                    "objective": message,
+                    "target": {
+                        "type": "workflow", "id": nav_workflow_id,
+                        "client": str(nav_facts.get("client") or ""),
+                        "label": navigation["label"],
+                    },
+                    "refers_to_previous": True,
+                    "confidence": 0.95,
+                    "needs_clarification": False,
+                    "missing_fields": [],
+                    "clarification_question": "",
+                    "action_evidence": [message],
+                    "safe_for_action": True,
+                })
+                turn_decision.update({
+                    "effect": "answer",
+                    "authorization": {
+                        "mode": "read_only",
+                        "workflow_id": None,
+                        "version": None,
+                        "plan_hash": None,
+                        "evidence": [message],
+                    },
+                    "blocked_reason": "",
+                    "safe_for_action": True,
+                })
+                semantic_action = "open_workflow"
+                semantic_speech_act = "execute"
+            else:
+                forced_answer = (
+                    "结论：这个工作流已不存在或已归档，无法打开。\n\n"
+                    "下一步：告诉我具体任务，我重新为你建立。"
+                )
+        elif not forced_answer:
+            forced_answer = (
+                "结论：还没有可打开的工作流——当前没有待确认或进行中的任务。\n\n"
+                "下一步：先告诉我具体目标建立任务，或从工作流列表里选中一个。"
+            )
     fact_receipt: dict[str, Any] = {}
     workflow_cancelled = False
     started_new_plan = False
@@ -1437,7 +1800,8 @@ def _copilot_impl(
     semantic_goal_intent = bool(
         semantic_action in {
             "candidate_sourcing", "candidate_outreach", "job_publish", "job_split",
-            "job_archive", "candidate_review", "recommendation", "salary",
+            "job_archive", "candidate_review", "candidate_relationship_cleanup",
+            "recommendation", "salary",
         }
         and semantic_speech_act in {"propose", "execute", "confirm"}
         and intent_understanding.get("safe_for_action")
@@ -1445,6 +1809,7 @@ def _copilot_impl(
     action_context_prompts = {
         "candidate_outreach": ({"candidate", "queue"}, "请先选择具体候选人，或明确要处理的待联系队列。"),
         "candidate_review": ({"job", "candidate", "queue"}, "请先选择要核验的岗位、候选人或候选队列。"),
+        "candidate_relationship_cleanup": ({"job"}, "请先选择要清理候选关系的具体岗位。"),
         "recommendation": ({"candidate"}, "请先选择要生成报告或推荐给客户的具体候选人。"),
         "salary": ({"candidate"}, "请先选择要处理谈薪的具体候选人。"),
     }
@@ -1459,6 +1824,7 @@ def _copilot_impl(
         forced_answer is None
         and not suppress_goal_intent
         and _is_candidate_list_query(message)
+        and semantic_action != "candidate_relationship_cleanup"
     ):
         list_job_id = 0
         # 消息里明确提到的唯一岗位优先；没有明确岗位时才回到当前人选/岗位焦点。
@@ -1491,7 +1857,7 @@ def _copilot_impl(
                     _conn.row_factory = _sqlite3.Row
                     try:
                         _jrow = _conn.execute(
-                            "SELECT c.name AS client, j.title AS title FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+                            "SELECT c.name AS client, j.* FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
                             (list_job_id,),
                         ).fetchone()
                     finally:
@@ -1499,8 +1865,14 @@ def _copilot_impl(
                     _client_name = str(_jrow["client"]) if _jrow is not None else ""
                     _job_title = str(_jrow["title"]) if _jrow is not None else ""
                     from .candidate_pool_filter import filter_job_candidates, format_grade_list, job_filter_domain
-                    _filter_domain = job_filter_domain(_job_title)
-                    if _filter_domain not in {"mechanical", "software"}:
+                    _job_columns = set(_jrow.keys()) if _jrow is not None else set()
+                    _job_context = " ".join(
+                        str(_jrow[key] or "")
+                        for key in ("summary", "hard_requirements", "ability_keywords", "search_words", "exclusions")
+                        if key in _job_columns
+                    )
+                    _filter_domain = job_filter_domain(_job_title, _job_context)
+                    if _filter_domain not in {"mechanical", "software", "power"}:
                         # 未支持的职能域（电气、失效分析等）只返回普通名单，
                         # 绝不自动批量写库，避免误停整池。
                         candidate_list_answer, candidate_list_card = _build_candidate_list_card(self.db_path, list_job_id, message)
@@ -1512,7 +1884,7 @@ def _copilot_impl(
                         # 分级名单同样生成结构化 action_card（前端渲染可点击名单弹窗）
                         _grade_groups: list[dict[str, Any]] = []
                         _grade_order = (
-                            "A-核心", "A-强", "B-中", "C-弱",
+                            "A-核心", "A-强", "B-中", "C-弱", "C-需确认", "D-暂缓",
                             "D-无证据", "D-无画像", "D-期望超限", "D-城市不符", "X-排除", "禁挖",
                         )
                         for _g in _grade_order:
@@ -1545,41 +1917,6 @@ def _copilot_impl(
                             },
                             "groups": _grade_groups,
                         }
-                        if _requests_batch_stop(message):
-                            # 用户明确要求“不匹配的就停止推进”：直接按分级结果批量落库，
-                            # 并附上执行回执。写库失败时降级为只读名单，不让用户空手。
-                            try:
-                                from .batch_stop import apply_batch_stop, batch_stop_summary, build_batch_stop_items
-
-                                _stop_items = build_batch_stop_items(_filter_result)
-                                if _stop_items:
-                                    _stop_result = apply_batch_stop(
-                                        self.db_path,
-                                        list_job_id,
-                                        _stop_items,
-                                        actor="copilot",
-                                        source="copilot_batch_stop",
-                                    )
-                                    _stop_summary = batch_stop_summary(_stop_items)
-                                    _remaining = int(_filter_result.get("total") or 0) - int(_stop_result.get("applied") or 0)
-                                    candidate_list_answer = format_grade_list(_filter_result) + (
-                                        f"\n\n已执行批量停止推进：共 {_stop_result.get('applied')} 人"
-                                        f"（{_stop_summary}）。当前岗位剩余可推进约 {_remaining} 人。"
-                                    )
-                                    batch_stop_receipt = {
-                                        "version": "batch_stop_receipt_v1",
-                                        "state": "已完成",
-                                        "job_id": list_job_id,
-                                        "applied": int(_stop_result.get("applied") or 0),
-                                        "skipped": int(_stop_result.get("skipped") or 0),
-                                        "events": int(_stop_result.get("events") or 0),
-                                        "summary": _stop_summary,
-                                    }
-                            except Exception as _stop_exc:
-                                import logging
-                                logging.getLogger("copilot.batch_stop").exception(
-                                    "batch stop failed for job %s: %s", list_job_id, _stop_exc
-                                )
                     if candidate_list_answer:
                         forced_answer = candidate_list_answer
                 except Exception as _exc:
@@ -1695,6 +2032,43 @@ def _copilot_impl(
             forced_answer = action_context_rule[1]
     if (
         forced_answer is None
+        and semantic_action == "candidate_relationship_cleanup"
+        and selected.get("type") == "job"
+        and selected.get("id")
+    ):
+        from .relationship_cleanup import (
+            RelationshipCleanupScopeBlocked,
+            validate_relationship_cleanup_scope,
+        )
+
+        if _requests_batch_stop(message):
+            requested_cleanup_scope = "nonmatching"
+        else:
+            requested_cleanup_scope, _ = _relationship_cleanup_scope(message, conversation_history)
+        try:
+            validate_relationship_cleanup_scope(
+                self.db_path,
+                int(selected["id"]),
+                scope_mode=requested_cleanup_scope,
+            )
+        except RelationshipCleanupScopeBlocked as exc:
+            forced_answer = (
+                f"未创建归档审批：{exc}"
+            )
+            turn_decision.update({
+                "effect": "answer",
+                "authorization": {
+                    "mode": "read_only",
+                    "workflow_id": None,
+                    "version": None,
+                    "plan_hash": None,
+                    "evidence": [message],
+                },
+                "blocked_reason": "unsupported_candidate_filter_domain",
+                "safe_for_action": True,
+            })
+    if (
+        forced_answer is None
         and semantic_action != "none"
         and intent_understanding.get("needs_clarification")
         and not suppress_goal_intent
@@ -1802,6 +2176,21 @@ def _copilot_impl(
             goal_context["turn_decision"] = turn_decision
             goal_context["constraint_ledger"] = list(turn_decision.get("effective_constraints") or [])
             goal_context["locked_constraints"] = list(dict.fromkeys(semantic_constraints))
+            if semantic_action == "candidate_relationship_cleanup":
+                if _requests_batch_stop(message):
+                    cleanup_scope, cleanup_scope_evidence = "nonmatching", [message]
+                else:
+                    cleanup_scope, cleanup_scope_evidence = _relationship_cleanup_scope(
+                        message,
+                        conversation_history,
+                    )
+                goal_inputs = dict(goal_context.get("goal_inputs") or {})
+                goal_inputs.update({
+                    "scope_mode": cleanup_scope,
+                    "scope_evidence": cleanup_scope_evidence,
+                    "preserve_candidate_records": True,
+                })
+                goal_context["goal_inputs"] = goal_inputs
             continued_sourcing = _continued_sourcing_requested(goal_request)
             if _new_candidate_outreach_requested(goal_request) or continued_sourcing:
                 grounding = goal_context.get("goal_grounding") if isinstance(goal_context.get("goal_grounding"), dict) else {}
@@ -1817,20 +2206,22 @@ def _copilot_impl(
                 if goal_request not in grounded_goal:
                     grounded_goal += f"。顾问原始目标：{goal_request}"
                 goal_request = grounded_goal
-            strategy_gate = (
-                {"action": "proceed"}
-                if (
-                    strategy_gate_clarification
-                    or _new_candidate_outreach_requested(message)
-                    or scope_clarification_resolved
-                    or (
-                        continued_sourcing
-                        and isinstance(existing_focus, dict)
-                        and str(existing_focus.get("action") or "") in {"candidate_sourcing", "strategy_revision"}
+            strategy_gate = {"action": "proceed"}
+            if semantic_action == "candidate_sourcing":
+                strategy_gate = (
+                    {"action": "proceed"}
+                    if (
+                        strategy_gate_clarification
+                        or _new_candidate_outreach_requested(message)
+                        or scope_clarification_resolved
+                        or (
+                            continued_sourcing
+                            and isinstance(existing_focus, dict)
+                            and str(existing_focus.get("action") or "") in {"candidate_sourcing", "strategy_revision"}
+                        )
                     )
+                    else self._sourcing_strategy_gate(goal_request, goal_context, floating_compact=floating_compact)
                 )
-                else self._sourcing_strategy_gate(goal_request, goal_context, floating_compact=floating_compact)
-            )
             if strategy_gate.get("action") == "ask":
                 # 红线：提问清单场景不创建 workflow_id，不声称已启动，无任何外部执行。
                 forced_answer = str(strategy_gate.get("answer") or "")
@@ -1907,10 +2298,22 @@ def _copilot_impl(
                     current_workflow_context,
                     expanded=_copilot_response_detail(message) == "expanded",
                 )
+        if navigation.get("type") == "workflow" and forced_answer is None:
+            # 导航回合给确定性短答，不再让模型把工作流详情重新输出一遍。
+            nav_label = str(navigation.get("label") or workflow.get("title") or "当前工作流")
+            if floating_compact:
+                forced_answer = f"已打开工作流（{nav_label}）。"
+            else:
+                forced_answer = (
+                    f"结论：已打开工作流（{nav_label}）。\n\n"
+                    "下一步：在详情面板查看进度；需要确认计划或调整策略时直接告诉我。"
+                )
     elif existing_focus:
         selected_payload["business_focus"] = existing_focus
     references: list[dict[str, Any]] = []
     suggested_actions: list[dict[str, Any]] = []
+    if navigation.get("type") == "workflow" and context_id:
+        suggested_actions.append({"type": "open_workflow", "id": context_id, "label": "打开工作流"})
     if context_type == "candidate" and context_id:
         candidate_context = build_candidate_context(self.db_path, context_id)
         state = self.get_candidate_state(context_id)
@@ -1951,6 +2354,17 @@ def _copilot_impl(
             }
         )
         suggested_actions.append({"type": "open_candidate", "id": context_id, "label": "打开人选"})
+        if navigation.get("type") == "candidate" and forced_answer is None:
+            # 导航回合给确定性短答，不再让模型把人选详情重新输出一遍。
+            nav_name = str(identity.get("name") or f"关系 #{context_id}")
+            nav_project = f"{position.get('client','')} / {position.get('job','')}".strip(" /")
+            if floating_compact:
+                forced_answer = f"已打开 {nav_name} 的详情页。"
+            else:
+                forced_answer = (
+                    f"结论：已打开 {nav_name} 的详情页（{nav_project}）。\n\n"
+                    "下一步：在详情面板查看；需要推进、触达或生成报告时直接告诉我。"
+                )
         if stopped_context and (
             stopped_candidate_action_blocked
             or _stopped_candidate_action_requested(
@@ -2053,6 +2467,16 @@ def _copilot_impl(
             selected_payload["position"] = _copilot_job_evidence(self, int(context_id))
             references.append({"type": "job", "id": context_id, "label": job["job"], "subtitle": job["client"]})
             suggested_actions.append({"type": "open_job", "id": context_id, "label": "打开岗位"})
+            if navigation.get("type") == "job" and forced_answer is None:
+                # 导航回合给确定性短答，不再让模型把岗位详情重新输出一遍。
+                nav_label = str(navigation.get("label") or f"{job['client']} / {job['job']}")
+                if floating_compact:
+                    forced_answer = f"已打开岗位详情页（{nav_label}）。"
+                else:
+                    forced_answer = (
+                        f"结论：已打开岗位详情页（{nav_label}）。\n\n"
+                        "下一步：在详情面板查看；需要寻访、过滤名单或调整策略时直接告诉我。"
+                    )
     elif context_type == "queue":
         inbox = self.get_flow_inbox(**selected.get("filters", {}))
         selected_payload["queue"] = {
@@ -2372,6 +2796,12 @@ def _copilot_impl(
                 f"已生成策略修订版：{goal_workflow['goal']['title']}。\n\n"
                 "旧工作流及其待审批已失效；修订版尚未开始，请查看新计划后确认。"
             )
+        elif (start_pending_plan or started_new_plan) and semantic_action == "candidate_relationship_cleanup":
+            answer = (
+                "已启动岗位候选关系归档预检。\n\n"
+                "当前尚未归档任何关系；请在 R2 审批卡核对范围、数量和样本后再确认。"
+                "人才主档及其全局状态会保持不变。"
+            )
         elif start_pending_plan or started_new_plan:
             answer = (
                 f"正在执行：{goal_workflow['goal']['title']}。\n\n"
@@ -2493,7 +2923,26 @@ def _copilot_impl(
         decision=turn_decision,
         selected=selected,
     )
+    if navigation:
+        # 显式导航指令：前端收到带 auto 标记的 open_* 动作后直接打开对象面板，
+        # 不等顾问再点一次按钮。
+        nav_action_type = f"open_{navigation.get('type')}"
+        for action in suggested_actions:
+            if action.get("type") == nav_action_type:
+                action["auto"] = True
     persisted_payload = _persistable_attachment_payload(selected_payload)
+    # 查询结果回写候选人焦点：本轮回答引用/工具结果涉及的候选人（仅当恰好
+    # 指向同一人时）写入 persisted_payload，由 _persist_copilot_focus 补进
+    # focus.candidate，供下一轮「把他详情页拉起来」等指代绑定使用。
+    turn_candidate_refs = _candidate_refs_from_structured({
+        "references": references,
+        "tool_calls": model_tool_calls,
+        "action_card": candidate_list_card,
+    })
+    if turn_candidate_refs:
+        distinct_ref_people = {str(item.get("name") or "").strip() or f"#{item.get('id')}" for item in turn_candidate_refs}
+        if len(distinct_ref_people) == 1 and "referenced_candidates" not in persisted_payload:
+            persisted_payload["referenced_candidates"] = turn_candidate_refs[:4]
     focus_context = (
         (goal_workflow.get("goal") or {}).get("context")
         if goal_workflow else persisted_payload
