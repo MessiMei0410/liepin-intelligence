@@ -27,6 +27,7 @@ swiftc \
   src/WebSecurityPolicy.swift \
   src/NativeContextPrivacy.swift \
   src/HotKeyRouting.swift \
+  src/ExternalLinkRouting.swift \
   src/DiagnosticsPage.swift \
   src/DetachedCandidateList.swift \
   src/AppDelegate.swift \
@@ -69,7 +70,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.30</string>
+  <string>0.2.31</string>
   <key>CFBundleVersion</key>
   <string>53</string>
   <key>LSMinimumSystemVersion</key>

@@ -47,6 +47,21 @@ struct NativeBoundaryTests {
         precondition(!policy.allowsExternalURL(URL(string: "about:blank")!))
         precondition(!policy.allowsExternalURL(URL(string: "http://user:pass@example.com")!))
 
+        // External link routing: Liepin and X-SaaS candidate links go through
+        // the long-lived 9223 CDP Chrome (login sessions live in that profile);
+        // everything else opens in the default browser. Matching is case
+        // insensitive and domain-boundary aware (no *.liepin.com.evil.example).
+        precondition(ExternalLinkRouting.viaCDPChrome(URL(string: "https://h.liepin.com/resume/showresumedetail/?res_id_encode=e1")!))
+        precondition(ExternalLinkRouting.viaCDPChrome(URL(string: "https://www.liepin.com/company/123")!))
+        precondition(ExternalLinkRouting.viaCDPChrome(URL(string: "HTTPS://H.LIEPIN.COM/RESUME/")!))
+        precondition(ExternalLinkRouting.viaCDPChrome(URL(string: "https://headhunt.x-saas.com.cn/#/app/candidate/info/42")!))
+        precondition(ExternalLinkRouting.viaCDPChrome(URL(string: "https://api.x-saas.com.cn/v1/ping")!))
+        precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "https://openai.com")!))
+        precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "http://127.0.0.1:9999")!))
+        precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "https://liepin.com.evil.example/x")!))
+        precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "https://x-saas.com.cn.evil.example/x")!))
+        precondition(!ExternalLinkRouting.viaCDPChrome(URL(string: "not-a-url")!))
+
         let clipboard = NativeContextPrivacy.clipboardMetadata(hasText: true, changeCount: 7)
         precondition(clipboard["has_text"] as? Bool == true)
         precondition(clipboard["change_count"] as? Int == 7)
