@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import time
 
 from a_system_agent import AgentService, FakeLLM
 from a_system_agent.copilot_handler import _copilot_pending_plan
 from a_system_agent.conversation_state import (
+    action_evidence_for_turn,
     build_context_state,
+    candidate_sourcing_request_negated,
     deterministic_context_summary,
     enrich_turn_understanding,
 )
+from a_system_agent.copilot_intent import _copilot_action_kind, _interpret_copilot_message
 from a_system_agent.copilot_routing import _execution_receipt
 from a_system_agent.turn_decision import build_turn_decision
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment
@@ -116,6 +120,63 @@ def test_model_inform_cannot_retain_a_sourcing_action() -> None:
     assert understanding["action"] == "none"
     assert understanding["action_evidence"] == []
     assert understanding["safe_for_action"] is False
+
+
+def test_job_scoped_find_people_command_survives_the_action_evidence_gate() -> None:
+    message = "士兰微的电源专家岗位再找找人"
+    understanding = enrich_turn_understanding(
+        _understanding(
+            speech_act="inform",
+            action="candidate_sourcing",
+            objective=message,
+        ),
+        message=message,
+        pending_plan_ref={"workflow_id": "workflow_old", "version": 1, "plan_hash": "old"},
+    )
+
+    assert _copilot_action_kind(message) == "candidate_sourcing"
+    assert understanding["speech_act"] == "propose"
+    assert understanding["action"] == "candidate_sourcing"
+    assert understanding["action_evidence"] == [message]
+
+
+def test_negated_job_sourcing_is_rejected_even_when_the_model_calls_it_execute() -> None:
+    messages = (
+        "这个岗位不要再找人",
+        "别再找候选人了",
+        "先不要给这个岗位继续寻访",
+    )
+    for message in messages:
+        understanding = enrich_turn_understanding(
+            _understanding(
+                speech_act="execute",
+                action="candidate_sourcing",
+                objective=message,
+            ),
+            message=message,
+            pending_plan_ref={},
+        )
+
+        assert candidate_sourcing_request_negated(message) is True
+        assert _copilot_action_kind(message) == ""
+        assert understanding["action"] == "none"
+        assert understanding["action_evidence"] == []
+        assert understanding["safe_for_action"] is False
+        assert build_turn_decision(understanding, message=message)["effect"] == "answer"
+
+
+def test_relationship_cleanup_requires_preserving_candidates_and_keeps_full_evidence() -> None:
+    message = "可以，直接清理和这个士兰微的岗位关联，不用清理掉人选"
+    understanding = _understanding(
+        speech_act="execute",
+        action="candidate_relationship_cleanup",
+        objective=message,
+    )
+
+    assert _copilot_action_kind(message) == "candidate_relationship_cleanup"
+    assert action_evidence_for_turn(understanding, message=message) == [message]
+    assert _copilot_action_kind("直接清理这个人选") != "candidate_relationship_cleanup"
+    assert _copilot_action_kind("不要清理岗位关联，保留人选") != "candidate_relationship_cleanup"
 
 
 def test_candidate_match_opinion_does_not_become_review_or_recommendation() -> None:
@@ -351,6 +412,155 @@ class CopilotContextReplayTest(AgentDbCase):
             return int(conn.execute("SELECT COUNT(*) FROM agent_workflows").fetchone()[0])
         finally:
             conn.close()
+
+    def test_negated_sourcing_never_creates_a_workflow(self) -> None:
+        initial_count = self._workflow_count()
+        for index, message in enumerate(("这个岗位不要再找人", "别再找候选人了")):
+            result = self.service.copilot(
+                message,
+                session_id=f"negated_sourcing_{index}",
+                context={"type": "job", "id": 10, "page": "positions"},
+            )
+
+            assert result["workflow_id"] is None
+            assert result["intent_understanding"]["action"] == "none"
+            assert result["turn_decision"]["safe_for_action"] is False
+            assert result["turn_decision"]["effect"] == "answer"
+        assert self._workflow_count() == initial_count
+
+    def _wait_for_workflow(self, workflow_id: str, statuses: set[str]) -> dict:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            workflow = self.service.get_workflow(workflow_id)
+            if str(workflow["workflow"]["status"]) in statuses:
+                return workflow
+            time.sleep(0.02)
+        return self.service.get_workflow(workflow_id)
+
+    def test_relationship_cleanup_overrides_review_model_output_and_old_plan_reference(self) -> None:
+        message = "可以，直接清理和这个士兰微的岗位关联，不用清理掉人选"
+        self.service.llm._intent_understanding = {
+            "speech_act": "confirm",
+            "action": "candidate_review",
+            "topic": "candidate_match",
+            "objective": "复核候选人",
+            "target": {"type": "job", "id": 10, "client": "长越科技", "label": "机械高级工程师"},
+            "constraints": [],
+            "fact_updates": [],
+            "action_evidence": [],
+            "refers_to_previous": True,
+            "confidence": 0.2,
+            "needs_clarification": False,
+            "missing_fields": [],
+            "clarification_question": "",
+        }
+        selected = {"type": "job", "id": 10, "page": "positions", "filters": {}}
+        understanding = _interpret_copilot_message(
+            self.service,
+            message,
+            selected,
+            self.service._copilot_context_facts(selected),
+            {},
+            [],
+            "",
+        )
+        decision = build_turn_decision(
+            understanding,
+            message=message,
+            pending_plan_ref={"workflow_id": "workflow_old", "version": 1, "plan_hash": "old"},
+        )
+
+        assert understanding["speech_act"] == "execute"
+        assert understanding["action"] == "candidate_relationship_cleanup"
+        assert understanding["refers_to_previous"] is False
+        assert understanding["action_evidence"] == [message]
+        assert decision["effect"] == "create_plan"
+        assert decision["blocked_reason"] == ""
+        assert decision["authorization"]["mode"] == "explicit_execute"
+
+    def test_job_scoped_find_people_command_creates_a_fresh_workflow(self) -> None:
+        first = self.service.copilot(
+            "给长越科技机械高级工程师补充10位候选人",
+            session_id="fresh_job_sourcing_request",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        second = self.service.copilot(
+            "长越科技的机械高级工程师岗位再找找人",
+            session_id="fresh_job_sourcing_request",
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        assert first["workflow_id"]
+        assert second["workflow_id"]
+        assert second["workflow_id"] != first["workflow_id"]
+        assert second["intent_understanding"]["action"] == "candidate_sourcing"
+        assert second["intent_understanding"]["speech_act"] == "execute"
+        assert second["intent_understanding"]["refers_to_previous"] is False
+        assert second["turn_decision"]["effect"] == "create_plan"
+        assert second["turn_decision"]["authorization"]["mode"] == "explicit_execute"
+        assert second["workflow"]["status"] != "planned"
+        assert "10位" not in str(second["workflow"]["plan"]["objective"])
+
+    def test_caf926_exact_turns_create_separate_r3_and_r2_workflows(self) -> None:
+        conn = self.service._connect()
+        try:
+            conn.execute("UPDATE clients SET name='士兰微' WHERE id=1")
+            conn.execute(
+                "UPDATE jobs SET title='电源专家',summary='VPD VRM 多相Buck TLVR 模块电源' WHERE id=10"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        session_id = "copilot_caf9268691d8_regression"
+        sourcing = self.service.copilot(
+            "士兰微的电源专家岗位再找找人",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        assert sourcing["workflow_id"]
+        assert sourcing["intent_understanding"]["action"] == "candidate_sourcing"
+        assert sourcing["turn_decision"]["authorization"]["mode"] == "explicit_execute"
+
+        self.service.copilot(
+            "当前候选池没有合适的就都清理了",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+        cleanup = self.service.copilot(
+            "可以，直接清理和这个士兰微的岗位关联，不用清理掉人选",
+            session_id=session_id,
+            context={"type": "job", "id": 10, "page": "positions"},
+        )
+
+        cleanup_workflow_id = str(cleanup.get("workflow_id") or "")
+        assert cleanup_workflow_id
+        assert cleanup_workflow_id != sourcing["workflow_id"]
+        assert cleanup["intent_understanding"]["action"] == "candidate_relationship_cleanup"
+        assert cleanup["intent_understanding"]["refers_to_previous"] is False
+        assert cleanup["turn_decision"]["authorization"]["mode"] == "explicit_execute"
+        assert "尚未归档任何关系" in cleanup["answer"]
+
+        waiting = self._wait_for_workflow(cleanup_workflow_id, {"waiting_approval", "failed"})
+        assert waiting["workflow"]["status"] == "waiting_approval"
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        assert approval["action_type"] == "candidate_relationship_cleanup"
+        assert approval["risk_level"] == "R2"
+        assert approval["preflight"]["scope_mode"] == "all_active"
+        assert approval["preflight"]["candidate_records_preserved"] is True
+
+        conn = self.service._connect()
+        try:
+            relation_stage = conn.execute(
+                "SELECT clean_stage FROM job_candidates WHERE id=30"
+            ).fetchone()[0]
+            candidate_status = conn.execute(
+                "SELECT status FROM candidates WHERE id=40"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert "初筛不通过" not in str(relation_stage or "")
+        assert candidate_status == "new"
 
     def test_realistic_followup_facts_do_not_replace_the_active_sourcing_goal(self) -> None:
         session_id = "replay_context_goal_separation"

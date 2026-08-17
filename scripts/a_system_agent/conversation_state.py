@@ -15,7 +15,8 @@ _SPEECH_ACTS = {
 }
 _ACTIONS = {
     "none", "candidate_sourcing", "strategy_revision", "candidate_outreach",
-    "candidate_review", "job_publish", "job_split", "job_archive",
+    "candidate_review", "candidate_relationship_cleanup",
+    "job_publish", "job_split", "job_archive",
     "recommendation", "salary",
 }
 _FACT_KINDS = {
@@ -38,6 +39,7 @@ _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"(?:给|为).{0,40}(?:找|寻访|搜索|搜寻|补充|补池).{0,30}(?:人选|候选人)",
         r"(?:找|寻访|搜索|搜寻|补池|补充).{0,24}(?:人选|候选人)",
         r"(?:人选|候选人).{0,24}(?:再找|继续找|补充|补池|寻访|搜索)",
+        r"(?:岗位|职位).{0,24}(?:再找|继续找|重新找|找找).{0,8}(?:人|人选|候选人)",
         r"(?:跑|开|启动|开始|继续|重新|再跑).{0,12}(?:一轮|新一轮)?.{0,12}(?:寻访|搜索)",
         r"(?:这个|当前|该).{0,12}(?:岗位|职位).{0,12}(?:再来|再跑|继续).{0,8}(?:一轮|新一轮)",
         r"(?:再触达|补充触达|补充并触达|再联系).{0,24}(?:一些|一批|新)?.{0,8}(?:人选|候选人)",
@@ -58,6 +60,12 @@ _ACTION_PATTERNS: dict[str, tuple[str, ...]] = {
         r"(?:比较|对比|排序).{0,30}(?:前|top|TOP)?\s*\d*\s*(?:位|个|名)?(?:候选池|候选人|人选)",
         r"(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d+\s*(?:位|个|名|人)",
         r"(?:候选池|候选人|人选).{0,30}(?:比较|对比|排序).{0,20}(?:前|top|TOP)?\s*\d*",
+    ),
+    "candidate_relationship_cleanup": (
+        r"(?=.*(?:清理|解除|移除))"
+        r"(?=.*(?:(?:岗位|职位).{0,16}(?:关联|关系)|(?:关联|关系).{0,16}(?:岗位|职位)))"
+        r"(?=.*(?:(?:保留|不(?:用|要|会)?(?:清理|删除|移除)|别(?:清理|删除|移除)|不动).{0,16}(?:人选|候选人|人才库)"
+        r"|(?:人选|候选人|人才库).{0,16}(?:保留|不删|不清理|不移除|不动)))",
     ),
     "job_publish": (
         r"(?:发布|上架|发到猎聘|准备发布).{0,24}(?:岗位|职位)",
@@ -96,6 +104,39 @@ def _looks_like_question(message: str) -> bool:
     return bool(
         re.search(r"[?？]$", text)
         or re.search(r"(?:吗|呢|如何|怎么|为什么|为何|是否|能不能|可不可以|要不要|什么|多少|哪(?:个|些)?)", text)
+    )
+
+
+_NEGATED_CANDIDATE_SOURCING_PATTERNS = (
+    r"(?:先不要|不要|先别|别|不用|无需|不必)\s*(?:再|继续|重新)?\s*"
+    r"(?:找人|找人选|找候选人|寻访|搜索人选|搜索候选人|搜人|补池|补人)",
+    r"(?:先不要|不要|先别|别|不用|无需|不必)[^，。；;]{0,30}(?:岗位|职位)"
+    r"[^，。；;]{0,10}(?:再|继续|重新)?\s*(?:找人|找人选|找候选人|寻访|搜索|搜人|补池|补人)",
+)
+
+
+def candidate_sourcing_request_negated(message: str) -> bool:
+    """Return true when the current turn explicitly says not to source more people."""
+    text = _clean(message)
+    if not text:
+        return False
+    return any(re.search(pattern, text, re.I) for pattern in _NEGATED_CANDIDATE_SOURCING_PATTERNS)
+
+
+def candidate_relationship_cleanup_requested(message: str) -> bool:
+    """Recognize an unlink-only command without treating candidate deletion as safe."""
+    text = _clean(message)
+    if not text or _looks_like_question(text):
+        return False
+    if re.search(
+        r"(?:不要|不用|别|无需|不必).{0,8}(?:清理|解除|移除).{0,20}"
+        r"(?:(?:岗位|职位).{0,16}(?:关联|关系)|(?:关联|关系).{0,16}(?:岗位|职位))",
+        text,
+    ):
+        return False
+    return any(
+        re.search(pattern, text, re.I)
+        for pattern in _ACTION_PATTERNS["candidate_relationship_cleanup"]
     )
 
 
@@ -303,6 +344,8 @@ def action_evidence_for_turn(
     pending = dict(pending_plan_ref or {})
     if not text or _looks_like_question(text):
         return []
+    if action == "candidate_sourcing" and candidate_sourcing_request_negated(text):
+        return []
     if _looks_like_observation(text) and not re.search(r"(?:帮我|请|给我|继续|再找|重新|开始|执行|启动)", text):
         return []
     if speech_act == "confirm":
@@ -321,6 +364,8 @@ def action_evidence_for_turn(
             return [text]
     if action not in _ACTIONS or action == "none":
         return []
+    if action == "candidate_relationship_cleanup":
+        return [text] if candidate_relationship_cleanup_requested(text) else []
     return [text] if any(re.search(pattern, text, re.I) for pattern in _ACTION_PATTERNS.get(action, ())) else []
 
 

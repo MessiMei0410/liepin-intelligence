@@ -171,6 +171,7 @@ class WorkflowPlanMixin:
         "new_candidate_outreach": ("sourcing", "寻访"),
         "candidate_outreach": ("outreach", "候选人触达"),
         "candidate_review": ("candidate_review", "候选人核验"),
+        "candidate_relationship_cleanup": ("candidate_relationship_cleanup", "岗位候选关系归档"),
         "job_publish": ("job_publish", "岗位发布"),
         "job_split": ("job_library", "岗位拆分"),
         "job_archive": ("job_library", "岗位归档"),
@@ -193,6 +194,7 @@ class WorkflowPlanMixin:
         ("client_recommendation", "recommendation", "客户推荐"),
         ("recommendation_report", "recommendation_report", "推荐报告"),
         ("salary_negotiation", "salary", "谈薪处理"),
+        ("candidate_relationship_cleanup", "candidate_relationship_cleanup", "岗位候选关系归档"),
         ("candidate_batch_assessment", "assessment", "批量评估"),
     )
 
@@ -423,7 +425,14 @@ class WorkflowPlanMixin:
         steps: list[dict[str, Any]] = []
         add = lambda *args: steps.append(self._step(*args))
 
-        if semantic_action == "candidate_review":
+        if semantic_action == "candidate_relationship_cleanup":
+            add(
+                "candidate_relationship_cleanup",
+                "归档岗位候选关系",
+                "assessment",
+                "审批前按当前岗位画像和有效评估生成精确预览；仅归档岗位关系并保留人才主档",
+            )
+        elif semantic_action == "candidate_review":
             if context.get("type") == "job":
                 add("job_diagnosis", "锁定岗位核验范围", "jd_calibration", "读取岗位漏斗、风险提示和当前待核验人选，不触发外部渠道")
                 add("talent_pool_search", "整理候选人核验队列", "verification", "优先继承上一轮指出的判断过期、待确认和已触达未回复人选", ["job_diagnosis"])
@@ -636,6 +645,7 @@ class WorkflowPlanMixin:
             "new_candidate_outreach": {"job"},
             "candidate_outreach": {"candidate", "queue"},
             "candidate_review": {"job", "candidate", "queue"},
+            "candidate_relationship_cleanup": {"job"},
             "job_publish": {"job"},
             "recommendation": {"candidate"},
             "salary": {"candidate"},
@@ -654,6 +664,7 @@ class WorkflowPlanMixin:
             "job_archive": {"job_library_update"},
             "recommendation": {"recommendation_report"},
             "salary": {"salary_verification", "salary_negotiation"},
+            "candidate_relationship_cleanup": {"candidate_relationship_cleanup"},
         }.get(semantic_action, set())
         if semantic_action == "recommendation" and self._recommendation_requires_send(
             str(understanding.get("objective") or "")
@@ -712,6 +723,7 @@ class WorkflowPlanMixin:
             "client_recommendation": {"candidate"},
             "offer_confirmation": {"candidate"},
             "identity_merge_preflight": {"candidate"},
+            "candidate_relationship_cleanup": {"job"},
         }
         for step in steps:
             required = required_contexts.get(step["capability_id"])
@@ -720,6 +732,17 @@ class WorkflowPlanMixin:
                 raise ValueError(f"能力 {step['capability_id']} 执行前必须唯一定位 {expected} 对象")
             if required and selected.get("type") in {"job", "candidate"} and not selected.get("id"):
                 raise ValueError(f"能力 {step['capability_id']} 执行前缺少唯一对象 ID")
+            if step["capability_id"] == "candidate_relationship_cleanup":
+                requested_scope = str(raw_inputs.get("scope_mode") or "").strip().lower()
+                if requested_scope not in {"all_active", "nonmatching"}:
+                    all_scope = bool(re.search(
+                        r"(?:候选池|候选人|人选|岗位关联|岗位关系).{0,20}(?:全部|所有|全都|都清理|都移除|都解除)"
+                        r"|(?:全部|所有|全都).{0,20}(?:候选池|候选人|人选|岗位关联|岗位关系)",
+                        objective,
+                    ))
+                    requested_scope = "all_active" if all_scope else "nonmatching"
+                step["inputs"]["scope_mode"] = requested_scope
+                step["inputs"]["preserve_candidate_records"] = True
             if step["capability_id"] != "job_library_update":
                 continue
             if not client:
@@ -1221,4 +1244,3 @@ class WorkflowPlanMixin:
             except Exception:
                 pass
         return self.get_workflow(source_workflow_id)
-

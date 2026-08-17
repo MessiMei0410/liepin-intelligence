@@ -127,6 +127,43 @@ describe('轻量工作流浮层', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/approvals/approval-1/decision'))).toBe(true)
   })
 
+  it('紧凑审批面在批准前展示关系归档锁定范围', () => {
+    const value: Workflow = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'waiting_approval' },
+      approvals: [{
+        approval_id: 'approval-cleanup',
+        title: '归档岗位候选关系',
+        risk_level: 'R2',
+        status: 'pending',
+        created_at: '2026-08-17 12:00:00',
+        preflight: {
+          channel: 'ASA 内部',
+          batch_size: 2,
+          scope_mode: 'nonmatching',
+          candidate_records_preserved: true,
+          exact_content: '批准后只归档 2 条岗位关系，人才主档及全局状态保持不变。',
+          items: [
+            { job_candidate_id: 201, candidate: '甲工', company: '甲公司', title: '机械工程师', reason: '岗位方向不符' },
+            { job_candidate_id: 202, candidate: '乙工', company: '乙公司', title: '软件工程师', reason: '岗位方向不符' },
+          ],
+        },
+      }],
+    }
+
+    renderDialog(value)
+
+    const approval = screen.getByRole('region', { name: '待审批操作' })
+    const snapshot = screen.getByLabelText('审批锁定范围')
+    expect(approval).toContainElement(snapshot)
+    expect(snapshot).toHaveTextContent('锁定 2 条岗位关系')
+    expect(snapshot).toHaveTextContent('规则判定不匹配关系')
+    expect(snapshot).toHaveTextContent('人才主档及全局状态保持不变')
+    expect(snapshot).toHaveTextContent('甲工')
+    expect(snapshot).toHaveTextContent('乙工')
+    expect(screen.getByRole('button', { name: '批准执行' })).toBeInTheDocument()
+  })
+
   it('审批成功不等待悬挂回读并立即移除已消费入口', async () => {
     const reload = vi.fn(() => new Promise<void>(() => {}))
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true })))

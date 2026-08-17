@@ -193,7 +193,10 @@ const messageReferences = (message: AgentMessage): AgentReference[] => {
       refs[existingIndex] = { ...existing, subtitle: next.subtitle }
     }
   }
-  ;(message.references || []).forEach(addRef)
+  // Tool results are internal provenance, not user-facing business objects. Keep
+  // them in the persisted message/audit payload, but do not turn every read-only
+  // query into an expandable object card in the conversation.
+  ;(message.references || []).filter(reference => reference.type !== 'tool_result').forEach(addRef)
   for (const action of message.suggested_actions || []) {
     const type = String(action.type || '')
     if (!['open_candidate', 'open_job', 'open_workflow'].includes(type) || action.id === undefined) continue
@@ -554,6 +557,18 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           // 查询型名单直答：自动弹出完整名单弹窗（非消息内嵌卡）。
           if (event.data.action_card && (event.data.action_card as CandidateListCardData).type === 'candidate_list') {
             setCandidateListDialog(event.data.action_card as CandidateListCardData)
+          }
+          // 显式导航指令（“把他详情页拉起来”）：后端在 open_* 动作上标 auto，
+          // 本轮直接打开对象面板，与点击 SuggestedActionBar 走同一条链路。
+          const autoOpen = (event.data.suggested_actions || []).find(action =>
+            Boolean(action.auto) && ['open_candidate', 'open_job', 'open_workflow'].includes(String(action.type || '')) && action.id !== undefined && action.id !== null
+          )
+          if (autoOpen) {
+            onOpenFullObject({
+              type: String(autoOpen.type).replace('open_', ''),
+              id: String(autoOpen.id),
+              label: String(autoOpen.label || autoOpen.title || '打开对象'),
+            })
           }
         } else {
           setTurnProgress('')

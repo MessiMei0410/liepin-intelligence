@@ -192,4 +192,44 @@ describe('工作流动作反馈', () => {
     expect(scope).toHaveTextContent('不作为平台筛选')
     expect(screen.getByRole('button', { name: '批准本次外部寻访' })).toBeInTheDocument()
   })
+
+  it('R2 岗位关系归档在批准前展示锁定数量、说明和明细样本', () => {
+    const value = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'waiting_approval' },
+      approvals: [{
+        approval_id: 'approval-cleanup',
+        title: '归档岗位候选关系',
+        risk_level: 'R2',
+        status: 'pending',
+        created_at: '2026-08-17 12:00:00',
+        preflight: {
+          channel: 'ASA 内部',
+          batch_size: 4,
+          scope_mode: 'all_active',
+          candidate_records_preserved: true,
+          exact_content: '批准后归档当前预览中的 4 条岗位候选关系；不会删除人员或候选人主档。',
+          items: [
+            { job_candidate_id: 101, candidate: '甲工', company: '甲公司', title: '电源工程师', reason: '岗位方向不符' },
+            { job_candidate_id: 102, candidate: '乙工', company: '乙公司', title: '机械工程师', reason: '缺少电源证据' },
+            { job_candidate_id: 103, candidate: '丙工', company: '丙公司', title: '软件工程师', reason: '岗位方向不符' },
+            { job_candidate_id: 104, candidate: '丁工', company: '丁公司', title: '销售经理', reason: '岗位方向不符' },
+          ],
+        },
+      }],
+    }
+
+    render(<WorkflowPanel value={value} jobs={[]} close={() => undefined} reload={() => undefined} openCandidate={() => undefined} archived={() => undefined} />)
+
+    const snapshot = screen.getByLabelText('审批锁定范围')
+    expect(snapshot).toHaveTextContent('锁定 4 条岗位关系')
+    expect(snapshot).toHaveTextContent('全部在推进关系')
+    expect(snapshot).toHaveTextContent('人才主档保留')
+    expect(snapshot).toHaveTextContent('批准后归档当前预览中的 4 条岗位候选关系')
+    expect(snapshot).toHaveTextContent('甲工')
+    expect(snapshot).toHaveTextContent('丙工')
+    expect(snapshot).not.toHaveTextContent('丁工')
+    expect(snapshot).toHaveTextContent('显示 3 / 4 条锁定明细')
+    expect(screen.getByRole('button', { name: '批准执行' })).toBeInTheDocument()
+  })
 })

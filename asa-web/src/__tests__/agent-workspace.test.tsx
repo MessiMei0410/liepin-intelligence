@@ -107,6 +107,46 @@ describe('Agent workspace', () => {
     expect(screen.getByLabelText('消息附件')).toHaveTextContent('探针台CPO方向新增需求.xlsx')
   })
 
+  it('显式导航回合收到 auto 标记的 open_candidate 动作时自动打开人选详情', async () => {
+    const openFull = vi.fn()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-nav"}\n\nevent: text\ndata: {"content":"已打开田逸帆的详情页"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-nav","answer":"已打开田逸帆的详情页","suggested_actions":[{"type":"open_candidate","id":619,"label":"打开人选","auto":true}]}\n\n',
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' }, { onOpenFullObject: openFull })
+
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '把他详情页拉起来' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    await waitFor(() => expect(openFull).toHaveBeenCalledWith(expect.objectContaining({ type: 'candidate', id: '619' })))
+    expect(await screen.findByText('已打开田逸帆的详情页')).toBeInTheDocument()
+  })
+
+  it('未带 auto 标记的 open_candidate 动作保持手动点击，不自动打开', async () => {
+    const openFull = vi.fn()
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        'event: context\ndata: {"session_id":"task-manual"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-manual","answer":"张航目前在待复核阶段","suggested_actions":[{"type":"open_candidate","id":30,"label":"打开人选"}]}\n\n',
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    }))
+    renderWorkspace({ type: 'page', page: 'agent' }, { onOpenFullObject: openFull })
+
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '张航现在什么状态' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('张航目前在待复核阶段')).toBeInTheDocument()
+    expect(openFull).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '打开人选' }))
+    expect(openFull).toHaveBeenCalledWith(expect.objectContaining({ type: 'candidate', id: '30' }))
+  })
+
   it('实时展示理解卡并通过显式对象上下文继续歧义指令', async () => {
     const fetchMock = vi.fn<typeof fetch>(async input => {
       const url = String(input)
@@ -558,6 +598,29 @@ describe('Agent workspace', () => {
     expect(screen.getByRole('table')).toHaveTextContent('电源专家')
     expect(screen.getByRole('button', { name: '展开电源专家' })).toBeInTheDocument()
     expect(screen.queryByText('**优先处理**')).not.toBeInTheDocument()
+  })
+
+  it('不把只读工具查询渲染成对象卡片，但保留业务对象引用', async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-tool-references')
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).endsWith('/api/v1/copilot/sessions/task-tool-references?limit=100')
+      ? mockResponse({
+        ok: true, session_id: 'task-tool-references', business_focus: null,
+        messages: [{
+          role: 'assistant', content: '已完成岗位查询', references: [
+            { type: 'job', id: 142, label: '电源专家', subtitle: '士兰微' },
+            { type: 'tool_result', id: 'call-job', label: 'query_job', subtitle: '查询成功' },
+            { type: 'tool_result', id: 'call-candidate', label: 'query_candidate', subtitle: '查询成功' },
+            { type: 'tool_result', id: 'call-knowledge', label: 'search_knowledge', subtitle: '查询成功' },
+          ],
+        }],
+      })
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    expect(await screen.findByRole('button', { name: '展开电源专家' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '展开query_job' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '展开query_candidate' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '展开search_knowledge' })).not.toBeInTheDocument()
   })
 
   it('工作流回复去重对象卡，并直接展示推进方案摘要', async () => {

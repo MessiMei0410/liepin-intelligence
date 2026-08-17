@@ -83,3 +83,42 @@ def test_cancel_without_a_pending_plan_has_no_business_effect() -> None:
     )
     assert decision["effect"] == "answer"
     assert decision["safe_for_action"] is False
+
+
+def test_job_scoped_find_people_command_creates_a_new_sourcing_plan() -> None:
+    message = "士兰微的电源专家岗位再找找人"
+    decision = build_turn_decision(
+        _understanding(
+            speech_act="propose",
+            action_evidence=[message],
+            refers_to_previous=False,
+        ),
+        message=message,
+        pending_plan_ref={"workflow_id": "workflow_old", "version": 1, "plan_hash": "old"},
+    )
+
+    assert decision["effect"] == "create_plan"
+    assert decision["safe_for_action"] is True
+    assert decision["authorization"]["evidence"] == [message]
+
+
+def test_relationship_cleanup_has_explicit_evidence_and_is_not_candidate_review() -> None:
+    message = "可以，直接清理和这个士兰微的岗位关联，不用清理掉人选"
+    decision = build_turn_decision(
+        _understanding(
+            speech_act="execute",
+            action="candidate_relationship_cleanup",
+            objective=message,
+            action_evidence=[],
+            refers_to_previous=False,
+        ),
+        message=message,
+        pending_plan_ref={"workflow_id": "workflow_old", "version": 1, "plan_hash": "old"},
+    )
+
+    assert decision["goal"]["action"] == "candidate_relationship_cleanup"
+    assert decision["effect"] == "create_plan"
+    assert decision["safe_for_action"] is True
+    assert decision["blocked_reason"] == ""
+    assert decision["authorization"]["mode"] == "explicit_execute"
+    assert decision["authorization"]["evidence"] == [message]

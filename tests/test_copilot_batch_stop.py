@@ -5,6 +5,8 @@
    普通名单/分级名单不触发写库。
 2. apply_batch_stop 落库口径——H5 初筛不通过、X-SaaS raw_status 区分、
    candidates.status 同步、candidate_events 审计、幂等跳过已停止。
+3. Copilot 批量停止必须先生成 R2 岗位关系归档审批；审批前不写库，
+   批准后只更新岗位关系并保留 candidates 全局状态。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -27,6 +30,22 @@ from a_system_agent.batch_stop import (  # noqa: E402
 from a_system_agent.copilot_intent import _requests_batch_stop  # noqa: E402
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment  # noqa: E402
 from a_system_agent import AgentService, FakeLLM  # noqa: E402
+
+
+def _wait_for_workflow(
+    service: AgentService,
+    workflow_id: str,
+    statuses: set[str],
+    *,
+    timeout: float = 3.0,
+) -> dict[str, object]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        workflow = service.get_workflow(workflow_id)
+        if str(workflow["workflow"]["status"]) in statuses:
+            return workflow
+        time.sleep(0.02)
+    return service.get_workflow(workflow_id)
 
 
 def _make_db() -> Path:
@@ -114,7 +133,7 @@ class BatchStopTest(unittest.TestCase):
 
 
 class CopilotBatchStopIntegrationTest(AgentDbCase):
-    """端到端：AgentService.copilot 收到“过滤 + 停止推进”时应真正批量落库。"""
+    """端到端：过滤 + 停止推进必须先经过 R2 岗位关系归档审批。"""
 
     def setUp(self) -> None:
         super().setUp()
@@ -145,7 +164,7 @@ class CopilotBatchStopIntegrationTest(AgentDbCase):
         conn.commit()
         conn.close()
 
-    def test_copilot_batch_stop_writes_and_receipts(self) -> None:
+    def test_copilot_batch_stop_requires_r2_and_preserves_candidate_master(self) -> None:
         service = AgentService(self.db_path, FakeLLM(fake_assessment()))
         self.addCleanup(service.close)
         result = service.copilot(
@@ -154,16 +173,38 @@ class CopilotBatchStopIntegrationTest(AgentDbCase):
             context={"type": "job", "id": 10, "page": "positions"},
         )
 
+        workflow_id = str(result.get("workflow_id") or "")
+        self.assertTrue(workflow_id)
+        waiting = _wait_for_workflow(service, workflow_id, {"waiting_approval", "failed"})
+        self.assertEqual(waiting["workflow"]["status"], "waiting_approval")
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        self.assertEqual(approval["risk_level"], "R2")
+        self.assertEqual(approval["preflight"]["relationship_ids"], [31])
+        self.assertTrue(approval["preflight"]["candidate_records_preserved"])
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        rows = {row["id"]: row for row in conn.execute("SELECT id, clean_stage, stop_reason FROM job_candidates WHERE id IN (30, 31)")}
+        before = {row["id"]: row for row in conn.execute("SELECT id, clean_stage FROM job_candidates WHERE id IN (30, 31)")}
+        candidate_before = conn.execute("SELECT status FROM candidates WHERE id=41").fetchone()[0]
+        conn.close()
+        self.assertNotIn("初筛不通过", str(before[31]["clean_stage"] or ""))
+        self.assertEqual(candidate_before, "new")
+        self.assertIn("尚未归档任何关系", str(result.get("answer") or ""))
+        self.assertIsNone(result.get("batch_stop_receipt"))
+
+        service.decide_workflow_approval(approval["approval_id"], "approve")
+        completed = _wait_for_workflow(service, workflow_id, {"completed", "failed", "blocked"})
+        self.assertEqual(completed["workflow"]["status"], "completed")
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = {row["id"]: row for row in conn.execute("SELECT id, clean_stage FROM job_candidates WHERE id IN (30, 31)")}
+        candidate_after = conn.execute("SELECT status FROM candidates WHERE id=41").fetchone()[0]
         conn.close()
 
         self.assertEqual(rows[31]["clean_stage"], "H5 最近寻访/初筛不通过")
         self.assertNotIn("初筛不通过", str(rows[30]["clean_stage"] or ""))
-        self.assertIn("已执行批量停止推进", str(result.get("answer") or ""))
-        receipt = result.get("batch_stop_receipt") or {}
-        self.assertEqual(int(receipt.get("applied") or 0), 1)
+        self.assertEqual(candidate_after, "new")
 
 
 class CopilotBatchStopUnsupportedDomainGuardTest(AgentDbCase):
@@ -208,8 +249,9 @@ class CopilotBatchStopUnsupportedDomainGuardTest(AgentDbCase):
         conn.close()
 
         self.assertNotIn("初筛不通过", str(row[0] or ""))
+        self.assertIsNone(result.get("workflow_id"))
         self.assertIsNone(result.get("batch_stop_receipt"))
-        self.assertNotIn("已执行批量停止推进", str(result.get("answer") or ""))
+        self.assertIn("无法可靠识别", str(result.get("answer") or ""))
 
 
 class CopilotBatchStopSoftwareTest(AgentDbCase):
@@ -274,14 +316,35 @@ class CopilotBatchStopSoftwareTest(AgentDbCase):
             context={"type": "job", "id": 10, "page": "positions"},
         )
 
+        workflow_id = str(result.get("workflow_id") or "")
+        self.assertTrue(workflow_id)
+        waiting = _wait_for_workflow(service, workflow_id, {"waiting_approval", "failed"})
+        self.assertEqual(waiting["workflow"]["status"], "waiting_approval")
+        approval = next(item for item in waiting["approvals"] if item["status"] == "pending")
+        self.assertEqual(approval["risk_level"], "R2")
+        self.assertEqual(approval["preflight"]["batch_size"], 2)
+
+        conn = sqlite3.connect(self.db_path)
+        before = conn.execute("SELECT clean_stage FROM job_candidates WHERE id=33").fetchone()[0]
+        conn.close()
+        self.assertNotIn("初筛不通过", str(before or ""))
+
+        service.decide_workflow_approval(approval["approval_id"], "approve")
+        completed = _wait_for_workflow(service, workflow_id, {"completed", "failed", "blocked"})
+        self.assertEqual(completed["workflow"]["status"], "completed")
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         rows = {row["id"]: row for row in conn.execute("SELECT id, clean_stage FROM job_candidates WHERE id IN (32, 33)")}
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute("SELECT id, status FROM candidates WHERE id IN (42, 43)")
+        }
         conn.close()
 
         self.assertNotIn("初筛不通过", str(rows[32]["clean_stage"] or ""))
         self.assertEqual(rows[33]["clean_stage"], "H5 最近寻访/初筛不通过")
-        self.assertEqual(int((result.get("batch_stop_receipt") or {}).get("applied") or 0), 2)
+        self.assertEqual(statuses, {42: "new", 43: "new"})
 
 
 if __name__ == "__main__":

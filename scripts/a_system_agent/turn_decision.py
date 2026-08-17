@@ -245,7 +245,12 @@ def build_turn_decision(
             effect = "clarify"
     elif speech_act == "execute":
         effect = "start_plan" if pending_ref.get("workflow_id") and understanding.get("refers_to_previous") else "create_plan"
-        explicit_execute = bool(re.search(r"(?:立即|马上|现在|直接)?(?:开始|执行|启动|马上搜|直接搜)", message))
+        explicit_execute = bool(re.search(
+            r"(?:立即|马上|现在|直接)?(?:开始|执行|启动|马上搜|直接搜)"
+            r"|直接(?:清理|解除|移除)"
+            r"|(?:岗位|职位).{0,24}(?:再找|继续找|重新找|找找).{0,8}(?:人|人选|候选人)",
+            message,
+        ))
         authorization = "confirm_exact_plan" if effect == "start_plan" else "explicit_execute" if explicit_execute else "none"
     elif speech_act == "propose":
         effect = "create_plan" if action_evidence else "answer"

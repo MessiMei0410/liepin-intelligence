@@ -29,7 +29,7 @@ min_confidence = 0.80
 min_evidence_coverage = 0.75
 
 [skills]
-enabled = ["job_diagnosis", "candidate_assessment", "verification_plan", "communication_draft", "liepin_resume_capture", "opencli_usage", "opencli_browser_read", "document_understanding", "job_intake", "jd_calibration", "job_library_update", "talent_pool_search", "search_strategy", "multi_channel_sourcing", "job_publish_prepare", "job_publish_execute", "resume_export", "candidate_batch_assessment", "candidate_pool_filter", "outreach_queue", "pool_gap_advice", "matching_report", "recommendation_report", "client_recommendation", "reply_triage", "communication_draft_batch", "outreach_prepare", "outreach_execute", "identity_merge_preflight", "interview_followup", "salary_verification", "salary_negotiation", "decision_coaching", "offer_confirmation", "onboarding_followup", "project_retrospective", "memory_capture"]
+enabled = ["job_diagnosis", "candidate_assessment", "verification_plan", "communication_draft", "liepin_resume_capture", "opencli_usage", "opencli_browser_read", "document_understanding", "job_intake", "jd_calibration", "job_library_update", "talent_pool_search", "search_strategy", "multi_channel_sourcing", "job_publish_prepare", "job_publish_execute", "resume_export", "candidate_batch_assessment", "candidate_pool_filter", "candidate_relationship_cleanup", "outreach_queue", "pool_gap_advice", "matching_report", "recommendation_report", "client_recommendation", "reply_triage", "communication_draft_batch", "outreach_prepare", "outreach_execute", "identity_merge_preflight", "interview_followup", "salary_verification", "salary_negotiation", "decision_coaching", "offer_confirmation", "onboarding_followup", "project_retrospective", "memory_capture"]
 
 [memory]
 enabled = true

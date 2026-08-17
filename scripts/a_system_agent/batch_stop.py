@@ -74,13 +74,22 @@ def apply_batch_stop(
     *,
     actor: str = "copilot",
     source: str = "copilot_batch_stop",
+    update_candidate_status: bool = True,
 ) -> dict[str, Any]:
-    """幂等地批量落库停止；已停止的人选会被跳过。"""
+    """幂等地批量落库停止；已停止的人选会被跳过。
+
+    ``update_candidate_status=False`` 用于岗位关系级归档：只停止当前
+    ``job_candidates`` 关系并保留人才库 ``candidates`` 主档的全局状态。
+    """
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     applied = skipped = events = candidates_updated = 0
     try:
         conn.execute("BEGIN IMMEDIATE")
+        job_candidate_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(job_candidates)").fetchall()
+        }
         for item in items:
             jc_id = int(item.get("jc_id") or 0)
             if jc_id <= 0:
@@ -103,19 +112,23 @@ def apply_batch_stop(
             stage = "H5 最近寻访/初筛不通过"
             code = str(item.get("stop_reason") or "other")
             note = str(item.get("note") or "ASA 批量停止推进")
+            assignments = ["clean_stage=?", "flow_bucket=?", "raw_status=?", "raw_stage=?"]
+            values: list[Any] = [stage, "最近寻访", raw_status, stage]
+            if "clean_reason" in job_candidate_columns:
+                assignments.append("clean_reason=?")
+                values.append(note)
+            if "stop_reason" in job_candidate_columns:
+                assignments.append("stop_reason=?")
+                values.append(code)
+            assignments.append("updated_at=datetime('now','localtime')")
             conn.execute(
-                """
-                UPDATE job_candidates
-                   SET clean_stage=?, flow_bucket=?, raw_status=?, raw_stage=?,
-                       clean_reason=?, stop_reason=?, updated_at=datetime('now','localtime')
-                 WHERE id=?
-                """,
-                (stage, "最近寻访", raw_status, stage, note, code, jc_id),
+                f"UPDATE job_candidates SET {', '.join(assignments)} WHERE id=?",
+                (*values, jc_id),
             )
             applied += 1
 
             source_candidate_id = str(row["source_candidate_id"] or "").strip()
-            if source_candidate_id.isdigit():
+            if update_candidate_status and source_candidate_id.isdigit():
                 candidate = conn.execute(
                     "SELECT id FROM candidates WHERE id=?", (int(source_candidate_id),)
                 ).fetchone()
@@ -144,14 +157,24 @@ def apply_batch_stop(
                 "grade": item.get("grade"),
                 "grade_reason": item.get("reason"),
                 "source": source,
+                "candidate_record_preserved": not update_candidate_status,
             }
             conn.execute(
                 """
                 INSERT INTO candidate_events
                 (job_candidate_id, person_id, job_id, event_type, event_status, event_time, summary, raw_json, source_table)
-                VALUES (?,?,?,?,?,datetime('now','localtime'),?,?,'copilot_batch_stop')
+                VALUES (?,?,?,?,?,datetime('now','localtime'),?,?,?)
                 """,
-                (jc_id, row["person_id"], row["job_id"], "resume_review_completed", "stop", note, json.dumps(raw, ensure_ascii=False)),
+                (
+                    jc_id,
+                    row["person_id"],
+                    row["job_id"],
+                    "resume_review_completed",
+                    "stop",
+                    note,
+                    json.dumps(raw, ensure_ascii=False),
+                    source,
+                ),
             )
             events += 1
         conn.commit()

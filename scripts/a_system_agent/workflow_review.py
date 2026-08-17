@@ -238,8 +238,6 @@ class WorkflowReviewMixin:
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         conn = self._connect()
         try:
-            if self._refresh_expired_approvals(conn, workflow_id):
-                conn.commit()
             workflow = conn.execute("SELECT * FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow is None:
                 raise ValueError("工作流不存在")
@@ -469,8 +467,6 @@ class WorkflowReviewMixin:
         """单步骤详情：完整 output（含渠道审计 stdout 与实时注入的评估队列），按需取用。"""
         conn = self._connect()
         try:
-            if self._refresh_expired_approvals(conn, workflow_id):
-                conn.commit()
             workflow = conn.execute("SELECT goal_id FROM agent_workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow is None:
                 raise ValueError("工作流不存在")
@@ -724,4 +720,3 @@ class WorkflowReviewMixin:
             return {"ok": True, "feedback_type": feedback_type, "learning_proposal": proposal, "quality": self.quality_metrics()["metrics"]}
         finally:
             conn.close()
-

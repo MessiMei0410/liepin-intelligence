@@ -93,6 +93,17 @@ _STRATEGY_V2 = {
 _ANSWER = "建议补充关键词「通信电源」「基站电源」，并扩展对标公司台达、维谛；也可以加过滤条件排除销售岗。"
 
 
+def _selected_with_pending_workflow(workflow_id: str = "workflow_abc123") -> dict:
+    return {
+        "type": "job",
+        "id": 10,
+        "business_focus": {
+            "job": {"id": 10},
+            "pending_workflow": {"workflow_id": workflow_id, "status": "planned"},
+        },
+    }
+
+
 def _make_db(tmp: Path, *, sourcing_status: str = "pending", workflow_status: str = "planned") -> Path:
     db_path = tmp / "agent.db"
     conn = sqlite3.connect(db_path)
@@ -213,7 +224,7 @@ class BuildPatchTest(unittest.TestCase):
             {"type": "add_company", "value": "维谛", "confidence": 0.7},
         ]})
         service = _StubService(db_path, llm)
-        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, {"type": "job", "id": 10})
+        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, _selected_with_pending_workflow())
         assert patch is not None
         assert patch["version"] == "1.0"
         assert patch["source"] == "copilot"
@@ -227,23 +238,58 @@ class BuildPatchTest(unittest.TestCase):
     def test_llm_failure_returns_none(self) -> None:
         db_path = _make_db(self.tmp)
         service = _StubService(db_path, _StubLLM(None))
-        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, {"type": "job", "id": 10})
+        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, _selected_with_pending_workflow())
         assert patch is None
 
     def test_all_duplicated_returns_none(self) -> None:
         db_path = _make_db(self.tmp)
         llm = _StubLLM({"changes": [{"type": "add_keyword", "value": "服务器电源"}]})
         service = _StubService(db_path, llm)
-        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, {"type": "job", "id": 10})
+        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, _selected_with_pending_workflow())
         assert patch is None
 
     def test_sourcing_started_returns_none(self) -> None:
         db_path = _make_db(self.tmp, sourcing_status="completed", workflow_status="completed")
         llm = _StubLLM({"changes": [{"type": "add_keyword", "value": "通信电源"}]})
         service = _StubService(db_path, llm)
-        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, {"type": "job", "id": 10})
+        patch = _build_strategy_patch(service, "策略上还有什么建议", _ANSWER, _selected_with_pending_workflow())
         assert patch is None
         assert llm.calls == 0  # 不可修订时连 LLM 提取都不触发
+
+    def test_job_context_does_not_bind_historical_waiting_workflow(self) -> None:
+        """caf9268691d8: a job page alone must not revive an old waiting workflow."""
+        db_path = _make_db(self.tmp, workflow_status="waiting_approval")
+        llm = _StubLLM({"changes": [{"type": "add_keyword", "value": "通信电源"}]})
+        service = _StubService(db_path, llm)
+
+        patch = _build_strategy_patch(
+            service,
+            "士兰微的电源专家岗位再找找人",
+            _ANSWER,
+            {"type": "job", "id": 10},
+        )
+
+        assert patch is None
+        assert llm.calls == 0
+
+    def test_current_turn_created_workflow_is_a_valid_binding(self) -> None:
+        db_path = _make_db(self.tmp)
+        llm = _StubLLM({"changes": [{"type": "add_keyword", "value": "通信电源"}]})
+        service = _StubService(db_path, llm)
+
+        patch = _build_strategy_patch(
+            service,
+            "策略上还有什么建议",
+            _ANSWER,
+            {
+                "type": "job",
+                "id": 10,
+                "workflow_intent": {"workflow_id": "workflow_abc123", "status": "planned"},
+            },
+        )
+
+        assert patch is not None
+        assert patch["workflow_id"] == "workflow_abc123"
 
     def test_selected_workflow_context_resolves_exact_target_when_job_has_multiple_rounds(self) -> None:
         db_path = _make_db(self.tmp)
