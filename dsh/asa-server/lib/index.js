@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { homedir } from "node:os";
@@ -13,13 +13,36 @@ import { SessionId } from "@deepseek-ai/dsh-session";
  *   POST /turn {message, session_id?} -> SSE 流（text 增量 + done），会话复用
  *   GET  /health                     -> {ok}
  * 流式：订阅 agent 会话的 session/event 火线，把 assistant/chunk(text-delta) 实时转成
- * SSE `text` 事件；轮结束聚合最终文本发 `done`。同 session_id 复用 live agent（多轮记忆）。
+ * SSE `text` 事件；轮结束发 `done`。同 session_id 复用 live agent（多轮记忆）。
+ *
+ * v1.3 加固（审计后）：
+ * - 事件订阅在 finally 中 dispose，异常路径不再残留监听器（此前会叠加重复推流）。
+ * - Agent 池带句柄：空闲 TTL（默认 30 分钟）+ 上限 LRU 回收，常驻不再只增不减。
+ * - 客户端断连（前端 AbortController）即时 cancel 本轮，释放会话队列、止损 LLM 调用。
+ * - 单轮总超时（默认 300s，ASA_DSH_TURN_TIMEOUT_MS），超时 cancel 并回 done ok:false。
+ * - 请求体上限（默认 1MB，ASA_DSH_MAX_BODY_BYTES），超限 413。
+ * - token 比较改恒定时间（timingSafeEqual）。
+ * - CORS 从 `*` 收紧为白名单回显（Core 8765 + vite dev 5173）。
+ * - 会话串行队列在队尾排空后删除条目，Map 不再无界增长。
  */
 
 const name = "asa-resident-runner";
 const inject = ["agentDefaultModel", "agents", "sessions"];
 
 const PORT = Number(process.env.ASA_DSH_RESIDENT_PORT || 8891);
+const TURN_TIMEOUT_MS = Number(process.env.ASA_DSH_TURN_TIMEOUT_MS || 300_000);
+const MAX_BODY_BYTES = Number(process.env.ASA_DSH_MAX_BODY_BYTES || 1_048_576);
+const AGENT_IDLE_TTL_MS = Number(process.env.ASA_DSH_AGENT_IDLE_TTL_MS || 30 * 60 * 1000);
+const MAX_AGENTS = Number(process.env.ASA_DSH_MAX_AGENTS || 20);
+
+// CORS 白名单：ASA app / 浏览器经 Core(8765) 加载的前端，以及 vite dev(5173)。
+// 非浏览器客户端（curl）不带 Origin，不受 CORS 约束；未知 Origin 的浏览器预检直接失败。
+const ALLOWED_ORIGINS = new Set([
+  "http://127.0.0.1:8765",
+  "http://localhost:8765",
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+]);
 
 // 鉴权：本地共享密钥（0600），Core 下发、前端带 Bearer。空 = 未启用鉴权（dev 回退）。
 const TOKEN = process.env.ASA_DSH_TOKEN || (() => {
@@ -30,138 +53,233 @@ const TOKEN = process.env.ASA_DSH_TOKEN || (() => {
   }
 })();
 
-/** 把本轮新产生的事件聚合为最终文本 + 结束原因（与 headless 的 summarize 同构）。 */
-function summarize(events, firstSeq) {
-  let started = false;
-  let text = "";
-  let reason;
-  for (const event of events) {
-    if (event.seq < firstSeq) continue;
-    if (event.type === "turn/start") {
-      started = true;
-      continue;
-    }
-    if (!started) continue;
-    if (event.type === "assistant/message") {
-      const joined = event.data.message.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("");
-      if (joined !== "") text = joined;
-    }
-    if (event.type === "turn/end") reason = event.data.reason;
-  }
-  return { text, reason };
+/** 恒定时间比较 Bearer token，避免时序侧信道。 */
+function tokenOk(header) {
+  if (!TOKEN) return true;
+  const actual = Buffer.from(String(header || ""));
+  const expected = Buffer.from(`Bearer ${TOKEN}`);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-/** 取 live agent，没有则按默认模型新建（agent.id === session.id，故按 sessionId 可查回）。 */
-async function ensureAgent(ctx, sessionId) {
-  const agents = ctx.get("agents");
-  const existing = agents.get(sessionId);
-  if (existing) return existing;
-  const defaultModel = ctx.get("agentDefaultModel");
-  const selection = defaultModel.currentSelection();
-  const { agent } = await agents.create({
-    sessionId: SessionId(sessionId),
-    meta: { cwd: process.cwd() },
-    agentOptions: { provider: selection.provider, model: selection.model },
-    setup: (agentCtx) => {
-      installModelSelection(agentCtx, { current: selection, assembled: void 0 });
-    },
-  });
-  await agent.whenIdle();
-  return agent;
+function corsHeaders(req) {
+  const headers = {
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) headers["Access-Control-Allow-Origin"] = origin;
+  return headers;
 }
 
-async function readBody(req) {
-  let body = "";
-  for await (const chunk of req) body += chunk;
-  return body;
+function writeJson(res, req, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders(req) });
+  res.end(JSON.stringify(obj));
 }
 
 function writeSse(res, type, data) {
+  if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
+async function readBody(req) {
+  let body = "";
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      const error = new Error("payload too large");
+      error.statusCode = 413;
+      throw error;
+    }
+    body += chunk;
+  }
+  return body;
+}
 
 function apply(ctx) {
+  // Agent 池：sessionId -> { handle, agent, busy, evictTimer }。
+  // create() 返回的 handle 带 dispose 能力（停 loop、注销 agent、清 session），必须持有。
+  const pool = new Map();
+
+  function touch(sessionId, entry) {
+    if (entry.evictTimer) clearTimeout(entry.evictTimer);
+    entry.evictTimer = setTimeout(() => void evict(sessionId), AGENT_IDLE_TTL_MS);
+    entry.evictTimer.unref?.();
+  }
+
+  async function evict(sessionId) {
+    const entry = pool.get(sessionId);
+    if (!entry) return;
+    if (entry.busy) {
+      // 轮次进行中不回收，重新计时；轮结束 touch 会再续命。
+      touch(sessionId, entry);
+      return;
+    }
+    pool.delete(sessionId);
+    try {
+      await entry.handle.dispose();
+    } catch (error) {
+      console.warn(`[asa-resident] dispose agent ${sessionId} failed:`, error);
+    }
+  }
+
+  function evictOldestIdle() {
+    for (const [sessionId, entry] of pool) {
+      if (!entry.busy) {
+        void evict(sessionId);
+        return;
+      }
+    }
+  }
+
+  /** 取 live agent，没有则按默认模型新建（agent.id === session.id，故按 sessionId 可查回）。 */
+  async function ensureAgent(sessionId) {
+    const existing = pool.get(sessionId);
+    if (existing) return existing;
+    if (pool.size >= MAX_AGENTS) evictOldestIdle();
+    const defaultModel = ctx.get("agentDefaultModel");
+    const selection = defaultModel.currentSelection();
+    const handle = await ctx.get("agents").create({
+      sessionId: SessionId(sessionId),
+      meta: { cwd: process.cwd() },
+      agentOptions: { provider: selection.provider, model: selection.model },
+      setup: (agentCtx) => {
+        installModelSelection(agentCtx, { current: selection, assembled: void 0 });
+      },
+    });
+    await handle.agent.whenIdle();
+    const entry = { handle, agent: handle.agent, busy: false, evictTimer: null };
+    pool.set(sessionId, entry);
+    touch(sessionId, entry);
+    return entry;
+  }
+
   // 每会话串行化：并发 /turn 到同一 session 时排队，避免 followup 交错污染会话状态。
+  // 队尾排空后删除条目，Map 不随会话数无界增长。
   const turnQueues = new Map();
   const serializeTurn = (sessionId, fn) => {
     const prev = turnQueues.get(sessionId) || Promise.resolve();
     const next = prev.then(fn, fn);
-    turnQueues.set(sessionId, next.catch(() => {}));
+    const tail = next.catch(() => {});
+    turnQueues.set(sessionId, tail);
+    void tail.then(() => {
+      if (turnQueues.get(sessionId) === tail) turnQueues.delete(sessionId);
+    });
     return next;
   };
 
+  /** 跑一轮：订阅事件火线实时转 SSE，断连/超时即时 cancel，监听器 finally 回收。 */
+  async function runTurn(req, res, sessionId, message) {
+    const entry = await ensureAgent(sessionId);
+    entry.busy = true;
+    const agent = entry.agent;
+    const firstSeq = agent.session.seq;
+    let answer = "";
+    let reason;
+    let finished = false;
+
+    // 客户端断连（前端 abort / 关页）：取消本轮，止损并尽早释放会话队列。
+    const onClose = () => {
+      if (finished) return;
+      try {
+        agent.cancel({ kind: "hook", reason: "client-disconnect" });
+      } catch { /* agent 可能已 dispose */ }
+    };
+    res.on("close", onClose);
+
+    const timeout = setTimeout(() => {
+      try {
+        agent.cancel({ kind: "hook", reason: "turn-timeout" });
+      } catch { /* agent 可能已 dispose */ }
+    }, TURN_TIMEOUT_MS);
+    timeout.unref?.();
+
+    // 订阅本 agent 会话的事件火线：text-delta 实时转 SSE，同时增量聚合最终答案，
+    // 不再每轮全量扫描 session.events（长会话 O(n²)）。
+    const dispose = agent.ctx.on("session/event", (session, event) => {
+      if (event.seq < firstSeq) return;
+      if (event.type === "assistant/chunk") {
+        const chunk = event.data && event.data.chunk;
+        if (chunk && chunk.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") {
+          writeSse(res, "text", { content: chunk.text });
+        }
+      } else if (event.type === "assistant/message") {
+        const content = event.data && event.data.message && event.data.message.content;
+        if (Array.isArray(content)) {
+          const joined = content.filter((block) => block.type === "text").map((block) => block.text).join("");
+          if (joined !== "") answer = joined;
+        }
+      } else if (event.type === "turn/end") {
+        reason = event.data && event.data.reason;
+      }
+    });
+
+    try {
+      writeSse(res, "progress", { message: "DSH 编排中…" });
+      agent.followup(
+        createUserMessage({
+          content: [{ type: "text", text: message }],
+          source: { kind: "user" },
+        }),
+      );
+      await agent.whenIdle();
+      writeSse(res, "done", {
+        session_id: sessionId,
+        answer,
+        ok: reason?.kind === "completed",
+        error: reason?.kind === "error"
+          ? reason.error.message
+          : reason?.kind === "aborted"
+            ? `turn aborted (${reason.reason?.reason || reason.reason?.kind || "unknown"})`
+            : void 0,
+      });
+    } finally {
+      finished = true;
+      clearTimeout(timeout);
+      res.off("close", onClose);
+      dispose();
+      entry.busy = false;
+      if (pool.has(sessionId)) touch(sessionId, entry);
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
-      res.writeHead(204, CORS);
+      res.writeHead(204, corsHeaders(req));
       res.end();
       return;
     }
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", ...CORS });
-      res.end(JSON.stringify({ ok: true, profile: "asa-server" }));
+      writeJson(res, req, 200, { ok: true, profile: "asa-server", sessions: pool.size });
       return;
     }
     if (req.method === "POST" && req.url === "/turn") {
+      if (!tokenOk(req.headers.authorization)) {
+        writeJson(res, req, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
       let payload = {};
       try {
         payload = JSON.parse((await readBody(req)) || "{}");
-      } catch {
-        payload = {};
+      } catch (error) {
+        writeJson(res, req, error.statusCode || 400, { ok: false, error: error.statusCode ? "payload too large" : "bad json" });
+        return;
       }
       const message = String(payload.message || "").trim();
       const sessionId = String(payload.session_id || `asa-${randomUUID()}`);
-      if (TOKEN && (req.headers.authorization || "") !== `Bearer ${TOKEN}`) {
-        res.writeHead(401, { "Content-Type": "application/json; charset=utf-8", ...CORS });
-        res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
-        return;
-      }
       if (!message) {
-        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8", ...CORS });
-        res.end(JSON.stringify({ ok: false, error: "message is required" }));
+        writeJson(res, req, 400, { ok: false, error: "message is required" });
         return;
       }
-      res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive", ...CORS });
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        ...corsHeaders(req),
+      });
       try {
-        await serializeTurn(sessionId, async () => {
-          const agent = await ensureAgent(ctx, sessionId);
-          const firstSeq = agent.session.seq;
-          // 订阅本 agent 会话的事件火线，实时转 text-delta → SSE text。
-          const dispose = agent.ctx.on("session/event", (session, event) => {
-            if (event.seq < firstSeq) return;
-            if (event.type === "assistant/chunk") {
-              const chunk = event.data && event.data.chunk;
-              if (chunk && chunk.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") {
-                writeSse(res, "text", { content: chunk.text });
-              }
-            }
-          });
-          writeSse(res, "progress", { message: "DSH 编排中…" });
-          agent.followup(
-            createUserMessage({
-              content: [{ type: "text", text: message }],
-              source: { kind: "user" },
-            }),
-          );
-          await agent.whenIdle();
-          dispose();
-          const outcome = summarize(agent.session.events, firstSeq);
-          writeSse(res, "done", {
-            session_id: sessionId,
-            answer: outcome.text,
-            ok: outcome.reason?.kind === "completed",
-            error: outcome.reason?.kind === "error" ? outcome.reason.error.message : void 0,
-          });
-        });
+        await serializeTurn(sessionId, () => runTurn(req, res, sessionId, message));
       } catch (error) {
         writeSse(res, "done", {
           session_id: sessionId,
@@ -170,11 +288,10 @@ function apply(ctx) {
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      res.end();
+      if (!res.writableEnded) res.end();
       return;
     }
-    res.writeHead(404, { "Content-Type": "application/json; charset=utf-8", ...CORS });
-    res.end(JSON.stringify({ ok: false, error: "not found" }));
+    writeJson(res, req, 404, { ok: false, error: "not found" });
   });
 
   server.listen(PORT, "127.0.0.1", () => {

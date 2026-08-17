@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
+<!--
+  asa-server 常驻服务器守护（KeepAlive：崩溃/重启自动拉起）。
+
+  安装：
+    dsh/bin/deploy-asa-server.sh   # 先装工具链 + 同步 profile
+    cp dsh/launchd/com.asa.dsh-server.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asa.dsh-server.plist
+
+  卸载：
+    launchctl bootout gui/$(id -u)/com.asa.dsh-server
+    rm ~/Library/LaunchAgents/com.asa.dsh-server.plist
+
+  注意：工具链固定在 ~/.dsh/asa-server-toolchain（deploy 脚本安装），不能用仓库里的
+  node_modules——launchd 拉起的进程没有 ~/Documents 的 TCC 授权，读仓库路径会 EPERM。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.asa.dsh-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/messi/.dsh/asa-server-toolchain/node_modules/.bin/dsh</string>
+        <string>--profile</string>
+        <string>asa-server</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/tmp/asa-dsh-spike</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/messi/.dsh/asa-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/messi/.dsh/asa-server.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/messi/.hermes/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/messi</string>
+    </dict>
+</dict>
+</plist>

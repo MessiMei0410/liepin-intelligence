@@ -144,4 +144,52 @@ describe('Agent transport', () => {
     expect(events.map(event => event.type)).toEqual(['context', 'text', 'done'])
     expect(events[2]).toEqual({ type: 'done', data: expect.objectContaining({ answer: '分段完成' }) })
   })
+
+  it('DSH 模式下 dsh-config 失败不缓存负结果，成功后才缓存', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = 'event: done\r\ndata: {"ok":true,"session_id":"s-1","answer":"完成"}\r\n\r\n'
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    let configCalls = 0
+    const turnAuths: Array<string | undefined> = []
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/v1/dsh-config')) {
+        configCalls += 1
+        if (configCalls === 1) throw new Error('core not ready')
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      turnAuths.push((init?.headers as Record<string, string> | undefined)?.Authorization)
+      return streamResponse()
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      const newTurn = () => createAgentTurn('s-1', '你好', { type: 'page' }, 'request-1')
+      // 第一次：config 拉取失败 → dev 回退（无 token），但不缓存
+      await streamAgentTurn(newTurn(), new AbortController().signal, () => {})
+      // 第二次：重新拉取成功 → 带 token，此后缓存
+      await streamAgentTurn(newTurn(), new AbortController().signal, () => {})
+      expect(configCalls).toBe(2)
+      // 第三次：命中缓存，不再拉取
+      await streamAgentTurn(newTurn(), new AbortController().signal, () => {})
+      expect(configCalls).toBe(2)
+      expect(turnAuths).toEqual([undefined, 'Bearer tok-1', 'Bearer tok-1'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
