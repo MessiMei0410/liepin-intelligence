@@ -83,6 +83,20 @@ describe('岗位列表 Jobs', () => {
     expect(screen.getByRole('status')).toHaveTextContent('共 3 个结果')
   })
 
+  it('无筛选模型且池内有活跃人选的岗位显示警告标识', () => {
+    const items = [
+      makeJob(1, { priority: 'P0', filter_domain: 'power', filter_model_missing: false }),
+      makeJob(2, { priority: 'P0', filter_domain: null, filter_model_missing: true }),
+      makeJob(3, { priority: 'P0', filter_domain: null, filter_model_missing: false }),
+    ]
+    render(<Jobs items={items} onSelect={() => {}} />)
+
+    const warned = screen.getByRole('row', { name: /岗位2/ })
+    expect(warned).toHaveTextContent('无筛选模型')
+    expect(screen.getByRole('row', { name: /岗位1/ })).not.toHaveTextContent('无筛选模型')
+    expect(screen.getByRole('row', { name: /岗位3/ })).not.toHaveTextContent('无筛选模型')
+  })
+
   it('超过一页时分批展示，翻页与搜索后页码重置', () => {
     const items = Array.from({ length: 45 }, (_, index) => makeJob(index + 1, { priority: 'P0' }))
     render(<Jobs items={items} onSelect={() => {}} />)
