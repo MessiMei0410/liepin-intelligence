@@ -36,6 +36,22 @@ PORT = int(os.environ.get("ASA_DSH_BRIDGE_PORT", "8890"))
 TIMEOUT = int(os.environ.get("ASA_DSH_TURN_TIMEOUT", "180"))
 
 
+# 鉴权：本地共享密钥（0600），与 Core / DSH 常驻服务器共用。空=未启用鉴权。
+def _read_token() -> str:
+    env_token = os.environ.get("ASA_DSH_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    token_file = os.environ.get("ASA_DSH_TOKEN_FILE", os.path.join(os.path.expanduser("~"), ".dsh", "asa-bridge-token"))
+    try:
+        with open(token_file, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
+
+
+TOKEN = _read_token()
+
+
 def run_turn(message: str) -> dict:
     env = dict(os.environ)
     env["DSH_HOME"] = DSH_HOME
@@ -54,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, Authorization")
 
     def _json(self, code: int, obj: dict) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -80,6 +96,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path != "/turn":
             self._json(404, {"ok": False, "error": "not found"})
+            return
+        if TOKEN and self.headers.get("Authorization", "") != f"Bearer {TOKEN}":
+            self._json(401, {"ok": False, "error": "unauthorized"})
             return
         length = int(self.headers.get("Content-Length", 0) or 0)
         try:

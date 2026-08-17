@@ -171,10 +171,32 @@ export const brainMode = (): 'copilot' | 'dsh' => {
   return new URLSearchParams(location.search).get('brain') === 'dsh' ? 'dsh' : 'copilot'
 }
 
+// DSH 桥接配置（token + url）：从 Core 拉取并缓存；失败回退无 token + 默认 url（dev 环境）。
+let dshConfigCache: { token: string; url: string } | null = null
+
+async function getDshConfig(): Promise<{ token: string; url: string }> {
+  if (dshConfigCache) return dshConfigCache
+  try {
+    const response = await fetch('/api/v1/dsh-config')
+    if (response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { token?: string; url?: string }
+      dshConfigCache = { token: data.token || '', url: data.url || DSH_BRIDGE_URL }
+      return dshConfigCache
+    }
+  } catch {
+    // 忽略，走回退
+  }
+  dshConfigCache = { token: '', url: DSH_BRIDGE_URL }
+  return dshConfigCache
+}
+
 async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {
-  const response = await fetch(DSH_BRIDGE_URL, {
+  const { token, url } = await getDshConfig()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
+  const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ message: turn.message, session_id: turn.sessionId, context: turn.context }),
     signal,
   })
