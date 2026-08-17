@@ -4,6 +4,7 @@ import json
 
 from a_system_agent import AgentService, FakeLLM
 from a_system_agent.copilot_handler import _copilot_pending_plan
+from a_system_agent.copilot_intent import _is_target_count_clause, _verbatim_constraint_candidates
 from a_system_agent.conversation_state import (
     build_context_state,
     deterministic_context_summary,
@@ -29,6 +30,18 @@ def _understanding(**overrides):
     }
     value.update(overrides)
     return value
+
+
+def test_pool_size_observation_is_not_a_target_count() -> None:
+    message = "过滤下这个 287 人大部分都不匹配"
+    assert _is_target_count_clause(message) is False
+    assert _verbatim_constraint_candidates([message]) == []
+
+
+def test_explicit_requested_count_remains_a_target_count() -> None:
+    message = "重新寻访，目标补充 10 人"
+    assert _is_target_count_clause(message) is True
+    assert _verbatim_constraint_candidates([message]) == [{"quote": "目标补充 10 人", "kind": "target_count"}]
 
 
 def test_salary_topic_is_not_a_salary_action_without_action_evidence() -> None:

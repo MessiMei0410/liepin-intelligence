@@ -73,14 +73,14 @@ class BatchStopTest(unittest.TestCase):
                     {"id": 1, "name": "甲", "company": "A", "title": "电气工程师", "grade": "X-排除", "reason": "方向不符"},
                     {"id": 2, "name": "乙", "company": "B", "title": "研发经理", "grade": "X-排除", "reason": "经理"},
                     {"id": 3, "name": "丙", "company": "C", "title": "机械工程师", "grade": "D-无证据", "reason": "无证据"},
+                    {"id": 5, "name": "戊", "company": "E", "title": "电源专家", "grade": "U-待补画像", "reason": "待补画像"},
                     {"id": 4, "name": "丁", "company": "D", "title": "机械工程师", "grade": "A-强", "reason": "硬证据"},
                 ]
             }
         )
-        self.assertEqual(len(items), 3)
+        self.assertEqual(len(items), 2)
         self.assertEqual(items[0]["stop_reason"], "direction_mismatch")
         self.assertEqual(items[1]["stop_reason"], "too_senior")
-        self.assertEqual(items[2]["stop_reason"], "other")
         self.assertIn("资历过高", batch_stop_summary(items))
 
     def test_apply_batch_stop_is_idempotent_and_audited(self) -> None:

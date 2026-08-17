@@ -18,6 +18,7 @@ export type Job = {
   lifecycle_stage?: string; summary?: string; hard_requirements?: string;
   priority?: string; risk?: string; stop_condition?: string;
   candidate_count: number; active_candidate_count: number; updated_at?: string;
+  filter_domain?: string | null; filter_model_missing?: boolean;
 }
 
 export type JobDetail = Job & {

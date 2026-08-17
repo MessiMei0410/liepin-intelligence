@@ -1086,6 +1086,24 @@ def test_dashboard_and_jobs_exclude_stopped_and_empty_left_join_rows(db_path: Pa
         assert all(item.get("lifecycle_stage") != "archived" and item.get("status") != "只读快照" for item in jobs)
 
 
+def test_jobs_expose_filter_domain_coverage_alert(db_path: Path) -> None:
+    """有活跃候选池但无确定性筛选模型的岗位必须显式标记，不能静默。"""
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        jobs = client.get("/api/v1/jobs?limit=200").json()["items"]
+        assert all("filter_domain" in item and "filter_model_missing" in item for item in jobs)
+        for item in jobs:
+            if item["filter_model_missing"]:
+                assert item["filter_domain"] is None
+                assert item["active_candidate_count"] > 0
+            if item["filter_domain"] is not None:
+                assert item["filter_model_missing"] is False
+        # 生产库基线：士兰微电源专家（岗位 142）已覆盖 power 域，不再报警。
+        matched = client.get("/api/v1/jobs", params={"q": "电源专家"}).json()["items"]
+        job142 = next(item for item in matched if item["id"] == 142)
+        assert job142["filter_domain"] == "power"
+        assert job142["filter_model_missing"] is False
+
+
 def test_stopped_candidate_cannot_be_reactivated_by_preflight(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         candidates = []

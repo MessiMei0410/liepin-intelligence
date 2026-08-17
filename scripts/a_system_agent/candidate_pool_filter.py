@@ -7,7 +7,7 @@
 毫秒级返回分级名单；批量评估是逐人 LLM 深评。二者互补：先过滤出 A/B 名单，
 再对 A/B 逐人深评。
 
-分级口径：
+机械/软件分级口径：
 - A-核心：精密证据≥1 且 (半导体 或 运动部件) ≥1 且 仿真≥1，且本科+/经验≥7
 - A-强：硬证据≥4 且 本科+/经验≥7
 - B-中：硬证据≥2
@@ -16,6 +16,10 @@
 - X-排除：原职位/当前职位非机械岗，或管理层级明显超出高级工程师（电气/软件/测试/销售/
   质量/产品经理/副总/总监/经理/部长/主任/装配/报价等）
 - 禁挖：命中 restricted.banned_companies 的公司一律剔除（source=restricted_client）
+
+电源岗使用独立证据模型：A/B 必须含 VPD/VRM/TLVR/DrMOS/多相 Buck 等
+直接证据；通用“电源/硬件/Ansys”只能作为弱辅助证据，不能单独进入 A/B。
+未支持的职能域失败关闭，绝不静默回落到机械规则。
 """
 
 from __future__ import annotations
@@ -64,13 +68,46 @@ SOFTWARE_EXCL_TITLE = [
 ]
 
 
+POWER_DIRECT_KEYS = [
+    "VPD", "Vertical Power Delivery", "VRM", "TLVR", "多相Buck", "多相 Buck",
+    "multiphase buck", "DrMOS", "Smart Power Stage", "Power Stage", "SPS",
+    "CPU供电", "GPU供电", "ASIC供电", "xPU供电", "CPU/GPU供电",
+]
+POWER_SUPPORT_KEYS = [
+    "模块电源", "服务器电源", "负载瞬态", "load transient", "均流", "current sharing",
+    "环路稳定", "loop stability", "磁集成", "TLVR电感", "VR电感", "封装寄生",
+    "一体成型电感", "SIMPLIS", "LTspice", "EVT", "DVT", "PVT",
+]
+POWER_ADJACENT_KEYS = [
+    "电力电子", "Buck", "降压", "电源", "硬件", "磁件", "电感", "热设计",
+    "可靠性", "Ansys",
+]
+POWER_EXCL_TITLE = [
+    "机械", "结构", "软件", "测试", "销售", "市场", "采购", "品质", "质量",
+    "财务", "法务", "行政", "人力", "运营", "供应链", "产品经理", "项目经理",
+    "技术支持", "技术市场", "sales", "marketing", "hr",
+]
+POWER_REVIEW_ONLY_TITLE = ("FAE", "现场应用", "应用工程师")
+
+SUPPORTED_FILTER_DOMAINS = {"mechanical", "software", "power"}
+
+
+class UnsupportedFilterDomainError(ValueError):
+    """Raised when a job has no auditable deterministic filter model."""
+
+
 def job_filter_domain(job_title: str) -> str | None:
     """按岗位名判定可自动分级/批量停止的职能域；不支持返回 None。"""
-    title = str(job_title or "")
+    title = str(job_title or "").strip()
+    normalized = title.lower()
+    if any(token in title for token in ("技术市场", "市场经理", "销售")):
+        return None
     if any(token in title for token in ("软件", "嵌入式", "算法", "C++", "C/C++", "开发", "Python", "Java")):
         return "software"
     if any(token in title for token in ("机械", "结构", "精密")):
         return "mechanical"
+    if title == "电源专家" or any(token in normalized for token in ("vpd", "vrm", "tlvr", "drmos")):
+        return "power"
     return None
 
 
@@ -187,7 +224,7 @@ def filter_job_candidates(
 ) -> dict[str, Any]:
     """按岗位职能域的硬证据过滤候选池，返回分级名单。
 
-    domain 为 "mechanical" 或 "software"；缺省时按 jobs.title 自动识别。
+    domain 为 "mechanical"、"software" 或 "power"；缺省时按 jobs.title 自动识别。
     max_salary_k: 期望月薪上限(K)，候选人期望薪资上限超过该值 → D-期望超限。
     cities: 期望城市关键词，命中任一即保留；不命中 → D-城市不符。
     两者默认 None 均不过滤，向后兼容。
@@ -200,9 +237,16 @@ def filter_job_candidates(
         if not domain:
             job_row = conn.execute("SELECT title FROM jobs WHERE id=?", (job_id,)).fetchone()
             domain = job_filter_domain(str(job_row["title"] or "") if job_row else "")
+        if domain not in SUPPORTED_FILTER_DOMAINS:
+            raise UnsupportedFilterDomainError(
+                f"岗位 {job_id} 暂无受支持的确定性筛选模型，已拒绝套用其他岗位规则"
+            )
         if domain == "software":
             keys = hard_keys or SOFTWARE_HARD_KEYS
             excl_tokens = SOFTWARE_EXCL_TITLE
+        elif domain == "power":
+            keys = hard_keys or [*POWER_DIRECT_KEYS, *POWER_SUPPORT_KEYS, *POWER_ADJACENT_KEYS]
+            excl_tokens = POWER_EXCL_TITLE
         else:
             keys = hard_keys or HARD_KEYS_DEFAULT
             excl_tokens = EXCL_TITLE
@@ -239,7 +283,8 @@ def filter_job_candidates(
             results.append({
                 "id": r["id"], "name": r["display_name"], "company": co, "title": r["current_title"] or "",
                 "city": r["city"] or "", "education": r["education"] or "", "experience": r["experience"] or "",
-                "stage": stage, "grade": "D-无画像", "score": 0, "hard_hits": [], "reason": "无 candidate_profiles 画像",
+                "stage": stage, "grade": "U-待补画像", "score": 0, "hard_hits": [],
+                "reason": "无 candidate_profiles 画像，证据不足，禁止自动淘汰",
             })
             continue
         salary_k_max, exp_city = _parse_expectation(str(prof.get("profile_summary") or ""))
@@ -269,7 +314,14 @@ def filter_job_candidates(
         excl_title = [k for k in excl_tokens if k.lower() in title_text]
         exp_n = _exp_years(r["experience"]) or _exp_years(prof.get("seniority"))
         edu = r["education"] or ""
-        score = len(hard_hits) * 10
+        power_direct = [k for k in POWER_DIRECT_KEYS if k.lower() in txt] if domain == "power" else []
+        power_support = [k for k in POWER_SUPPORT_KEYS if k.lower() in txt] if domain == "power" else []
+        power_adjacent = [k for k in POWER_ADJACENT_KEYS if k.lower() in txt] if domain == "power" else []
+        score = (
+            len(power_direct) * 20 + len(power_support) * 8 + len(power_adjacent) * 2
+            if domain == "power"
+            else len(hard_hits) * 10
+        )
         if edu in ("硕士", "博士"):
             score += 8
         elif edu == "本科":
@@ -287,6 +339,23 @@ def filter_job_candidates(
         if excl_title:
             grade = "X-排除"
             reason = f"当前/原职位不匹配:{'、'.join(excl_title)}"
+        elif domain == "power" and any(token.lower() in title_text for token in POWER_REVIEW_ONLY_TITLE):
+            grade = "C-弱"
+            reason = "应用/FAE 角色需核验是否承担模块电源设计责任"
+        elif domain == "power" and (
+            len(power_direct) >= 2 or (power_direct and len(power_support) >= 3)
+        ):
+            grade = "A-核心"
+            reason = f"电源直接证据{len(power_direct)}项、支撑证据{len(power_support)}项"
+        elif domain == "power" and power_direct and power_support:
+            grade = "A-强"
+            reason = f"电源直接证据{len(power_direct)}项并有项目支撑"
+        elif domain == "power" and power_direct:
+            grade = "B-中"
+            reason = f"电源直接证据{len(power_direct)}项，需补充项目闭环证据"
+        elif domain == "power" and (len(power_support) >= 2 or len(power_adjacent) >= 3):
+            grade = "C-弱"
+            reason = "仅有相邻电源证据，需核验 VPD/VRM/TLVR/DrMOS 实际项目"
         elif domain == "mechanical" and prec and (semi or mot) and fea:
             grade = "A-核心"
             reason = "精密设备+仿真+半导体/运动部件全占"
@@ -316,14 +385,19 @@ def filter_job_candidates(
 
 
 def format_grade_list(result: dict[str, Any]) -> str:
-    """把过滤结果格式化成可读名单文本，明确区分“可推进”与“建议停止推进”。"""
+    """把过滤结果格式化成可读名单文本，区分优先复核、证据不足和明确排除。"""
     candidates = list(result.get("candidates") or [])
-    keep_grades = ("A-核心", "A-强", "B-中", "C-弱")
-    stop_grades = ("X-排除", "禁挖", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符")
-    keep_count = sum(1 for c in candidates if c.get("grade") in keep_grades)
+    review_grades = ("A-核心", "A-强", "B-中", "C-弱")
+    evidence_pending_grades = ("D-无证据", "U-待补画像")
+    stop_grades = ("X-排除", "禁挖", "D-期望超限", "D-城市不符")
+    review_count = sum(1 for c in candidates if c.get("grade") in review_grades)
+    evidence_pending_count = sum(1 for c in candidates if c.get("grade") in evidence_pending_grades)
     stop_count = sum(1 for c in candidates if c.get("grade") in stop_grades)
     lines = [f"## 候选池分级名单（共 {result['total']} 人）"]
-    lines.append(f"可推进 {keep_count} 人；建议停止推进 {stop_count} 人。\n")
+    lines.append(
+        f"建议优先复核 {review_count} 人；证据不足待补充 {evidence_pending_count} 人；"
+        f"有明确排除证据 {stop_count} 人。\n"
+    )
 
     def _grade_block(grade: str, group: list[dict[str, Any]]) -> None:
         if not group:
@@ -336,10 +410,13 @@ def format_grade_list(result: dict[str, Any]) -> str:
                 f"| {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}"
             )
 
-    lines.append("## 可推进")
-    for grade in keep_grades:
+    lines.append("## 建议优先复核")
+    for grade in review_grades:
         _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
-    lines.append("\n## 建议停止推进")
+    lines.append("\n## 证据不足，暂不自动裁决")
+    for grade in evidence_pending_grades:
+        _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
+    lines.append("\n## 有明确排除证据")
     for grade in stop_grades:
         _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
     return "\n".join(lines)

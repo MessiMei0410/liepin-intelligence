@@ -1073,7 +1073,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
           {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
           {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
-          {message.role === 'assistant' && !message.invalidated && message.strategy_patch && <StrategyPatchCard
+          {message.role === 'assistant' && !message.invalidated && message.strategy_patch && (message.strategy_patch.display_requested === true || message.strategy_patch_applied) && <StrategyPatchCard
             patch={message.strategy_patch}
             sessionId={sessionId}
             applied={message.strategy_patch_applied}

@@ -563,7 +563,7 @@ def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple
       "summary": {"total": 329, "active": 321, "stopped": 8, "bonder_count": 37},
       "groups": [
         {"key": "bonder", "label": "固晶机/共晶机/键合机背景", "priority": true, "candidates": [...]},
-        {"key": "active", "label": "其余可推进候选", "priority": false, "candidates": [...]},
+        {"key": "active", "label": "其余未停止候选", "priority": false, "candidates": [...]},
         {"key": "stopped", "label": "已停止推进", "priority": false, "candidates": [...]},
       ],
     }
@@ -664,7 +664,7 @@ def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple
             })
         if other_active:
             groups.append({
-                "key": "active", "label": "其余可推进候选",
+                "key": "active", "label": "其余未停止候选",
                 "priority": False, "candidates": [to_candidate(r) for r in other_active],
             })
         if stopped:
@@ -685,7 +685,7 @@ def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple
 
         lines: list[str] = []
         lines.append(f"## {job['client']}｜{job['title']}（岗位 {job['id']}）候选名单")
-        lines.append(f"共 {len(rows)} 人，其中可推进 {len(active)} 人、已停止 {len(stopped)} 人。\n")
+        lines.append(f"共 {len(rows)} 人，其中未停止 {len(active)} 人、已停止 {len(stopped)} 人。\n")
         # 固晶优先组的优先级标注：A 级=直接固晶机/键合机经验，B 级=封装/精密设备相关，C 级=其余命中
         priority_notes: dict[int, tuple[str, str]] = {}
         if prioritized and bonder:
@@ -726,7 +726,7 @@ def _build_candidate_list_card(db_path: str, job_id: int, message: str) -> tuple
                     lines.append(base)
             lines.append("")
         if other_active:
-            lines.append(f"### 其余可推进候选（{len(other_active)} 人，列前 15）")
+            lines.append(f"### 其余未停止候选（{len(other_active)} 人，列前 15）")
             lines.extend(fmt(r) for r in other_active[:15])
             lines.append("")
         if stopped:
@@ -853,10 +853,7 @@ def _verbatim_constraint_candidates(messages: list[str]) -> list[dict[str, str]]
                 kind = "allow"
             elif any(token in clause for token in ("排除", "不要", "不能要", "不考虑")):
                 kind = "exclude"
-            elif (
-                re.search(r"\d+\s*(?:位|个|名|人)(?:选|候选人)?", clause)
-                and not re.search(r"(?:只|已|已经|目前|现在).*找到", clause)
-            ):
+            elif _is_target_count_clause(clause):
                 kind = "target_count"
             elif any(token in clause for token in ("年经验", "年以上", "职级", "行业", "方向")):
                 kind = "other"
@@ -865,6 +862,20 @@ def _verbatim_constraint_candidates(messages: list[str]) -> list[dict[str, str]]
             seen.add(clause)
             rows.append({"quote": clause, "kind": kind})
     return rows[-12:]
+
+
+def _is_target_count_clause(clause: str) -> bool:
+    """Only treat a count as a target when the clause explicitly asks for that amount."""
+    text = " ".join(str(clause or "").split())
+    if not re.search(r"\d+\s*(?:位|个|名|人)(?:选|候选人)?", text):
+        return False
+    if re.search(r"(?:只|已|已经|目前|现在|现有|当前|一共|总共).*?(?:找到|有|共|池|名单)", text):
+        return False
+    target_markers = (
+        "目标", "要", "需要", "希望", "计划", "补充", "补人", "找", "寻找", "寻访",
+        "筛出", "推荐", "提供", "先来", "再来", "至少", "最多", "控制在",
+    )
+    return any(marker in text for marker in target_markers)
 
 
 def _interpret_copilot_message(
@@ -1060,6 +1071,8 @@ def _interpret_copilot_message(
             continue
         quote = str(item.get("quote") or "").strip()
         kind = str(item.get("kind") or "other").strip().lower()
+        if kind == "target_count" and not _is_target_count_clause(quote):
+            continue
         if quote and quote in source_corpus and quote not in seen_quotes and not _is_plan_control_instruction(quote):
             seen_quotes.add(quote)
             constraints.append({"quote": quote, "kind": kind if kind in _COPILOT_CONSTRAINT_KINDS else "other"})
@@ -1086,6 +1099,10 @@ def _interpret_copilot_message(
         for item in (raw.get("constraint_changes") or [])
         if isinstance(item, dict)
         and not _is_plan_control_instruction(item.get("quote") or item.get("value"))
+        and (
+            str(item.get("kind") or "").strip().lower() != "target_count"
+            or _is_target_count_clause(str(item.get("quote") or item.get("value") or ""))
+        )
     ]
     understanding = {
         "version": "copilot_understanding_v1",

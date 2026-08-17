@@ -17,7 +17,8 @@ from collections import Counter
 from typing import Any
 
 
-STOP_GRADES = ("X-排除", "禁挖", "D-无证据", "D-无画像", "D-期望超限", "D-城市不符")
+# 缺画像或未命中关键词只表示证据不足，不能作为自动淘汰依据。
+STOP_GRADES = ("X-排除", "禁挖", "D-期望超限", "D-城市不符")
 _MGMT_TOKENS = ("副总", "总经理", "总监", "部长", "主任", "经理", "manager", "ceo", "director")
 _BATCH_STOP_LABELS = {"too_senior": "资历过高", "direction_mismatch": "方向不符", "other": "其他"}
 

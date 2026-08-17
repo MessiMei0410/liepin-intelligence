@@ -258,6 +258,13 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
                     [*params, min(max(limit, 1), 200), max(offset, 0)],
                 )
             ]
+            # 筛选模型覆盖巡检：岗位有活跃候选池但无确定性筛选域时给出显式标记，
+            # 避免“系统不认识该岗位却静默错筛”再次无感知上线。
+            from a_system_agent.candidate_pool_filter import job_filter_domain
+            for item in rows:
+                domain = job_filter_domain(str(item.get("title") or ""))
+                item["filter_domain"] = domain
+                item["filter_model_missing"] = domain is None and int(item.get("active_candidate_count") or 0) > 0
             return {"ok": True, "items": rows, "total": total, "limit": limit, "offset": offset}
         finally:
             conn.close()

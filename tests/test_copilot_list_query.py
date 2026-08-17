@@ -138,8 +138,8 @@ class CandidateListQueryTest(unittest.TestCase):
             # 补搜伪命中不冒充真实经历
             prio_section = answer.split("### ⭐ 固晶机/共晶机/键合机背景")[1].split("###")[0]
             self.assertNotIn("补搜先生", prio_section)
-            # 停止者不进可推进组
-            self.assertNotIn("上海泽丰", answer.split("### 其余可推进候选")[1].split("###")[0])
+            # 停止者不进未停止组
+            self.assertNotIn("上海泽丰", answer.split("### 其余未停止候选")[1].split("###")[0])
         finally:
             db.unlink()
 
@@ -231,9 +231,9 @@ class CandidateListQueryTest(unittest.TestCase):
         conn.close()
         try:
             answer = _format_candidate_list_answer(path, 137, "把名单给我")
-            self.assertIn("可推进 1 人", answer)
+            self.assertIn("未停止 1 人", answer)
             self.assertIn("已停止 2 人", answer)
-            self.assertIn("甲**", answer.split("### 其余可推进候选")[1])
+            self.assertIn("甲**", answer.split("### 其余未停止候选")[1])
         finally:
             Path(path).unlink()
 

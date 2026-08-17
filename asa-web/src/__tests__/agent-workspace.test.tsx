@@ -158,6 +158,7 @@ describe('Agent workspace', () => {
       workflow_id: 'workflow-strategy-1',
       workflow_title: '长越科技｜机械高级工程师｜第 2 轮',
       strategy_hash: 'strategy-hash-1',
+      display_requested: true,
       changes: [
         { type: 'add_keyword', value: '精密运动平台', clause: '新增关键词「精密运动平台」' },
         { type: 'add_company', value: 'ASMPT', clause: '新增对标公司「ASMPT」' },
