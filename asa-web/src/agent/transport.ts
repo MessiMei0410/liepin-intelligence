@@ -182,12 +182,19 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
     const body = await response.json().catch(() => ({})) as Record<string, unknown>
     throw new Error(String(body.error || `DSH 请求失败 (${response.status})`))
   }
-  const data = (await response.json().catch(() => ({}))) as { ok?: boolean; answer?: string; error?: string }
-  if (!data.ok) throw new Error(String(data.error || 'DSH 返回失败'))
-  const answer = data.answer || ''
-  onEvent({ type: 'progress', data: { message: 'DSH 编排中…' } })
-  onEvent({ type: 'text', data: { content: answer } })
-  onEvent({ type: 'done', data: { session_id: turn.sessionId || 'dsh-session', answer, context: turn.context } })
+  if (!response.body) throw new Error('DSH 流式响应不可用')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() || ''
+    parseAgentSse(blocks.join('\n\n')).forEach(onEvent)
+    if (done) break
+  }
+  parseAgentSse(buffer).forEach(onEvent)
 }
 
 export async function streamAgentTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {

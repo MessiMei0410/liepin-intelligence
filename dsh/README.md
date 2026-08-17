@@ -11,7 +11,7 @@ DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在�
 
 - `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（8 个工具，见下）。
 - `asa-profile/` — `asa` profile 源（headless 一次性）：persona + 12 条业务护栏（`AGENTS.md`）+ 插件装配。
-- `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn` + 会话复用（多轮记忆）。
+- `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn`（SSE 流式）+ 会话复用（多轮记忆）。
 - `asa-server-profile/` — `asa-server` profile 源（bundles = `dsh-base` + `@asa/dsh-asa-server`）。
 - `bridge/` — `asa_dsh_bridge.py`：per-turn 子进程桥接（v0 遗留，已被常驻服务器取代）。
 
