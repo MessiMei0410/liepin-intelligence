@@ -163,7 +163,45 @@ export const createAgentTurn = (sessionId: string, message: string, context: Age
   return turn
 }
 
+const DSH_BRIDGE_URL = 'http://127.0.0.1:8891/turn'
+
+// 非破坏的 DSH 开关：URL 带 ?brain=dsh 时 Agent 走 DSH 桥接（路 2），否则保持现有 Copilot。
+export const brainMode = (): 'copilot' | 'dsh' => {
+  if (typeof location === 'undefined') return 'copilot'
+  return new URLSearchParams(location.search).get('brain') === 'dsh' ? 'dsh' : 'copilot'
+}
+
+async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {
+  const response = await fetch(DSH_BRIDGE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: turn.message, session_id: turn.sessionId, context: turn.context }),
+    signal,
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>
+    throw new Error(String(body.error || `DSH 请求失败 (${response.status})`))
+  }
+  if (!response.body) throw new Error('DSH 流式响应不可用')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() || ''
+    parseAgentSse(blocks.join('\n\n')).forEach(onEvent)
+    if (done) break
+  }
+  parseAgentSse(buffer).forEach(onEvent)
+}
+
 export async function streamAgentTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {
+  if (brainMode() === 'dsh') {
+    await streamDshTurn(turn, signal, onEvent)
+    return
+  }
   const response = await fetch('/api/v1/copilot/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': turn.idempotencyKey },
