@@ -45,6 +45,36 @@ curl -s -X POST http://127.0.0.1:8891/turn -H 'Content-Type: application/json' \
 > per-turn 子进程桥接（`dsh/bridge/asa_dsh_bridge.py`，8890）仍可用作 headless 一次性回退，
 > 但无跨轮记忆；常驻服务器（8891）是当前前端 DSH 路径。
 
+## 部署与守护
+
+profile 的 `file:` 安装是**拷贝**：改完 `asa-server/` 或 `asa-tools/` 必须同步到
+`~/.dsh/profiles/asa-server/node_modules/@asa/` 并重启常驻服务器才生效。一键完成：
+
+```bash
+dsh/bin/deploy-asa-server.sh   # 同步源码 → 重启 → 健康检查
+```
+
+常驻服务器建议挂 launchd 守护（崩溃 / 重启自动拉起，此前手动 nohup 无守护、挂了就静默死亡）：
+
+```bash
+cp dsh/launchd/com.asa.dsh-server.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asa.dsh-server.plist
+```
+
+装了 launchd 后 `deploy-asa-server.sh` 自动改走 `launchctl kickstart`。
+
+## v1.3 加固（2026-08-17 审计后）
+
+- 事件订阅 finally dispose：异常路径不再残留监听器（此前同 session 后续请求会叠加重复推流）。
+- Agent 池持句柄：空闲 TTL 30 分钟（`ASA_DSH_AGENT_IDLE_TTL_MS`）+ 上限 20 个（`ASA_DSH_MAX_AGENTS`）LRU 回收，常驻内存不再只增不减。
+- 客户端断连（前端 AbortController）即时 cancel 本轮：止损 LLM 调用、释放会话队列。
+- 单轮总超时 300s（`ASA_DSH_TURN_TIMEOUT_MS`），超时 cancel 并回 `done ok:false`。
+- 请求体上限 1MB（`ASA_DSH_MAX_BODY_BYTES`），超限 413。
+- token 比较改恒定时间（`timingSafeEqual` / `hmac.compare_digest`）。
+- CORS 从 `*` 收紧为白名单回显（Core 8765 + vite dev 5173），8891/8890 一致。
+- 前端 dsh-config 失败不再缓存负结果：Core 未就绪时一次失败不再导致整页 401。
+- 会话串行队列排空后删除条目；最终答案改为事件流增量聚合，不再每轮全量扫 `session.events`。
+
 ## 关键坑（已记录，勿重踩）
 
 - 插件 `file:` 安装是**拷贝**：改 `asa-tools/lib/index.js` 后需在 profile 目录重新 `pnpm install`（或 `dsh plugin` 重装）。

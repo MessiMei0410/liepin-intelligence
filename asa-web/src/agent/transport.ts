@@ -171,7 +171,8 @@ export const brainMode = (): 'copilot' | 'dsh' => {
   return new URLSearchParams(location.search).get('brain') === 'dsh' ? 'dsh' : 'copilot'
 }
 
-// DSH 桥接配置（token + url）：从 Core 拉取并缓存；失败回退无 token + 默认 url（dev 环境）。
+// DSH 桥接配置（token + url）：从 Core 拉取，成功才缓存；失败按 dev 回退（无 token + 默认 url）
+// 但不缓存负结果——否则 Core 未就绪时一次失败会导致整页生命周期内 401，必须刷新才能恢复。
 let dshConfigCache: { token: string; url: string } | null = null
 
 async function getDshConfig(): Promise<{ token: string; url: string }> {
@@ -186,8 +187,7 @@ async function getDshConfig(): Promise<{ token: string; url: string }> {
   } catch {
     // 忽略，走回退
   }
-  dshConfigCache = { token: '', url: DSH_BRIDGE_URL }
-  return dshConfigCache
+  return { token: '', url: DSH_BRIDGE_URL }
 }
 
 async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {

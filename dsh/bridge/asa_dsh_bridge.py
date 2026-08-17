@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import subprocess
@@ -51,6 +52,24 @@ def _read_token() -> str:
 
 TOKEN = _read_token()
 
+MAX_BODY_BYTES = int(os.environ.get("ASA_DSH_MAX_BODY_BYTES", str(1024 * 1024)))
+
+# CORS 白名单：ASA app / 浏览器经 Core(8765) 加载的前端，以及 vite dev(5173)。
+# 未知 Origin 的浏览器预检直接失败；非浏览器客户端（curl）不带 Origin，不受影响。
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:8765",
+    "http://localhost:8765",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+}
+
+
+def _token_ok(header: str) -> bool:
+    """恒定时间比较 Bearer token，避免时序侧信道。"""
+    if not TOKEN:
+        return True
+    return hmac.compare_digest(header or "", f"Bearer {TOKEN}")
+
 
 def run_turn(message: str) -> dict:
     env = dict(os.environ)
@@ -66,9 +85,11 @@ def run_turn(message: str) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    # 仅监听 127.0.0.1 的本地桥接；CORS 放行同机前端（8765）。生产硬化时收紧到具体 origin。
+    # 仅监听 127.0.0.1 的本地桥接；CORS 白名单回显（Core 8765 + vite dev 5173）。
     def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, Authorization")
 
@@ -97,10 +118,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/turn":
             self._json(404, {"ok": False, "error": "not found"})
             return
-        if TOKEN and self.headers.get("Authorization", "") != f"Bearer {TOKEN}":
+        if not _token_ok(self.headers.get("Authorization", "")):
             self._json(401, {"ok": False, "error": "unauthorized"})
             return
         length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > MAX_BODY_BYTES:
+            self._json(413, {"ok": False, "error": "payload too large"})
+            return
         try:
             req = json.loads(self.rfile.read(length) or b"{}")
         except Exception as exc:  # noqa: BLE001
