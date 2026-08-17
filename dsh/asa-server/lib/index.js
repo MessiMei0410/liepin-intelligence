@@ -80,6 +80,15 @@ const CORS = {
 };
 
 function apply(ctx) {
+  // 每会话串行化：并发 /turn 到同一 session 时排队，避免 followup 交错污染会话状态。
+  const turnQueues = new Map();
+  const serializeTurn = (sessionId, fn) => {
+    const prev = turnQueues.get(sessionId) || Promise.resolve();
+    const next = prev.then(fn, fn);
+    turnQueues.set(sessionId, next.catch(() => {}));
+    return next;
+  };
+
   const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, CORS);
@@ -107,33 +116,35 @@ function apply(ctx) {
       }
       res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive", ...CORS });
       try {
-        const agent = await ensureAgent(ctx, sessionId);
-        const firstSeq = agent.session.seq;
-        // 订阅本 agent 会话的事件火线，实时转 text-delta → SSE text。
-        const dispose = agent.ctx.on("session/event", (session, event) => {
-          if (event.seq < firstSeq) return;
-          if (event.type === "assistant/chunk") {
-            const chunk = event.data && event.data.chunk;
-            if (chunk && chunk.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") {
-              writeSse(res, "text", { content: chunk.text });
+        await serializeTurn(sessionId, async () => {
+          const agent = await ensureAgent(ctx, sessionId);
+          const firstSeq = agent.session.seq;
+          // 订阅本 agent 会话的事件火线，实时转 text-delta → SSE text。
+          const dispose = agent.ctx.on("session/event", (session, event) => {
+            if (event.seq < firstSeq) return;
+            if (event.type === "assistant/chunk") {
+              const chunk = event.data && event.data.chunk;
+              if (chunk && chunk.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") {
+                writeSse(res, "text", { content: chunk.text });
+              }
             }
-          }
-        });
-        writeSse(res, "progress", { message: "DSH 编排中…" });
-        agent.followup(
-          createUserMessage({
-            content: [{ type: "text", text: message }],
-            source: { kind: "user" },
-          }),
-        );
-        await agent.whenIdle();
-        dispose();
-        const outcome = summarize(agent.session.events, firstSeq);
-        writeSse(res, "done", {
-          session_id: sessionId,
-          answer: outcome.text,
-          ok: outcome.reason?.kind === "completed",
-          error: outcome.reason?.kind === "error" ? outcome.reason.error.message : void 0,
+          });
+          writeSse(res, "progress", { message: "DSH 编排中…" });
+          agent.followup(
+            createUserMessage({
+              content: [{ type: "text", text: message }],
+              source: { kind: "user" },
+            }),
+          );
+          await agent.whenIdle();
+          dispose();
+          const outcome = summarize(agent.session.events, firstSeq);
+          writeSse(res, "done", {
+            session_id: sessionId,
+            answer: outcome.text,
+            ok: outcome.reason?.kind === "completed",
+            error: outcome.reason?.kind === "error" ? outcome.reason.error.message : void 0,
+          });
         });
       } catch (error) {
         writeSse(res, "done", {
