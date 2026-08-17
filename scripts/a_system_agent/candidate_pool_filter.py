@@ -89,7 +89,46 @@ POWER_EXCL_TITLE = [
 ]
 POWER_REVIEW_ONLY_TITLE = ("FAE", "现场应用", "应用工程师")
 
-SUPPORTED_FILTER_DOMAINS = {"mechanical", "software", "power"}
+POWER_TME_ROLE_KEYS = [
+    "技术市场", "TME", "Technical Marketing", "产品市场", "Product Marketing",
+    "产品定义", "Product Definition", "产品规划", "产品立项", "应用工程", "FAE",
+    "现场应用", "AE", "Application Engineer", "客户技术推广", "Design-in",
+    "Design Win", "Design-win",
+]
+POWER_TME_PRODUCT_KEYS = [
+    "多相控制器", "DrMOS", "POL", "eFuse", "板级电源", "三次电源", "PC电源",
+    "服务器电源", "汽车电源", "ADAS电源", "电源管理芯片", "PMIC", "VRM", "VPD",
+    "TLVR", "SPS", "Power Stage",
+]
+POWER_TME_SUPPORT_KEYS = [
+    "客户导入", "客户需求", "技术宣讲", "参考设计", "产品推广", "市场调研",
+    "项目机会", "方案支持", "技术支持", "客户沟通", "竞品分析", "路线图",
+]
+POWER_TME_EXCL_TITLE = [
+    "机械", "结构", "软件", "测试", "采购", "品质", "质量", "财务", "法务",
+    "行政", "人力", "运营", "供应链", "项目经理", "new media", "新媒体",
+]
+
+ACDC_SCOPE_KEYS = [
+    "AC/DC", "ACDC", "AC-DC", "服务器电源", "Server Power", "Server PSU",
+    "通信电源", "数据中心电源", "机架电源", "整流器", "Power Supply Unit",
+]
+ACDC_TOPOLOGY_KEYS = [
+    "PFC", "LLC", "图腾柱", "Totem-pole", "Totem Pole", "Vienna", "移相全桥",
+    "PSFB", "全桥", "半桥", "反激", "Flyback", "正激", "Forward", "谐振变换",
+]
+ACDC_DELIVERY_KEYS = [
+    "数字电源", "DSP", "并机", "均流", "冗余", "热插拔", "80 PLUS", "功率密度",
+    "EMI", "EMC", "安规", "效率", "可靠性", "量产", "团队管理", "研发管理",
+    "kW", "千瓦", "高功率",
+]
+ACDC_EXCL_TITLE = [
+    "机械", "结构", "软件", "测试", "销售", "市场", "采购", "品质", "质量",
+    "财务", "法务", "行政", "人力", "运营", "供应链", "FAE", "应用工程",
+    "技术支持", "产品经理", "项目经理",
+]
+
+SUPPORTED_FILTER_DOMAINS = {"mechanical", "software", "power", "power_tme", "acdc_power"}
 
 
 class UnsupportedFilterDomainError(ValueError):
@@ -100,7 +139,15 @@ def job_filter_domain(job_title: str) -> str | None:
     """按岗位名判定可自动分级/批量停止的职能域；不支持返回 None。"""
     title = str(job_title or "").strip()
     normalized = title.lower()
-    if any(token in title for token in ("技术市场", "市场经理", "销售")):
+    if any(token in title for token in ("技术市场", "市场经理")) or any(
+        token in normalized for token in ("tme", "technical marketing")
+    ):
+        return "power_tme" if "电源" in title else None
+    if any(token in normalized for token in ("acdc", "ac/dc", "ac-dc")) and any(
+        token in title for token in ("电源", "研发")
+    ):
+        return "acdc_power"
+    if "销售" in title:
         return None
     if any(token in title for token in ("软件", "嵌入式", "算法", "C++", "C/C++", "开发", "Python", "Java")):
         return "software"
@@ -224,7 +271,8 @@ def filter_job_candidates(
 ) -> dict[str, Any]:
     """按岗位职能域的硬证据过滤候选池，返回分级名单。
 
-    domain 为 "mechanical"、"software" 或 "power"；缺省时按 jobs.title 自动识别。
+    domain 为 "mechanical"、"software"、"power"、"power_tme" 或
+    "acdc_power"；缺省时按 jobs.title 自动识别。
     max_salary_k: 期望月薪上限(K)，候选人期望薪资上限超过该值 → D-期望超限。
     cities: 期望城市关键词，命中任一即保留；不命中 → D-城市不符。
     两者默认 None 均不过滤，向后兼容。
@@ -247,6 +295,12 @@ def filter_job_candidates(
         elif domain == "power":
             keys = hard_keys or [*POWER_DIRECT_KEYS, *POWER_SUPPORT_KEYS, *POWER_ADJACENT_KEYS]
             excl_tokens = POWER_EXCL_TITLE
+        elif domain == "power_tme":
+            keys = hard_keys or [*POWER_TME_ROLE_KEYS, *POWER_TME_PRODUCT_KEYS, *POWER_TME_SUPPORT_KEYS]
+            excl_tokens = POWER_TME_EXCL_TITLE
+        elif domain == "acdc_power":
+            keys = hard_keys or [*ACDC_SCOPE_KEYS, *ACDC_TOPOLOGY_KEYS, *ACDC_DELIVERY_KEYS]
+            excl_tokens = ACDC_EXCL_TITLE
         else:
             keys = hard_keys or HARD_KEYS_DEFAULT
             excl_tokens = EXCL_TITLE
@@ -317,11 +371,20 @@ def filter_job_candidates(
         power_direct = [k for k in POWER_DIRECT_KEYS if k.lower() in txt] if domain == "power" else []
         power_support = [k for k in POWER_SUPPORT_KEYS if k.lower() in txt] if domain == "power" else []
         power_adjacent = [k for k in POWER_ADJACENT_KEYS if k.lower() in txt] if domain == "power" else []
-        score = (
-            len(power_direct) * 20 + len(power_support) * 8 + len(power_adjacent) * 2
-            if domain == "power"
-            else len(hard_hits) * 10
-        )
+        tme_role = [k for k in POWER_TME_ROLE_KEYS if k.lower() in txt] if domain == "power_tme" else []
+        tme_product = [k for k in POWER_TME_PRODUCT_KEYS if k.lower() in txt] if domain == "power_tme" else []
+        tme_support = [k for k in POWER_TME_SUPPORT_KEYS if k.lower() in txt] if domain == "power_tme" else []
+        acdc_scope = [k for k in ACDC_SCOPE_KEYS if k.lower() in txt] if domain == "acdc_power" else []
+        acdc_topology = [k for k in ACDC_TOPOLOGY_KEYS if k.lower() in txt] if domain == "acdc_power" else []
+        acdc_delivery = [k for k in ACDC_DELIVERY_KEYS if k.lower() in txt] if domain == "acdc_power" else []
+        if domain == "power":
+            score = len(power_direct) * 20 + len(power_support) * 8 + len(power_adjacent) * 2
+        elif domain == "power_tme":
+            score = len(tme_role) * 18 + len(tme_product) * 12 + len(tme_support) * 3
+        elif domain == "acdc_power":
+            score = len(acdc_scope) * 15 + len(acdc_topology) * 12 + len(acdc_delivery) * 4
+        else:
+            score = len(hard_hits) * 10
         if edu in ("硕士", "博士"):
             score += 8
         elif edu == "本科":
@@ -356,6 +419,39 @@ def filter_job_candidates(
         elif domain == "power" and (len(power_support) >= 2 or len(power_adjacent) >= 3):
             grade = "C-弱"
             reason = "仅有相邻电源证据，需核验 VPD/VRM/TLVR/DrMOS 实际项目"
+        elif domain == "power_tme" and "销售" in cur_title and not tme_role:
+            grade = "X-排除"
+            reason = "当前为纯销售角色，缺少技术市场/FAE/产品定义责任证据"
+        elif domain == "power_tme" and len(tme_role) >= 2 and len(tme_product) >= 2 and tme_support:
+            grade = "A-核心"
+            reason = f"技术市场职能证据{len(tme_role)}项、电源产品证据{len(tme_product)}项且有客户闭环"
+        elif domain == "power_tme" and tme_role and len(tme_product) >= 2:
+            grade = "A-强"
+            reason = f"技术市场职能证据{len(tme_role)}项、电源产品证据{len(tme_product)}项"
+        elif domain == "power_tme" and tme_role and tme_product:
+            grade = "B-中"
+            reason = "同时具备技术市场/应用职能与电源产品证据"
+        elif domain == "power_tme" and (tme_role or tme_product or tme_support):
+            grade = "C-弱"
+            reason = "职能或电源产品证据单边命中，需核验另一侧证据"
+        elif domain == "power_tme":
+            grade = "D-无证据"
+            reason = "简历无技术市场/应用职能及目标电源产品证据"
+        elif domain == "acdc_power" and len(acdc_scope) >= 2 and len(acdc_topology) >= 2 and len(acdc_delivery) >= 2:
+            grade = "A-核心"
+            reason = f"ACDC场景证据{len(acdc_scope)}项、拓扑证据{len(acdc_topology)}项且有研发交付闭环"
+        elif domain == "acdc_power" and acdc_scope and acdc_topology and len(acdc_delivery) >= 2:
+            grade = "A-强"
+            reason = "具备服务器ACDC场景、拓扑与研发交付证据"
+        elif domain == "acdc_power" and acdc_scope and acdc_topology:
+            grade = "B-中"
+            reason = "同时具备ACDC应用场景与电源拓扑证据"
+        elif domain == "acdc_power" and (acdc_scope or acdc_topology or acdc_delivery):
+            grade = "C-弱"
+            reason = "ACDC场景或拓扑证据不完整，需补充服务器电源研发闭环"
+        elif domain == "acdc_power":
+            grade = "D-无证据"
+            reason = "简历无服务器ACDC电源硬证据"
         elif domain == "mechanical" and prec and (semi or mot) and fea:
             grade = "A-核心"
             reason = "精密设备+仿真+半导体/运动部件全占"
