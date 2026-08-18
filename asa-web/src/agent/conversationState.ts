@@ -25,7 +25,7 @@ export type AgentConversationAction =
   | { type: 'turn_done'; requestId: string; result: AgentTurnResult }
   | { type: 'turn_failed'; requestId: string; error: string }
   | { type: 'turn_stopped'; requestId: string }
-  | { type: 'card_refreshed'; jobId: number; content: string; action_card: Record<string, unknown> | null }
+  | { type: 'card_refreshed'; sourceCard: Record<string, unknown>; content: string; action_card: Record<string, unknown> | null }
 
 export const agentConversationReducer = (
   state: AgentConversationState,
@@ -53,21 +53,16 @@ export const agentConversationReducer = (
           ],
     }
   }
-  // 名单卡刷新：按 jobId 更新所有 candidate_list 消息的 action_card + 回答文本（不依赖 requestId）
+  // 名单卡刷新：只更新被点击的那条消息——同一岗位可能同时存在普通名单卡和严格筛选
+  // 名单卡，按 jobId 全覆盖会把另一张卡的内容也替换掉。以发起刷新时的卡片对象引用
+  // （sourceCard）定位消息；消息流与弹窗始终持有同一卡片对象，引用匹配是精确的。
   if (action.type === 'card_refreshed') return {
     ...state,
-    messages: state.messages.map(message => {
-      const card = message.action_card && typeof message.action_card === 'object' ? message.action_card as { type?: unknown; context?: { type?: unknown; id?: unknown } } : null
-      const isTarget = Boolean(
-        message.role === 'assistant'
-        && card?.type === 'candidate_list'
-        && card.context?.type === 'job'
-        && Number(card.context.id) === action.jobId,
-      )
-      return isTarget
+    messages: state.messages.map(message =>
+      message.role === 'assistant' && message.action_card === action.sourceCard
         ? { ...message, content: action.content, action_card: action.action_card }
         : message
-    }),
+    ),
   }
   if (action.requestId !== state.activeRequestId) return state
   if (action.type === 'turn_text') return {

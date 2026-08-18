@@ -269,12 +269,34 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
         finally:
             conn.close()
 
-    def candidate_list_card(self, job_id: int, *, bonder: bool = False) -> dict[str, Any]:
+    def candidate_list_card(self, job_id: int, *, bonder: bool = False, filter_mode: str = "") -> dict[str, Any]:
         """重新生成岗位候选名单卡片（刷新静态快照，供前端名单卡\"刷新\"按钮调用）。
 
         - job 不存在 → 404（LookupError 全局映射）
         - bonder=True 时按固晶/共晶/键合关键词重建优先分组（原卡有该组时前端应传回）
         """
+        if filter_mode == "grade_filter":
+            from a_system_agent.candidate_pool_filter import filter_job_candidates, format_grade_card, job_filter_domain
+
+            conn = connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT c.name AS client, j.title FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.id=?",
+                    (int(job_id),),
+                ).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                raise LookupError("job not found")
+            client = str(row["client"] or "")
+            title = str(row["title"] or "")
+            domain = job_filter_domain(title)
+            if domain not in {"mechanical", "software", "power"}:
+                raise ValueError("该岗位暂无可用的严格筛选模型")
+            result = filter_job_candidates(str(self.db_path), int(job_id), client=client, domain=domain)
+            answer, card = format_grade_card(result, client=client, job_title=title, job_id=int(job_id))
+            return {"ok": True, "answer": answer, "card": card}
+
         from a_system_agent.copilot_handler import _build_candidate_list_card
 
         answer, card = _build_candidate_list_card(str(self.db_path), int(job_id), "固晶" if bonder else "")
@@ -623,7 +645,7 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
                        SUM(sf.signal_type='review_pass') AS review_pass_count,
                        SUM(sf.signal_type='contacted') AS contacted_count,
                        SUM(sf.signal_type='recommended') AS recommended_count,
-                       SUM(sf.signal_type='stopped') AS stopped_count,
+                       SUM(sf.signal_type IN ('stopped','stopped_neutral')) AS stopped_count,
                        SUM(sf.signal_type IN ('client_approved','client_interview','client_offer','client_hired')) AS client_positive_count,
                        SUM(sf.signal_type='client_rejected') AS client_rejected_count
                 FROM agent_sourcing_attributions sa

@@ -668,6 +668,7 @@ def record_sourcing_business_signal(
                        SUM(sf.signal_type='contacted') AS contacted,
                        SUM(sf.signal_type='recommended') AS recommended,
                        SUM(sf.signal_type='stopped') AS stopped,
+                       SUM(sf.signal_type='stopped_neutral') AS neutral_stopped,
                        SUM(sf.signal_type IN ('client_approved','client_interview','client_offer','client_hired')) AS client_positive,
                        SUM(sf.signal_type='client_rejected') AS client_rejected
                 FROM agent_sourcing_feedback sf
@@ -687,7 +688,8 @@ def record_sourcing_business_signal(
             content = (
                 f"{job_row['client']}/{job_row['job']} 寻访经验：{attribution['channel']} 关键词“{attribution['source_query']}”{verdict}；"
                 f"复核通过 {int(aggregate['review_pass'] or 0)}，联系 {int(aggregate['contacted'] or 0)}，"
-                f"推荐 {int(aggregate['recommended'] or 0)}，停止 {int(aggregate['stopped'] or 0)}，"
+                f"推荐 {int(aggregate['recommended'] or 0)}，负向停止 {int(aggregate['stopped'] or 0)}，"
+                f"意向不足停止 {int(aggregate['neutral_stopped'] or 0)}，"
                 f"客户正向 {int(aggregate['client_positive'] or 0)}，客户否决 {int(aggregate['client_rejected'] or 0)}，经验分 {score:g}。"
             )
             memory_source_id = f"job:{attribution['job_id']}|{attribution['channel']}|{attribution['source_query']}"
@@ -732,4 +734,3 @@ def analyze_stop_note(self, payload: dict[str, Any]) -> dict[str, Any]:
     if not self.llm:
         raise RuntimeError("LLM not available")
     return self.llm.analyze_stop_note(payload)
-

@@ -521,12 +521,32 @@ def _requests_grade_filter(message: str) -> bool:
         return False
     grade_tokens = (
         "过滤", "筛选", "分级", "分层", "重新过滤", "再筛", "筛一下",
-        "匹配度", "按硬性", "按证据", "不匹配",
+        "匹配度", "按硬性", "按证据", "不匹配", "严格口径", "硬门槛",
+        "只保留", "直接证据", "项目支撑",
     )
     list_tokens = ("名单", "列表", "给我", "输出")
     if any(token in text for token in grade_tokens) and any(token in text for token in list_tokens):
         return True
     return any(token in text for token in ("分级过滤", "筛选出", "过滤出", "按匹配度"))
+
+
+_FULL_LIST_MARKERS = (
+    "全量名单", "完整名单", "全部候选", "全量候选", "所有人选", "全部人选",
+    "普通名单", "未筛选", "不用筛", "不要筛", "不筛选", "取消筛选", "取消过滤",
+)
+
+
+def _requests_full_list(message: str) -> bool:
+    """判断消息是否显式要求“全量/未筛选名单”（退出会话级严格筛选态）。
+
+    会话记住严格筛选态后必须给用户一个对话内出口：明确说“全量名单/不用筛”
+    时回落普通名单并清除记忆。只在有明确全量措辞时判定，避免“再筛一下”
+    这类分级措辞被误清。
+    """
+    text = " ".join(str(message or "").split())
+    if not text:
+        return False
+    return any(marker in text for marker in _FULL_LIST_MARKERS)
 
 
 _BATCH_STOP_MARKERS = (

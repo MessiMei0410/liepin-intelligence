@@ -89,3 +89,33 @@ describe('Agent conversation state machine', () => {
     expect(withText.messages[withText.messages.length - 1].content).toBe('生成中')
   })
 })
+
+describe('名单卡刷新', () => {
+  it('card_refreshed 只更新被点击的那张卡，同岗位其他名单卡不受影响', () => {
+    const plainCard = {
+      type: 'candidate_list', title: '岗位 137 候选名单',
+      context: { type: 'job', id: 137 }, summary: { total: 277 },
+    }
+    const gradeCard = {
+      type: 'candidate_list', title: '岗位 137 严格筛选名单', filter_mode: 'grade_filter',
+      context: { type: 'job', id: 137 }, summary: { total: 17 },
+    }
+    const state = {
+      ...initialAgentConversationState,
+      messages: [
+        { role: 'assistant' as const, content: '全量名单', action_card: plainCard },
+        { role: 'assistant' as const, content: '严格筛选名单', action_card: gradeCard },
+      ],
+    }
+    const refreshedCard = { ...gradeCard, summary: { total: 16 } }
+    const next = agentConversationReducer(state, {
+      type: 'card_refreshed', sourceCard: gradeCard, content: '刷新后的严格筛选名单', action_card: refreshedCard,
+    })
+
+    // 被刷新的严格筛选卡更新；同岗位的普通全量卡保持原样
+    expect(next.messages[1].content).toBe('刷新后的严格筛选名单')
+    expect(next.messages[1].action_card).toBe(refreshedCard)
+    expect(next.messages[0].content).toBe('全量名单')
+    expect(next.messages[0].action_card).toBe(plainCard)
+  })
+})

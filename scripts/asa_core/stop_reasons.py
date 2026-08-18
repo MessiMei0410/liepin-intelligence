@@ -21,6 +21,11 @@ STOP_REASON_LABELS: dict[str, str] = {
     "other": "其他",
 }
 
+# Candidate willingness is an outcome of outreach, not evidence that the sourcing
+# query returned an unsuitable person. Keep the stop state, but do not penalize
+# the query/strategy that found the candidate.
+NEUTRAL_SOURCING_STOP_REASONS = frozenset({"low_intent"})
+
 # 历史数据（stop_reason 列为 NULL）在统计口径里的单独标签。
 UNLABELED_STOP_REASON_LABEL = "未标注"
 

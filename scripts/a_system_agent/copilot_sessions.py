@@ -491,6 +491,7 @@ def _persist_copilot_focus(
     *,
     structured: dict[str, Any] | None = None,
     conflicts: list[dict[str, Any]] | None = None,
+    list_filter_update: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     previous = self.get_copilot_focus(session_id) or {}
     structured = dict(structured or {})
@@ -670,6 +671,22 @@ def _persist_copilot_focus(
     objective = semantic_objective if action else ""
     if active_workflow and not objective:
         objective = str(active_workflow.get("objective") or previous.get("objective") or "")
+    # 会话级名单筛选态（{job_id: "grade_filter"}）随焦点持久化：本轮若有
+    # 登记/清除请求在此应用，未提及的岗位原样保留。直答名单时按此记忆
+    # 决定是否保持严格口径（见 copilot_impl 名单分支）。
+    prev_list_filters = previous.get("list_filters") if isinstance(previous.get("list_filters"), dict) else {}
+    list_filters = {str(k): str(v) for k, v in prev_list_filters.items() if str(v or "")}
+    if isinstance(list_filter_update, dict):
+        try:
+            _lf_job = str(int(list_filter_update.get("job_id") or 0))
+        except (TypeError, ValueError):
+            _lf_job = ""
+        _lf_mode = str(list_filter_update.get("mode") or "")
+        if _lf_job and _lf_job != "0":
+            if _lf_mode:
+                list_filters[_lf_job] = _lf_mode
+            else:
+                list_filters.pop(_lf_job, None)
     focus = {
         "context": context_value,
         "client": client,
@@ -685,6 +702,7 @@ def _persist_copilot_focus(
         "turn_decision": turn_decision,
         "pending_workflow": pending_workflow,
         "current_workflow": current_workflow,
+        "list_filters": list_filters,
         "confidence": round(confidence, 3),
     }
     previous_state = previous.get("conversation_state") if isinstance(previous.get("conversation_state"), dict) else {}
