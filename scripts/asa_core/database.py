@@ -421,6 +421,30 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON agent_sourcing_adjustments(applied_workflow_id, applied_artifact_id);
         """,
     ),
+    (
+        14,
+        "lifecycle_event_request_dedupe_index",
+        # 生命周期事件 request_id 去重原为"先查后插"，多客户端并发下可重复插入；
+        # 部分唯一索引兜底：只约束 record_lifecycle_event 写入的
+        # （source_table='api_v1' 且 source_id 非空）行，其他写入（source_id 为 NULL）不受影响。
+        # 既有重复保留最早一条（MIN(id)），其孤儿跟进待办一并清理。
+        # 编号说明：12/13 由在途分支（kb-correctness / job-list-filter-memory）占用，故顺延到 14。
+        """
+        DELETE FROM candidate_events
+         WHERE source_table='api_v1' AND source_id IS NOT NULL
+           AND id NOT IN (
+               SELECT MIN(id) FROM candidate_events
+                WHERE source_table='api_v1' AND source_id IS NOT NULL
+                GROUP BY job_candidate_id, event_type, source_id
+           );
+        DELETE FROM followup_tasks
+         WHERE source_table='lifecycle_event'
+           AND source_id NOT IN (SELECT id FROM candidate_events);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_events_api_v1_request
+            ON candidate_events(job_candidate_id, event_type, source_id)
+            WHERE source_table='api_v1' AND source_id IS NOT NULL;
+        """,
+    ),
 ]
 
 

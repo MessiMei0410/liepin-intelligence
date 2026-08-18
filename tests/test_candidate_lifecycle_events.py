@@ -154,3 +154,117 @@ def test_lifecycle_event_validation(db_path: Path) -> None:
     assert bad_status.status_code == 409
     assert "事件状态非法" in bad_status.json()["detail"]
     assert missing.status_code == 404
+
+
+def test_lifecycle_event_explicit_status_written(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = _record(
+            client, 559, "lc-key-status", "lc-req-status",
+            event_type="interview_completed", event_status="passed", notes="一面通过，等二面",
+        )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["event"]["event_status"] == "passed"
+    assert _count(
+        db_path,
+        "SELECT COUNT(*) FROM candidate_events WHERE source_table='api_v1' AND source_id='lc-req-status' AND event_status='passed'",
+    ) == 1
+
+
+def test_migration_14_dedupes_and_enforces_unique_request_id(db_path: Path) -> None:
+    """migration 14：先去重（保留最早一条 + 清孤儿待办）再建部分唯一索引；重复执行幂等。"""
+    from asa_core.database import migrate
+
+    conn = sqlite3.connect(db_path)
+    try:
+        person_id, job_id = conn.execute(
+            "SELECT person_id,job_id FROM job_candidates WHERE id=559"
+        ).fetchone()
+        # 无论本模块其他测试是否已触发过 create_app 的 migrate，都回到 14 未应用的状态重跑。
+        conn.execute("DROP INDEX IF EXISTS idx_candidate_events_api_v1_request")
+        conn.execute("DELETE FROM schema_migrations WHERE version=14")
+        conn.execute("DELETE FROM candidate_events WHERE source_id='m14-dup-req'")
+        for summary in ("最早一条", "重复一条"):
+            conn.execute(
+                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                   VALUES (559,?,?,'interview_completed','completed',datetime('now','localtime'),?,'{}','api_v1','m14-dup-req')""",
+                (person_id, job_id, summary),
+            )
+        dup_id = int(conn.execute(
+            "SELECT MAX(id) FROM candidate_events WHERE source_id='m14-dup-req'"
+        ).fetchone()[0])
+        keep_id = int(conn.execute(
+            "SELECT MIN(id) FROM candidate_events WHERE source_id='m14-dup-req'"
+        ).fetchone()[0])
+        orphan_task_id = int(conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM followup_tasks").fetchone()[0])
+        conn.execute(
+            """INSERT INTO followup_tasks(id,job_candidate_id,task_type,status,source_table,source_id,created_at,updated_at)
+               VALUES (?,559,'interview_followup','open','lifecycle_event',?,datetime('now','localtime'),datetime('now','localtime'))""",
+            (orphan_task_id, dup_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = migrate(db_path, backup=False)
+    assert 14 in result["applied"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id,summary FROM candidate_events WHERE source_id='m14-dup-req'"
+        ).fetchall()
+        assert [int(row[0]) for row in rows] == [keep_id]  # 既有重复保留最早一条
+        assert conn.execute(
+            "SELECT COUNT(*) FROM followup_tasks WHERE id=?", (orphan_task_id,)
+        ).fetchone()[0] == 0  # 被删事件的孤儿待办一并清理
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_candidate_events_api_v1_request'"
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                   VALUES (559,?,?,'interview_completed','passed',datetime('now','localtime'),'再次重复','{}','api_v1','m14-dup-req')""",
+                (person_id, job_id),
+            )
+        conn.rollback()
+        # 索引只约束 api_v1 且 source_id 非空的行：其他写入（source_id NULL / 其他 source_table）不受影响。
+        conn.execute(
+            """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table)
+               VALUES (559,?,?,'client_feedback','interviewing',datetime('now','localtime'),'旧口径事件','{}','legacy')""",
+            (person_id, job_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    again = migrate(db_path, backup=False)
+    assert 14 not in again["applied"]  # 幂等：重复执行不再应用
+
+
+def test_lifecycle_event_concurrent_same_request_id(db_path: Path) -> None:
+    """多客户端并发同一 request_id：只落一条事件与一条跟进待办，后到者按重放回读。"""
+    import concurrent.futures
+
+    from asa_core.service import CoreService
+
+    core = CoreService(db_path=db_path)
+
+    def record() -> dict:
+        return core.record_lifecycle_event(
+            559, "interview_scheduled", notes="并发写入", request_id="lc-req-race",
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: record(), range(2)))
+    assert all(result["ok"] for result in results)
+    assert sum(1 for result in results if result["already_recorded"]) == 1
+    assert len({result["event_id"] for result in results}) == 1
+    assert _count(
+        db_path,
+        "SELECT COUNT(*) FROM candidate_events WHERE source_table='api_v1' AND source_id='lc-req-race'",
+    ) == 1
+    assert _count(
+        db_path,
+        "SELECT COUNT(*) FROM followup_tasks WHERE job_candidate_id=559 AND source_table='lifecycle_event' AND reason LIKE '面试安排：并发写入%'",
+    ) == 1
