@@ -42,11 +42,11 @@ describe('CandidateListDialog', () => {
     expect(screen.getByText('已停止推进')).toBeTruthy()
   })
 
-  it('点击人选行触发 onOpenCandidate 带人选 id', () => {
+  it('点击人选行触发 onOpenCandidate 带人选 id 与名单顺序', () => {
     const onOpenCandidate = vi.fn()
     render(<CandidateListDialog data={data} onOpenCandidate={onOpenCandidate} onClose={() => {}} />)
     fireEvent.click(screen.getByText('张航'))
-    expect(onOpenCandidate).toHaveBeenCalledWith(522)
+    expect(onOpenCandidate).toHaveBeenCalledWith(522, [522, 519, 511])
   })
 
   it('Escape 触发 onClose', () => {

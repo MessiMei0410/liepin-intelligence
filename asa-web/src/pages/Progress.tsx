@@ -45,7 +45,7 @@ const compareStages = (a: readonly [string, Candidate[]], b: readonly [string, C
   return a[0].localeCompare(b[0], 'zh-Hans-CN')
 }
 
-export function Progress({ items, openCandidate }: { items: Candidate[]; openCandidate: (id: number) => void }) {
+export function Progress({ items, openCandidate }: { items: Candidate[]; openCandidate: (id: number, navIds?: number[]) => void }) {
   // 搜索词与各阶段页码跨 tab 切换与刷新保持。
   const [query, setQuery] = usePageFilterState<string>('progress.query', '')
   const [stagePages, setStagePages] = usePageFilterState<Record<string, number>>('progress.stagePages', {})
@@ -84,6 +84,8 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
   }, [groups, setStagePages])
 
   const goStagePage = (stage: string, next: number) => setStagePages(prev => ({ ...prev, [stage]: next }))
+  // 详情页"上一位/下一位"按当前看板的展示顺序（阶段分组展开、跨页完整顺序）切换。
+  const orderedIds = useMemo(() => groups.flatMap(([, list]) => list.map(candidate => candidate.id)), [groups])
 
   return (
     <div className="stage-progress">
@@ -112,7 +114,7 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
               <section className="stage" key={stage} aria-label={stage}>
                 <header><span>{stage}</span><b>{list.length}</b></header>
                 {visible.map(candidate => (
-                  <button key={candidate.id} onClick={() => openCandidate(candidate.id)} aria-label={`打开候选人 ${candidate.name}（${stage}）`}>
+                  <button key={candidate.id} onClick={() => openCandidate(candidate.id, orderedIds)} aria-label={`打开候选人 ${candidate.name}（${stage}）`}>
                     <UserRoundSearch aria-hidden="true" />
                     <span><b>{candidate.name}</b><small>{candidate.client} · {candidate.job}</small></span>
                   </button>

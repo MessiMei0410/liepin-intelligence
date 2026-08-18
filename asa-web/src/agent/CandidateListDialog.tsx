@@ -18,7 +18,7 @@ export function CandidateListDialog({
   refreshing = false,
 }: {
   data: CandidateListCardData
-  onOpenCandidate: (jobCandidateId: number) => void
+  onOpenCandidate: (jobCandidateId: number, navIds?: number[]) => void
   onOpenJob?: (jobId: number) => void
   onClose: () => void
   onRefresh?: () => void
@@ -32,6 +32,8 @@ export function CandidateListDialog({
   const stopped = Number(summary.stopped ?? 0)
   const bonderCount = Number(summary.bonder_count ?? groups.find(group => group.key === 'bonder')?.candidates?.length ?? 0)
   const jobId = data.context?.type === 'job' ? Number(data.context.id) : undefined
+  // 详情页"上一位/下一位"按名单分组展开后的展示顺序切换。
+  const orderedIds = groups.flatMap(group => (group.candidates || []).map(candidate => candidate.id))
 
   const detachDialog = (anchor?: DragResizeAnchor): boolean => {
     const jobId = data.context?.type === 'job' ? Number(data.context.id) : 0
@@ -90,7 +92,7 @@ export function CandidateListDialog({
                 <li key={candidate.id}>
                   <button
                     className="candidate-dialog-row"
-                    onClick={() => onOpenCandidate(candidate.id)}
+                    onClick={() => onOpenCandidate(candidate.id, orderedIds)}
                     title={`打开人选详情：${candidate.name}`}
                   >
                     <span className="candidate-list-row-main">

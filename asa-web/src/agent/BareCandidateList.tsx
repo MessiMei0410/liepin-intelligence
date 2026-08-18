@@ -10,7 +10,7 @@ import type { CandidateListCardData } from '../workflows/CandidateListCard'
  * 组件渲染，保证独立窗口与应用内名单 UI 完全一致。
  * 点人选通过原生桥弹出独立的详情窗口（名单窗口保持开着）；刷新走岗位名单刷新接口。
  */
-export function BareCandidateList({ onOpenCandidate }: { onOpenCandidate: (id: number) => void }) {
+export function BareCandidateList({ onOpenCandidate }: { onOpenCandidate: (id: number, navIds?: number[]) => void }) {
   const [data, setData] = useState<CandidateListCardData | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   useEffect(() => {
@@ -35,9 +35,11 @@ export function BareCandidateList({ onOpenCandidate }: { onOpenCandidate: (id: n
     return ''
   }
   // 点人选：弹独立详情窗口；无原生桥（纯浏览器调试）时退回同窗口导航。
-  const openDetail = (id: number) => {
-    if (nativeBridge('openDetachedDialog', { title: nameOf(id) || '候选人详情', url: `/asa-app#candidate=${id}&bare=1` })) return
-    onOpenCandidate(id)
+  // 名单顺序随 URL hash（nav 参数）带给详情窗口，详情页"上一位/下一位"按此顺序切换。
+  const openDetail = (id: number, navIds?: number[]) => {
+    const nav = navIds?.length ? `&nav=${navIds.join(',')}` : ''
+    if (nativeBridge('openDetachedDialog', { title: nameOf(id) || '候选人详情', url: `/asa-app#candidate=${id}&bare=1${nav}` })) return
+    onOpenCandidate(id, navIds)
   }
   const refresh = async () => {
     if (!jobId || refreshing) return

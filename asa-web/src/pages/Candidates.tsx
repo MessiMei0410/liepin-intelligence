@@ -52,7 +52,7 @@ const compareCandidates = (a: Candidate, b: Candidate, key: SortKey): number => 
   return result || b.id - a.id
 }
 
-export function Candidates({ items, openCandidate, compact = false }: { items: Candidate[]; openCandidate: (id: number) => void; compact?: boolean }) {
+export function Candidates({ items, openCandidate, compact = false }: { items: Candidate[]; openCandidate: (id: number, navIds?: number[]) => void; compact?: boolean }) {
   // 筛选/排序/页码跨 tab 切换与刷新保持（compact 内嵌模式不渲染工具栏，不受影响）。
   const [mode, setMode] = usePageFilterState<Mode>('candidates.mode', 'active')
   const [query, setQuery] = usePageFilterState<string>('candidates.query', '')
@@ -88,10 +88,12 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
     setMode(next)
     setPage(0)
   }
+  // 打开详情时把当前筛选/排序后的完整顺序一并交给 App：详情页"上一位/下一位"严格按名单此刻的顺序切换。
+  const openDetail = (id: number) => openCandidate(id, filtered.map(candidate => candidate.id))
   const open = (event: React.KeyboardEvent, id: number) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
-      openCandidate(id)
+      openDetail(id)
     }
   }
   const ariaSort = (key: SortKey) => (sortKey === key ? (key === 'name' ? 'ascending' : 'descending') : undefined)
@@ -161,7 +163,7 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
           </thead>
           <tbody>
             {shown.map(candidate => (
-              <tr key={candidate.id} tabIndex={0} aria-label={`打开候选人 ${candidate.name}`} onKeyDown={event => open(event, candidate.id)} onClick={() => openCandidate(candidate.id)}>
+              <tr key={candidate.id} tabIndex={0} aria-label={`打开候选人 ${candidate.name}`} onKeyDown={event => open(event, candidate.id)} onClick={() => openDetail(candidate.id)}>
                 <td className="candidate-cell"><b>{candidate.name}</b><small>{candidate.current_company || '公司待补充'} · {candidate.current_title || '职位待补充'}</small></td>
                 <td className="candidate-cell"><b>{candidate.job || '待关联岗位'}</b><small>{candidate.client}</small></td>
                 <td>{sourceLabel(candidate.source_type)}</td>

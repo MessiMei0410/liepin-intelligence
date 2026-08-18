@@ -27,7 +27,7 @@ import { BusinessDeliverySummary } from './BusinessDeliverySummary'
 import { SourcingResultCard, type SourcingResultCardData } from './SourcingResultCard'
 import { useWorkflowWriteActions } from './useWorkflowWriteActions'
 
-export function WorkflowPanel({value:sourceValue,jobs,close,reload,openCandidate,archived,closeAll}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number)=>void,archived:()=>void,closeAll?:()=>void}) {
+export function WorkflowPanel({value:sourceValue,jobs,close,reload,openCandidate,archived,closeAll}:{value:Workflow,jobs:Job[],close:()=>void,reload:()=>void|Promise<void>,openCandidate:(id:number,navIds?:number[])=>void,archived:()=>void,closeAll?:()=>void}) {
   const {value,busy,error:actionError,feedback:actionFeedback,runAction:action,decide,retry}=useWorkflowWriteActions({sourceValue,reload,archived})
   const [now,setNow]=useState(Date.now())
   const [strategyOpen,setStrategyOpen]=useState(false)
