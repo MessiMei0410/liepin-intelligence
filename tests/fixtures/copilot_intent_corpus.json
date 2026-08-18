@@ -41,6 +41,11 @@
     {"message": "客户那边可以推了", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
     {"message": "这个人直接报给客户吧", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "recommend"}, "note": "recommend 同义句"},
 
+    {"message": "把这位候选人标记为已联系", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "标记为X 祈使句（F1：曾误路由 create_plan）"},
+    {"message": "把这位候选人标记为已触达", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "contact"}, "note": "标记为X 祈使句"},
+    {"message": "把这位候选人标记为复核通过", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "标记为X 祈使句（F1：曾误路由 create_plan）"},
+    {"message": "把这个人选标记为筛选合格", "expected": {"tier": "confirm", "kind": "candidate_action", "action": "advance"}, "note": "标记为X 祈使句"},
+
     {"message": "这个人选已读不回怎么办", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
     {"message": "这人不合适，要不要停？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
     {"message": "感觉他不太行，该怎么处理？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
@@ -53,10 +58,13 @@
     {"message": "他多久没回消息了？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
     {"message": "为什么不推进这个人？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写"},
     {"message": "先别联系他了，行吗？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写：动作搭配+商量语气仍是询问句"},
+    {"message": "要不要把他标记为已联系？", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "询问句零误写：标记为X 商量语气仍是询问句"},
 
     {"message": "先不约面试", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+约面试不得判 advance"},
     {"message": "还没联系上他", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：没+联系上不得判 contact"},
     {"message": "没聊过，只是发了消息", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：没+聊过不得判 contact"},
-    {"message": "不推给客户了", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+推给客户不得判 recommend"}
+    {"message": "不推给客户了", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+推给客户不得判 recommend"},
+    {"message": "别把他标记为已联系", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：别+把+标记为不得判 contact"},
+    {"message": "不要把他标记为复核通过", "expected": {"tier": "", "kind": "none", "action": ""}, "note": "否定守卫：不+把+标记为不得判 advance"}
   ]
 }

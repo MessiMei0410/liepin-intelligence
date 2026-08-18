@@ -307,3 +307,82 @@ def test_openai_compatible_tool_request_uses_normalized_content(monkeypatch) -> 
     assert result["tool_calls"][0]["name"] == "query_job"
     assert result["tool_calls"][0]["arguments"] == {"job_id": 137}
     assert "DSML" not in result["content"]
+
+
+# ---------------------------------------------------------------------------
+# F1 二段缺陷回归（DSH parity 2026-08-18）：Core 意图层已认领候选人写入意图
+# （pending_intent 确认通道）的轮次，模型答题循环不得暴露业务写工具，
+# 否则 LLM 会绕过“未确认前不会写入 ASA”在同一条消息里直接写库。
+# ---------------------------------------------------------------------------
+
+def test_model_answer_hides_business_write_tools_when_candidate_intent_claimed() -> None:
+    from types import SimpleNamespace
+
+    from a_system_agent.copilot_impl import _generate_copilot_model_answer
+    from a_system_agent.copilot_tools import BUSINESS_WRITE_TOOLS
+
+    captured: dict[str, list[str]] = {}
+
+    class FakeLLM:
+        def copilot_with_tools(self, payload, tools, messages=None, allow_tools=True):
+            captured["tools"] = [t["function"]["name"] for t in tools]
+            return {"content": "好的", "tool_calls": []}
+
+    fake_self = SimpleNamespace(
+        config={"runtime": {"copilot_tools_enabled": True}},
+        llm=FakeLLM(),
+        db_path=":memory:",
+    )
+    answer, tool_calls, _refs = _generate_copilot_model_answer(
+        fake_self, {"question": "把这位候选人标记为已联系"},
+        allow_business_write_tools=False,
+    )
+    assert answer == "好的"
+    assert tool_calls == []
+    exposed = set(captured["tools"])
+    assert exposed.isdisjoint(BUSINESS_WRITE_TOOLS)
+    # 只读工具仍保留
+    assert {"query_candidate", "get_dashboard", "recall"} <= exposed
+
+    # 默认轮次（无候选人写入意图认领）行为不变：写工具仍暴露
+    _generate_copilot_model_answer(fake_self, {"question": "随便聊聊"})
+    assert "update_candidate_stage" in captured["tools"]
+
+
+def test_model_answer_blocks_write_tool_execution_even_if_called() -> None:
+    from types import SimpleNamespace
+
+    from a_system_agent.copilot_impl import _generate_copilot_model_answer
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def copilot_with_tools(self, payload, tools, messages=None, allow_tools=True):
+            self.calls += 1
+            if not allow_tools:
+                return {"content": "已收到，等待确认", "tool_calls": []}
+            if self.calls == 1:
+                # 模型幻觉调用已被摘除的写工具：执行层也必须拒绝，不得落库
+                return {
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "t1", "name": "update_candidate_stage",
+                         "arguments": {"candidate_id": 969, "stage": "S3 已联系/待回复"}},
+                    ],
+                }
+            return {"content": "已收到，等待确认", "tool_calls": []}
+
+    fake_self = SimpleNamespace(
+        config={"runtime": {"copilot_tools_enabled": True}},
+        llm=FakeLLM(),
+        db_path=":memory:",  # 即使真执行也会因无表报错；这里断言的是根本没走到执行
+    )
+    answer, tool_calls, _refs = _generate_copilot_model_answer(
+        fake_self, {"question": "把这位候选人标记为已联系"},
+        allow_business_write_tools=False,
+    )
+    assert answer == "已收到，等待确认"
+    assert tool_calls[0]["tool"] == "update_candidate_stage"
+    assert tool_calls[0]["result"]["success"] is False
+    assert "不允许" in tool_calls[0]["result"]["error"]

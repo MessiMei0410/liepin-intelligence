@@ -368,3 +368,52 @@ def test_recommend_synonym_never_creates_workflow(db_path: Path) -> None:
         assert "已启动寻访" not in body["answer"]
         assert "已建立目标" not in body["answer"]
     assert _candidate_row(db_path) == ACTIVE_STAGE
+
+
+# ---------------------------------------------------------------------------
+# F1 回归（DSH parity 2026-08-18 §6 F1）：「把这位候选人标记为已联系/复核通过」
+# 是对当前候选人的写入指令，必须走候选人动作确认层（pending_intent），
+# 不得被 turn_decision 路由为 create_plan（draft goal + planned workflow）。
+# ---------------------------------------------------------------------------
+
+def test_mark_contacted_imperative_pends_not_create_plan(db_path: Path) -> None:
+    """parity write_contact 场景原文：确认前零写入、零计划，确认后推进到 S3。"""
+    _set_candidate_stage(db_path, ACTIVE_STAGE)
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        body = _post_message(client, "把这位候选人标记为已联系")
+        pending = body["pending_intent"]
+        assert pending["action"] == "contact"
+        assert pending["kind"] == "candidate_action"
+        assert pending["candidate"]["id"] == CANDIDATE_ID
+        assert pending["preflight_token"]
+        assert "未确认前不会写入 ASA" in body["answer"]
+        # F1 缺陷形态：不得凭空创建 draft goal / planned workflow
+        assert not body.get("workflow_id")
+        assert not body.get("goal_id")
+        assert not body.get("plan_summary")
+        assert "已启动寻访" not in body["answer"]
+        assert _candidate_row(db_path) == ACTIVE_STAGE
+
+        confirm = _post_confirm(client, pending)
+        assert confirm.status_code == 200
+        confirmed = confirm.json()
+        assert confirmed["ok"] is True
+        assert confirmed["candidate_action"]["action"] == "contact"
+        assert "已确认并同步到 ASA" in confirmed["answer"]
+        assert _candidate_row(db_path) == ("S3 已联系/待回复", "联系推进", "contacted")
+
+
+def test_mark_review_passed_imperative_pends_not_create_plan(db_path: Path) -> None:
+    """parity guard_4 场景原文：'把这位候选人标记为复核通过' 路由为 advance 确认层。"""
+    _set_candidate_stage(db_path, ACTIVE_STAGE)
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        body = _post_message(client, "把这位候选人标记为复核通过")
+        pending = body["pending_intent"]
+        assert pending["action"] == "advance"
+        assert pending["kind"] == "candidate_action"
+        assert pending["candidate"]["id"] == CANDIDATE_ID
+        assert "未确认前不会写入 ASA" in body["answer"]
+        assert not body.get("workflow_id")
+        assert not body.get("goal_id")
+        assert not body.get("plan_summary")
+    assert _candidate_row(db_path) == ACTIVE_STAGE

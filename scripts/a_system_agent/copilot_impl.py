@@ -382,12 +382,23 @@ def _execution_receipt(
 def _generate_copilot_model_answer(
     self,
     payload: dict[str, Any],
+    *,
+    allow_business_write_tools: bool = True,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the canonical answer model with read-only tools on the same turn state."""
     if not bool(self.config.get("runtime", {}).get("copilot_tools_enabled", True)):
         return self.llm.copilot(payload), [], []
 
-    from .copilot_tools import COPILOT_TOOLS, TOOL_EXECUTORS
+    from .copilot_tools import BUSINESS_WRITE_TOOLS, COPILOT_TOOLS, TOOL_EXECUTORS
+
+    # Core 意图层已认领候选人写入意图（pending_intent 确认通道）的轮次，
+    # 摘掉业务写工具：写入只能由用户在确认卡片上确认后走 preflight→commit。
+    tools = COPILOT_TOOLS
+    if not allow_business_write_tools:
+        tools = [
+            tool for tool in COPILOT_TOOLS
+            if str((tool.get("function") or {}).get("name") or "") not in BUSINESS_WRITE_TOOLS
+        ]
 
     max_rounds = max(1, min(int(self.config.get("runtime", {}).get("copilot_tool_rounds", 3)), 5))
     messages: list[dict[str, Any]] = [
@@ -398,7 +409,7 @@ def _generate_copilot_model_answer(
     references: list[dict[str, Any]] = []
 
     for round_num in range(max_rounds):
-        response = self.llm.copilot_with_tools(payload, COPILOT_TOOLS, messages=messages)
+        response = self.llm.copilot_with_tools(payload, tools, messages=messages)
         if not isinstance(response, dict):
             return str(response or "").strip(), tool_results, references
         calls = response.get("tool_calls") if isinstance(response.get("tool_calls"), list) else []
@@ -432,7 +443,7 @@ def _generate_copilot_model_answer(
             arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
             call_key = (name, json.dumps(arguments, sort_keys=True, ensure_ascii=False))
             executor = TOOL_EXECUTORS.get(name)
-            if executor is None:
+            if executor is None or (not allow_business_write_tools and name in BUSINESS_WRITE_TOOLS):
                 result = {"success": False, "error": f"不允许的只读工具: {name or 'unknown'}"}
             elif call_key in executed_calls:
                 result = {"success": False, "error": "本轮已返回相同查询，请直接使用已有结果作答。"}
@@ -459,7 +470,7 @@ def _generate_copilot_model_answer(
         if not new_call_executed or round_num == max_rounds - 1:
             final = self.llm.copilot_with_tools(
                 payload,
-                COPILOT_TOOLS,
+                tools,
                 messages=messages,
                 allow_tools=False,
             )
@@ -2470,6 +2481,9 @@ def _copilot_impl(
         answer, model_tool_calls, tool_references = _generate_copilot_model_answer(
             self,
             sanitize_payload(payload),
+            # Core 意图层已认领候选人写入意图（pending_intent 确认通道）：
+            # 本轮模型答题不得使用业务写工具，写入只能由确认卡片触发。
+            allow_business_write_tools=not raw_context.get("candidate_intent"),
         )
         references.extend(tool_references)
         if not answer:

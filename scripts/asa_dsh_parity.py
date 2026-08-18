@@ -63,8 +63,11 @@ DSH_BOOT_TIMEOUT_S = 60
 
 # 业务副作用比较只覆盖这些表；agent_copilot_messages 等传输层会话记录单列信息项。
 SNAPSHOT_TABLES: dict[str, dict[str, Any]] = {
-    "job_candidates": {"pk": "id", "strip": set()},
-    "candidates": {"pk": "id", "strip": set()},
+    # clean_reason/notes 承载通道相关备注文案（Copilot 确认备注 vs DSH 备注），
+    # 属判定口径里的"备注文案"剥离项；阶段/状态本体仍由 clean_stage/raw_status/
+    # flow_bucket/status 列参与比较。
+    "job_candidates": {"pk": "id", "strip": {"clean_reason"}},
+    "candidates": {"pk": "id", "strip": {"notes"}},
     "people": {"pk": "id", "strip": set()},
     "candidate_events": {
         "pk": "id",
@@ -104,6 +107,8 @@ def _is_volatile(column: str) -> bool:
 # 比较副作用等价时归一化为占位符（业务内容不变，只抹掉随机标识）。
 _RANDOM_ID_RE = re.compile(
     r"\b(?:approval|goal|workflow|audit|copilot|run|session)_[0-9a-f]{8,}\b"
+    # Copilot 确认端点的 request_id（copilot_intent_confirm_<hex>）：属随机标识。
+    r"|\bcopilot_intent_confirm_[0-9a-f]{8,}\b"
     r"|\bparity-[0-9a-f-]{8,}\b"
     r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
 )
@@ -187,9 +192,26 @@ def diff_snapshots(
     return diff
 
 
+def _strip_added_row_pk(diff: dict) -> dict:
+    """added 行的自增主键是运行序产物（Copilot 侧传输层操作行也会消耗 id，
+    过滤后两侧同一业务行的 id 错位），等价判定时剥离；比较的是"加了什么行"，
+    不是"行号是多少"。changed 行按 pk 对齐，不受影响。"""
+    out = {}
+    for table, delta in diff.items():
+        pk = SNAPSHOT_TABLES.get(table, {}).get("pk", "id")
+        out[table] = {
+            "added": [
+                {key: value for key, value in row.items() if key != pk}
+                for row in delta.get("added", [])
+            ],
+            "changed": delta.get("changed", []),
+        }
+    return out
+
+
 def diffs_equal(left: dict, right: dict) -> tuple[bool, str]:
-    left_n = _normalize_random_ids(left)
-    right_n = _normalize_random_ids(right)
+    left_n = _normalize_random_ids(_strip_added_row_pk(left))
+    right_n = _normalize_random_ids(_strip_added_row_pk(right))
     if left_n == right_n:
         return True, ""
     mismatch_tables = sorted(set(left_n) | set(right_n))
@@ -1055,7 +1077,9 @@ def main() -> int:
         total = len(report["scenarios"])
         passed_n = sum(1 for s in report["scenarios"] if s["pass"])
         write_scenarios = [s for s in report["scenarios"] if s["kind"] == "write"]
-        write_equal = sum(1 for s in write_scenarios if s["copilot_diff"] == s["dsh_diff"])
+        # 与判定口径一致：归一化（随机 ID/时间戳/备注文案/added 行 pk）后比较，
+        # 不能用原始字典 ==（两侧随机标识必然不同，永远计 0）。
+        write_equal = sum(1 for s in write_scenarios if diffs_equal(s["copilot_diff"], s["dsh_diff"])[0])
         report["summary"] = {
             "total": total,
             "passed": passed_n,

@@ -955,3 +955,14 @@ TOOL_EXECUTORS.update({
     "memorize": execute_memorize,
     "recall": execute_recall,
 })
+
+# 业务写工具（直接落库/落文件，不经过 Core preflight→commit 安全链）。
+# 当 Core 意图层已把本轮认领为候选人写入意图（pending_intent 确认通道，
+# “未确认前不会写入 ASA”）时，模型答题循环不得暴露这些工具——否则 LLM
+# 会绕过确认层在同一条消息里直接写库（DSH parity 2026-08-18 F1 二段缺陷）。
+# memorize/recall 是 Agent 记忆面、不落业务表，不在此列。
+BUSINESS_WRITE_TOOLS = frozenset({
+    "update_candidate_stage",
+    "record_communication",
+    "generate_report",
+})
