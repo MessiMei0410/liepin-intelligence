@@ -113,9 +113,13 @@ _NEGATION_TOKENS = ("没", "未", "不", "别", "莫")
 
 
 def _negated(text: str, start: int) -> bool:
-    """动作词前紧邻否定词则视为否定表达，不产生正向意图。"""
+    """动作词前紧邻否定词，或「否定词+把/将」隔字结构（“别把他标记为…”），
+    均视为否定表达，不产生正向意图。"""
     prefix = text[max(0, start - 2):start]
-    return any(token in prefix for token in _NEGATION_TOKENS)
+    if any(token in prefix for token in _NEGATION_TOKENS):
+        return True
+    wide = text[max(0, start - 8):start]
+    return bool(re.search(r"[没未不别莫][^把将]{0,3}[把将]", wide))
 
 
 # 顺序即优先级：stop 最先（“先别推给客户”必须落在 stop 而不是 recommend）。
@@ -148,12 +152,26 @@ _EXTENDED_ACTION_RULES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "contact",
+        "明确标记指令（标记为已联系），判定为已联系",
+        (
+            r"(?:标记|更新|改|记录|登记)(?:一下|下)?(?:为|成|到)?已(?:联系|触达|沟通)",
+        ),
+    ),
+    (
         "advance",
         "肯定/推进类表达，判定为复核通过继续推进",
         (
             r"(?:可以|不错|挺好|挺好的|没问题|我看行|蛮好).{0,8}(?:约面试|安排面试|继续推|往下推|推进吧|往下走|下一轮)",
             r"(?:约面试|安排面试|约面|排面试)",
             r"(?:通过吧|给通过|算通过|直接通过)",
+        ),
+    ),
+    (
+        "advance",
+        "明确标记指令（标记为复核通过），判定为复核通过继续推进",
+        (
+            r"(?:标记|更新|改|记录|登记)(?:一下|下)?(?:为|成|到)?(?:复核|初筛|筛选)(?:通过|合格)",
         ),
     ),
 )
