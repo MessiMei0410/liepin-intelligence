@@ -67,6 +67,32 @@ class CopilotListFilterMemoryTest(AgentDbCase):
         fourth = self._copilot(service, "给我名单")
         self.assertFalse((fourth.get("action_card") or {}).get("filter_mode"))
 
+    def test_grade_filter_remembered_across_sessions(self) -> None:
+        """岗位级口径（job_list_filters）：任何会话做过严格筛选后，全新会话问名单也默认给最新分级名单。
+
+        场景（2026-08-18 copilot_dc34113ddefc）：岗位前一日筛出 17 人分级名单，
+        第二天新会话第一句"候选人名单给我"回落全量 287 人。
+        """
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        self.addCleanup(service.close)
+        context = {"type": "job", "id": 10, "page": "positions"}
+
+        first = service.copilot("把候选池过滤一下，按匹配度给我名单", session_id="session-a", context=context)
+        self.assertEqual((first.get("action_card") or {}).get("filter_mode"), "grade_filter")
+
+        # 全新会话无会话级记忆：岗位级记忆兜底，仍按最新数据重算分级名单，并附口径提示
+        second = service.copilot("给我名单", session_id="session-b", context=context)
+        self.assertEqual((second.get("action_card") or {}).get("filter_mode"), "grade_filter")
+        self.assertIn("严格筛选口径", str(second.get("answer") or ""))
+
+        # 显式要全量：岗位级记忆一并清除
+        third = service.copilot("给我全量名单", session_id="session-b", context=context)
+        self.assertFalse((third.get("action_card") or {}).get("filter_mode"))
+
+        # 之后的全新会话：不再恢复严格口径
+        fourth = service.copilot("给我名单", session_id="session-c", context=context)
+        self.assertFalse((fourth.get("action_card") or {}).get("filter_mode"))
+
 
 if __name__ == "__main__":
     unittest.main()

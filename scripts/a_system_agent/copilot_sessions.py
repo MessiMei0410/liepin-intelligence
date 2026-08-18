@@ -26,6 +26,58 @@ from .copilot_evidence import _continued_sourcing_requested, _copilot_context_jo
 from .copilot_intent import _COPILOT_SEMANTIC_ACTIONS
 
 
+_JOB_LIST_FILTER_DDL = """
+CREATE TABLE IF NOT EXISTS job_list_filters (
+    job_id INTEGER PRIMARY KEY,
+    mode TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+)
+"""
+
+
+def get_job_list_filter(db_path: Any, job_id: int) -> str:
+    """岗位级名单口径（跨会话）：grade_filter 表示该岗位做过严格筛选，问名单默认给分级结果。
+
+    表不存在（老库/未迁移的测试库）时安静返回空串，由调用方按普通名单处理。
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT mode FROM job_list_filters WHERE job_id=?", (int(job_id),)
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return ""
+    return str(row[0] or "") if row else ""
+
+
+def set_job_list_filter(db_path: Any, job_id: int, mode: str) -> None:
+    """登记/清除岗位级名单口径；mode 为空串时删除记录。"""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            conn.execute(_JOB_LIST_FILTER_DDL)
+            if mode:
+                conn.execute(
+                    """
+                    INSERT INTO job_list_filters (job_id, mode, updated_at)
+                    VALUES (?, ?, datetime('now','localtime'))
+                    ON CONFLICT(job_id) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at
+                    """,
+                    (int(job_id), str(mode)),
+                )
+            else:
+                conn.execute("DELETE FROM job_list_filters WHERE job_id=?", (int(job_id),))
+            conn.commit()
+        finally:
+            conn.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        # 口径记忆是体验增强，写失败不影响名单主流程。
+        pass
+
+
 def _format_workflow_strategy_answer(workflow_context: dict[str, Any], *, expanded: bool = False) -> str:
     strategy = workflow_context.get("strategy") if isinstance(workflow_context.get("strategy"), dict) else None
     workflow = workflow_context.get("workflow") if isinstance(workflow_context.get("workflow"), dict) else {}

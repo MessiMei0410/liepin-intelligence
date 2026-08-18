@@ -1493,6 +1493,10 @@ def _copilot_impl(
                     (existing_focus.get("list_filters") if isinstance(existing_focus, dict) else None) or {}
                 ).get(str(list_job_id)) or ""
             )
+            # 岗位级名单口径（跨会话兜底）：该岗位在任意会话做过严格筛选后，
+            # 之后问“名单”都按 grade_filter 口径用最新数据重算；显式“全量名单”清除。
+            from .copilot_sessions import get_job_list_filter, set_job_list_filter
+            job_list_filter = get_job_list_filter(self.db_path, list_job_id)
             explicit_grade = _requests_grade_filter(message)
             explicit_full = _requests_full_list(message)
             if explicit_grade:
@@ -1503,8 +1507,10 @@ def _copilot_impl(
                 use_grade_filter = False
                 if remembered_list_filter:
                     list_filter_update = {"job_id": list_job_id, "mode": ""}
+                if job_list_filter:
+                    set_job_list_filter(self.db_path, list_job_id, "")
             else:
-                use_grade_filter = remembered_list_filter == "grade_filter"
+                use_grade_filter = remembered_list_filter == "grade_filter" or job_list_filter == "grade_filter"
             if use_grade_filter:
                 try:
                     import sqlite3 as _sqlite3
@@ -1532,6 +1538,12 @@ def _copilot_impl(
                         candidate_list_answer, candidate_list_card = format_grade_card(
                             _filter_result, client=_client_name, job_title=_job_title, job_id=list_job_id
                         )
+                        # 严格筛选口径成功出卡即登记岗位级记忆：之后任意会话问名单
+                        # 都按最新数据重算分级名单，直到显式要全量名单。
+                        if job_list_filter != "grade_filter":
+                            set_job_list_filter(self.db_path, list_job_id, "grade_filter")
+                        if not explicit_grade:
+                            candidate_list_answer += "\n\n（已按该岗位的严格筛选口径生成最新名单；需要完整候选池时说“全量名单”即可。）"
                         if _requests_batch_stop(message):
                             # 用户明确要求“不匹配的就停止推进”：直接按分级结果批量落库，
                             # 并附上执行回执。写库失败时降级为只读名单，不让用户空手。
