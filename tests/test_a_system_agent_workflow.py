@@ -11,10 +11,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import unittest
+
 import pytest
 
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment, workbench_server
 from a_system_agent import AgentService, FakeLLM
+from a_system_agent.capability_runtime_base import (
+    JIASHI_AUDIT,
+    JIASHI_REPORT,
+    JIASHI_TEMPLATE,
+    MATCHING_REPORT,
+)
 from a_system_agent.context import build_candidate_context
 
 
@@ -2910,6 +2918,13 @@ class WorkflowEngineTest(AgentDbCase):
         assert "判人评估" in result["summary"]
         assert any("判人评估" in item for item in result["missing_inputs"])
 
+    # 真实 docx Runner 依赖本机 skill 脚本 + 嘉驰模板（capability_runtime_base 硬编码路径）；
+    # CI 上缺失时显式 skip，不再靠 --deselect 静默排除。守卫直接引用 Runner 使用的常量，
+    # Runner 路径日后参数化时本守卫自动跟随。
+    @unittest.skipUnless(
+        all(p.exists() for p in (MATCHING_REPORT, JIASHI_REPORT, JIASHI_AUDIT, JIASHI_TEMPLATE)),
+        "本机资源缺失（docx skill 脚本/嘉驰模板）",
+    )
     def test_real_document_runners_generate_audited_docx(self) -> None:
         self.service.submit_assessment(30, wait=True)
         matching = self.service.skills.execute("matching_report", {"type": "candidate", "id": 30}, {})["result"]
