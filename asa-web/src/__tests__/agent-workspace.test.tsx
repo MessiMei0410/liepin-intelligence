@@ -38,6 +38,8 @@ describe('Agent workspace', () => {
     localStorage.clear()
     // 任务栏折叠偏好：测试默认展开，任务栏交互断言不受折叠影响。
     localStorage.setItem('asaTaskRailCollapsed', '0')
+    // 本文件用例全部针对 Python Copilot 流式路径：钉住 ?brain=copilot（2026-08-18 起默认大脑为 DSH）。
+    history.replaceState(null, '', '?brain=copilot')
   })
   it('空任务显示今日摘要并可新建任务', async () => {
     const scrollSpy = vi.fn()

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAgentTurn, parseAgentSse, streamAgentTurn } from '../agent/transport'
+import { createAgentTurn, brainMode, parseAgentSse, streamAgentTurn } from '../agent/transport'
 import type { AgentSseEvent } from '../agent/transport'
 
 describe('Agent transport', () => {
@@ -172,6 +172,10 @@ describe('Agent transport', () => {
         if (configCalls === 1) throw new Error('core not ready')
         return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
       }
+      // 只统计真正的 /turn 调用；DSH 轮次回填（record-turn）等辅助调用不计入鉴权断言
+      if (!url.includes('/turn')) {
+        return { ok: true, json: async () => ({}) } as unknown as Response
+      }
       turnAuths.push((init?.headers as Record<string, string> | undefined)?.Authorization)
       return streamResponse()
     })
@@ -188,6 +192,64 @@ describe('Agent transport', () => {
       await streamAgentTurn(newTurn(), new AbortController().signal, () => {})
       expect(configCalls).toBe(2)
       expect(turnAuths).toEqual([undefined, 'Bearer tok-1', 'Bearer tok-1'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('默认走 DSH，?brain=copilot 显式回退', () => {
+    history.replaceState(null, '', '/')
+    expect(brainMode()).toBe('dsh')
+    history.replaceState(null, '', '/?brain=copilot')
+    expect(brainMode()).toBe('copilot')
+    history.replaceState(null, '', '/?brain=dsh')
+    expect(brainMode()).toBe('dsh')
+    history.replaceState(null, '', '/')
+  })
+
+  it('DSH 轮次完成后回填 Core，回填失败不影响流式结果', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = 'event: done\r\ndata: {"ok":true,"session_id":"s-dsh","answer":"完成"}\r\n\r\n'
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-dsh', '你好', { type: 'page' }, 'request-9'), new AbortController().signal, event => events.push(event))
+      // 回填是 fire-and-forget，让出一个事件循环等它发出
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
+      expect(record).toBeTruthy()
+      expect(JSON.parse(record?.body || '{}')).toMatchObject({
+        session_id: 's-dsh', request_id: 'request-9', message: '你好', answer: '完成', source: 'dsh',
+      })
+      // 回填接口 500 不影响本轮流式结果
+      expect(events.map(event => event.type)).toEqual(['done'])
     } finally {
       vi.unstubAllGlobals()
     }

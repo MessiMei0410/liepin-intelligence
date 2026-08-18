@@ -149,6 +149,11 @@ def list_copilot_sessions(
     return _impl(self, limit=limit, query=query, include_archived=include_archived)
 
 
+def record_external_copilot_turn(self, **kwargs: Any) -> dict[str, Any]:
+    from .copilot_sessions import record_external_copilot_turn as _impl
+    return _impl(self, **kwargs)
+
+
 def update_copilot_session(
     self,
     session_id: str,

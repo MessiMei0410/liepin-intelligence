@@ -912,6 +912,66 @@ def search_copilot_session_messages(self, session_id: str, q: str, limit: int = 
         conn.close()
 
 
+def record_external_copilot_turn(
+    self,
+    *,
+    session_id: str,
+    request_id: str,
+    message: str,
+    answer: str,
+    context: dict[str, Any] | None = None,
+    source: str = "dsh",
+    model: str = "",
+) -> dict[str, Any]:
+    """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
+
+    DSH 路径的对话只存在于 DSH 常驻服务器内存，不写 Core；而会话列表/恢复是
+    对 agent_copilot_messages 的 rollup，回填 user+assistant 两行即可让外部
+    会话出现在任务列表并可刷新恢复。按 request_id 幂等（网络重试/重复提交不
+    产生重复行）。
+    """
+    session_id = str(session_id or "").strip()
+    request_id = str(request_id or "").strip()
+    if not session_id or not request_id:
+        return {"ok": False, "recorded": False, "error": "session_id 与 request_id 必填"}
+    context = dict(context or {})
+    context_type = str(context.get("type") or "global")
+    raw_context_id = context.get("id")
+    try:
+        context_id = int(raw_context_id) if context_type in {"job", "candidate"} and raw_context_id else None
+    except (TypeError, ValueError):
+        context_id = None
+    conn = self._connect()
+    try:
+        existing = conn.execute(
+            """SELECT 1 FROM agent_copilot_messages
+               WHERE session_id=? AND role='user'
+                 AND json_extract(structured_json,'$.request_id')=? LIMIT 1""",
+            (session_id, request_id),
+        ).fetchone()
+        if existing:
+            return {"ok": True, "session_id": session_id, "recorded": False}
+        user_structured = {"source": source, "request_id": request_id}
+        assistant_structured = {
+            "source": source,
+            "request_id": request_id,
+            "model_participation": {"mode": source, "label": "DSH 编排层", "model": str(model or "")},
+        }
+        conn.executemany(
+            """INSERT INTO agent_copilot_messages
+               (session_id,context_type,context_id,role,content,structured_json)
+               VALUES (?,?,?,?,?,?)""",
+            [
+                (session_id, context_type, context_id, "user", str(message or ""), _dumps(user_structured)),
+                (session_id, context_type, context_id, "assistant", str(answer or ""), _dumps(assistant_structured)),
+            ],
+        )
+        conn.commit()
+        return {"ok": True, "session_id": session_id, "recorded": True}
+    finally:
+        conn.close()
+
+
 def list_copilot_sessions(
     self,
     limit: int = 30,

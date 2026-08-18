@@ -204,6 +204,22 @@ class CopilotSessionListResponse(BaseModel):
     sessions: list[CopilotSessionSummaryResponse] = Field(default_factory=list)
 
 
+class CopilotTurnRecordRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=120)
+    request_id: str = Field(min_length=1, max_length=120)
+    message: str = Field(default="", max_length=20000)
+    answer: str = Field(default="", max_length=100000)
+    context: dict[str, Any] = Field(default_factory=dict)
+    source: str = Field(default="dsh", max_length=40)
+    model: str = Field(default="", max_length=120)
+
+
+class CopilotTurnRecordResponse(BaseModel):
+    ok: bool = True
+    session_id: str = ""
+    recorded: bool = False
+
+
 class CopilotSessionDetailResponse(BaseModel):
     ok: bool = True
     session_id: str
@@ -1020,6 +1036,23 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         include_archived: bool = Query(False),
     ) -> dict[str, Any]:
         return agent.list_copilot_sessions(limit, q, include_archived)
+
+    # 外部编排层（DSH）轮次回填：DSH 对话只存其服务器内存，回填后才会出现在
+    # 会话列表（agent_copilot_messages rollup）并可刷新恢复。服务端按 request_id 幂等。
+    @app.post("/api/v1/copilot/sessions/record-turn", response_model=CopilotTurnRecordResponse)
+    def copilot_sessions_record_turn(body: CopilotTurnRecordRequest) -> dict[str, Any]:
+        result = agent.record_external_copilot_turn(
+            session_id=body.session_id,
+            request_id=body.request_id,
+            message=body.message,
+            answer=body.answer,
+            context=body.context,
+            source=body.source,
+            model=body.model,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "record failed")
+        return result
 
     @app.post("/api/v1/copilot/sessions/archive-all", response_model=CopilotSessionBulkArchiveResponse)
     def copilot_sessions_archive_all(
