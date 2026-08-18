@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,7 +90,7 @@ def _pick_fixtures(db: Path) -> dict:
 def env(tmp_path_factory: pytest.TempPathFactory) -> dict:
     target = tmp_path_factory.mktemp("asa-workflow-reads") / "asa.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,7 +21,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # template_id/run_id/session_id，计数断言均为相对增量，共享安全。
     target = tmp_path_factory.mktemp("asa-analytics") / "asa-analytics.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)

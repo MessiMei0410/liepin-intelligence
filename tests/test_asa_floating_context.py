@@ -13,7 +13,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 
@@ -131,7 +131,7 @@ def service(tmp_path_factory: pytest.TempPathFactory):
     # 模块级共享副本：每个测试用独立 session_id 写入焦点，互不冲突。
     target = tmp_path_factory.mktemp("floating-context") / "asa.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)
