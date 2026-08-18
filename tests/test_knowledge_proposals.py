@@ -196,8 +196,10 @@ def test_list_and_detail_endpoints(client: TestClient) -> None:
 
 
 def test_accept_negative_rule_writes_confirmed_rules_file(client: TestClient, kb_dir: Path) -> None:
+    # 真实库漂移会带入额外 negative_rule 提案（如士兰微 stop 聚类），
+    # 必须按种子标题取提案（同文件 L146/L180 的既有口径），不能取第一个。
     proposal = next(
-        item for item in _generate(client)["created"] if item["proposal_type"] == "negative_rule"
+        item for item in _generate(client)["created"] if item["title"] == "排除规则建议：聚类客户甲 × 方向不符"
     )
     status, payload = _decide(client, proposal["proposal_id"], "accept")
     assert status == 200, payload
