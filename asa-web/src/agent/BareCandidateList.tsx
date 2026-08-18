@@ -44,7 +44,7 @@ export function BareCandidateList({ onOpenCandidate }: { onOpenCandidate: (id: n
     setRefreshing(true)
     try {
       const bonder = Array.isArray(data.groups) && data.groups.some(group => group.key === 'bonder')
-      const result = await api.candidateListRefresh(jobId, bonder)
+      const result = await api.candidateListRefresh(jobId, bonder, data.filter_mode)
       setData(result.card)
     } catch {
       // 刷新失败保留当前名单，用户可再点一次。

@@ -769,10 +769,10 @@ export const api = {
     return { items, total: first.total }
   },
   job: (id: number) => json<{job: JobDetail}>(`/api/v1/jobs/${id}`),
-  candidateListRefresh: (jobId: number, bonder = false) =>
+  candidateListRefresh: (jobId: number, bonder = false, filterMode: CandidateListCardData['filter_mode'] = undefined) =>
     write<{ ok: boolean; answer: string; card: CandidateListCardData }>(
       `/api/v1/jobs/${jobId}/candidate-list/refresh`,
-      { bonder },
+      { bonder, filter_mode: filterMode || '' },
     ),
   candidates: (q = '', jobId?: number, limit = 200, offset = 0) =>
     json<{items: Candidate[]; total: number; limit?: number; offset?: number}>(

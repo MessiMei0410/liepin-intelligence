@@ -20,6 +20,7 @@ export type CandidateListCardData = {
   type: 'candidate_list'
   title: string
   context?: { type: string; id: string | number }
+  filter_mode?: 'grade_filter'
   summary?: {
     total?: number
     active?: number

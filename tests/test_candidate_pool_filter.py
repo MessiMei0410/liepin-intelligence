@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from a_system_agent.candidate_pool_filter import (  # noqa: E402
     UnsupportedFilterDomainError,
     filter_job_candidates,
+    format_grade_card,
+    format_grade_list,
     job_filter_domain,
 )
 from a_system_agent.copilot_tools import execute_filter_candidates  # noqa: E402
@@ -45,19 +47,27 @@ def _filter_db(tmp_path: Path) -> Path:
             (1, '电源甲', '台达', '电源工程师', '上海', '硕士', '10年'),
             (2, '机械乙', '上海微电子装备', '机械设计工程师', '上海', '硕士', '10年'),
             (3, '通用电源丙', '某电源公司', '电源研发工程师', '深圳', '本科', '8年'),
-            (4, '待补丁', 'MPS', '硬件专家-电源', '上海', '硕士', '12年');
+            (4, '待补丁', 'MPS', '硬件专家-电源', '上海', '硕士', '12年'),
+            (5, '系统丁', '某芯片公司', '系统工程师', '上海', '硕士', '10年'),
+            (6, '邻接戊', '某电源公司', '电源工程师', '上海', '本科', '8年');
         INSERT INTO job_candidates VALUES
             (101, 142, 1, 'S1 新增寻访/待复核', '待复核', '201', '2026-08-17'),
             (102, 142, 2, 'S1 新增寻访/待复核', '待复核', '202', '2026-08-17'),
             (103, 142, 3, 'S1 新增寻访/待复核', '待复核', '203', '2026-08-17'),
-            (104, 142, 4, 'S1 新增寻访/待复核', '待复核', '204', '2026-08-17');
+            (104, 142, 4, 'S1 新增寻访/待复核', '待复核', '204', '2026-08-17'),
+            (105, 142, 5, 'S1 新增寻访/待复核', '待复核', '205', '2026-08-17'),
+            (106, 142, 6, 'S1 新增寻访/待复核', '待复核', '206', '2026-08-17');
         INSERT INTO candidate_profiles VALUES
             (1, 201, '电源甲', '台达', '电源专家', '硕士', '10年',
              '负责 VPD 垂直供电模块，多相 Buck/TLVR 控制建模，DrMOS 选型，使用 SIMPLIS 完成负载瞬态和环路稳定验证'),
             (2, 202, '机械乙', '上海微电子装备', '电源专家', '硕士', '10年',
              '光刻机机械结构设计，使用 Ansys 做有限元、模态和振动分析'),
             (3, 203, '通用电源丙', '某电源公司', '电源专家', '本科', '8年',
-             '长期负责通用 AC/DC、LLC 和 PFC 电源开发');
+             '长期负责通用 AC/DC、LLC 和 PFC 电源开发'),
+            (4, 205, '系统丁', '某芯片公司', '电源专家', '硕士', '10年',
+             '参与 CPU/GPU 供电项目，了解 VPD、TLVR、多相 Buck 和 DrMOS'),
+            (5, 206, '邻接戊', '某电源公司', '电源专家', '本科', '8年',
+             '负责电力电子、电源硬件、磁件、热设计和可靠性工作');
         """
     )
     conn.commit()
@@ -92,3 +102,20 @@ def test_power_filter_requires_direct_power_evidence_for_a_or_b(tmp_path: Path) 
     assert not by_name["机械乙"]["grade"].startswith(("A", "B"))
     assert not by_name["通用电源丙"]["grade"].startswith(("A", "B"))
     assert by_name["待补丁"]["grade"] == "U-待补画像"
+    assert by_name["系统丁"]["grade"] == "C-弱"
+    assert "当前职位缺少明确" in by_name["系统丁"]["reason"]
+    assert by_name["邻接戊"]["grade"] == "C-弱"
+    assert not by_name["邻接戊"]["grade"].startswith(("A", "B"))
+
+    answer = format_grade_list(result)
+    assert "可推进 1 人（仅 A/B 级）" in answer
+    assert "C-弱 3 人" in answer
+    assert "X-排除 1 人" in answer
+    assert "电源甲" in answer
+    assert "系统丁" not in answer
+    assert "机械乙" not in answer
+
+    _, card = format_grade_card(result, client="士兰微", job_title="电源专家", job_id=142)
+    assert card["filter_mode"] == "grade_filter"
+    assert [group["key"] for group in card["groups"]] == ["A-核心"]
+    assert sum(len(group["candidates"]) for group in card["groups"]) == 1

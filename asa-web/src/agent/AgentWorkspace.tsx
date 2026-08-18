@@ -994,10 +994,11 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     const jobId = card.context?.type === 'job' ? Number(card.context.id) : 0
     if (!jobId || !Number.isFinite(jobId) || refreshingCardJob === jobId) return
     const bonder = Array.isArray(card.groups) && card.groups.some(group => group.key === 'bonder')
+    const filterMode = card.filter_mode
     setRefreshingCardJob(jobId); setCardRefreshError('')
     try {
-      const result = await api.candidateListRefresh(jobId, bonder)
-      dispatch({ type: 'card_refreshed', jobId, content: result.answer, action_card: result.card as Record<string, unknown> })
+      const result = await api.candidateListRefresh(jobId, bonder, filterMode)
+      dispatch({ type: 'card_refreshed', sourceCard: card as Record<string, unknown>, content: result.answer, action_card: result.card as Record<string, unknown> })
       setCandidateListDialog(prev => prev && prev.context?.type === 'job' && Number(prev.context.id) === jobId ? result.card : prev)
     } catch (value) {
       setCardRefreshError(value instanceof Error ? value.message : String(value))

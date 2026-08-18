@@ -24,7 +24,7 @@ from a_system_agent.batch_stop import (  # noqa: E402
     batch_stop_summary,
     build_batch_stop_items,
 )
-from a_system_agent.copilot_intent import _requests_batch_stop  # noqa: E402
+from a_system_agent.copilot_intent import _requests_batch_stop, _requests_grade_filter  # noqa: E402
 from test_a_system_agent_v1 import AgentDbCase, fake_assessment  # noqa: E402
 from a_system_agent import AgentService, FakeLLM  # noqa: E402
 
@@ -65,6 +65,10 @@ class BatchStopTest(unittest.TestCase):
         self.assertTrue(_requests_batch_stop("把不匹配的停掉，再给我名单"))
         self.assertFalse(_requests_batch_stop("过滤一下候选人，按匹配度给名单"))
         self.assertFalse(_requests_batch_stop("把岗位 137 的名单给我"))
+
+    def test_strict_filter_language_never_falls_back_to_raw_list(self) -> None:
+        self.assertTrue(_requests_grade_filter("按严格口径刷新名单，只保留有直接证据和项目支撑的人选"))
+        self.assertTrue(_requests_grade_filter("按电源专家硬门槛输出名单"))
 
     def test_build_items_and_summary(self) -> None:
         items = build_batch_stop_items(
@@ -164,6 +168,14 @@ class CopilotBatchStopIntegrationTest(AgentDbCase):
         self.assertIn("已执行批量停止推进", str(result.get("answer") or ""))
         receipt = result.get("batch_stop_receipt") or {}
         self.assertEqual(int(receipt.get("applied") or 0), 1)
+        card = result.get("action_card") or {}
+        self.assertTrue(card.get("groups"))
+        self.assertTrue(
+            all(
+                str(group.get("key") or "").startswith(("A-", "B-"))
+                for group in card.get("groups") or []
+            )
+        )
 
 
 class CopilotBatchStopUnsupportedDomainGuardTest(AgentDbCase):

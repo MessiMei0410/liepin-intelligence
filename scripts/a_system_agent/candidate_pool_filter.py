@@ -87,7 +87,23 @@ POWER_EXCL_TITLE = [
     "财务", "法务", "行政", "人力", "运营", "供应链", "产品经理", "项目经理",
     "技术支持", "技术市场", "sales", "marketing", "hr",
 ]
-POWER_REVIEW_ONLY_TITLE = ("FAE", "现场应用", "应用工程师")
+# Power keywords in an old project are not enough. For an A/B decision the
+# current role must also expose a power design/R&D responsibility; otherwise
+# the row stays evidence-insufficient instead of being promoted by resume text.
+POWER_RND_TITLE_KEYS = (
+    "电源", "电力电子", "power", "vpd", "vrm", "tlvr", "drmos",
+    "硬件工程师", "硬件专家", "硬件开发", "硬件研发", "电子工程师",
+    "功率模块", "功率半导体",
+)
+POWER_NON_RND_TITLE_KEYS = (
+    "系统工程师", "系统架构", "项目经理", "项目主管", "交付经理", "商务经理",
+    "主计划", "精益经理", "设备工程师", "设备研发", "工艺工程师", "封装",
+    "版图", "测试", "验证", "可靠性", "功能安全", "电气", "软件", "机械",
+    "结构", "销售", "市场", "客户经理", "fae", "应用工程", "技术支持",
+    "总经理", "副总", "总监", "处长", "主任", "经理", "manager", "director",
+    "vp", "商务", "交付",
+)
+POWER_REVIEW_ONLY_TITLE = ("FAE", "AE ", "现场应用", "应用工程师")
 
 SUPPORTED_FILTER_DOMAINS = {"mechanical", "software", "power"}
 
@@ -199,6 +215,48 @@ def _candidate_profiles(db_path: str) -> dict[int, dict[str, Any]]:
         conn.close()
 
 
+def _source_resume_texts(db_path: str) -> dict[int, str]:
+    """每人最新一条 source_profiles 的简历原文（full_text/work_text/project_text/raw_text）。
+
+    2026-08-18 起分级证据纳入简历原文：candidate_profiles.profile_summary 只有
+    约 220 字摘要，大量有真实电源证据的人选被判 D-无证据；原文已在库内，
+    分级时一并扫描，避免误埋。按 person_id 取最新一条。
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT person_id, raw_json FROM source_profiles sp
+            WHERE sp.id = (
+                SELECT sp2.id FROM source_profiles sp2
+                WHERE sp2.person_id = sp.person_id
+                ORDER BY sp2.source_date DESC, sp2.id DESC LIMIT 1)
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # 无 source_profiles 表（测试库/旧库）：按无原文处理
+        return {}
+    finally:
+        conn.close()
+    texts: dict[int, str] = {}
+    for r in rows:
+        raw: dict[str, Any] = {}
+        try:
+            parsed = json.loads(str(r["raw_json"] or "{}"))
+            if isinstance(parsed, dict):
+                raw = parsed
+        except (TypeError, ValueError):
+            pass
+        text = " ".join(
+            str(raw.get(k) or "")
+            for k in ("full_text", "work_text", "project_text", "raw_text")
+        ).strip()
+        if text:
+            texts[int(r["person_id"])] = text[:20000]
+    return texts
+
+
 def _banned_companies(db_path: str, client: str, kb_dir: str | None = None) -> list[str]:
     """读取 restricted 层禁挖名单（banned_companies 白名单）。"""
     try:
@@ -232,6 +290,7 @@ def filter_job_candidates(
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     profiles = _candidate_profiles(db_path)
+    source_texts = _source_resume_texts(db_path)
     banned = _banned_companies(db_path, client) if client else []
     try:
         if not domain:
@@ -279,14 +338,16 @@ def filter_job_candidates(
             })
             continue
         prof = profiles.get(int(r["source_candidate_id"])) if r["source_candidate_id"] else None
-        if not prof:
+        src_txt = source_texts.get(int(r["person_id"]), "")
+        if not prof and len(src_txt) < 100:
             results.append({
                 "id": r["id"], "name": r["display_name"], "company": co, "title": r["current_title"] or "",
                 "city": r["city"] or "", "education": r["education"] or "", "experience": r["experience"] or "",
                 "stage": stage, "grade": "U-待补画像", "score": 0, "hard_hits": [],
-                "reason": "无 candidate_profiles 画像，证据不足，禁止自动淘汰",
+                "reason": "无 candidate_profiles 画像且库内无简历原文，证据不足，禁止自动淘汰",
             })
             continue
+        prof = prof or {}
         salary_k_max, exp_city = _parse_expectation(str(prof.get("profile_summary") or ""))
         if max_salary_k and salary_k_max is not None and salary_k_max > max_salary_k:
             results.append({
@@ -307,9 +368,9 @@ def filter_job_candidates(
         cur_title = str(r["current_title"] or "").strip()
         # 画像 position 字段在部分入库批次里被统一写成目标岗位名（机械岗写“机械高级
         # 工程师”、软件岗写“自动化软件高级工程师”），既不能用于排除，也不能用于证据。
-        # 排除与证据只信任 people.current_title + 简历摘要 + 当前公司。
+        # 排除与证据信任 people.current_title + 简历摘要 + 当前公司 + 库内简历原文。
         title_text = cur_title.lower()
-        txt = " ".join([cur_title, str(prof.get("profile_summary") or ""), co]).lower()
+        txt = " ".join([cur_title, str(prof.get("profile_summary") or ""), co, src_txt]).lower()
         hard_hits = [k for k in keys if k.lower() in txt]
         excl_title = [k for k in excl_tokens if k.lower() in title_text]
         exp_n = _exp_years(r["experience"]) or _exp_years(prof.get("seniority"))
@@ -317,6 +378,8 @@ def filter_job_candidates(
         power_direct = [k for k in POWER_DIRECT_KEYS if k.lower() in txt] if domain == "power" else []
         power_support = [k for k in POWER_SUPPORT_KEYS if k.lower() in txt] if domain == "power" else []
         power_adjacent = [k for k in POWER_ADJACENT_KEYS if k.lower() in txt] if domain == "power" else []
+        power_role_title = any(token.lower() in title_text for token in POWER_RND_TITLE_KEYS) if domain == "power" else False
+        power_non_rnd_title = any(token.lower() in title_text for token in POWER_NON_RND_TITLE_KEYS) if domain == "power" else False
         score = (
             len(power_direct) * 20 + len(power_support) * 8 + len(power_adjacent) * 2
             if domain == "power"
@@ -342,6 +405,9 @@ def filter_job_candidates(
         elif domain == "power" and any(token.lower() in title_text for token in POWER_REVIEW_ONLY_TITLE):
             grade = "C-弱"
             reason = "应用/FAE 角色需核验是否承担模块电源设计责任"
+        elif domain == "power" and (not power_role_title or power_non_rnd_title):
+            grade = "C-弱"
+            reason = "当前职位缺少明确的电源研发/硬件设计职责证据"
         elif domain == "power" and (
             len(power_direct) >= 2 or (power_direct and len(power_support) >= 3)
         ):
@@ -351,11 +417,14 @@ def filter_job_candidates(
             grade = "A-强"
             reason = f"电源直接证据{len(power_direct)}项并有项目支撑"
         elif domain == "power" and power_direct:
-            grade = "B-中"
-            reason = f"电源直接证据{len(power_direct)}项，需补充项目闭环证据"
+            grade = "C-弱"
+            reason = f"仅有电源直接证据{len(power_direct)}项，缺少项目支撑，不进入可推进名单"
         elif domain == "power" and (len(power_support) >= 2 or len(power_adjacent) >= 3):
             grade = "C-弱"
             reason = "仅有相邻电源证据，需核验 VPD/VRM/TLVR/DrMOS 实际项目"
+        elif domain == "power":
+            grade = "C-弱" if hard_hits else "D-无证据"
+            reason = "没有服务器/CPU/GPU 电源直接证据，禁止回退到通用关键词分级"
         elif domain == "mechanical" and prec and (semi or mot) and fea:
             grade = "A-核心"
             reason = "精密设备+仿真+半导体/运动部件全占"
@@ -387,16 +456,17 @@ def filter_job_candidates(
 def format_grade_list(result: dict[str, Any]) -> str:
     """把过滤结果格式化成可读名单文本，区分优先复核、证据不足和明确排除。"""
     candidates = list(result.get("candidates") or [])
-    review_grades = ("A-核心", "A-强", "B-中", "C-弱")
+    # 2026-08-18 起口径：只有 A/B 级算可推进；C/D/U 与明确排除证据一起直接排除。
+    review_grades = ("A-核心", "A-强", "B-中")
     evidence_pending_grades = ("D-无证据", "U-待补画像")
+    weak_grades = ("C-弱",)
     stop_grades = ("X-排除", "禁挖", "D-期望超限", "D-城市不符")
+    excluded_grades = weak_grades + evidence_pending_grades + stop_grades
     review_count = sum(1 for c in candidates if c.get("grade") in review_grades)
-    evidence_pending_count = sum(1 for c in candidates if c.get("grade") in evidence_pending_grades)
-    stop_count = sum(1 for c in candidates if c.get("grade") in stop_grades)
-    lines = [f"## 候选池分级名单（共 {result['total']} 人）"]
+    excluded_count = sum(1 for c in candidates if c.get("grade") in excluded_grades)
+    lines = [f"## 严格筛选名单（候选池共 {result['total']} 人）"]
     lines.append(
-        f"建议优先复核 {review_count} 人；证据不足待补充 {evidence_pending_count} 人；"
-        f"有明确排除证据 {stop_count} 人。\n"
+        f"可推进 {review_count} 人（仅 A/B 级）；已排除 {excluded_count} 人（C/D/U 及明确排除证据）。"
     )
 
     def _grade_block(grade: str, group: list[dict[str, Any]]) -> None:
@@ -410,13 +480,65 @@ def format_grade_list(result: dict[str, Any]) -> str:
                 f"| {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}"
             )
 
-    lines.append("## 建议优先复核")
+    lines.append("## 可推进（A/B 级，建议优先复核）")
     for grade in review_grades:
         _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
-    lines.append("\n## 证据不足，暂不自动裁决")
-    for grade in evidence_pending_grades:
-        _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
-    lines.append("\n## 有明确排除证据")
-    for grade in stop_grades:
-        _grade_block(grade, [c for c in candidates if c.get("grade") == grade])
+    # 排除项只做数量审计，不逐人展开到候选名单，避免“严格筛选”结果再次被
+    # 大量明显不匹配的人淹没；如需审计，仍可通过岗位页查看完整关系池。
+    excluded_breakdown = []
+    for grade in excluded_grades:
+        count = sum(1 for c in candidates if c.get("grade") == grade)
+        if count:
+            excluded_breakdown.append(f"{grade} {count} 人")
+    lines.append("\n## 已排除汇总（不进入可推进名单）")
+    lines.append("、".join(excluded_breakdown) if excluded_breakdown else "无")
     return "\n".join(lines)
+
+
+def format_grade_card(
+    result: dict[str, Any],
+    *,
+    client: str,
+    job_title: str,
+    job_id: int,
+) -> tuple[str, dict[str, Any]]:
+    """生成严格筛选的文本与卡片，保证对话和刷新接口共用同一口径。"""
+    grade_order = ("A-核心", "A-强", "B-中")
+    candidates = list(result.get("candidates") or [])
+    groups: list[dict[str, Any]] = []
+    for grade in grade_order:
+        items = [c for c in candidates if c.get("grade") == grade]
+        if not items:
+            continue
+        groups.append({
+            "key": grade,
+            "label": grade,
+            "priority": grade.startswith("A"),
+            "candidates": [
+                {
+                    "id": int(c.get("id") or 0),
+                    "name": c.get("name") or "",
+                    "company": c.get("company") or "",
+                    "title": c.get("title") or "",
+                    "stage": c.get("stage") or "",
+                    "flow_bucket": c.get("stage") or "",
+                }
+                for c in items[:200]
+            ],
+        })
+    active = sum(1 for c in candidates if c.get("grade") in grade_order)
+    pending = sum(1 for c in candidates if c.get("grade") in ("D-无证据", "U-待补画像"))
+    card = {
+        "type": "candidate_list",
+        "title": f"{client}｜{job_title}（岗位 {job_id}）分级过滤名单",
+        "context": {"type": "job", "id": job_id},
+        "filter_mode": "grade_filter",
+        "summary": {
+            "total": result.get("total") or 0,
+            "active": active,
+            "stopped": len(candidates) - active,
+            "pending_evidence": pending,
+        },
+        "groups": groups,
+    }
+    return format_grade_list(result), card

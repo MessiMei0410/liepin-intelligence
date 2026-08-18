@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from .database import connect, json_value, transaction
-from .stop_reasons import STOP_REASON_LABELS, normalize_stop_reason
+from .stop_reasons import NEUTRAL_SOURCING_STOP_REASONS, STOP_REASON_LABELS, normalize_stop_reason
 
 
 STOP_TOKENS = ("停止", "淘汰", "不推进", "拒绝", "关闭")
@@ -605,6 +605,8 @@ class CandidateActionsMixin:
                 # R10 停止原因标准化：reason 命中 8 枚举→存枚举值；缺失/未知/自由
                 # 文本→存 'other' 并把原文并入备注（不报错阻断，note-only 旧载荷不变）。
                 stop_reason, note = normalize_stop_reason(reason, note)
+                if stop_reason in NEUTRAL_SOURCING_STOP_REASONS:
+                    learning_signal = "stopped_neutral"
             event_reason = note or stage
             if action == "review":
                 pass

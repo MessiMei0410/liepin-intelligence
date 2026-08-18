@@ -170,6 +170,32 @@ def test_unknown_stop_reason_degrades_to_other_and_preserves_text(db_path: Path)
     assert json.loads(raw_json)["stop_reason"] == "other"
 
 
+def test_low_intent_stop_is_neutral_sourcing_feedback(db_path: Path) -> None:
+    _reset_candidate_558(db_path)
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = _commit_stop(client, 558, reason="low_intent")
+        assert response.status_code == 200, response.text
+        learning = response.json()["sourcing_learning"]
+        assert learning["recorded"] is True
+        assert learning["signal_type"] == "stopped_neutral"
+        assert learning["weight"] == 0.0
+
+        attribution = client.get("/api/v1/candidates/558").json()["candidate"]["sourcing_attributions"][0]
+        assert attribution["learning_score"] == 0
+        assert attribution["stopped_count"] == 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        signal_type, weight = conn.execute(
+            "SELECT signal_type,weight FROM agent_sourcing_feedback "
+            "WHERE job_candidate_id=558 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert signal_type == "stopped_neutral"
+    assert weight == 0.0
+
+
 def test_note_only_payload_behaves_as_before(db_path: Path) -> None:
     _reset_candidate_558(db_path)
     conn = sqlite3.connect(db_path)

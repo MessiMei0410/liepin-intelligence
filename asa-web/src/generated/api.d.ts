@@ -1960,6 +1960,11 @@ export interface components {
              * @default false
              */
             bonder: boolean;
+            /**
+             * Filter Mode
+             * @default
+             */
+            filter_mode: string;
         };
         /** CompanyCalibrationSubmit */
         CompanyCalibrationSubmit: {

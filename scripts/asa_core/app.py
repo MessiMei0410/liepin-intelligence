@@ -127,6 +127,7 @@ class CopilotMessage(WriteEnvelope):
 class CandidateListRefreshBody(BaseModel):
     """名单卡刷新：仅需 job_id（路径）+ 可选 bonder 标记（原卡有固晶优先组时传 true 保持分组）。"""
     bonder: bool = False
+    filter_mode: str = ""
 
 
 class CopilotAttachmentUpload(WriteEnvelope):
@@ -666,7 +667,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def job_candidate_list_refresh(job_id: int, body: CandidateListRefreshBody) -> dict[str, Any]:
         # 名单卡静态快照刷新：重新按库内最新状态生成 candidate_list 卡片。
         # 不写库、不建工作流、不走 LLM——纯查询重建；404=岗位不存在。
-        return core.candidate_list_card(job_id, bonder=body.bonder)
+        return core.candidate_list_card(job_id, bonder=body.bonder, filter_mode=body.filter_mode)
 
     @app.get("/api/v1/jobs/{job_id}/profile-insights")
     def job_profile_insights_get(job_id: int) -> dict[str, Any]:

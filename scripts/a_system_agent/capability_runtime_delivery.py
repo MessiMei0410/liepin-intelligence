@@ -107,6 +107,7 @@ class RunnerDeliveryMixin:
                            SUM(sf.signal_type='contacted') AS contacted,
                            SUM(sf.signal_type='recommended') AS recommended,
                            SUM(sf.signal_type='stopped') AS stopped,
+                           SUM(sf.signal_type='stopped_neutral') AS neutral_stopped,
                            SUM(sf.signal_type IN ('client_approved','client_interview','client_offer','client_hired')) AS client_positive,
                            SUM(sf.signal_type='client_rejected') AS client_rejected
                     FROM agent_sourcing_attributions sa
