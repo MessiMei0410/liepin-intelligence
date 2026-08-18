@@ -15,6 +15,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLCHAIN_DIR="${ASA_DSH_TOOLCHAIN_DIR:-$HOME/.dsh/asa-server-toolchain}"
 PROFILE_DIR="${ASA_DSH_PROFILE_DIR:-$HOME/.dsh/profiles/asa-server}"
+# 常驻服务器工作目录：须与 launchd plist 的 WorkingDirectory 一致；放 ~/.dsh 是因为
+# launchd 进程没有 ~/Documents 的 TCC 授权，而 /tmp 会被系统清理。
+WORKDIR="${ASA_DSH_WORKDIR:-$HOME/.dsh/asa-workspace}"
 LABEL="com.asa.dsh-server"
 PORT="${ASA_DSH_RESIDENT_PORT:-8891}"
 
@@ -37,6 +40,12 @@ for pkg in asa-server asa-tools; do
   echo "[deploy] synced $pkg -> $target"
 done
 
+# 2b. 同步 profile patch 与工作目录护栏（这两个文件不在 bundle 里，仓库即事实源）
+cp "$REPO_ROOT/asa-server-profile/cordis.patch.yml" "$PROFILE_DIR/cordis.patch.yml"
+mkdir -p "$WORKDIR"
+cp "$REPO_ROOT/asa-server-profile/AGENTS.md" "$WORKDIR/AGENTS.md"
+echo "[deploy] synced cordis.patch.yml -> profile, AGENTS.md -> $WORKDIR"
+
 # 3. 重启常驻服务器
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   launchctl kickstart -k "gui/$(id -u)/$LABEL"
@@ -45,8 +54,7 @@ else
   echo "[deploy] launchd $LABEL 未安装，退回 nohup（无崩溃守护；建议安装 dsh/launchd/ 下的 plist）"
   pkill -f "profile asa-server" 2>/dev/null || true
   sleep 1
-  mkdir -p /tmp/asa-dsh-spike
-  cd /tmp/asa-dsh-spike
+  cd "$WORKDIR"
   nohup "$TOOLCHAIN_DIR/node_modules/.bin/dsh" --profile asa-server > /tmp/asa-server.log 2>&1 &
 fi
 

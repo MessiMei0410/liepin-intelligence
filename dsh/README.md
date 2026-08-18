@@ -40,7 +40,22 @@ curl -s -X POST http://127.0.0.1:8891/turn -H 'Content-Type: application/json' \
   -d '{"message":"用 asa_dashboard 读数据，回答：现在有多少活跃岗位？"}'
 ```
 
-前端走 DSH：ASA 界面 URL 加 `?surface=copilot&brain=dsh`（默认仍走 `/copilot/stream`）。
+前端走 DSH：**2026-08-18 起 DSH 为默认大脑**（所有入口：桌面 APP `/asa-app`、浮窗），
+URL 加 `?brain=copilot` 可临时回退 Python Copilot 直连。
+DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/record-turn`，按 `request_id` 幂等），
+会话出现在任务列表、可刷新恢复。
+
+## v1.4 收敛（2026-08-18）
+
+- 默认模型切到 `deepseek-v4-flash`（`~/.dsh/settings.yaml` 的 `agent-default-model`，本机配置、不在仓库内）。
+- 工作目录从 `/tmp/asa-dsh-spike`（会被系统清理）迁到 `~/.dsh/asa-workspace`；**业务护栏
+  `AGENTS.md` 必须在该目录才会被 agent-instructions 加载**——此前 /tmp 下没有该文件，护栏实际未生效。
+  `deploy-asa-server.sh` 现在同步 `cordis.patch.yml` → profile、`AGENTS.md` → 工作目录。
+- 工具面收敛：`tool-bash` / `tool-pwsh` / `tool-fs` / `tool-fs-search` / `tool-skill` 在
+  `cordis.patch.yml` 中 `disabled`——业务问答只用 8 个 `asa_*` 工具，消除模型绕路探索文件系统
+  （实测同问 120s → 77s）并收紧 `danger-full-access` 暴露面。副作用：Agent 不再能导出文件。
+- 常驻服务器每轮 stdout 打一行观测日志（session/成败/答案长度/耗时）；`tool/call` 事件
+  转发为 SSE progress，前端可见工具执行进度。
 
 > per-turn 子进程桥接（`dsh/bridge/asa_dsh_bridge.py`，8890）仍可用作 headless 一次性回退，
 > 但无跨轮记忆；常驻服务器（8891）是当前前端 DSH 路径。
