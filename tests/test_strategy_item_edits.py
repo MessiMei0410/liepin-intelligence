@@ -7,7 +7,8 @@
    电源岗位裸公司词，违规则拒绝并说明。
 3. 端点（TestClient + tmp_path 隔离库）——happy path 落新 revision artifact 并回读、
    幂等重放返回首次响应、外部寻访已开始 409、状态漂移（目标项不存在）409、
-   工作流不存在 404、waiting_approval 旧审批卡作废并换新（不绕过 R3）。
+   工作流不存在 404、waiting_approval 旧审批卡作废并换新（不绕过 R3）、
+   预检后并发状态/版本漂移被写锁内二次校验拦截 409（不落库）。
 """
 
 from __future__ import annotations
@@ -507,6 +508,78 @@ def test_strategy_item_edits_rechecks_sourcing_state_before_any_write(db_path: P
         assert output["strategy_v2"].get("edit_revision") is None
     finally:
         conn.close()
+
+
+def test_strategy_item_edits_rechecks_strategy_hash_before_write(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 预检通过后、写入前另一位顾问提交了新 revision：写锁内二次校验按 strategy_hash
+    # 漂移拦截（revise_workflow 二次校验兜底在版本维度的对齐），不落第三个 artifact。
+    _seed_workflow(db_path)
+    edits = [{"op": "delete_keyword_group", "group": "scene"}]
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        preflight = client.post(
+            "/api/v1/workflows/workflow_edit1/strategy/edits/preflight",
+            json={"request_id": "race-hash-preflight", "edits": edits},
+        )
+        assert preflight.status_code == 200, preflight.text
+        preview = preflight.json()
+
+        original_compile = query_builders.compile_query_plan_v1
+        state_changed = False
+
+        def compile_after_concurrent_revision(strategy: dict) -> dict:
+            nonlocal state_changed
+            result = original_compile(strategy)
+            if not state_changed:
+                state_changed = True
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT step_id,metadata_json FROM agent_artifacts WHERE artifact_id='artifact_edit1'"
+                    ).fetchone()
+                    metadata = json.loads(row[1])
+                    # 模拟并发 revision：删掉一个关键词组，strategy_hash 随之变化
+                    metadata["strategy_v2"]["step4_keyword_groups"] = [
+                        group
+                        for group in metadata["strategy_v2"]["step4_keyword_groups"]
+                        if group["group"] != "scene"
+                    ]
+                    metadata["edit_revision"] = 99
+                    conn.execute(
+                        "INSERT INTO agent_artifacts(artifact_id,goal_id,workflow_id,step_id,artifact_type,title,metadata_json,validation_status) "
+                        "VALUES ('artifact_edit2','goal_edit1','workflow_edit1',?,'search_strategy','多渠道寻访策略（并发 revision）',?,'passed')",
+                        (row[0], json.dumps(metadata, ensure_ascii=False)),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            return result
+
+        monkeypatch.setattr(query_builders, "compile_query_plan_v1", compile_after_concurrent_revision)
+        response = client.post(
+            "/api/v1/workflows/workflow_edit1/strategy/edits",
+            headers={"Idempotency-Key": "race-hash-commit"},
+            json={
+                "request_id": "race-hash-commit", "edits": edits,
+                "expected_strategy_hash": preview["strategy_hash"],
+                "preflight_token": preview["preflight_token"],
+            },
+        )
+    assert response.status_code == 409
+    assert "已被其他操作更新" in response.json()["detail"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        artifacts = conn.execute(
+            "SELECT artifact_id FROM agent_artifacts "
+            "WHERE workflow_id='workflow_edit1' AND artifact_type='search_strategy' ORDER BY id"
+        ).fetchall()
+        output = json.loads(conn.execute(
+            "SELECT output_json FROM agent_workflow_steps WHERE workflow_id='workflow_edit1' AND capability_id='search_strategy'"
+        ).fetchone()[0])
+    finally:
+        conn.close()
+    assert [row[0] for row in artifacts] == ["artifact_edit1", "artifact_edit2"]  # 未落第三个 artifact
+    assert output["strategy_v2"].get("edit_revision") is None  # 步骤 output 未被改写
 
 
 def test_strategy_item_edits_idempotent_replay(client: TestClient, db_path: Path) -> None:
