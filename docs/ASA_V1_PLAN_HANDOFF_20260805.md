@@ -31,7 +31,7 @@
 - 端点：`POST /api/v1/workflows/{workflow_id}/strategy/edits`（app.py，走 `idem()` 幂等；LookupError→404、ValueError→409 中文 detail）。
 - 前端：`asa-web/src/workflows/WorkflowStrategy.tsx` 新增可选 props（`strategyV2/workflowId/editable/onEdited`，不传则行为与旧版完全一致）；每组关键词显示目标画像（targets）与预期召回（step5 `expected_recall_per_tier`），按项编辑入口 + 两步确认删除；`WorkflowPanel.tsx` 提取 strategyV2 传入并加 `strategyEditable` 闸门。
 - 测试：`tests/test_strategy_item_edits.py`（16）、`asa-web/src/__tests__/strategy-item-edit.test.tsx`（8）。
-- 坑：①编辑后 `golden_candidate_replay_v1=None`（旧回放失效，快照按"无回放"视为有效）；②状态闸门与 revise_workflow 有同样的固有竞态（revise 用二次校验兜底，本实现未加）；③测试里模拟"寻访已开始"必须用 `waiting_external` 而非 `running`（`_recover_interrupted` 会把 running 改写为 paused/pending）。
+- 坑：①编辑后 `golden_candidate_replay_v1=None`（旧回放失效，快照按"无回放"视为有效）；②状态闸门与 revise_workflow 有同样的固有竞态——已闭环（2026-08-14 commit 0dfd6e7：编译完成后 `BEGIN IMMEDIATE` 写锁内复核工作流/寻访步骤状态 + strategy_hash，漂移即 409 不落库；hash 漂移分支回归见 `test_strategy_item_edits_rechecks_strategy_hash_before_write`）；③测试里模拟"寻访已开始"必须用 `waiting_external` 而非 `running`（`_recover_interrupted` 会把 running 改写为 paused/pending）。
 
 ### 2. 版本化推荐包 + 客户反馈闭环
 
@@ -154,7 +154,7 @@
 4. 客户反馈新旧表口径统一（视图或双写）。
 5. 技能本体扩族（fab 工艺/质量/YE/FPGA），回填新原型的空 nodes。
 6. 回放推荐率 proxy → 真实口径替换。
-7. 策略编辑的状态闸门二次校验（对齐 revise_workflow）。
+7. ~~策略编辑的状态闸门二次校验（对齐 revise_workflow）~~ 已闭环：commit 0dfd6e7 写锁内二次校验状态 + strategy_hash（409 中文文案），并发版本漂移回归测试已补。
 8. 一期验收未做真实 P0 岗位端到端寻访（外部渠道动作需顾问 R3 触发，未自动执行）。
 
 ## 六、协作约定提醒（本项目既有红线）
