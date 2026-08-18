@@ -196,11 +196,14 @@ export function App() {
   }, [])
 
   // Mapping 等入口新建岗位关系后，立即让四主 tab 的岗位/人选数据回读数据库。
-  // 普通阶段更新（详情面板、名单弹窗等发出的 candidate-updated）只重拉候选人列表。
+  // 普通阶段更新仍走详情增量刷新，不触发这条全量列表路径。
+  // 注意：非新建事件不能在这里补刷新——Mapping 批量入库按人逐个派发事件，中途触发的
+  // allCandidates 会通过 candidatesRefreshRef 挤掉 created 分支的权威回读（e2e 回归实证）。
+  // 外部写库（猎聘助手/X-SaaS 等不发前端事件）由 15s 统一轮询收敛。
   useEffect(() => {
     const onCandidateUpdated = (event: Event) => {
       const detail = (event as CustomEvent<CandidateUpdatedDetail>).detail
-      if (!detail?.created) { void refreshCandidateList(); return }
+      if (!detail?.created) return
       const jobsRefreshId = ++jobsRefreshRef.current
       void Promise.allSettled([
         refreshCreatedCandidate(detail.id),
@@ -212,7 +215,7 @@ export function App() {
     }
     window.addEventListener(CANDIDATE_UPDATED_EVENT, onCandidateUpdated)
     return () => window.removeEventListener(CANDIDATE_UPDATED_EVENT, onCandidateUpdated)
-  }, [refreshCreatedCandidate, refreshWorkbench, refreshCandidateList])
+  }, [refreshCreatedCandidate, refreshWorkbench])
 
   // 合并双轮询：单一定时器统一刷新 dashboard + 候选人详情，避免两个独立 setInterval(2000)。
   useEffect(() => {
