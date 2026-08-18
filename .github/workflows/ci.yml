@@ -23,11 +23,11 @@ jobs:
         # 全量测试（1306 项）。本机环境依赖已参数化（tests/_local.py：ASA_SOURCE_DB /
         # ASA_BUILDER_PATH / ASA_SYNC_SCRIPT / ASA_CDP_SKILL_DIR 等环境变量可覆盖），
         # CI 上缺本机资源时测试显式 skip（require_local/skip_unless_local），不再静默 ignore。
-        # --deselect：单测级环境依赖（依赖本机 skill 脚本生成 docx）。
+        # 最后一个 --deselect（test_real_document_runners_generate_audited_docx，依赖本机
+        # docx skill 脚本 + 嘉驰模板）已改为测试内 skipUnless 显式守卫，本命令不再带排除项。
         # 不再用 2>/dev/null || echo 掩盖退出码：测试失败必须让 CI 红。
         run: |
-          python3 -m pytest tests/ -q \
-            --deselect tests/test_a_system_agent_workflow.py::WorkflowEngineTest::test_real_document_runners_generate_audited_docx
+          python3 -m pytest tests/ -q
 
   frontend-test:
     runs-on: ubuntu-latest
