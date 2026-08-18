@@ -12,7 +12,7 @@ import importlib.util
 import json
 import sqlite3
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 
@@ -31,7 +31,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # 判重：各测试用独立 source_id/action_id（dry-run 还用独立候选人名），互不冲突。
     target = tmp_path_factory.mktemp("talent-pool-intake") / "asa.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)

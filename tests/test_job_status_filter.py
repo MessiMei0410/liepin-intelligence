@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 
@@ -57,7 +57,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # action_id/source_id 入库（process_action 按 source_id 判重），互不冲突。
     target = tmp_path_factory.mktemp("job-status-filter") / "asa.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)

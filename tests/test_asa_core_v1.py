@@ -6,7 +6,7 @@ import json
 import sqlite3
 import uuid
 from pathlib import Path
-from _local import env_path, require_local
+from _local import env_path, fixture_base_db, require_local
 
 import pytest
 import openpyxl
@@ -730,7 +730,7 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     # request_id/session_id，候选人 558 相关测试均先自行复位状态，共享安全。
     target = tmp_path_factory.mktemp("core-v1") / "asa.db"
     require_local(SOURCE_DB, "正式库 talent_system_v3")
-    source = sqlite3.connect(SOURCE_DB)
+    source = sqlite3.connect(fixture_base_db())
     destination = sqlite3.connect(target)
     try:
         source.backup(destination)
