@@ -433,3 +433,10 @@
 
 - `strategy_replay_eval.py` 推荐率改为双口径：有真实顾问确认数据时优先真实口径并标注来源；无数据时显式回落 `recommendation_rate_proxy` 并继续标注「proxy 非真实口径」，指标随业务数据成熟自动过渡，不伪造。
 - 真实库当前顾问确认类事件近零（`candidate_assessment_advisor_action` 2 条），回落路径是当前实际生效路径；39 条定向测试通过。
+
+## 五十六、P3-b 客户反馈新旧表双写口径统一（2026-08-14，PR #20）
+
+- `record_package_feedback` 写 `recommendation_package_feedback` 时同事务镜像到旧 `client_feedback_events`（source='recommendation_package'，event_id 链回 candidate_events 留痕），约 10 个旧报表读方（generate_workflow_status_report 等）零改动可见；选双写而非视图，因为旧读方多且字段可完整映射。
+- 反馈类型映射旧写方口径（interview→interviewing 等）；候选人/客户/岗位经 job_candidates→people/jobs/clients 解析；幂等沿用新表 UNIQUE(package_id, request_id)，重放不重复双写；旧表缺 governance 扩展列时 PRAGMA 幂等补列，不占 MIGRATIONS 编号。
+- `record_client_feedback.py` 手工路径保持只写旧表（standalone 台账，不进推荐包链路）；新读方（交付记分卡面试信号、岗位周报、知识提案）读新表 + candidate_events，无双表混读双算。
+- 测试 `test_feedback_table_unification.py` 4 条：镜像字段映射/留痕、重放不双份、旧报表正/负反馈 SQL 原样可读、旧表两种形态兼容。
