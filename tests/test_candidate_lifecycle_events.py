@@ -156,6 +156,17 @@ def test_lifecycle_event_validation(db_path: Path) -> None:
     assert missing.status_code == 404
 
 
+def test_ensure_lifecycle_followup_cleanup_without_table() -> None:
+    """合成 fixture 库没有 followup_tasks 表时，孤儿清理安全跳过（CI 事故回归）。"""
+    from asa_core.database import ensure_lifecycle_followup_cleanup
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        ensure_lifecycle_followup_cleanup(conn)  # 不抛 OperationalError
+    finally:
+        conn.close()
+
+
 def test_lifecycle_event_explicit_status_written(db_path: Path) -> None:
     with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
         response = _record(
