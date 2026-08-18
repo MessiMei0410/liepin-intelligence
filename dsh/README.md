@@ -13,7 +13,7 @@ DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在�
 - `asa-profile/` — `asa` profile 源（headless 一次性）：persona + 12 条业务护栏（`AGENTS.md`）+ 插件装配。
 - `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn`（SSE 流式）+ 会话复用（多轮记忆）。
 - `asa-server-profile/` — `asa-server` profile 源（bundles = `dsh-base` + `@asa/dsh-asa-server`）。
-- `bridge/` — `asa_dsh_bridge.py`：per-turn 子进程桥接（v0 遗留，已被常驻服务器取代）。
+- （`bridge/` v0 per-turn 子进程桥接已于 2026-08-19 删除——无任何引用，headless 一次性需求用 `dsh --profile asa` 直跑。）
 
 ## 工具面（8 个）
 
@@ -57,8 +57,8 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
 - 常驻服务器每轮 stdout 打一行观测日志（session/成败/答案长度/耗时）；`tool/call` 事件
   转发为 SSE progress，前端可见工具执行进度。
 
-> per-turn 子进程桥接（`dsh/bridge/asa_dsh_bridge.py`，8890）仍可用作 headless 一次性回退，
-> 但无跨轮记忆；常驻服务器（8891）是当前前端 DSH 路径。
+> headless 一次性回退：直接 `dsh --profile asa "<任务>"`（无跨轮记忆）；
+> 常驻服务器（8891）是当前前端 DSH 路径。
 
 ## 部署与守护
 
