@@ -24,6 +24,7 @@ import { SessionId } from "@deepseek-ai/dsh-session";
  * - token 比较改恒定时间（timingSafeEqual）。
  * - CORS 从 `*` 收紧为白名单回显（Core 8765 + vite dev 5173）。
  * - 会话串行队列在队尾排空后删除条目，Map 不再无界增长。
+ * - 优雅停机：SIGTERM/SIGINT 停接新连接、取消在跑轮次、dispose 全部 agent 后退出（10s 硬退兜底）。
  */
 
 const name = "asa-resident-runner";
@@ -316,6 +317,41 @@ function apply(ctx) {
   server.listen(PORT, "127.0.0.1", () => {
     console.log(`[asa-resident] http://127.0.0.1:${PORT}`);
   });
+
+  // 优雅停机：launchd kickstart / kill 发 SIGTERM。停接新连接 → 取消在跑轮次 →
+  // dispose 全部 agent（停 loop、清 session）→ 退出。dispose 可能 hang，
+  // 10s 硬退兜底，避免 launchd 反复 kickstart 失败。
+  let shuttingDown = false;
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[asa-resident] ${signal} received, draining ${pool.size} agent(s)`);
+    const hardExit = setTimeout(() => {
+      console.warn("[asa-resident] graceful shutdown timed out, hard exit");
+      process.exit(1);
+    }, 10_000);
+    hardExit.unref?.();
+    server.close();
+    const entries = [...pool.values()];
+    pool.clear();
+    await Promise.allSettled(
+      entries.map(async (entry) => {
+        if (entry.evictTimer) clearTimeout(entry.evictTimer);
+        try {
+          entry.agent.cancel({ kind: "hook", reason: `shutdown-${signal.toLowerCase()}` });
+        } catch { /* agent 可能已 dispose */ }
+        try {
+          await entry.handle.dispose();
+        } catch (error) {
+          console.warn("[asa-resident] dispose on shutdown failed:", error);
+        }
+      }),
+    );
+    clearTimeout(hardExit);
+    process.exit(0);
+  }
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 export { apply, inject, name };
