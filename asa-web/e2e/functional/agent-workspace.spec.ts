@@ -175,9 +175,11 @@ test('Agent 策略建议逐项预检、二次确认并持久化回执', async ({
         role: 'assistant',
         content: '建议把以下顾问判断沉淀到当前寻访策略。',
         strategy_patch: {
+          // 27f531d 起策略卡仅在显式请求沉淀（display_requested）或已写入时渲染
           workflow_id: 'workflow-strategy-e2e',
           workflow_title: '长越科技｜机械高级工程师｜第 2 轮',
           strategy_hash: 'strategy-hash-e2e',
+          display_requested: true,
           changes: [
             { type: 'add_keyword', value: '精密运动平台', clause: '新增关键词「精密运动平台」' },
             { type: 'add_company', value: 'ASMPT', clause: '新增对标公司「ASMPT」' },
