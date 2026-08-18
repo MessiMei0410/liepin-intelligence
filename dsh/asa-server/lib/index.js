@@ -61,6 +61,18 @@ function tokenOk(header) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+// 工具调用的前端进度文案（tool/call → SSE progress）：让「死寂」的工具执行段可见。
+const TOOL_LABELS = {
+  asa_dashboard: "读取工作台总览",
+  asa_jobs: "查询岗位列表",
+  asa_candidates: "查询候选人",
+  asa_workflow: "查询工作流",
+  asa_candidate_preflight: "候选人操作预检",
+  asa_candidate_commit: "提交候选人操作",
+  asa_approval_decision: "提交审批决定",
+  asa_copilot_ask: "委托 Copilot 做领域分析",
+};
+
 function corsHeaders(req) {
   const headers = {
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -175,6 +187,7 @@ function apply(ctx) {
     entry.busy = true;
     const agent = entry.agent;
     const firstSeq = agent.session.seq;
+    const startedAt = Date.now();
     let answer = "";
     let reason;
     let finished = false;
@@ -210,6 +223,10 @@ function apply(ctx) {
           const joined = content.filter((block) => block.type === "text").map((block) => block.text).join("");
           if (joined !== "") answer = joined;
         }
+      } else if (event.type === "tool/call") {
+        // 工具执行段本无任何输出（「死寂」），转发为进度事件让等待可见。
+        const toolName = event.data && event.data.name;
+        if (toolName) writeSse(res, "progress", { message: `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…` });
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
       }
@@ -241,6 +258,8 @@ function apply(ctx) {
       dispose();
       entry.busy = false;
       if (pool.has(sessionId)) touch(sessionId, entry);
+      // 每轮一行观测日志（session/结果/答案长度/耗时），用于排查截断与卡轮。
+      console.log(`[asa-resident] turn session=${sessionId} ok=${reason?.kind === "completed"} reason=${reason?.kind || "unknown"} answer_chars=${answer.length} ms=${Date.now() - startedAt}`);
     }
   }
 

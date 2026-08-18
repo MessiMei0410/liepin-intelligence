@@ -165,10 +165,11 @@ export const createAgentTurn = (sessionId: string, message: string, context: Age
 
 const DSH_BRIDGE_URL = 'http://127.0.0.1:8891/turn'
 
-// 非破坏的 DSH 开关：URL 带 ?brain=dsh 时 Agent 走 DSH 桥接（路 2），否则保持现有 Copilot。
+// DSH 默认大脑（2026-08-18 起）：Agent 默认走 DSH 常驻服务器（路 2 编排层）；
+// URL 带 ?brain=copilot 可临时回退到 Python Copilot 直连。
 export const brainMode = (): 'copilot' | 'dsh' => {
-  if (typeof location === 'undefined') return 'copilot'
-  return new URLSearchParams(location.search).get('brain') === 'dsh' ? 'dsh' : 'copilot'
+  if (typeof location === 'undefined') return 'dsh'
+  return new URLSearchParams(location.search).get('brain') === 'copilot' ? 'copilot' : 'dsh'
 }
 
 // DSH 桥接配置（token + url）：从 Core 拉取，成功才缓存；失败按 dev 回退（无 token + 默认 url）
@@ -190,6 +191,27 @@ async function getDshConfig(): Promise<{ token: string; url: string }> {
   return { token: '', url: DSH_BRIDGE_URL }
 }
 
+// DSH 轮次回填 Core：DSH 对话只存在其服务器内存，回填后才会进入会话列表
+//（agent_copilot_messages rollup）并可刷新恢复。失败仅告警，绝不影响流式主流程。
+async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Promise<void> {
+  try {
+    await fetch('/api/v1/copilot/sessions/record-turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: String(data.session_id || turn.sessionId),
+        request_id: turn.requestId,
+        message: turn.message,
+        answer: String(data.answer || ''),
+        context: turn.context,
+        source: 'dsh',
+      }),
+    })
+  } catch (error) {
+    console.warn('DSH 轮次回填 Core 失败（不影响本轮结果）', error)
+  }
+}
+
 async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {
   const { token, url } = await getDshConfig()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -208,15 +230,21 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let doneData: Record<string, unknown> | null = null
+  const track = (event: AgentSseEvent) => {
+    if (event.type === 'done') doneData = (event.data || {}) as Record<string, unknown>
+    onEvent(event)
+  }
   while (true) {
     const { value, done } = await reader.read()
     buffer += decoder.decode(value, { stream: !done })
     const blocks = buffer.split(/\r?\n\r?\n/)
     buffer = blocks.pop() || ''
-    parseAgentSse(blocks.join('\n\n')).forEach(onEvent)
+    parseAgentSse(blocks.join('\n\n')).forEach(track)
     if (done) break
   }
-  parseAgentSse(buffer).forEach(onEvent)
+  parseAgentSse(buffer).forEach(track)
+  if (doneData && (doneData as { ok?: unknown }).ok !== false) void recordDshTurn(turn, doneData)
 }
 
 export async function streamAgentTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {

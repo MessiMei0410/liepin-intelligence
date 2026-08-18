@@ -180,6 +180,7 @@ from .copilot_handler import (
     get_copilot_session as _h_get_copilot_session,
     search_copilot_session_messages as _h_search_copilot_session_messages,
     list_copilot_sessions as _h_list_copilot_sessions,
+    record_external_copilot_turn as _h_record_external_copilot_turn,
     update_copilot_session as _h_update_copilot_session,
     archive_all_copilot_sessions as _h_archive_all_copilot_sessions,
     _copilot_conversation_history as _h_copilot_conversation_history,
@@ -1712,6 +1713,7 @@ AgentService._persist_copilot_focus = _h_persist_copilot_focus
 AgentService.get_copilot_session = _h_get_copilot_session
 AgentService.search_copilot_session_messages = _h_search_copilot_session_messages
 AgentService.list_copilot_sessions = _h_list_copilot_sessions
+AgentService.record_external_copilot_turn = _h_record_external_copilot_turn
 AgentService.update_copilot_session = _h_update_copilot_session
 AgentService.archive_all_copilot_sessions = _h_archive_all_copilot_sessions
 AgentService._copilot_conversation_history = _h_copilot_conversation_history

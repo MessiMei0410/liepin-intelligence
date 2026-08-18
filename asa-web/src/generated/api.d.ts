@@ -892,6 +892,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/copilot/sessions/record-turn": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Copilot Sessions Record Turn */
+        post: operations["copilot_sessions_record_turn_api_v1_copilot_sessions_record_turn_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/copilot/sessions/archive-all": {
         parameters: {
             query?: never;
@@ -2353,6 +2370,55 @@ export interface components {
             business_focus?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** CopilotTurnRecordRequest */
+        CopilotTurnRecordRequest: {
+            /** Session Id */
+            session_id: string;
+            /** Request Id */
+            request_id: string;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Answer
+             * @default
+             */
+            answer: string;
+            /** Context */
+            context?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Source
+             * @default dsh
+             */
+            source: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+        };
+        /** CopilotTurnRecordResponse */
+        CopilotTurnRecordResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /**
+             * Session Id
+             * @default
+             */
+            session_id: string;
+            /**
+             * Recorded
+             * @default false
+             */
+            recorded: boolean;
         };
         /** DiffDecision */
         DiffDecision: {
@@ -4625,6 +4691,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CopilotSessionListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    copilot_sessions_record_turn_api_v1_copilot_sessions_record_turn_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotTurnRecordRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotTurnRecordResponse"];
                 };
             };
             /** @description Validation Error */
