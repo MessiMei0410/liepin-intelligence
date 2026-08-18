@@ -421,6 +421,29 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON agent_sourcing_adjustments(applied_workflow_id, applied_artifact_id);
         """,
     ),
+    (
+        14,
+        "lifecycle_event_request_dedupe_index",
+        # 生命周期事件 request_id 去重原为"先查后插"，多客户端并发下可重复插入；
+        # 部分唯一索引兜底：只约束 record_lifecycle_event 写入的
+        # （source_table='api_v1' 且 source_id 非空）行，其他写入（source_id 为 NULL）不受影响。
+        # 既有重复保留最早一条（MIN(id)）；被删事件的孤儿跟进待办由
+        # ensure_lifecycle_followup_cleanup 清理（Python 侧检查表存在性——
+        # 合成 fixture 库可能没有 followup_tasks 表，纯 SQL migration 无法防御）。
+        # 编号说明：12/13 由在途分支（kb-correctness / job-list-filter-memory）占用，故顺延到 14。
+        """
+        DELETE FROM candidate_events
+         WHERE source_table='api_v1' AND source_id IS NOT NULL
+           AND id NOT IN (
+               SELECT MIN(id) FROM candidate_events
+                WHERE source_table='api_v1' AND source_id IS NOT NULL
+                GROUP BY job_candidate_id, event_type, source_id
+           );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_events_api_v1_request
+            ON candidate_events(job_candidate_id, event_type, source_id)
+            WHERE source_table='api_v1' AND source_id IS NOT NULL;
+        """,
+    ),
 ]
 
 
@@ -434,6 +457,29 @@ def ensure_stop_reason_schema(conn: sqlite3.Connection) -> None:
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(job_candidates)")}
     if "stop_reason" not in columns:
         conn.execute("ALTER TABLE job_candidates ADD COLUMN stop_reason TEXT")
+
+
+def ensure_lifecycle_followup_cleanup(conn: sqlite3.Connection) -> None:
+    """清理生命周期事件的孤儿跟进待办（migration 14 去重的配套步骤）。
+
+    走 Python 侧 sqlite_master 检查而非 migration 纯 SQL：合成 fixture 库可能
+    没有 followup_tasks 表，纯 SQL 的 DELETE 会直接 OperationalError（CI 事故）。
+    每次 migrate 幂等执行：没有生命周期孤儿待办时为零操作。
+    """
+    has_table = bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='followup_tasks'"
+        ).fetchone()
+    )
+    if not has_table:
+        return
+    conn.execute(
+        """
+        DELETE FROM followup_tasks
+         WHERE source_table='lifecycle_event'
+           AND source_id NOT IN (SELECT id FROM candidate_events)
+        """
+    )
 
 
 def ensure_idempotency_recovery_schema(conn: sqlite3.Connection) -> None:
@@ -561,6 +607,7 @@ def migrate(db_path: Path = DEFAULT_DB, *, backup: bool = True) -> dict[str, Any
             applied.append(version)
         ensure_stop_reason_schema(conn)
         ensure_idempotency_recovery_schema(conn)
+        ensure_lifecycle_followup_cleanup(conn)
         _backfill_source_links(conn)
         conn.commit()
         _integrity(conn)

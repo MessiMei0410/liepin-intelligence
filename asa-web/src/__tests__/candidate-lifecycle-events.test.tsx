@@ -54,6 +54,33 @@ describe('生命周期事件记录表单（面试/Offer/入职）', () => {
     expect(screen.getByText('只写入时间线并生成跟进待办，不会自动对外沟通。')).toBeInTheDocument()
   })
 
+  it('多状态事件类型暴露事件状态选择，提交发送 event_status', async () => {
+    const { user } = await openForm()
+    // 默认"面试安排"：状态 待面试/已取消
+    const scheduledStatus = screen.getByRole('combobox', { name: '事件状态' })
+    expect(scheduledStatus).toHaveValue('scheduled')
+    expect(within(scheduledStatus).getAllByRole('option').map(option => option.textContent)).toEqual(['待面试', '已取消'])
+    await user.selectOptions(screen.getByRole('combobox', { name: '事件类型' }), 'interview_completed')
+    const statusSelect = screen.getByRole('combobox', { name: '事件状态' })
+    expect(statusSelect).toHaveValue('completed')
+    expect(within(statusSelect).getAllByRole('option').map(option => option.textContent)).toEqual(['结果待定', '面试通过', '面试未通过'])
+    await user.selectOptions(statusSelect, 'passed')
+    await user.click(screen.getByRole('button', { name: '记录事件' }))
+    await screen.findByText(/已记录（事件 #91）/)
+    const call = fetchMock.mock.calls.find(([input]) => String(input).includes(lifecycleUrl))
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toMatchObject({ event_type: 'interview_completed', event_status: 'passed' })
+  })
+
+  it('单一状态事件类型不展示状态选择器，按默认状态提交', async () => {
+    const { user } = await openForm()
+    await user.selectOptions(screen.getByRole('combobox', { name: '事件类型' }), 'onboarded')
+    expect(screen.queryByRole('combobox', { name: '事件状态' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: '记录事件' }))
+    await screen.findByText(/已记录（事件 #91）/)
+    const call = fetchMock.mock.calls.find(([input]) => String(input).includes(lifecycleUrl))
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toMatchObject({ event_type: 'onboarded', event_status: 'recorded' })
+  })
+
   it('提交走 lifecycle-events 端点并展示回执、回读刷新', async () => {
     const { user, changed } = await openForm()
     fireEvent.change(screen.getByLabelText('发生时间（选填，默认现在）'), { target: { value: '2026-08-10T14:00' } })

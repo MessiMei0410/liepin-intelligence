@@ -1839,65 +1839,78 @@ class CandidateActionsMixin:
             ).fetchone()
             if not row:
                 raise LookupError("candidate not found")
-            if request_id:
-                existing = conn.execute(
-                    """SELECT id,event_status,event_time,summary FROM candidate_events
-                       WHERE job_candidate_id=? AND event_type=? AND source_table='api_v1' AND source_id=?""",
-                    (candidate_id, event_type, request_id),
+
+            find_existing_sql = """SELECT id,event_status,event_time,summary FROM candidate_events
+                   WHERE job_candidate_id=? AND event_type=? AND source_table='api_v1' AND source_id=?"""
+
+            def replay_response(existing: sqlite3.Row) -> dict[str, Any]:
+                # 表级幂等兜底：request_id 命中即回读，不重复写事件与待办。
+                task = conn.execute(
+                    """SELECT id,task_type,due_at,status FROM followup_tasks
+                       WHERE job_candidate_id=? AND source_table='lifecycle_event' AND source_id=?
+                       ORDER BY id DESC LIMIT 1""",
+                    (candidate_id, int(existing["id"])),
                 ).fetchone()
-                if existing:
-                    # 表级幂等兜底：request_id 命中即回读，不重复写事件与待办。
-                    task = conn.execute(
-                        """SELECT id,task_type,due_at,status FROM followup_tasks
-                           WHERE job_candidate_id=? AND source_table='lifecycle_event' AND source_id=?
-                           ORDER BY id DESC LIMIT 1""",
-                        (candidate_id, int(existing["id"])),
-                    ).fetchone()
-                    return {
-                        "ok": True,
-                        "candidate_id": candidate_id,
-                        "event_id": int(existing["id"]),
-                        "followup_task_id": int(task["id"]) if task else None,
-                        "already_recorded": True,
-                        "event": {
-                            "id": int(existing["id"]),
-                            "event_type": event_type,
-                            "event_type_label": label,
-                            "event_status": existing["event_status"],
-                            "event_time": existing["event_time"],
-                            "summary": existing["summary"],
-                        },
-                        "followup": (
-                            {"id": int(task["id"]), "task_type": task["task_type"], "due_at": task["due_at"], "status": task["status"]}
-                            if task
-                            else None
-                        ),
-                    }
-            cursor = conn.execute(
-                """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
-                   VALUES (?,?,?,?,?,COALESCE(NULLIF(?,''),datetime('now','localtime')),?,?,'api_v1',NULLIF(?,''))""",
-                (
-                    candidate_id,
-                    int(row["person_id"]),
-                    row["job_id"],
-                    event_type,
-                    event_status,
-                    event_time,
-                    summary[:1000],
-                    json.dumps(
-                        {
-                            "action": "lifecycle_event",
-                            "event_type": event_type,
-                            "event_status": event_status,
-                            "notes": notes,
-                            "request_id": request_id,
-                            "actor": "consultant",
-                        },
-                        ensure_ascii=False,
+                return {
+                    "ok": True,
+                    "candidate_id": candidate_id,
+                    "event_id": int(existing["id"]),
+                    "followup_task_id": int(task["id"]) if task else None,
+                    "already_recorded": True,
+                    "event": {
+                        "id": int(existing["id"]),
+                        "event_type": event_type,
+                        "event_type_label": label,
+                        "event_status": existing["event_status"],
+                        "event_time": existing["event_time"],
+                        "summary": existing["summary"],
+                    },
+                    "followup": (
+                        {"id": int(task["id"]), "task_type": task["task_type"], "due_at": task["due_at"], "status": task["status"]}
+                        if task
+                        else None
                     ),
-                    request_id,
-                ),
-            )
+                }
+
+            if request_id:
+                existing = conn.execute(find_existing_sql, (candidate_id, event_type, request_id)).fetchone()
+                if existing:
+                    return replay_response(existing)
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO candidate_events(job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
+                       VALUES (?,?,?,?,?,COALESCE(NULLIF(?,''),datetime('now','localtime')),?,?,'api_v1',NULLIF(?,''))""",
+                    (
+                        candidate_id,
+                        int(row["person_id"]),
+                        row["job_id"],
+                        event_type,
+                        event_status,
+                        event_time,
+                        summary[:1000],
+                        json.dumps(
+                            {
+                                "action": "lifecycle_event",
+                                "event_type": event_type,
+                                "event_status": event_status,
+                                "notes": notes,
+                                "request_id": request_id,
+                                "actor": "consultant",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        request_id,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # 并发兜底：唯一索引 idx_candidate_events_api_v1_request（migration 14）命中，
+                # 说明另一事务已抢先写入同一 request_id —— 回读其记录按重放返回，不重复写。
+                if not request_id:
+                    raise
+                existing = conn.execute(find_existing_sql, (candidate_id, event_type, request_id)).fetchone()
+                if existing is None:
+                    raise
+                return replay_response(existing)
             event_id = int(cursor.lastrowid)
             # 自动跟进待办：复用 followup_tasks 机制（与 Agent 生命周期 followup 同表同字段），
             # 截止时间相对事件发生时间推算；只建内部任务，不自动对外发任何消息。
