@@ -322,6 +322,9 @@ def execute_filter_candidates(
         )
     except Exception as exc:
         return {"success": False, "error": f"分级过滤失败: {exc}"}
+    # 岗位级口径记忆：工具路径做过严格筛选同样登记，之后任意会话问名单默认给分级结果。
+    from .copilot_sessions import set_job_list_filter
+    set_job_list_filter(db_path, job_id, "grade_filter")
     candidates = result.get("candidates") or []
     grades: dict[str, list[dict[str, Any]]] = {}
     for c in candidates:

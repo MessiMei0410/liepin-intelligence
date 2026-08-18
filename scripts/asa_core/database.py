@@ -421,6 +421,22 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON agent_sourcing_adjustments(applied_workflow_id, applied_artifact_id);
         """,
     ),
+    (
+        13,
+        "job_list_filters",
+        # 岗位级名单口径记忆：岗位做过严格筛选后，后续任意会话问"名单"默认按
+        # grade_filter 口径重算；显式"全量名单"清除。会话级 list_filters 之外
+        # 的跨会话兜底（2026-08-18 新会话问名单回落全量 275 人的问题）。
+        # 注意：版本 12（copilot_persistent_commands）在 fix/kb-correctness-2026-08-16
+        # 分支且已应用于生产库，本迁移只能用 13，否则生产库校验和冲突。
+        """
+        CREATE TABLE IF NOT EXISTS job_list_filters (
+            job_id INTEGER PRIMARY KEY,
+            mode TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        """,
+    ),
 ]
 
 
