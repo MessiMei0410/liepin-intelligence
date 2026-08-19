@@ -1,7 +1,8 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import http from "node:http";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
@@ -41,7 +42,7 @@ import { delegateDoneFields } from "./copilot-payload.js";
 const name = "asa-resident-runner";
 const inject = ["agentDefaultModel", "agents", "sessions"];
 
-const PORT = Number(process.env.ASA_DSH_RESIDENT_PORT || 8891);
+const residentPort = () => Number(process.env.ASA_DSH_RESIDENT_PORT || 8891);
 const TURN_TIMEOUT_MS = Number(process.env.ASA_DSH_TURN_TIMEOUT_MS || 300_000);
 const MAX_BODY_BYTES = Number(process.env.ASA_DSH_MAX_BODY_BYTES || 1_048_576);
 const AGENT_IDLE_TTL_MS = Number(process.env.ASA_DSH_AGENT_IDLE_TTL_MS || 30 * 60 * 1000);
@@ -160,6 +161,53 @@ function toolCallProgressMessage(toolName) {
   return `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…`;
 }
 
+// ---------------------------------------------------------------------------
+// 会话碰撞自愈：陈旧持久化日志定位（路径算法逐行复刻自
+// @deepseek-ai/dsh-session-persistence-jsonl 的 encodeSegment/projectKey，
+// 该包未导出这些工具函数；ASA 的 session id 只含安全字符，实际不会走转义分支）。
+// ---------------------------------------------------------------------------
+const dshSessionsRoot = () => process.env.ASA_DSH_SESSIONS_ROOT
+  || `${process.env.DSH_HOME || `${homedir()}/.dsh`}/sessions`;
+
+function encodeSegment(raw) {
+  if (raw === ".") return "~002E";
+  if (raw === "..") return "~002E~002E";
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch !== "~" && /^[A-Za-z0-9._-]$/.test(ch)) out += ch;
+    else out += `~${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return out;
+}
+
+function projectKey(cwd) {
+  let readable = "";
+  let separatorRun = false;
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch === "/" || ch === "\\" || ch === ":") {
+      if (!separatorRun) readable += "-";
+      separatorRun = true;
+    } else if (ch !== "~" && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch;
+      separatorRun = false;
+    } else {
+      readable += `~${code.toString(16).toUpperCase().padStart(4, "0")}`;
+      separatorRun = false;
+    }
+  }
+  return `--${(readable.replace(/^-+/, "") || "root").slice(0, 251)}--`;
+}
+
+/** 把某会话的持久化事件日志挪到 .bak-<ts>（不存在则空操作），供碰撞自愈重试。 */
+function archiveStaleSessionLog(sessionId) {
+  const log = join(join(dshSessionsRoot(), projectKey(process.cwd())), encodeSegment(sessionId), "session.jsonl.zstd");
+  if (existsSync(log)) renameSync(log, `${log}.bak-${Date.now()}`);
+}
+
 // tool/result 后的进度文案：工具结果已回、LLM 接续生成，让「死寂段」持续可见。
 const TOOL_RESULT_PROGRESS_MESSAGE = "整理工具结果，生成中…";
 
@@ -233,14 +281,28 @@ function apply(ctx) {
     if (pool.size >= MAX_AGENTS) evictOldestIdle();
     const defaultModel = ctx.get("agentDefaultModel");
     const selection = defaultModel.currentSelection();
-    const handle = await ctx.get("agents").create({
-      sessionId: SessionId(sessionId),
-      meta: { cwd: process.cwd() },
-      agentOptions: { provider: selection.provider, model: selection.model },
-      setup: (agentCtx) => {
-        installModelSelection(agentCtx, { current: selection, assembled: void 0 });
-      },
-    });
+    const createAgent = () =>
+      ctx.get("agents").create({
+        sessionId: SessionId(sessionId),
+        meta: { cwd: process.cwd() },
+        agentOptions: { provider: selection.provider, model: selection.model },
+        setup: (agentCtx) => {
+          installModelSelection(agentCtx, { current: selection, assembled: void 0 });
+        },
+      });
+    let handle;
+    try {
+      handle = await createAgent();
+    } catch (error) {
+      // 会话碰撞自愈（2026-08-19 实证）：部署重启恰逢在跑轮次时，旧 agent 被取消
+      // 会在磁盘留下与新 agent 事件流不匹配的持久化日志，DSH 会话存储拒绝收养
+      // （id collision），此后该会话 id 每轮毫秒级失败。归档陈旧日志并重试一次；
+      // 界面历史由 Core 回填承载，DSH 侧仅丢失该线程的工作记忆。
+      if (!/id collision/.test(String(error && error.message))) throw error;
+      archiveStaleSessionLog(sessionId);
+      console.warn(`[asa-resident] session ${sessionId} id collision，已归档陈旧日志并重试`);
+      handle = await createAgent();
+    }
     await handle.agent.whenIdle();
     const entry = { handle, agent: handle.agent, busy: false, evictTimer: null };
     pool.set(sessionId, entry);
@@ -447,8 +509,8 @@ function apply(ctx) {
     writeJson(res, req, 404, { ok: false, error: "not found" });
   });
 
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`[asa-resident] http://127.0.0.1:${PORT}`);
+  server.listen(residentPort(), "127.0.0.1", () => {
+    console.log(`[asa-resident] http://127.0.0.1:${residentPort()}`);
   });
 
   // 优雅停机：launchd kickstart / kill 发 SIGTERM。停接新连接 → 取消在跑轮次 →
@@ -485,6 +547,8 @@ function apply(ctx) {
   }
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
+
+  return server;
 }
 
-export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE };
+export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey };
