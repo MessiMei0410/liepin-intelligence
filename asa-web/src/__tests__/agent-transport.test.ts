@@ -84,6 +84,15 @@ describe('Agent transport', () => {
     ])
   })
 
+  it('解析 thinking 事件（DSH 思考过程流），契约漂移同样转错误', () => {
+    expect(parseAgentSse('event: thinking\ndata: {"content":"先分析岗位画像"}\n\n')).toEqual([
+      { type: 'thinking', data: { content: '先分析岗位画像' } },
+    ])
+    expect(parseAgentSse('event: thinking\ndata: {"content":42}\n\n')).toEqual([
+      { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } },
+    ])
+  })
+
   it('同一发送任务的重试复用 request id 和幂等键', () => {
     const turn = createAgentTurn('task-1', '继续寻找 10 人', { type: 'job', id: 154 }, 'request-fixed')
     expect(turn.requestId).toBe('request-fixed')
@@ -436,6 +445,54 @@ describe('Agent transport', () => {
       expect(JSON.parse(record?.body || '{}')).toMatchObject({
         session_id: 's-del', request_id: 'request-del', source: 'dsh', ...delegate,
       })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('DSH 模式 thinking 事件按序透传（不合并进 done）', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = [
+      'event: progress\r\ndata: {"message":"DSH 编排中…"}\r\n\r\n',
+      'event: thinking\r\ndata: {"content":"先分析岗位"}\r\n\r\n',
+      'event: thinking\r\ndata: {"content":"，再查人选"}\r\n\r\n',
+      'event: text\r\ndata: {"content":"结论如下"}\r\n\r\n',
+      'event: done\r\ndata: {"ok":true,"session_id":"s-think","answer":"结论如下"}\r\n\r\n',
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-think', '分析一下', { type: 'page' }, 'request-think'), new AbortController().signal, event => events.push(event))
+      expect(events.map(event => event.type)).toEqual(['progress', 'thinking', 'thinking', 'text', 'done'])
+      expect(events[1]).toEqual({ type: 'thinking', data: { content: '先分析岗位' } })
+      expect(events[2]).toEqual({ type: 'thinking', data: { content: '，再查人选' } })
+      // thinking 不并入 done（done 只合并 card/confirm_request）
+      expect(events[4]).toEqual({ type: 'done', data: expect.not.objectContaining({ thinking: expect.anything() }) })
     } finally {
       vi.unstubAllGlobals()
     }

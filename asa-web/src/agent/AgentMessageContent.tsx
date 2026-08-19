@@ -15,3 +15,12 @@ export function AgentThinking({ label }: { label: string }) {
     <span>{label}</span>
   </div>
 }
+
+// DSH 思考过程折叠区（reasoning 流）：流式时强制展开并随增量滚到底，轮末自动收起、
+// 可手动再展开。正文 markdown 重渲染不走这里（纯文本 pre-wrap，无解析开销）。
+export function AgentThinkingBlock({ thinking, streaming }: { thinking: string; streaming?: boolean }) {
+  return <details className={`agent-thinking-block ${streaming ? 'streaming' : ''}`} open={streaming || undefined}>
+    <summary>{streaming ? '思考中…' : '思考过程'}</summary>
+    <div className="agent-thinking-body" ref={el => { if (el && streaming) el.scrollTop = el.scrollHeight }}>{thinking}</div>
+  </details>
+}

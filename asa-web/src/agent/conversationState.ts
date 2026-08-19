@@ -22,6 +22,7 @@ export type AgentConversationAction =
   | { type: 'restore_failed'; error: string }
   | { type: 'turn_started'; requestId: string; message: string; context: AgentContext; retry: boolean; continuation?: boolean }
   | { type: 'turn_text'; requestId: string; content: string }
+  | { type: 'turn_thinking'; requestId: string; content: string }
   | { type: 'turn_done'; requestId: string; result: AgentTurnResult }
   | { type: 'turn_failed'; requestId: string; error: string }
   | { type: 'turn_stopped'; requestId: string }
@@ -69,6 +70,14 @@ export const agentConversationReducer = (
     ...state,
     messages: state.messages.map(message => message.role === 'assistant' && message.turnRequestId === action.requestId
       ? { ...message, content: message.content + action.content }
+      : message),
+  }
+  // DSH 思考过程（reasoning-delta → thinking 事件）：增量挂到本轮 assistant 消息，
+  // 与正文分通道渲染（折叠区），不进 content、不进 markdown 重解析链路。
+  if (action.type === 'turn_thinking') return {
+    ...state,
+    messages: state.messages.map(message => message.role === 'assistant' && message.turnRequestId === action.requestId
+      ? { ...message, thinking: (message.thinking || '') + action.content }
       : message),
   }
   if (action.type === 'turn_done') {

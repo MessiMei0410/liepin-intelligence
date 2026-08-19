@@ -1196,6 +1196,85 @@ describe('Agent workspace', () => {
     expect(screen.queryByText('正在处理：梳理岗位需求')).not.toBeInTheDocument()
   })
 
+  it('thinking 事件渲染为思考过程折叠区：流式展开、轮末收起且不进正文', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const chunks = [
+      'event: context\ndata: {"session_id":"task-1"}\n\nevent: thinking\ndata: {"content":"先分析岗位画像"}\n\n',
+      'event: text\ndata: {"content":"结论如下"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-1","answer":"结论如下"}\n\n',
+    ]
+    let index = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/copilot/stream')
+      ? ({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (index > 0) await gate
+              return index < chunks.length
+                ? { value: new TextEncoder().encode(chunks[index++]), done: false }
+                : { value: undefined, done: true }
+            },
+          }),
+        },
+      }) as unknown as Response
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '分析一下' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    // 流式中：折叠区强制展开，标题「思考中…」，正文尚未到达
+    expect(await screen.findByText('思考中…')).toBeInTheDocument()
+    expect(screen.getByText('先分析岗位画像')).toBeInTheDocument()
+    expect(document.querySelector('details.agent-thinking-block')).toHaveAttribute('open')
+    expect(screen.queryByText('结论如下')).not.toBeInTheDocument()
+
+    release()
+    // 轮末：正文到达，思考区自动收起但保留可展开
+    expect(await screen.findByText('结论如下')).toBeInTheDocument()
+    expect(await screen.findByText('思考过程')).toBeInTheDocument()
+    expect(document.querySelector('details.agent-thinking-block')).not.toHaveAttribute('open')
+    expect(screen.getByText('先分析岗位画像')).toBeInTheDocument()
+  })
+
+  it('正文已开始后再来 progress（工具段）：状态行显示在正文下方，不被内容吞掉', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const chunks = [
+      'event: context\ndata: {"session_id":"task-1"}\n\nevent: text\ndata: {"content":"先给一半"}\n\nevent: progress\ndata: {"message":"查询候选人…"}\n\n',
+      'event: text\ndata: {"content":"，补全"}\n\nevent: done\ndata: {"ok":true,"session_id":"task-1","answer":"先给一半，补全"}\n\n',
+    ]
+    let index = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => String(input).includes('/api/v1/copilot/stream')
+      ? ({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (index > 0) await gate
+              return index < chunks.length
+                ? { value: new TextEncoder().encode(chunks[index++]), done: false }
+                : { value: undefined, done: true }
+            },
+          }),
+        },
+      }) as unknown as Response
+      : mockResponse({ ok: true, sessions: [] })))
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(screen.getByPlaceholderText('告诉 ASA 你要推进的目标…（或点上方快捷指令）'), { target: { value: '继续' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    // 正文已可见，工具段状态行同时可见（修复前：content 非空后状态行不再渲染）
+    expect(await screen.findByText('先给一半')).toBeInTheDocument()
+    expect(await screen.findByRole('status', { name: '正在处理：查询候选人…' })).toHaveClass('agent-thinking')
+
+    release()
+    expect(await screen.findByText(/补全/)).toBeInTheDocument()
+    expect(screen.queryByText('正在处理：查询候选人…')).not.toBeInTheDocument()
+  })
+
   it('服务端焦点有值时优先于本地附着上下文文案，冲突提示不受影响', async () => {
     localStorage.setItem('asaAgentSessionId', 'task-1')
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {

@@ -31,6 +31,8 @@ const sessionSummarySchema = z.object({
 const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.string(),
+  // DSH 思考过程（流式 thinking 事件聚合；恢复会话时 Core 暂未回填则缺省）。
+  thinking: z.string().optional(),
   context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(),
   suggested_actions: z.array(structuredRecord).optional(),

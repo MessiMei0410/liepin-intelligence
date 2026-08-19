@@ -27,6 +27,27 @@ describe('Agent conversation state machine', () => {
     expect(stale.phase).toBe('idle')
   })
 
+  it('turn_thinking 增量挂到本轮 assistant 消息，与正文分通道、turn_done 后保留', () => {
+    const streaming = agentConversationReducer(initialAgentConversationState, {
+      type: 'turn_started', requestId: 'request-1', message: '分析一下', context: { type: 'page' }, retry: false,
+    })
+    const t1 = agentConversationReducer(streaming, { type: 'turn_thinking', requestId: 'request-1', content: '先看岗位' })
+    const t2 = agentConversationReducer(t1, { type: 'turn_thinking', requestId: 'request-1', content: '，再看人选' })
+    const withText = agentConversationReducer(t2, { type: 'turn_text', requestId: 'request-1', content: '结论如下' })
+    expect(withText.messages[1].thinking).toBe('先看岗位，再看人选')
+    expect(withText.messages[1].content).toBe('结论如下')
+
+    // 非本轮 request 的 thinking 被忽略
+    const foreign = agentConversationReducer(withText, { type: 'turn_thinking', requestId: 'request-x', content: '不该出现' })
+    expect(foreign.messages[1].thinking).toBe('先看岗位，再看人选')
+
+    const done = agentConversationReducer(withText, {
+      type: 'turn_done', requestId: 'request-1', result: { ok: true, session_id: 'task-1', answer: '结论如下' },
+    })
+    expect(done.messages[1].thinking).toBe('先看岗位，再看人选')
+    expect(done.messages[1].content).toBe('结论如下')
+  })
+
   it('turn_failed 清空 activeRequestId，迟到事件不再改动状态', () => {
     const streaming = agentConversationReducer(initialAgentConversationState, {
       type: 'turn_started', requestId: 'request-1', message: '继续推进', context: { type: 'job', id: 154 }, retry: false,
