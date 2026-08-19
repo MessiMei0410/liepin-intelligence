@@ -216,4 +216,18 @@ describe('岗位列表 Jobs', () => {
     expect(screen.queryByText('岗位1')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /全部 1/ })).toHaveAttribute('aria-pressed', 'true')
   })
+
+  it('首屏加载中显示真实加载态，不出现"共 0 个结果"假空态', () => {
+    render(<Jobs items={[]} onSelect={() => {}} loading />)
+    expect(screen.getByRole('status')).toHaveTextContent('正在加载岗位…')
+    expect(screen.getByText('正在加载岗位数据，请稍候…')).toBeInTheDocument()
+    expect(screen.queryByText('没有符合当前条件的岗位。')).not.toBeInTheDocument()
+    expect(screen.queryByText(/共 0 个结果/)).not.toBeInTheDocument()
+  })
+
+  it('加载中但已有数据时照常渲染数据，不切换成加载态', () => {
+    render(<Jobs items={[makeJob(1, { priority: 'P0' })]} onSelect={() => {}} loading />)
+    expect(screen.getByRole('status')).toHaveTextContent('共 1 个结果')
+    expect(screen.getByRole('row', { name: /岗位1/ })).toBeInTheDocument()
+  })
 })

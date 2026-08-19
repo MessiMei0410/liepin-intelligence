@@ -52,7 +52,9 @@ const compareCandidates = (a: Candidate, b: Candidate, key: SortKey): number => 
   return result || b.id - a.id
 }
 
-export function Candidates({ items, openCandidate, compact = false }: { items: Candidate[]; openCandidate: (id: number) => void; compact?: boolean }) {
+export function Candidates({ items, openCandidate, compact = false, loading = false }: { items: Candidate[]; openCandidate: (id: number) => void; compact?: boolean; loading?: boolean }) {
+  // 首屏数据未落地前显示真实加载态，不用"共 0 个结果/没有符合"的假空态误导。
+  const initialLoading = loading && !(items ?? []).length
   // 筛选/排序/页码跨 tab 切换与刷新保持（compact 内嵌模式不渲染工具栏，不受影响）。
   const [mode, setMode] = usePageFilterState<Mode>('candidates.mode', 'active')
   const [query, setQuery] = usePageFilterState<string>('candidates.query', '')
@@ -144,7 +146,7 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
               <span>已停止</span><span className="mode-count">{counts.stopped}</span>
             </button>
           </div>
-          <span className="candidates-count" role="status">共 {filtered.length} 个结果</span>
+          <span className="candidates-count" role="status">{initialLoading ? '正在加载候选人…' : `共 ${filtered.length} 个结果`}</span>
         </div>
       )}
       <div className="table-wrap data-table-scroll" role="region" tabIndex={0} aria-label="候选人列表，可横向滚动">
@@ -171,7 +173,7 @@ export function Candidates({ items, openCandidate, compact = false }: { items: C
             ))}
             {shown.length === 0 && (
               <tr>
-                <td colSpan={5}><div className="empty">没有符合当前条件的候选人。</div></td>
+                <td colSpan={5}><div className="empty">{initialLoading ? '正在加载候选人数据，请稍候…' : '没有符合当前条件的候选人。'}</div></td>
               </tr>
             )}
           </tbody>

@@ -158,4 +158,16 @@ describe('人选进度 Progress', () => {
     expect(screen.getByText('没有符合当前条件的人选进度。')).toBeInTheDocument()
     expect(screen.queryByText(/共 0 位人选/)).not.toBeInTheDocument()
   })
+
+  it('首屏加载中显示真实加载态，不出现假空态', () => {
+    render(<Progress items={[]} openCandidate={() => {}} loading />)
+    expect(screen.getByText('正在加载人选数据，请稍候…')).toBeInTheDocument()
+    expect(screen.queryByText('没有符合当前条件的人选进度。')).not.toBeInTheDocument()
+  })
+
+  it('加载中但已有数据时照常渲染数据，不切换成加载态', () => {
+    render(<Progress items={[makeCandidate(1, '初筛')]} openCandidate={() => {}} loading />)
+    expect(screen.getByRole('status')).toHaveTextContent('共 1 位人选 · 1 个阶段')
+    expect(screen.getByRole('region', { name: '初筛' })).toBeInTheDocument()
+  })
 })
