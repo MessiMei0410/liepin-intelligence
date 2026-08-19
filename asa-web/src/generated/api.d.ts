@@ -2548,6 +2548,32 @@ export interface components {
             confirm_result?: {
                 [key: string]: unknown;
             } | null;
+            /** Understanding Card */
+            understanding_card?: {
+                [key: string]: unknown;
+            } | null;
+            /** Execution Receipt */
+            execution_receipt?: {
+                [key: string]: unknown;
+            } | null;
+            /** Workflow Progress */
+            workflow_progress?: {
+                [key: string]: unknown;
+            } | null;
+            /** Workflow Id */
+            workflow_id?: string | null;
+            /** Business Focus */
+            business_focus?: {
+                [key: string]: unknown;
+            } | null;
+            /** Model Participation */
+            model_participation?: {
+                [key: string]: unknown;
+            } | null;
+            /** Action Cards */
+            action_cards?: {
+                [key: string]: unknown;
+            }[];
         };
         /** CopilotTurnRecordResponse */
         CopilotTurnRecordResponse: {

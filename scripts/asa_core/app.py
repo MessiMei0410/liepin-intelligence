@@ -260,6 +260,15 @@ class CopilotTurnRecordRequest(BaseModel):
     # 按 request_id 回写同轮 assistant 消息的 confirm_request.state。
     confirm_request: dict[str, Any] | None = None
     confirm_result: dict[str, Any] | None = None
+    # Copilot 委托载荷透传（asa_copilot_ask → DSH done）：恢复会话时理解卡/执行回执/
+    # 焦点条/模型参与 badge/工作流进度卡仍可重渲染。
+    understanding_card: dict[str, Any] | None = None
+    execution_receipt: dict[str, Any] | None = None
+    workflow_progress: dict[str, Any] | None = None
+    workflow_id: str | None = Field(default=None, max_length=120)
+    business_focus: dict[str, Any] | None = None
+    model_participation: dict[str, Any] | None = None
+    action_cards: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CopilotTurnRecordResponse(BaseModel):
@@ -1102,6 +1111,13 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             references=body.references,
             confirm_request=body.confirm_request,
             confirm_result=body.confirm_result,
+            understanding_card=body.understanding_card,
+            execution_receipt=body.execution_receipt,
+            workflow_progress=body.workflow_progress,
+            workflow_id=body.workflow_id,
+            business_focus=body.business_focus,
+            model_participation=body.model_participation,
+            action_cards=body.action_cards,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "record failed")

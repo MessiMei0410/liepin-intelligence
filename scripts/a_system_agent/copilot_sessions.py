@@ -816,6 +816,7 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
                     "skill_runs": structured.get("skill_runs") or [],
                     "goal": structured.get("goal"),
                     "workflow": structured.get("workflow"),
+                    "workflow_id": structured.get("workflow_id"),
                     "plan_ref": structured.get("plan_ref"),
                     "plan_summary": structured.get("plan_summary") or [],
                     "workflow_progress": structured.get("workflow_progress"),
@@ -930,6 +931,13 @@ def record_external_copilot_turn(
     references: list[dict[str, Any]] | None = None,
     confirm_request: dict[str, Any] | None = None,
     confirm_result: dict[str, Any] | None = None,
+    understanding_card: dict[str, Any] | None = None,
+    execution_receipt: dict[str, Any] | None = None,
+    workflow_progress: dict[str, Any] | None = None,
+    workflow_id: str | None = None,
+    business_focus: dict[str, Any] | None = None,
+    model_participation: dict[str, Any] | None = None,
+    action_cards: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
@@ -943,6 +951,12 @@ def record_external_copilot_turn(
     确认/取消后再带 confirm_result 调本函数，按 (session_id, request_id) 回写
     同轮 assistant 消息的 confirm_request.state/execution_receipt——恢复会话
     时确认卡呈现终态（已确认/已取消；过期由前端按 expires_at 判定）。
+    understanding_card/execution_receipt/workflow_progress/workflow_id/
+    business_focus/model_participation/action_cards 是 asa_copilot_ask 委托
+    载荷经 DSH done 的透传字段：落 structured_json 后恢复会话时理解卡/执行
+    回执/焦点条/模型参与 badge/工作流进度卡仍可重渲染。business_focus 只落
+    消息级 structured，不写 agent_copilot_focus（焦点仲裁仍是 Python 脑职责，
+    避免回填绕过置信度仲裁污染焦点状态）。
     """
     session_id = str(session_id or "").strip()
     request_id = str(request_id or "").strip()
@@ -992,11 +1006,30 @@ def record_external_copilot_turn(
         assistant_structured = {
             "source": source,
             "request_id": request_id,
-            "model_participation": {"mode": source, "label": "DSH 编排层", "model": str(model or "")},
+            # 模型参与 badge：调用方（DSH done）带委托脑的真实参与信息时优先使用，
+            # 否则按 DSH 编排层兜底。
+            "model_participation": dict(model_participation) if isinstance(model_participation, dict) and model_participation
+                else {"mode": source, "label": "DSH 编排层", "model": str(model or "")},
         }
         if isinstance(action_card, dict) and action_card:
             assistant_structured["action_card"] = action_card
             assistant_structured["action_cards"] = [action_card]
+        # 复数卡片（Copilot 委托载荷）：显式传入时覆盖从单卡派生的默认值。
+        clean_cards = [dict(item) for item in (action_cards or []) if isinstance(item, dict)]
+        if clean_cards:
+            assistant_structured["action_cards"] = clean_cards
+            if not isinstance(action_card, dict) or not action_card:
+                assistant_structured["action_card"] = clean_cards[0]
+        if isinstance(understanding_card, dict) and understanding_card:
+            assistant_structured["understanding_card"] = understanding_card
+        if isinstance(execution_receipt, dict) and execution_receipt:
+            assistant_structured["execution_receipt"] = execution_receipt
+        if isinstance(workflow_progress, dict) and workflow_progress:
+            assistant_structured["workflow_progress"] = workflow_progress
+        if workflow_id:
+            assistant_structured["workflow_id"] = str(workflow_id)
+        if isinstance(business_focus, dict) and business_focus:
+            assistant_structured["business_focus"] = business_focus
         clean_actions = [dict(item) for item in (suggested_actions or []) if isinstance(item, dict)]
         if clean_actions:
             assistant_structured["suggested_actions"] = clean_actions
@@ -1054,6 +1087,11 @@ def list_copilot_sessions(
                         WHERE latest_context.session_id=messages.session_id
                         ORDER BY latest_context.id DESC LIMIT 1) AS context_id
                 FROM agent_copilot_messages messages
+                -- 委托会话不出现在任务列表：asa_copilot_ask 的委托轮次落在
+                -- <dsh会话>::dsh-delegate 派生 session（可审计但非用户会话）；
+                -- dsh-% 前缀是治理前一次性随机委托 session 的遗留孤儿。
+                WHERE messages.session_id NOT LIKE '%::dsh-delegate'
+                  AND messages.session_id NOT LIKE 'dsh-%'
                 GROUP BY messages.session_id
             )
             SELECT rollup.session_id, rollup.message_count, rollup.latest_id,
@@ -1180,6 +1218,9 @@ def archive_all_copilot_sessions(self) -> dict[str, Any]:
                  FROM agent_copilot_messages messages
                  LEFT JOIN agent_copilot_sessions metadata ON metadata.session_id=messages.session_id
                 WHERE metadata.archived_at IS NULL
+                  -- 与 list_copilot_sessions 一致：委托会话不可见，批量归档不动它们。
+                  AND messages.session_id NOT LIKE '%::dsh-delegate'
+                  AND messages.session_id NOT LIKE 'dsh-%'
                 ORDER BY messages.session_id"""
         ).fetchall()
         session_ids = [str(row["session_id"]) for row in rows]

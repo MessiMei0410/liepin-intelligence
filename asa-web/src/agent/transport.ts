@@ -30,6 +30,7 @@ export type AgentTurnResult = {
   goal?: Record<string, unknown> | null
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
+  action_cards?: Array<Record<string, unknown>>
   // DSH 写确认请求（preflight 申请投影）：前端渲染确认卡，用户确认后调 Core 激活+写入。
   confirm_request?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
@@ -78,6 +79,7 @@ const doneEventSchema = z.object({
   goal: structuredRecord.nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  action_cards: z.array(structuredRecord).optional(),
   confirm_request: structuredRecord.nullable().optional(),
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
@@ -222,10 +224,19 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         source: 'dsh',
         // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
         ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
+        ...(Array.isArray(data.action_cards) && data.action_cards.length ? { action_cards: data.action_cards } : {}),
         // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
         ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
         ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
         ...(confirmRequest ? { confirm_request: confirmRequest } : {}),
+        // Copilot 委托载荷（asa-server 并入 done）：理解卡/执行回执/焦点/模型参与/
+        // 工作流进度卡一并回填，恢复会话时这些卡/条仍可重渲染。
+        ...(data.understanding_card && typeof data.understanding_card === 'object' ? { understanding_card: data.understanding_card } : {}),
+        ...(data.execution_receipt && typeof data.execution_receipt === 'object' ? { execution_receipt: data.execution_receipt } : {}),
+        ...(data.business_focus && typeof data.business_focus === 'object' ? { business_focus: data.business_focus } : {}),
+        ...(data.model_participation && typeof data.model_participation === 'object' ? { model_participation: data.model_participation } : {}),
+        ...(data.workflow_progress && typeof data.workflow_progress === 'object' ? { workflow_progress: data.workflow_progress } : {}),
+        ...(typeof data.workflow_id === 'string' && data.workflow_id ? { workflow_id: data.workflow_id } : {}),
       }),
     })
   } catch (error) {

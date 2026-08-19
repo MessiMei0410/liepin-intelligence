@@ -68,6 +68,45 @@ function listItems(value) {
   return value && typeof value === "object" && Array.isArray(value.items) ? value.items : [];
 }
 
+const isRecord = (value) => value && typeof value === "object" && !Array.isArray(value);
+const recordOrNull = (value) => (isRecord(value) ? value : null);
+const recordList = (value) => (Array.isArray(value) ? value.filter(isRecord) : []);
+
+// 委托会话治理：Copilot 每轮把 user+assistant 落 agent_copilot_messages，会话列表
+// 是对该表的 rollup。asa_copilot_ask 此前每次用一次性随机 session（dsh-${uuid}），
+// 每调一次就多一个孤儿会话。改为派生自当前 DSH 会话的固定委托 session
+// （同一会话内多次委托共享上下文，可审计）；Core 侧 rollup 过滤 ::dsh-delegate
+// 后缀与遗留 dsh- 前缀，委托会话不再出现在任务列表。
+// 故意不复用 DSH 用户会话本身：委托轮次的 user/assistant 行会和用户轮次交错，
+// 恢复会话时消息流错乱，且回填（record-turn）与 copilot() 会写双份 assistant 行。
+export function delegateSessionId(exec) {
+  const agentId = exec && exec.agent && exec.agent.id != null ? String(exec.agent.id) : "";
+  return agentId ? `${agentId}::dsh-delegate` : `dsh-${crypto.randomUUID()}`;
+}
+
+// Copilot 脑 done 顶层结构化字段（understanding_card/execution_receipt/工作流进度原料/
+// business_focus/model_participation/action_cards/context）投影：常驻服务器据此
+// 组装 workflow_progress 并并入轮末 done，前端渲染路径与 Copilot 脑直连一致。
+function copilotPayload(value) {
+  const d = isRecord(value) ? value : {};
+  const actionCard = recordOrNull(d.action_card);
+  const actionCards = recordList(d.action_cards);
+  return {
+    understanding_card: recordOrNull(d.understanding_card),
+    execution_receipt: recordOrNull(d.execution_receipt),
+    workflow_id: d.workflow_id != null && d.workflow_id !== "" ? String(d.workflow_id) : null,
+    workflow: recordOrNull(d.workflow),
+    progress: recordOrNull(d.progress),
+    plan_summary: recordList(d.plan_summary),
+    approvals: recordList(d.approvals),
+    goal: recordOrNull(d.goal),
+    business_focus: recordOrNull(d.business_focus),
+    model_participation: recordOrNull(d.model_participation),
+    action_cards: actionCards.length ? actionCards : actionCard ? [actionCard] : [],
+    context: recordOrNull(d.context),
+  };
+}
+
 function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_dashboard",
@@ -297,6 +336,9 @@ function apply(ctx) {
       // meta 是完整 JSON 快照，常驻服务器据此向前端透传 SSE card 事件。
       presentationMeta: (_args, value) => ({
         action_card: value && typeof value === "object" && value.action_card && typeof value.action_card === "object" ? value.action_card : null,
+        // 其余结构化字段（理解卡/执行回执/工作流进度原料/焦点/模型参与/复数卡片/上下文）
+        // 完整 JSON 快照投到 meta.copilot_payload，常驻服务器轮末并入 done。
+        copilot_payload: copilotPayload(value),
       }),
     },
     timeoutMs: 120000,
@@ -306,7 +348,14 @@ function apply(ctx) {
       const res = await fetch(`${ASA_BASE}/api/v1/copilot/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", "User-Agent": UA },
-        body: JSON.stringify({ request_id: requestId, session_id: `dsh-${crypto.randomUUID()}`, message: args.message, context: args.context || {} }),
+        // 委托轮次打标 source=dsh_delegate（落库可审计）；session 复用当前 DSH 会话
+        // 派生的固定委托 session，不再每次产生一次性孤儿会话。
+        body: JSON.stringify({
+          request_id: requestId,
+          session_id: delegateSessionId(exec),
+          message: args.message,
+          context: { ...(args.context || {}), source: "dsh_delegate" },
+        }),
         signal: exec.signal,
       });
       const text = await res.text();
@@ -327,9 +376,8 @@ function apply(ctx) {
               answer: d.answer || "",
               references: d.references || [],
               suggested_actions: d.suggested_actions || [],
-              workflow_id: d.workflow_id ?? null,
-              business_focus: d.business_focus ?? null,
               action_card: d.action_card && typeof d.action_card === "object" ? d.action_card : null,
+              ...copilotPayload(d),
             };
           } catch {
             return { answer: data };

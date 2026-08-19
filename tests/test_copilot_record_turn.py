@@ -140,6 +140,96 @@ class CopilotRecordTurnTest(AgentDbCase):
         self.assertEqual(assistant["references"], references)
         service.close()
 
+    def test_record_turn_persists_delegate_payload_for_session_restore(self) -> None:
+        """asa_copilot_ask 委托载荷（经 DSH done）回填后落 structured_json，
+        恢复会话时理解卡/执行回执/焦点/模型参与/工作流进度卡仍透出。"""
+        understanding = {"show": True, "summary": "我理解为要士兰微电源专家名单"}
+        receipt = {"state": "已生成建议", "verified": False}
+        focus = {"client": "士兰微", "action": "寻访"}
+        participation = {"mode": "model_tools", "label": "模型生成 + 工具证据", "model": "deepseek-v4"}
+        workflow_progress = {
+            "workflow_id": "workflow_aaa", "status": "running",
+            "completed": 1, "total": 4, "label": "寻访中", "pending_approvals": [],
+        }
+        cards = [{"type": "candidate_list", "summary": {"total": 7}}]
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-delegate",
+            request_id="req-delegate-1",
+            message="士兰微寻访进展如何",
+            answer="当前在寻访阶段……",
+            context={"type": "job", "id": 142},
+            source="dsh",
+            understanding_card=understanding,
+            execution_receipt=receipt,
+            business_focus=focus,
+            model_participation=participation,
+            workflow_progress=workflow_progress,
+            workflow_id="workflow_aaa",
+            action_cards=cards,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recorded"])
+
+        detail = service.get_copilot_session("asa-test-delegate")
+        assistant = detail["messages"][1]
+        self.assertEqual(assistant["understanding_card"], understanding)
+        self.assertEqual(assistant["execution_receipt"], receipt)
+        self.assertEqual(assistant["business_focus"], focus)
+        self.assertEqual(assistant["model_participation"], participation)
+        self.assertEqual(assistant["workflow_progress"], workflow_progress)
+        self.assertEqual(assistant["workflow_id"], "workflow_aaa")
+        self.assertEqual(assistant["action_cards"], cards)
+        # 复数卡片传入时单卡取首卡（前端渲染路径消费单卡）
+        self.assertEqual(assistant["action_card"], cards[0])
+        service.close()
+
+    def test_record_turn_delegate_payload_defaults_when_absent(self) -> None:
+        """不带委托载荷时保持既有默认：模型参与 badge 落 DSH 编排层，卡片字段干净。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-plain",
+            request_id="req-plain-1",
+            message="你好", answer="你好！",
+            context={"type": "page"}, source="dsh", model="deepseek-v4-flash",
+        )
+        self.assertTrue(result["recorded"])
+        detail = service.get_copilot_session("asa-test-plain")
+        assistant = detail["messages"][1]
+        self.assertEqual(
+            assistant["model_participation"],
+            {"mode": "dsh", "label": "DSH 编排层", "model": "deepseek-v4-flash"},
+        )
+        self.assertIsNone(assistant["understanding_card"])
+        self.assertIsNone(assistant["execution_receipt"])
+        self.assertIsNone(assistant["workflow_progress"])
+        self.assertIsNone(assistant["workflow_id"])
+        service.close()
+
+    def test_delegate_sessions_hidden_from_session_list_but_auditable(self) -> None:
+        """孤儿会话治理：::dsh-delegate 派生 session 与遗留 dsh- 前缀 session
+        不进会话列表 rollup，但消息仍在库中可审计（详情可按 id 取回）。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        for session_id, request_id in (
+            ("asa-777::dsh-delegate", "req-del-1"),
+            ("dsh-0f3c9a2b-legacy", "req-legacy-1"),
+            ("asa-visible", "req-visible-1"),
+        ):
+            result = service.record_external_copilot_turn(
+                session_id=session_id, request_id=request_id,
+                message="委托问题", answer="委托回答",
+                context={"type": "page"}, source="dsh",
+            )
+            self.assertTrue(result["recorded"])
+
+        sessions = service.list_copilot_sessions()
+        session_ids = [s["session_id"] for s in sessions["sessions"]]
+        self.assertEqual(session_ids, ["asa-visible"])
+        # 委托会话仍可按 id 取回（审计轨迹不丢）
+        detail = service.get_copilot_session("asa-777::dsh-delegate")
+        self.assertEqual([m["role"] for m in detail["messages"]], ["user", "assistant"])
+        service.close()
+
 
 if __name__ == "__main__":
     unittest.main()
