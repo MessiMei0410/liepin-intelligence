@@ -30,6 +30,8 @@ export type AgentTurnResult = {
   goal?: Record<string, unknown> | null
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
+  // DSH 写确认请求（preflight 申请投影）：前端渲染确认卡，用户确认后调 Core 激活+写入。
+  confirm_request?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
   strategy_patch?: Record<string, unknown> | null
   strategy_patch_applied?: boolean
@@ -47,6 +49,7 @@ export type AgentSseEvent =
   | { type: 'progress'; data: { message: string } }
   | { type: 'text'; data: { content: string } }
   | { type: 'card'; data: Record<string, unknown> }
+  | { type: 'confirm_request'; data: Record<string, unknown> }
   | { type: 'done'; data: AgentTurnResult }
   | { type: 'error'; data: { error: string } }
 
@@ -75,6 +78,7 @@ const doneEventSchema = z.object({
   goal: structuredRecord.nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  confirm_request: structuredRecord.nullable().optional(),
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
@@ -122,15 +126,17 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
     : event === 'text' ? textEventSchema.safeParse(value)
       : event === 'progress' ? progressEventSchema.safeParse(value)
         : event === 'card' ? cardEventSchema.safeParse(value)
-          : event === 'done' ? doneEventSchema.safeParse(value)
-            : event === 'error' ? errorEventSchema.safeParse(value)
-              : undefined
+          : event === 'confirm_request' ? cardEventSchema.safeParse(value)
+            : event === 'done' ? doneEventSchema.safeParse(value)
+              : event === 'error' ? errorEventSchema.safeParse(value)
+                : undefined
   if (!parsed) return undefined
   if (!parsed.success) return { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } }
   if (event === 'context') return { type: 'context', data: parsed.data as Extract<AgentSseEvent, { type: 'context' }>['data'] }
   if (event === 'text') return { type: 'text', data: parsed.data as Extract<AgentSseEvent, { type: 'text' }>['data'] }
   if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
   if (event === 'card') return { type: 'card', data: parsed.data as Record<string, unknown> }
+  if (event === 'confirm_request') return { type: 'confirm_request', data: parsed.data as Record<string, unknown> }
   if (event === 'done') {
     const data = parsed.data as AgentTurnResult
     return { type: 'done', data: { ...data, workflow_progress: synthesizeWorkflowProgress(data) } }
@@ -199,6 +205,11 @@ async function getDshConfig(): Promise<{ token: string; url: string }> {
 //（agent_copilot_messages rollup）并可刷新恢复。失败仅告警，绝不影响流式主流程。
 async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Promise<void> {
   try {
+    // 写确认请求一并回填（注入本轮 request_id：恢复会话后确认/取消的终态
+    // 回写需要它定位同一轮 assistant 消息）。
+    const confirmRequest = data.confirm_request && typeof data.confirm_request === 'object'
+      ? { ...(data.confirm_request as Record<string, unknown>), client_request_id: turn.requestId }
+      : null
     await fetch('/api/v1/copilot/sessions/record-turn', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -214,10 +225,39 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
         ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
         ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
+        ...(confirmRequest ? { confirm_request: confirmRequest } : {}),
       }),
     })
   } catch (error) {
     console.warn('DSH 轮次回填 Core 失败（不影响本轮结果）', error)
+  }
+}
+
+// DSH 写确认终态回填：用户在确认卡点确认/取消后，按 (session_id, request_id)
+// 把终态（confirmed/cancelled + 执行回执）回写同轮 assistant 消息——恢复会话时
+// 确认卡呈现终态而非悬空的待确认。失败仅告警（本地卡片状态不受影响）。
+export async function recordDshConfirmation(
+  sessionId: string,
+  clientRequestId: string,
+  confirmResult: { state: 'confirmed' | 'cancelled'; summary?: string; execution_receipt?: Record<string, unknown> },
+): Promise<void> {
+  if (!sessionId || !clientRequestId) return
+  try {
+    await fetch('/api/v1/copilot/sessions/record-turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        request_id: clientRequestId,
+        message: '',
+        answer: '',
+        context: {},
+        source: 'dsh',
+        confirm_result: confirmResult,
+      }),
+    })
+  } catch (error) {
+    console.warn('DSH 写确认终态回填失败（不影响本次写入结果）', error)
   }
 }
 
@@ -240,18 +280,26 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   const decoder = new TextDecoder()
   let buffer = ''
   let doneData: Record<string, unknown> | null = null
-  // DSH 常驻服务器把工具结果里的 action_card 以独立 `card` 事件透传（工具结果没有
-  // 会话级归属字段，只能按序到达）。这里暂存并合并进 done：与 Copilot 脑一致在轮末
+  // DSH 常驻服务器把工具结果里的 action_card / confirm_request 以独立事件透传（工具结果
+  // 没有会话级归属字段，只能按序到达）。这里暂存并合并进 done：与 Copilot 脑一致在轮末
   // 挂到 assistant 消息（turn_done / 名单弹窗自动打开 / record-turn 回填同一条路径），
-  // 不单独转发 card——上层事件循环只认 context/progress/text/done/error。
+  // 不单独转发——上层事件循环只认 context/progress/text/done/error。
   let cardData: Record<string, unknown> | null = null
+  let confirmRequestData: Record<string, unknown> | null = null
   const track = (event: AgentSseEvent) => {
     if (event.type === 'card') {
       cardData = event.data
       return
     }
+    if (event.type === 'confirm_request') {
+      confirmRequestData = event.data
+      return
+    }
     if (event.type === 'done') {
-      if (cardData && !event.data.action_card) event.data = { ...event.data, action_card: cardData }
+      const merged = { ...event.data }
+      if (cardData && !merged.action_card) merged.action_card = cardData
+      if (confirmRequestData && !merged.confirm_request) merged.confirm_request = confirmRequestData
+      event.data = merged
       doneData = (event.data || {}) as Record<string, unknown>
     }
     onEvent(event)

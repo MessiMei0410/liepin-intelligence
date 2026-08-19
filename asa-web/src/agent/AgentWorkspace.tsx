@@ -17,7 +17,7 @@ import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
-import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from './AgentInteractionCards'
+import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard, WriteConfirmationCard } from './AgentInteractionCards'
 import { StrategyPatchCard } from './StrategyPatchCard'
 import { compareCandidatePageContext, CandidatePageConflict } from './pageContextConflict'
 import { readThemePreference, setThemePreference, type ThemeMode } from './theme'
@@ -557,6 +557,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           }
         } else if (event.type === 'card') {
           // DSH 透传的结构化卡片：transport 已合并进 done（action_card），这里不单独处理。
+        } else if (event.type === 'confirm_request') {
+          // DSH 透传的写确认请求：transport 已合并进 done（confirm_request），这里不单独处理。
         } else {
           setTurnProgress('')
           streamFailed = true
@@ -1076,6 +1078,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
           {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
           {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
+          {message.role === 'assistant' && !message.invalidated && <WriteConfirmationCard request={message.confirm_request ? { client_request_id: message.turnRequestId || '', ...message.confirm_request } : message.confirm_request} sessionId={sessionId}/>}
           {message.role === 'assistant' && !message.invalidated && message.strategy_patch && (message.strategy_patch.display_requested === true || message.strategy_patch_applied) && <StrategyPatchCard
             patch={message.strategy_patch}
             sessionId={sessionId}

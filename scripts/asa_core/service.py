@@ -138,7 +138,12 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
         self.db_path = db_path
         self.agent_service = agent_service
         self.analytics_service = analytics_service
-        self._preflight_tokens: dict[str, tuple[int, str, datetime]] = {}
+        # preflight token → (目标, 动作, 过期时间, 是否已激活)。
+        # 候选人动作/审批决定/工作流动作的 token 铸造时为未激活，必须经 UI 确认
+        # （POST /api/v1/write-confirmations/activate）激活后才可写入——这是 DSH 脑
+        # 写动作的人确认机制闸门（模型工具面拿不到激活能力）；Python 脑 pending_intent
+        # 确认链路（intents/confirm）不经 HTTP 写端点，自带签名确认，不受影响。
+        self._preflight_tokens: dict[str, tuple[Any, str, datetime, bool]] = {}
         self._preflight_lock = threading.Lock()
         self._strategy_edit_tokens: dict[str, dict[str, Any]] = {}
         self._bootstrap_cache: dict[str, Any] | None = None

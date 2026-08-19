@@ -2,26 +2,43 @@
 
 把 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) 嵌入 ASA 作为**编排层（路 2）**：
 DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在现有 Python Copilot，
-写动作走 typed 工具（preflight → commit + 幂等）。
+**模型对写动作只能发起「预检申请」——人确认走 UI 激活（机制闸门，见下）**。
 
 完整设计、验证证据与决策记录见
 [`docs/ASA_DSH_嵌入方案_方案A_2026-08-17.md`](../docs/ASA_DSH_嵌入方案_方案A_2026-08-17.md)。
 
 ## 目录
 
-- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（10 个工具，见下）。
+- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（9 个工具，见下）。
 - `asa-profile/` — `asa` profile 源（headless 一次性）：persona + 12 条业务护栏（`AGENTS.md`）+ 插件装配。
 - `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn`（SSE 流式）+ 会话复用（多轮记忆）。
 - `asa-server-profile/` — `asa-server` profile 源（bundles = `dsh-base` + `@asa/dsh-asa-server`）。
 - （`bridge/` v0 per-turn 子进程桥接已于 2026-08-19 删除——无任何引用，headless 一次性需求用 `dsh --profile asa` 直跑。）
 
-## 工具面（10 个）
+## 工具面（9 个）
 
 | 类 | 工具 | 说明 |
 | --- | --- | --- |
 | 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` / `asa_approvals` | 直读 ASA Core（GET） |
-| 受控写 | `asa_candidate_preflight` / `asa_candidate_commit` / `asa_approval_decision` / `asa_workflow_action` | preflight→commit / 工作流动作（cancel·pause·resume，note 必填）+ `Idempotency-Key` |
+| 写动作预检申请 | `asa_candidate_preflight` / `asa_approval_preflight` / `asa_workflow_action_preflight` | 只读预检 + 铸造一次性 token（**不写库**）；确认请求经 `presentationMeta` → SSE `confirm_request` → 前端确认卡 |
 | 领域情报委托 | `asa_copilot_ask` | 转发 `/api/v1/copilot/stream`，取现有 Copilot 富答案 |
+
+## 写确认链路（人确认机制闸门，2026-08-19）
+
+**模型靠自己的工具面无法完成任何业务写入。** 机制（不靠 prompt 约束）：
+
+1. 模型的写动作工具只有 `asa_*_preflight`：Core 预检后铸造**未激活**的一次性 token（5 分钟有效）。
+2. Core 写端点（`candidate-actions/commit`、`approvals/{id}/decision`、`workflows/{id}/{cancel,pause,resume}`）
+   只接受**已激活** token；未激活 → `409 confirmation_required`（不消费 token）。
+3. 激活只能由 UI 发起：`POST /api/v1/write-confirmations/activate` 按 `ASAApp/` UA 前缀门控
+   （同 `/api/v1/dsh-config`）；asa-tools 的 fetch UA（`asa-dsh-tools/1.0`）过不去，
+   模型又没有 bash/fs/skill（`cordis.patch.yml` 已禁用），无法绕过。
+4. 用户在 ASA 界面的确认卡点「确认」→ 前端调 activate + 写端点（带 `Idempotency-Key`）完成写入；
+   取消则零写请求。终态（confirmed/cancelled）经 record-turn 回写，会话恢复后呈现终态。
+
+Python 脑既有链路不受影响：`pending_intent` 签名确认（`/api/v1/copilot/intents/confirm`）
+在服务层内部走 commit，自带人确认，不经 HTTP 写端点的激活闸门；`?brain=copilot` 回退与
+`asa_copilot_ask` 委托均照常。
 
 ## 快速开始（常驻服务器，推荐）
 

@@ -13,6 +13,8 @@ const preflightUrl = '/api/v1/candidate-actions/preflight'
 const commitUrl = '/api/v1/candidate-actions/commit'
 const decisionPreflightUrl = '/api/v1/consultant-recommendations/preflight'
 const decisionCommitUrl = '/api/v1/consultant-recommendations/commit'
+// 写确认链路：candidate-actions commit 前先经 UI 通道激活 token（人确认闸门）。
+const activateUrl = '/api/v1/write-confirmations/activate'
 
 const recommendationCandidate = (): CandidateDetail => ({
   ...candidateDetail,
@@ -37,6 +39,7 @@ describe('顾问确认推荐（recommendation-decision）', () => {
     fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '将标记该候选人为已推荐' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true })
       if (url.includes(decisionPreflightUrl)) return mockResponse({ token: 'consultant-tok-1', impact: '记录顾问确认推荐事实' })
       if (url.includes(decisionCommitUrl)) return mockResponse({ ok: true, confirmed_at: '2026-08-05T14:30:00', reason: '硬性要求匹配，候选人意向已确认' })
@@ -252,6 +255,7 @@ describe('顾问确认推荐（recommendation-decision）', () => {
     fetchMock.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '将标记该候选人为已推荐' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true })
       if (url.includes(decisionPreflightUrl)) return mockResponse({ token: 'consultant-tok-1', impact: '记录顾问确认推荐事实' })
       if (url.includes(decisionCommitUrl)) {
@@ -280,6 +284,7 @@ describe('顾问确认推荐（recommendation-decision）', () => {
     fetchMock.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '将标记该候选人为已推荐' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true, already_applied: true, stage: 'S7 已推荐客户/待反馈' })
       if (url.includes(decisionPreflightUrl)) return mockResponse({ token: 'consultant-tok-1', impact: '记录顾问确认推荐事实' })
       if (url.includes(decisionCommitUrl)) return mockResponse({ ok: true, already_confirmed: true, confirmed_at: '2026-08-05T10:00:00', reason: '历史确认理由' })

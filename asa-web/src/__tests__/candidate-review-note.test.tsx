@@ -9,6 +9,8 @@ import { candidateDetail, mockResponse } from './helpers'
 
 const preflightUrl = '/api/v1/candidate-actions/preflight'
 const commitUrl = '/api/v1/candidate-actions/commit'
+// 写确认链路：commit 前先经 UI 通道激活 token（人确认闸门）。
+const activateUrl = '/api/v1/write-confirmations/activate'
 
 describe('评分复核快捷记录（S4-5 N5）', () => {
   let fetchMock: Mock<typeof fetch>
@@ -17,6 +19,7 @@ describe('评分复核快捷记录（S4-5 N5）', () => {
     fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-review', impact: '候选人关系状态将更新，并写入业务时间线和统一审计。', expires_at: '2026-07-23 10:00' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true })
       throw new Error(`未预期的请求：${url}`)
     })

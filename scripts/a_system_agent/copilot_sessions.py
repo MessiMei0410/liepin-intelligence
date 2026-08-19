@@ -833,6 +833,9 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
                     "pending_intent": structured.get("pending_intent"),
                     "action_card": structured.get("action_card"),
                     "action_cards": structured.get("action_cards") or [],
+                    # DSH 写确认卡：透传持久化的 confirm_request（含 state 终态），
+                    # 恢复会话时前端按 state/expires_at 渲染 已确认/已取消/已过期/待确认。
+                    "confirm_request": structured.get("confirm_request"),
                     "model_participation": structured.get("model_participation"),
                     "analysis_card": structured.get("analysis_card"),
                     # 策略建议补丁：浮窗恢复会话时可重渲染「应用到策略」操作栏
@@ -925,6 +928,8 @@ def record_external_copilot_turn(
     action_card: dict[str, Any] | None = None,
     suggested_actions: list[dict[str, Any]] | None = None,
     references: list[dict[str, Any]] | None = None,
+    confirm_request: dict[str, Any] | None = None,
+    confirm_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
@@ -934,6 +939,10 @@ def record_external_copilot_turn(
     产生重复行）。action_card（如候选人名单卡）与 suggested_actions/references
     （轮末对象操作入口/对象卡）一并落 structured_json，恢复会话时前端可重渲染
     卡片且操作芯片仍可点击。
+    confirm_request（DSH 写确认卡）随轮次落库；会话已回填后，前端在用户
+    确认/取消后再带 confirm_result 调本函数，按 (session_id, request_id) 回写
+    同轮 assistant 消息的 confirm_request.state/execution_receipt——恢复会话
+    时确认卡呈现终态（已确认/已取消；过期由前端按 expires_at 判定）。
     """
     session_id = str(session_id or "").strip()
     request_id = str(request_id or "").strip()
@@ -955,6 +964,29 @@ def record_external_copilot_turn(
             (session_id, request_id),
         ).fetchone()
         if existing:
+            # 终态回写：只更新同轮 assistant 消息的 confirm_request，不新增行。
+            if isinstance(confirm_result, dict) and confirm_result.get("state"):
+                row = conn.execute(
+                    """SELECT id,structured_json FROM agent_copilot_messages
+                       WHERE session_id=? AND role='assistant'
+                         AND json_extract(structured_json,'$.request_id')=? LIMIT 1""",
+                    (session_id, request_id),
+                ).fetchone()
+                if row:
+                    structured = _loads(row["structured_json"], {})
+                    stored = structured.get("confirm_request") if isinstance(structured.get("confirm_request"), dict) else {}
+                    stored["state"] = str(confirm_result.get("state") or "")
+                    if confirm_result.get("summary"):
+                        stored["result_summary"] = str(confirm_result["summary"])
+                    structured["confirm_request"] = stored
+                    if isinstance(confirm_result.get("execution_receipt"), dict):
+                        structured["execution_receipt"] = confirm_result["execution_receipt"]
+                    conn.execute(
+                        "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
+                        (_dumps(structured), row["id"]),
+                    )
+                    conn.commit()
+                    return {"ok": True, "session_id": session_id, "recorded": False, "updated": True}
             return {"ok": True, "session_id": session_id, "recorded": False}
         user_structured = {"source": source, "request_id": request_id}
         assistant_structured = {
@@ -971,6 +1003,10 @@ def record_external_copilot_turn(
         clean_references = [dict(item) for item in (references or []) if isinstance(item, dict)]
         if clean_references:
             assistant_structured["references"] = clean_references
+        if isinstance(confirm_request, dict) and confirm_request:
+            stored_request = dict(confirm_request)
+            stored_request.setdefault("state", "pending")
+            assistant_structured["confirm_request"] = stored_request
         conn.executemany(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)

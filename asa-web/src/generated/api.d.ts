@@ -1383,6 +1383,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflow_id}/actions/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Workflow Action Preflight */
+        post: operations["workflow_action_preflight_api_v1_workflows__workflow_id__actions_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflow_id}/{action_name}": {
         parameters: {
             query?: never;
@@ -1411,6 +1428,23 @@ export interface paths {
         get: operations["approvals_api_v1_approvals_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{approval_id}/decision/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approval Decision Preflight */
+        post: operations["approval_decision_preflight_api_v1_approvals__approval_id__decision_preflight_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1462,6 +1496,23 @@ export interface paths {
         put?: never;
         /** Candidate Commit */
         post: operations["candidate_commit_api_v1_candidate_actions_commit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/write-confirmations/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Write Confirmation Activate */
+        post: operations["write_confirmation_activate_api_v1_write_confirmations_activate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1942,6 +1993,23 @@ export interface components {
              * @default
              */
             note: string;
+            /**
+             * Preflight Token
+             * @default
+             */
+            preflight_token: string;
+        };
+        /** ApprovalDecisionPreflight */
+        ApprovalDecisionPreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Decision */
+            decision: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
         };
         /** ApprovalItemResponse */
         ApprovalItemResponse: {
@@ -2253,6 +2321,10 @@ export interface components {
             action_card?: {
                 [key: string]: unknown;
             } | null;
+            /** Confirm Request */
+            confirm_request?: {
+                [key: string]: unknown;
+            } | null;
             /** Model Participation */
             model_participation?: {
                 [key: string]: unknown;
@@ -2468,6 +2540,14 @@ export interface components {
             references?: {
                 [key: string]: unknown;
             }[];
+            /** Confirm Request */
+            confirm_request?: {
+                [key: string]: unknown;
+            } | null;
+            /** Confirm Result */
+            confirm_result?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** CopilotTurnRecordResponse */
         CopilotTurnRecordResponse: {
@@ -2979,6 +3059,23 @@ export interface components {
              * @default
              */
             expected_plan_hash: string;
+            /**
+             * Preflight Token
+             * @default
+             */
+            preflight_token: string;
+        };
+        /** WorkflowActionPreflight */
+        WorkflowActionPreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Action */
+            action: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
         };
         /** WorkflowCreate */
         WorkflowCreate: {
@@ -2995,6 +3092,13 @@ export interface components {
              * @default 2
              */
             priority: number;
+        };
+        /** WriteConfirmationActivate */
+        WriteConfirmationActivate: {
+            /** Request Id */
+            request_id: string;
+            /** Preflight Token */
+            preflight_token: string;
         };
         /** WriteEnvelope */
         WriteEnvelope: {
@@ -5924,6 +6028,43 @@ export interface operations {
             };
         };
     };
+    workflow_action_preflight_api_v1_workflows__workflow_id__actions_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkflowActionPreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     workflow_action_api_v1_workflows__workflow_id___action_name__post: {
         parameters: {
             query?: never;
@@ -5981,6 +6122,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApprovalListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approval_decision_preflight_api_v1_approvals__approval_id__decision_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalDecisionPreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
@@ -6078,6 +6256,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CandidateAction"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_confirmation_activate_api_v1_write_confirmations_activate_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteConfirmationActivate"];
             };
         };
         responses: {

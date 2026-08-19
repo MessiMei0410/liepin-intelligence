@@ -41,6 +41,8 @@ const messageSchema = z.object({
   workflow_progress: structuredRecord.nullable().optional(),
   pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  // DSH 写确认卡（含 state 终态：pending/confirmed/cancelled；过期由前端按 expires_at 判定）。
+  confirm_request: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),
   strategy_patch: structuredRecord.nullable().optional(),
   strategy_patch_applied: z.boolean().optional(),

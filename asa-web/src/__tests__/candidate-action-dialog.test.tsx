@@ -7,6 +7,8 @@ import { candidateDetail, mockResponse } from './helpers'
 
 const preflightUrl = '/api/v1/candidate-actions/preflight'
 const commitUrl = '/api/v1/candidate-actions/commit'
+// 写确认链路：commit 前先经 UI 通道激活 token（人确认闸门）。
+const activateUrl = '/api/v1/write-confirmations/activate'
 
 describe('候选人停止确认层', () => {
   let fetchMock: Mock<typeof fetch>
@@ -15,6 +17,7 @@ describe('候选人停止确认层', () => {
     fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '将停止推进该候选人', expires_at: '2026-07-22 10:00' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true })
       throw new Error(`未预期的请求：${url}`)
     })
@@ -116,6 +119,7 @@ describe('候选人停止确认层', () => {
     fetchMock.mockImplementation(async input => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '候选人状态将更新' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ detail: '模拟提交失败' }, false, 500)
       throw new Error(`未预期的请求：${url}`)
     })
@@ -141,6 +145,7 @@ describe('候选人停止确认层', () => {
     fetchMock.mockImplementation(async input => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '候选人状态将更新' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true, already_applied: true, stage: 'S7 已推荐客户/待反馈' })
       throw new Error(`未预期的请求：${url}`)
     })
@@ -179,6 +184,7 @@ describe('停止原因表单（R10）', () => {
     fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input)
       if (url.includes(preflightUrl)) return mockResponse({ token: 'tok-1', impact: '将停止推进该候选人', expires_at: '2026-07-22 10:00' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
       if (url.includes(commitUrl)) return mockResponse({ ok: true })
       throw new Error(`未预期的请求：${url}`)
     })

@@ -104,11 +104,16 @@ describe('typed client 高频接口契约', () => {
     expect(body.request_id).toMatch(/^web_/)
   })
 
-  it('commit 携带幂等键与 preflight_token', async () => {
+  it('commit 先经 UI 通道激活 token，再携带幂等键与 preflight_token', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     await api.commit(7, 'stop', 'tok-9', '方向不符')
-    const init = fetchMock.mock.calls[0][1] as RequestInit
+    // 人确认闸门：第一次调用是 activate（同一 token），第二次才是 commit。
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/write-confirmations/activate')
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toMatchObject({ preflight_token: 'tok-9' })
+    const commitCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/candidate-actions/commit'))
+    expect(commitCall).toBeDefined()
+    const init = commitCall?.[1] as RequestInit
     expect(JSON.parse(String(init.body))).toMatchObject({ candidate_id: 7, action: 'stop', preflight_token: 'tok-9', note: '方向不符' })
     expect(init.headers).toMatchObject({ 'Idempotency-Key': expect.stringContaining('/api/v1/candidate-actions/commit') })
   })
