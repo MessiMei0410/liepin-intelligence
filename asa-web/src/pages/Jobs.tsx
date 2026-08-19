@@ -47,7 +47,9 @@ const matchesQuery = (job: Job, keyword: string): boolean => {
   return haystack.includes(keyword)
 }
 
-export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number) => void }) {
+export function Jobs({ items, onSelect, loading = false }: { items: Job[]; onSelect: (id: number) => void; loading?: boolean }) {
+  // 首屏数据未落地前显示真实加载态，不用"共 0 个结果/没有符合"的假空态误导。
+  const initialLoading = loading && !(items ?? []).length
   // 筛选/排序/页码跨 tab 切换与刷新保持：用户调好的视图不因组件卸载而重置。
   const [mode, setMode] = usePageFilterState<Mode>('jobs.mode', 'p0')
   const [query, setQuery] = usePageFilterState<string>('jobs.query', '')
@@ -143,7 +145,7 @@ export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number)
             <span>全部</span><span className="mode-count">{counts.all}</span>
           </button>
         </div>
-        <span className="jobs-count" role="status">共 {filtered.length} 个结果</span>
+        <span className="jobs-count" role="status">{initialLoading ? '正在加载岗位…' : `共 ${filtered.length} 个结果`}</span>
       </div>
       <div className="table-wrap data-table-scroll" role="region" tabIndex={0} aria-label="岗位列表，可横向滚动">
         <table>
@@ -169,7 +171,7 @@ export function Jobs({ items, onSelect }: { items: Job[]; onSelect: (id: number)
             ))}
             {shown.length === 0 && (
               <tr>
-                <td colSpan={5}><div className="empty">没有符合当前条件的岗位。</div></td>
+                <td colSpan={5}><div className="empty">{initialLoading ? '正在加载岗位数据，请稍候…' : '没有符合当前条件的岗位。'}</div></td>
               </tr>
             )}
           </tbody>

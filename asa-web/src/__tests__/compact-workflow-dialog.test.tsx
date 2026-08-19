@@ -207,6 +207,12 @@ describe('轻量工作流浮层', () => {
     await user.click(screen.getByRole('button', { name: '更多工作流操作' }))
     await user.click(screen.getByRole('menuitem', { name: '暂停寻访' }))
 
+    // P7 确认链：菜单点击只打开确认卡，填原因并确认后才执行
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('暂停寻访')
+    await user.type(screen.getByRole('textbox', { name: '原因说明' }), '客户要求暂停')
+    await user.click(screen.getByRole('button', { name: '确认暂停' }))
+
     expect(await screen.findByRole('status')).toHaveTextContent('已请求暂停寻访，渠道会在当前查询单元结束后停止。')
     await user.click(screen.getByRole('button', { name: '更多工作流操作' }))
     expect(screen.getByRole('menuitem', { name: '继续寻访' })).toBeEnabled()

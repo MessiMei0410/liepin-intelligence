@@ -96,10 +96,17 @@ describe('工作流动作反馈', () => {
     render(<WorkflowPanel value={waitingExternal} jobs={[]} close={() => undefined} reload={reload} openCandidate={() => undefined} archived={() => undefined} />)
 
     await user.click(screen.getByRole('button', { name: '暂停寻访' }))
+    // P7 确认链：先弹确认卡，填原因（preflight 必填）并确认后才真正触发写链路
+    const pauseDialog = await screen.findByRole('alertdialog')
+    expect(pauseDialog).toHaveTextContent('渠道会在当前查询单元结束后停止')
+    await user.type(screen.getByRole('textbox', { name: '原因说明' }), '客户要求暂停一周')
+    await user.click(screen.getByRole('button', { name: '确认暂停' }))
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/workflows/wf-1/pause'))).toBe(true)
     expect(await screen.findByRole('status')).toHaveTextContent('已请求暂停寻访，渠道会在当前查询单元结束后停止。')
     expect(screen.getByText('已暂停，渠道会在当前查询单元结束后停止。')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '继续寻访' }))
+    await user.type(await screen.findByRole('textbox', { name: '原因说明' }), '客户反馈已到位')
+    await user.click(screen.getByRole('button', { name: '确认继续' }))
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/workflows/wf-1/resume'))).toBe(true)
     expect(screen.getByRole('button', { name: '立即停止寻访' })).toBeInTheDocument()
     expect(reload).toHaveBeenCalledTimes(2)

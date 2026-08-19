@@ -14,7 +14,7 @@ import { copilotText } from '../shared/text'
 // 图谱 JSON 保持原始名单。本组件负责：
 //  1) 待校准队列（未校准优先；搜索名称/赛道/主营业务；状态过滤）；
 //  2) 逐公司校准表单（字段与后端校准模型一一对应；图谱原值作为初始值）；
-//  3) 进度指示（已校准 N/目标 50）；
+//  3) 进度指示（已校准 N 家 · 首批目标 50 家，另列图谱总量口径）；
 //  4) 提交回执（版本/changed/幂等重放如实呈现）+ 提交后回读刷新队列与进度。
 // 红线：如实反映后端状态、不引入 any、不用 prompt/confirm/alert、样式只走 ccal- 前缀。
 
@@ -260,11 +260,11 @@ export function CompanyCalibrationPanel() {
           <h3><Building2 />核心公司校准</h3>
           <p>逐公司确认/修正图谱条目（行业/产品线/技能标签/职级体系/禁挖竞业），校准值优先于原始名单进入策略与评估。</p>
         </div>
-        <div className="ccal-progress" role="status" aria-label={`校准进度：已校准 ${calibrated} 家，目标 ${target} 家`}>
-          <b>已校准 {calibrated}/{target}</b>
+        <div className="ccal-progress" role="status" aria-label={`校准进度：已校准 ${calibrated} 家，首批目标 ${target} 家`}>
+          <b>已校准 {calibrated} 家 · 首批目标 {target} 家</b>
           <div className="ccal-progress-bar"><i style={{ width: `${Math.round(ratio * 100)}%` }} /></div>
           {progress && (
-            <small>图谱共 {progress.total} 家 · 未校准 {progress.pending} · 待复核 {progress.needs_review} · 已拒绝 {progress.rejected}</small>
+            <small>图谱共 {progress.total} 家（未校准 {progress.pending} · 待复核 {progress.needs_review} · 已拒绝 {progress.rejected}）</small>
           )}
         </div>
       </header>

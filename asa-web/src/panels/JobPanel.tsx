@@ -10,7 +10,8 @@ import { RecommendationMetricsCard } from './RecommendationMetricsCard'
 import { JobWeeklyReport } from './JobWeeklyReport'
 import { SourcingAdjustments } from './SourcingAdjustments'
 import { recordValue, textList } from '../shared/records'
-import { date, sourceLabel, eventStatusLabel, lifecycleEventLabel, lifecycleEventTone, stageTone } from '../shared/format'
+import { date, sourceLabel, lifecycleEventLabel, lifecycleEventTone, stageTone } from '../shared/format'
+import { humanizeEventStatus } from '../workflow/statusMapping'
 import { SectionHead } from '../shared/primitives'
 import { openAgentWorkspace } from '../agent/navigation'
 
@@ -195,7 +196,7 @@ export function JobPanel({ value, close, openCandidate, changed }: { value: JobD
               : <div className="timeline">
                   {visibleEvents.map(event => (
                     <div key={event.id} title={event.summary || event.event_type}>
-                      <i className={lifecycleEventTone(event.event_type)||undefined} /><span>{date(event.event_time)}</span><b>{event.summary || lifecycleEventLabel(event.event_type) || event.event_type}</b><small>{eventStatusLabel(event.event_status)}</small>
+                      <i className={lifecycleEventTone(event.event_type)||undefined} /><span>{date(event.event_time)}</span><b>{event.summary || lifecycleEventLabel(event.event_type) || event.event_type}</b><small>{humanizeEventStatus(event.event_status)}</small>
                     </div>
                   ))}
                   <LimitNote total={value.events.length} limit={EVENT_LIMIT} expanded={eventExpanded} onToggle={() => setEventExpanded(expanded => !expanded)} />

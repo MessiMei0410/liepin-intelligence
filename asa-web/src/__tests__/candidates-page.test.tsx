@@ -248,4 +248,18 @@ describe('候选人列表 Candidates', () => {
     rerender(<Candidates items={[]} openCandidate={() => {}} compact />)
     expect(screen.getByText('没有符合当前条件的候选人。')).toBeInTheDocument()
   })
+
+  it('首屏加载中显示真实加载态，不出现"共 0 个结果"假空态', () => {
+    render(<Candidates items={[]} openCandidate={() => {}} loading />)
+    expect(screen.getByRole('status')).toHaveTextContent('正在加载候选人…')
+    expect(screen.getByText('正在加载候选人数据，请稍候…')).toBeInTheDocument()
+    expect(screen.queryByText('没有符合当前条件的候选人。')).not.toBeInTheDocument()
+    expect(screen.queryByText(/共 0 个结果/)).not.toBeInTheDocument()
+  })
+
+  it('加载中但已有数据时照常渲染数据，不切换成加载态', () => {
+    render(<Candidates items={[makeCandidate(1)]} openCandidate={() => {}} loading />)
+    expect(screen.getByRole('status')).toHaveTextContent('共 1 个结果')
+    expect(screen.getByRole('row', { name: /候选人1/ })).toBeInTheDocument()
+  })
 })

@@ -61,6 +61,9 @@ export function App() {
   const [dashboard, setDashboard] = useState<Dashboard>()
   const [jobs, setJobs] = useState<Job[]>([])
   const [candidates, setCandidates] = useState<Candidate[]>([])
+  // 首屏分段渲染的加载态：jobs/candidates 各拉各的，慢的一侧显示加载中而非假空态。
+  const [jobsLoading, setJobsLoading] = useState(true)
+  const [candidatesLoading, setCandidatesLoading] = useState(true)
   const [job, setJob] = useState<JobDetail>()
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
@@ -86,7 +89,6 @@ export function App() {
   const workflowStateRef = useRef<Workflow | undefined>(undefined)
   const jobStateRef = useRef<JobDetail | undefined>(undefined)
   const coreFailuresRef = useRef(0)
-  const workbenchRefreshRef = useRef(0)
   const jobsRefreshRef = useRef(0)
   const candidatesRefreshRef = useRef(0)
   useGlobalDialogDrag()
@@ -103,41 +105,69 @@ export function App() {
     }
   }
 
-  const refreshWorkbench = useCallback(async () => {
-    const refreshId = ++workbenchRefreshRef.current
-    await Promise.allSettled([
-      api.workbench().then(next => {
-        if (refreshId === workbenchRefreshRef.current && Array.isArray(next.items) && next.summary) setWorkbench(next)
-      }),
-      api.analyticsTemplates().then(next => {
-        if (refreshId === workbenchRefreshRef.current && Array.isArray(next.items)) setTemplates(next.items)
-      }),
-    ])
+  // 工作台刷新仲裁：合并而非丢弃。高负载下 workbench 响应要 5–12s，SSE workflow
+  // 事件风暴期间旧的 refreshId 丢弃机制会让每一轮响应都因"已不是最新"被作废，
+  // lane 永久停在"加载中"。改为单在途 + trailing 合并：在途期间到来的刷新只标记
+  // pending，当前轮完成后立刻补跑一轮；响应不校验 refreshId，落地必然上屏。
+  const workbenchRefreshLockRef = useRef<{ running: boolean; pending: boolean; promise?: Promise<void> }>({ running: false, pending: false })
+  const refreshWorkbench = useCallback(() => {
+    const lock = workbenchRefreshLockRef.current
+    if (lock.running) {
+      lock.pending = true
+      return lock.promise ?? Promise.resolve()
+    }
+    lock.running = true
+    const promise = (async () => {
+      try {
+        do {
+          lock.pending = false
+          await Promise.allSettled([
+            api.workbench().then(next => {
+              if (Array.isArray(next.items) && next.summary) setWorkbench(next)
+            }),
+            api.analyticsTemplates().then(next => {
+              if (Array.isArray(next.items)) setTemplates(next.items)
+            }),
+          ])
+        } while (lock.pending)
+      } finally {
+        lock.running = false
+        lock.promise = undefined
+      }
+    })()
+    lock.promise = promise
+    return promise
   }, [])
 
   useEffect(() => {
     let active = true
     const jobsRefreshId = ++jobsRefreshRef.current
     const candidatesRefreshId = ++candidatesRefreshRef.current
+    // 分段渲染：dashboard / 岗位 / 人选各自落地各自上屏，不再 Promise.allSettled 互相
+    // 拖住（jobs 0.3s 即返回，曾被 800+ 人的 candidates 全量分页拖出 15s 假空态）。
+    // 失败的模块各自上报，成功的一侧不受影响。
+    const failures: string[] = []
+    const reportFailure = (label: string, reason: unknown) => {
+      if (!active) return
+      failures.push(`${label}：${reason instanceof Error ? reason.message : String(reason)}`)
+      setError(`部分模块加载失败。${failures.join('；')}`)
+    }
+    setJobsLoading(true)
+    setCandidatesLoading(true)
     api.bootstrap()
       .then(value => { if (active) setBoot(value) })
       .catch(e => { if (active) setError(String(e.message || e)) })
-    Promise.allSettled([api.dashboard(), api.allJobs(), api.allCandidates()])
-      .then(results => {
-        if (!active) return
-        const [dashboardResult, jobsResult, candidatesResult] = results
-        const failures: string[] = []
-        if (dashboardResult.status === 'fulfilled') setDashboard(dashboardResult.value)
-        else failures.push(`经营概况：${String(dashboardResult.reason?.message || dashboardResult.reason)}`)
-        if (jobsResult.status === 'fulfilled') {
-          if (jobsRefreshId === jobsRefreshRef.current) setJobs(jobsResult.value.items)
-        } else failures.push(`岗位看板：${String(jobsResult.reason?.message || jobsResult.reason)}`)
-        if (candidatesResult.status === 'fulfilled') {
-          if (candidatesRefreshId === candidatesRefreshRef.current) setCandidates(candidatesResult.value.items)
-        } else failures.push(`人选模块：${String(candidatesResult.reason?.message || candidatesResult.reason)}`)
-        if (failures.length) setError(`部分模块加载失败。${failures.join('；')}`)
-        else setError('')
-      })
+    api.dashboard()
+      .then(value => { if (active) setDashboard(value) })
+      .catch(reason => reportFailure('经营概况', reason))
+    api.allJobs()
+      .then(result => { if (active && jobsRefreshId === jobsRefreshRef.current) setJobs(result.items) })
+      .catch(reason => reportFailure('岗位看板', reason))
+      .finally(() => { if (active) setJobsLoading(false) })
+    api.allCandidates()
+      .then(result => { if (active && candidatesRefreshId === candidatesRefreshRef.current) setCandidates(result.items) })
+      .catch(reason => reportFailure('人选模块', reason))
+      .finally(() => { if (active) setCandidatesLoading(false) })
     queueMicrotask(() => void refreshWorkbench())
     queueMicrotask(() => {
       void api.analyticsCatalog().then(result => setAnalysisCatalog(result.items)).catch(() => undefined)
@@ -147,22 +177,47 @@ export function App() {
 
   useEffect(() => {
     let active = true
-    let refreshing = false
-    const refresh = async () => {
-      if (!active || refreshing || document.hidden) return
-      refreshing = true
-      try { await Promise.all([refreshWorkbench(), probeCore()]) } finally { refreshing = false }
+    // workbench 刷新由 refreshWorkbench 内部的单在途+trailing 合并锁兜底，这里不再
+    // 用 refreshing 标志整体跳过——否则在途期间的刷新请求会被静默吞掉。probing 只
+    // 保护健康探测不叠加。
+    let probing = false
+    const refresh = () => {
+      if (!active || document.hidden) return
+      void refreshWorkbench()
+      if (!probing) {
+        probing = true
+        void probeCore().finally(() => { probing = false })
+      }
     }
     queueMicrotask(() => void probeCore())
     const timer = window.setInterval(() => void refresh(), 15_000)
     const onVisible = () => { if (!document.hidden) void refresh() }
     window.addEventListener('focus', onVisible)
     document.addEventListener('visibilitychange', onVisible)
+    // SSE workflow 事件节流合并：风暴期间（实测 17+ 条/秒）每 2s 最多触发一轮刷新，
+    // trailing 补尾保证最后一条事件之后必有一轮真实执行，但不会把 Core 打满。
+    let lastEventRefreshAt = 0
+    let trailingTimer: number | undefined
+    const onWorkflowEvent = () => {
+      const wait = 2000 - (Date.now() - lastEventRefreshAt)
+      if (wait <= 0) {
+        if (trailingTimer !== undefined) { window.clearTimeout(trailingTimer); trailingTimer = undefined }
+        lastEventRefreshAt = Date.now()
+        void refresh()
+      } else if (trailingTimer === undefined) {
+        trailingTimer = window.setTimeout(() => {
+          trailingTimer = undefined
+          lastEventRefreshAt = Date.now()
+          void refresh()
+        }, wait)
+      }
+    }
     const source = typeof EventSource === 'undefined' ? undefined : new EventSource('/api/v1/events')
-    source?.addEventListener('workflow', () => void refresh())
+    source?.addEventListener('workflow', onWorkflowEvent)
     return () => {
       active = false
       window.clearInterval(timer)
+      if (trailingTimer !== undefined) window.clearTimeout(trailingTimer)
       window.removeEventListener('focus', onVisible)
       document.removeEventListener('visibilitychange', onVisible)
       source?.close()
@@ -559,9 +614,9 @@ export function App() {
           {!sourcingCandidatesWorkflowId && analysis && <AnalysisWorkspace result={analysis} trend={analysisTrend} busy={analysisBusy === 'refresh' || analysisBusy === 'export' ? analysisBusy : undefined} close={closeOverlay} refresh={() => void refreshAnalysis()} exportReport={() => void exportAnalysis()} />}
         </Suspense>
         {!sourcingCandidatesWorkflowId && !analysis && tab === 'agent' && <AgentWorkspace jobs={jobs} workbench={workbench || emptyWorkbench} templates={templates} context={agentContext} templateBusyId={analysisBusy} onOpenAnalysis={id => void openAnalysis(id)} onRunTemplate={id => void runTemplate(id)} onManageTemplate={setTemplateDialog} onCreateTemplate={() => setTemplateDialog('new')} onWorkbenchAction={handleWorkbenchAction} onOpenFullObject={openAgentObject} />}
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} onSelect={openJob} />}
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} openCandidate={openCandidate} />}
-        {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} openCandidate={openCandidate} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'jobs' && <Jobs items={jobs} loading={jobsLoading} onSelect={openJob} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'progress' && <Progress items={candidates} loading={candidatesLoading} openCandidate={openCandidate} />}
+        {!sourcingCandidatesWorkflowId && !analysis && tab === 'candidates' && <Candidates items={candidates} loading={candidatesLoading} openCandidate={openCandidate} />}
       </div>
     </main>
     {(tab !== 'agent' || analysis) && <aside className="context-rail">

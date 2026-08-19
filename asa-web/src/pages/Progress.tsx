@@ -45,7 +45,9 @@ const compareStages = (a: readonly [string, Candidate[]], b: readonly [string, C
   return a[0].localeCompare(b[0], 'zh-Hans-CN')
 }
 
-export function Progress({ items, openCandidate }: { items: Candidate[]; openCandidate: (id: number) => void }) {
+export function Progress({ items, openCandidate, loading = false }: { items: Candidate[]; openCandidate: (id: number) => void; loading?: boolean }) {
+  // 首屏数据未落地前显示真实加载态，不用假空态误导。
+  const initialLoading = loading && !(items ?? []).length
   // 搜索词与各阶段页码跨 tab 切换与刷新保持。
   const [query, setQuery] = usePageFilterState<string>('progress.query', '')
   const [stagePages, setStagePages] = usePageFilterState<Record<string, number>>('progress.stagePages', {})
@@ -125,7 +127,7 @@ export function Progress({ items, openCandidate }: { items: Candidate[]; openCan
           })}
         </div>
       ) : (
-        <div className="empty">没有符合当前条件的人选进度。</div>
+        <div className="empty">{initialLoading ? '正在加载人选数据，请稍候…' : '没有符合当前条件的人选进度。'}</div>
       )}
     </div>
   )
