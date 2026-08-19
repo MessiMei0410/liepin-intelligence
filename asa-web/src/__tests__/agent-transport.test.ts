@@ -266,6 +266,49 @@ describe('Agent transport', () => {
     }
   }, 15000)
 
+  it('DSH /turn 请求携带 request_id（服务端回填与前端回填共用同一幂等键，R2-1）', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = 'event: done\r\ndata: {"ok":true,"session_id":"s-rid","answer":"完成"}\r\n\r\n'
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({}) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      await streamAgentTurn(createAgentTurn('s-rid', '你好', { type: 'page' }, 'request-rid-1'), new AbortController().signal, () => {})
+      const turnCall = calls.find(call => call.url.includes('127.0.0.1:8891/turn'))
+      expect(turnCall).toBeTruthy()
+      expect(JSON.parse(turnCall?.body || '{}')).toMatchObject({
+        session_id: 's-rid', message: '你好', request_id: 'request-rid-1',
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('recordDshTurn：瞬时网络异常指数退避重试，第三次成功返回 true', async () => {
     let attempts = 0
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => {

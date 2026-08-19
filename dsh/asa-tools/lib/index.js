@@ -2,6 +2,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 // ASA Core 工具集。只读工具直调 GET；写动作对模型只暴露「预检申请」：
 // asa_candidate_preflight / asa_approval_preflight / asa_workflow_action_preflight
+// / asa_resume_backfill / asa_job_filter_note_preflight
 // 只铸造一次性 preflight token（不写库），工具结果经 presentationMeta 投影
 // confirm_request → 常驻服务器透传 SSE → 前端确认卡。真正的写入由用户在
 // ASA 界面确认后完成（Core 侧 token 需经 UA 门控的 activate 端点激活才可写），
@@ -350,7 +351,7 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_pool_filter",
     description:
-      "生成/刷新岗位候选人名单（只读）：纯查询重建名单卡，不写库、不建工作流、不走 LLM。对应 POST /api/v1/jobs/{job_id}/candidate-list/refresh。filter_mode 默认 ''（宽松口径：全量名单按阶段分组——未停止/已停止，bonder=true 时固晶/共晶/键合背景单列优先组）；传 'grade_filter' 为严格口径（按岗位职能域硬证据分级 A-核心/A-强/B-中，仅机械/软件/电源类岗位有确定性筛选模型，不支持的岗位会报错）。名单卡只是证据输入；用户给出优先/匹配/经验要求等筛选条件时，调用后必须继续证据核验并给出已确认、相邻经验、待核验/不满足的分档判断、推荐顺序、依据和下一步，不能只返回名单。筛名单/看存量名单一律用本工具，不要委托 asa_copilot_ask 出名单。绝不写库。",
+      "生成/刷新岗位候选人名单（只读）：纯查询重建名单卡，不写库、不建工作流、不走 LLM。对应 POST /api/v1/jobs/{job_id}/candidate-list/refresh。filter_mode 默认 ''（宽松口径：全量名单按阶段分组——未停止/已停止，bonder=true 时固晶/共晶/键合背景单列优先组）；传 'grade_filter' 为严格口径（按岗位职能域硬证据分级 A-核心/A-强/B-中，仅机械/软件/电源类岗位有确定性筛选模型，不支持的岗位会报错）。岗位有筛选口径便签时，返回的 answer/卡片会带「口径便签」声明——回答用户时必须照该口径声明说明生效的口径。名单卡只是证据输入；用户给出优先/匹配/经验要求等筛选条件时，调用后必须继续证据核验并给出已确认、相邻经验、待核验/不满足的分档判断、推荐顺序、依据和下一步，不能只返回名单。筛名单/看存量名单一律用本工具，不要委托 asa_copilot_ask 出名单。绝不写库。",
     parameters: {
       job_id: { type: "integer", required: true, description: "岗位 ID（jobs.id），例如 137。" },
       filter_mode: { type: "string", description: "默认 '' 宽松全量名单；'grade_filter' = 严格分级过滤（仅机械/软件/电源域岗位支持）。" },
@@ -419,6 +420,30 @@ function apply(ctx) {
       return await getJson(`/api/v1/candidates/dedupe-scan${qs ? `?${qs}` : ""}`, exec);
     },
   }));
+
+  // 岗位筛选口径便签（dogfood R2-3）：跨会话"以后筛选按 X 口径"的持久化通道。
+  // 便签是给人和模型看的口径声明（asa_pool_filter 出名单卡时随口径声明显示），
+  // 不参与确定性筛选逻辑；写走确认链（本工具只读，写用 asa_job_filter_note_preflight）。
+  ctx.tools.register(defineTool({
+    name: "asa_job_filter_notes",
+    description:
+      "读取岗位筛选口径便签（只读）：返回该岗位当前生效的口径便签（note/updated_at，无便签时 note=null）。对应 GET /api/v1/jobs/{job_id}/filter-notes。回答「这个岗位筛选口径是什么/之前记的偏好生效了吗」时用本工具查证，不要凭会话记忆声称。绝不写库。",
+    parameters: {
+      job_id: { type: "integer", required: true, description: "岗位 ID（jobs.id），例如 137。" },
+    },
+    output: output(),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const jobId = Number(args.job_id);
+      if (!Number.isInteger(jobId) || jobId <= 0) {
+        throw new Error("asa_job_filter_notes 要求 job_id 为正整数（jobs.id）。");
+      }
+      return await getJson(`/api/v1/jobs/${jobId}/filter-notes`, exec);
+    },
+  }));
+
+  // 口径便签写申请工具在 confirmMeta 定义之后注册（见下）。
 
   // 子集名单卡（与 asa_pool_filter 互补）：精读/评审/去重等"指定一组候选人"场景
   // 出可操作 candidate_list 卡（用户规矩：凡给名单必须给可操作名单卡，禁止纯
@@ -562,6 +587,42 @@ function apply(ctx) {
         payload.note = String(args.note || "");
       }
       return await postJson("/api/v1/candidate-actions/preflight", payload, exec);
+    },
+  }));
+
+  // 口径便签写申请（不写库）：只铸一次性 preflight token，confirm_request 经
+  // presentationMeta 投影 → 前端确认卡；用户确认后由前端调 Core 激活 + 写端点。
+  // 未落库前模型不得声称"已记录"（护栏第 18 条）。
+  ctx.tools.register(defineTool({
+    name: "asa_job_filter_note_preflight",
+    description:
+      "申请保存岗位筛选口径便签（不写库）：用户要求「以后筛选都按某口径/偏好」（如「六自由度运动台作为大加分项」）时用本工具发起界面确认。返回一次性 preflight token（5 分钟有效）并与当前便签对照；随后 ASA 界面弹出确认卡，由用户决定是否保存。便签是口径声明：保存后出名单卡时随口径声明显示，不改变确定性筛选逻辑本身（关键词变更只能走代码变更，不得承诺「已改筛选逻辑」）。回答用户时必须说明「已在界面发起确认，等用户确认后才会保存」，未确认前不得声称「已记录/已记住」。",
+    parameters: {
+      job_id: { type: "integer", required: true, description: "岗位 ID（jobs.id），例如 137。" },
+      note: { type: "string", required: true, description: "口径便签内容（≤500 字），如「六自由度运动台（6-DOF）经验作为大加分项」。" },
+    },
+    output: confirmMeta((value) => ({
+      kind: "filter_note",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      action: "job_filter_note",
+      job: value.job && typeof value.job === "object" ? value.job : {},
+      note: value.note || "",
+      previous_note: value.previous_note || "",
+      impact: value.impact || "",
+    })),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const jobId = Number(args.job_id);
+      if (!Number.isInteger(jobId) || jobId <= 0) {
+        throw new Error("asa_job_filter_note_preflight 要求 job_id 为正整数（jobs.id）。");
+      }
+      const note = typeof args.note === "string" ? args.note.trim() : "";
+      if (!note) {
+        throw new Error("asa_job_filter_note_preflight 要求 note 非空。");
+      }
+      return await postJson(`/api/v1/jobs/${jobId}/filter-notes/preflight`, { note }, exec);
     },
   }));
 

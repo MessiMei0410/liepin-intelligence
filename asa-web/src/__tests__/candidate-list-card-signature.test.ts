@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { candidateListCardSignature, shouldAutoOpenCandidateList } from '../agent/candidateListCardSignature'
+import { candidateListCardSignature, isPendingConfirmRequest, listAutoOpenBlockedByConfirm, shouldAutoOpenCandidateList } from '../agent/candidateListCardSignature'
 import type { CandidateListCardData } from '../workflows/CandidateListCard'
 
 const baseCard: CandidateListCardData = {
@@ -45,5 +45,32 @@ describe('名单卡签名（自动弹窗只对"新卡"触发）', () => {
     const sparse = { type: 'candidate_list', title: '子集名单' } as CandidateListCardData
     expect(candidateListCardSignature(sparse)).toBe(candidateListCardSignature({ ...sparse }))
     expect(shouldAutoOpenCandidateList(sparse, { ...sparse, title: '另一个子集' })).toBe(true)
+  })
+})
+
+describe('确认卡优先于名单弹窗（dogfood R2-5）', () => {
+  // 剧本 4 回归：合并预检确认卡出现时，前轮名单卡被携带重投又自动弹出，压住确认卡。
+  const pendingConfirm = { kind: 'candidate_action', preflight_token: 'tok', action: 'merge' }
+  it('isPendingConfirmRequest：无 state/未知 state 视为待确认，终态不算', () => {
+    expect(isPendingConfirmRequest(pendingConfirm)).toBe(true)
+    expect(isPendingConfirmRequest({ ...pendingConfirm, state: 'pending' })).toBe(true)
+    expect(isPendingConfirmRequest({ ...pendingConfirm, state: 'confirmed' })).toBe(false)
+    expect(isPendingConfirmRequest({ ...pendingConfirm, state: 'cancelled' })).toBe(false)
+    expect(isPendingConfirmRequest(null)).toBe(false)
+    expect(isPendingConfirmRequest(undefined)).toBe(false)
+    expect(isPendingConfirmRequest('x')).toBe(false)
+  })
+
+  it('本轮 done 带待确认 confirm_request：名单弹窗不自动弹出（即使签名是"新卡"）', () => {
+    expect(listAutoOpenBlockedByConfirm(pendingConfirm, [])).toBe(true)
+    expect(listAutoOpenBlockedByConfirm(null, [])).toBe(false)
+  })
+
+  it('消息流已有活跃待确认卡：后续轮的名单卡同样不自动弹出', () => {
+    const messages = [{ confirm_request: pendingConfirm }]
+    expect(listAutoOpenBlockedByConfirm(null, messages)).toBe(true)
+    // 确认卡已终态（confirmed/cancelled）后恢复自动弹
+    expect(listAutoOpenBlockedByConfirm(null, [{ confirm_request: { ...pendingConfirm, state: 'confirmed' } }])).toBe(false)
+    expect(listAutoOpenBlockedByConfirm(null, [{}, { confirm_request: null }])).toBe(false)
   })
 })

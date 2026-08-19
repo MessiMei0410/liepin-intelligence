@@ -444,6 +444,26 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             WHERE source_table='api_v1' AND source_id IS NOT NULL;
         """,
     ),
+    (
+        15,
+        "job_filter_notes",
+        # 岗位级筛选口径便签（dogfood R2-3）："以后筛选用六自由度作为大加分项"这类
+        # 跨会话口径记忆此前无任何持久化通道，模型空口承诺"已记录"。本表给每岗位
+        # 一条口径便签（UNIQUE(job_id) upsert）：便签是给人和模型看的口径声明，
+        # 由名单卡口径声明携带展示；确定性筛选引擎的关键词变更仍走代码 PR，
+        # 便签不参与过滤逻辑。写入走 preflight 确认链（UI 激活 token 后 commit）。
+        """
+        CREATE TABLE IF NOT EXISTS job_filter_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL UNIQUE,
+            note TEXT NOT NULL,
+            updated_by TEXT NOT NULL DEFAULT 'consultant',
+            request_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        """,
+    ),
 ]
 
 

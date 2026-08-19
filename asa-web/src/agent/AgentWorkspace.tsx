@@ -13,7 +13,7 @@ import { useDialogFocus } from '../shared/useDialogFocus'
 import { DialogModal } from '../shared/Dialog'
 import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { updateCandidateListDialogData } from './candidateListDialogUpdate'
-import { shouldAutoOpenCandidateList } from './candidateListCardSignature'
+import { isPendingConfirmRequest, listAutoOpenBlockedByConfirm, shouldAutoOpenCandidateList } from './candidateListCardSignature'
 import { plainTextPreview } from './agentTextSanitize'
 import { FULL_OBJECT_CLOSED_EVENT } from './navigation'
 import { useCandidateListUpdates } from './useCandidateListUpdates'
@@ -576,8 +576,11 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           // 只对"新卡"自动弹：DSH 会把上一轮名单卡并入后续 done（卡片携带语义），同一
           // 张卡随每条新回复重复到达，2026-08-19 dogfood 逐条回复重复弹窗遮挡正文。
           // 与消息流里最近一张名单卡比签名，同卡/历史恢复不弹；常驻「查看名单」按钮不受影响。
+          // R2-5：确认卡优先级最高——本轮带待确认 confirm_request 时名单弹窗不自动弹出，
+          // 已开着的名单弹窗立即让位（收起，可由常驻入口重新打开）。
+          if (isPendingConfirmRequest(event.data.confirm_request)) setCandidateListDialog(null)
           const doneListCard = candidateListCardOf(event.data)
-          if (doneListCard) {
+          if (doneListCard && !listAutoOpenBlockedByConfirm(event.data.confirm_request, messages)) {
             const previousListCard = [...messages].reverse().reduce<CandidateListCardData | undefined>(
               (found, message) => found || (message.role === 'assistant' ? candidateListCardOf(message) : undefined),
               undefined,

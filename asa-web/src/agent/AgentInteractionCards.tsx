@@ -188,6 +188,9 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const isResumeBackfill = kind === 'resume_backfill'
   const backfillResume = record(request.resume)
   const backfillDiff = (list(request.diff).filter(item => item && typeof item === 'object') as Array<Record<string, unknown>>)
+  // 岗位筛选口径便签（R2-3）：job 带岗位信息，note=新便签，previous_note=当前便签对照。
+  const isFilterNote = kind === 'filter_note'
+  const filterNoteJob = record(request.job)
   const expiresAt = Date.parse(text(request.expires_at))
   const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
   const clientRequestId = text(request.client_request_id)
@@ -198,7 +201,9 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
       ? workflowActionText[text(request.action)] || '工作流动作'
       : isResumeBackfill
         ? '简历回填'
-        : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
+        : isFilterNote
+          ? '保存筛选口径便签'
+          : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
   const targetLines: Array<{ label: string; value: string }> = kind === 'approval_decision'
     ? [
         { label: '审批', value: text(approval.title, text(approval.approval_id, '待审批事项')) },
@@ -209,6 +214,12 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           { label: '工作流', value: text(workflow.title, text(workflow.workflow_id, '待确认')) },
           { label: '当前状态', value: text(workflow.status, '待确认') },
         ]
+      : isFilterNote
+        ? [
+            { label: '岗位', value: [text(filterNoteJob.client), text(filterNoteJob.title)].filter(Boolean).join(' / ') || `岗位 #${text(filterNoteJob.id)}` },
+            { label: '新便签', value: text(request.note) },
+            { label: '当前便签', value: text(request.previous_note, '无') },
+          ]
       : isResumeBackfill
         ? [
             { label: '人选', value: `${text(candidate.name, `#${text(candidate.id)}`)}（${[text(candidate.client), text(candidate.job)].filter(Boolean).join(' / ') || '岗位待确认'}）` },
@@ -259,6 +270,16 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
         summary = response.already_applied
           ? `${text(candidate.name, '当前人选')}的简历已是最新，无需重复回填`
           : text(response.summary, `已回填 ${text(candidate.name, '当前人选')} 的简历`)
+      } else if (isFilterNote) {
+        const jobId = Number(filterNoteJob.id)
+        if (!Number.isFinite(jobId) || !text(request.note)) {
+          setError('确认请求缺少岗位或便签内容')
+          return
+        }
+        const response = await api.jobFilterNoteCommit(jobId, text(request.note), text(request.preflight_token))
+        summary = response.already_saved
+          ? '该口径便签此前已保存，未重复写入'
+          : `已保存筛选口径便签：${[text(filterNoteJob.client), text(filterNoteJob.title)].filter(Boolean).join(' / ') || `岗位 #${jobId}`}——出名单时将随口径声明显示`
       } else {
         const candidateId = Number(candidate.id)
         if (!Number.isFinite(candidateId) || !text(request.action)) {

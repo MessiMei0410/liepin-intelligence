@@ -134,6 +134,10 @@ export type ContractAnchor = [
   paths['/api/v1/jobs/{job_id}/sourcing-adjustments']['get'],
   paths['/api/v1/sourcing-adjustments/{adjustment_id}/confirm']['post'],
   paths['/api/v1/sourcing-adjustments/{adjustment_id}/ignore']['post'],
+  // 岗位筛选口径便签（R2-3）：读取 + 预检 + 写入路由入锚（generated/api.d.ts 已 regenerate）。
+  paths['/api/v1/jobs/{job_id}/filter-notes']['get'],
+  paths['/api/v1/jobs/{job_id}/filter-notes/preflight']['post'],
+  paths['/api/v1/jobs/{job_id}/filter-notes']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -909,6 +913,8 @@ export const api = {
   },
   resumeBackfillCommit: (candidate_id: number, preflight_token: string, note = '') =>
     resumeBackfillCommitConfirmed(candidate_id, preflight_token, note),
+  jobFilterNoteCommit: (jobId: number, note: string, preflightToken: string) =>
+    jobFilterNoteCommitConfirmed(jobId, note, preflightToken),
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
     fetch('/api/asa/floating/candidate-update', {
       method: 'POST',
@@ -1085,6 +1091,20 @@ const resumeBackfillCommitConfirmed = async (
   await activateWriteConfirmation(preflightToken)
   return write<ResumeBackfillCommitResult>('/api/v1/candidates/resume-backfill/commit', {
     candidate_id: candidateId, preflight_token: preflightToken, note,
+  })
+}
+
+// 岗位筛选口径便签（R2-3）：DSH 确认卡 filter_note kind 的提交通道（activate + 写端点）。
+export type JobFilterNoteCommitResult = { ok: boolean; job_id: number; note: string; already_saved?: boolean }
+
+const jobFilterNoteCommitConfirmed = async (
+  jobId: number,
+  note: string,
+  preflightToken: string,
+): Promise<JobFilterNoteCommitResult> => {
+  await activateWriteConfirmation(preflightToken)
+  return write<JobFilterNoteCommitResult>(`/api/v1/jobs/${jobId}/filter-notes`, {
+    note, preflight_token: preflightToken,
   })
 }
 
