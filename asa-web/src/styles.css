@@ -1439,6 +1439,7 @@ button:disabled{cursor:not-allowed;opacity:.58}
 :root[data-theme="dark"] .agent-conversation{background:var(--surface)}
 :root[data-theme="dark"] .agent-task-rail{background:var(--surface-sub);border-color:var(--line)}
 :root[data-theme="dark"] .agent-task-search{background:var(--surface)}
+:root[data-theme="dark"] .agent-task-search input{background:transparent;color:var(--text)}
 :root[data-theme="dark"] .agent-focus-bar{background:#1c2733;border-color:#2c3c52;color:#8ab4f8}
 :root[data-theme="dark"] .agent-focus-bar.conflict{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}
 :root[data-theme="dark"] .agent-message-role{background:var(--surface);color:#b6bdc7}
@@ -1461,3 +1462,177 @@ button:disabled{cursor:not-allowed;opacity:.58}
 :root[data-theme="dark"] .action-dialog header,:root[data-theme="dark"] .candidate-dialog header{background:var(--surface-sub)}
 /* 浮窗（窄屏/独立窗口） */
 :root[data-theme="dark"] .bare-shell{background:var(--bg)}
+/* ============================================================================
+   Dark theme v1 补漏（2026-08-19）：修复硬编码浅色值导致的对比度问题。
+   大量组件在浅色模式下使用 #fff/#f8faf7 等硬编码值，深色模式下未覆盖，
+   导致浅色文字落在浅色背景上（或深色文字落在深色背景上）。
+   ============================================================================ */
+:root[data-theme="dark"] .context-rail{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .context-rail dl>div,:root[data-theme="dark"] .rail-links a,:root[data-theme="dark"] .rail-links button{border-color:var(--line-soft)}
+:root[data-theme="dark"] .rail-links a,:root[data-theme="dark"] .rail-links button{color:var(--focus)}
+:root[data-theme="dark"] .nav-status{color:var(--green)}
+:root[data-theme="dark"] .legacy{color:var(--muted)}
+:root[data-theme="dark"] .candidate-tabs button:hover{background:var(--surface-sub);color:var(--text)}
+:root[data-theme="dark"] .workbench-band{background:var(--surface)}
+:root[data-theme="dark"] .workbench-row{border-color:var(--line-soft)}
+:root[data-theme="dark"] .workbench-row:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .workbench-kind{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .workbench-kind.approval{background:var(--amber-soft);color:var(--amber)}
+:root[data-theme="dark"] .workbench-kind.analysis{background:var(--green-soft);color:var(--green)}
+:root[data-theme="dark"] .workbench-kind.lane-risk{background:var(--red-soft);color:var(--red)}
+:root[data-theme="dark"] .workbench-kind.lane-waiting_client{background:#1c2733;color:#8ab4f8}
+:root[data-theme="dark"] .workbench-source{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .workbench-status{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .workbench-status.urgent{background:var(--amber-soft);color:var(--amber)}
+:root[data-theme="dark"] .workbench-pagination{background:var(--surface-sub)}
+:root[data-theme="dark"] .workbench-empty,:root[data-theme="dark"] .workbench-empty b{color:var(--muted)}
+:root[data-theme="dark"] .action-dialog-body select,:root[data-theme="dark"] .action-dialog-body textarea,:root[data-theme="dark"] .action-dialog-body input{background:var(--surface);color:var(--text);border-color:var(--line)}
+:root[data-theme="dark"] .icon-btn:hover{border-color:var(--line);color:var(--green)}
+:root[data-theme="dark"] .table-wrap tbody tr:focus-visible{background:var(--surface-sub)}
+:root[data-theme="dark"] .table-wrap th{color:var(--muted)}
+:root[data-theme="dark"] .table-wrap td{color:var(--text)}
+:root[data-theme="dark"] .stage>button small{color:var(--muted)}
+:root[data-theme="dark"] .detail-body>main,:root[data-theme="dark"] .workflow-body>main{color:var(--text)}
+:root[data-theme="dark"] .toast.success{color:#fff}
+:root[data-theme="dark"] .search input{background:var(--surface);color:var(--text)}
+:root[data-theme="dark"] .topbar h1,:root[data-theme="dark"] .topbar p{color:var(--text)}
+:root[data-theme="dark"] .content{color:var(--text)}
+:root[data-theme="dark"] .shell{background:var(--bg)}
+/* ============================================================================
+   Dark theme v2（2026-08-19）：Agent 消息区对比度系统修复。
+   用户截图实证：react-markdown 渲染的表格白底白字（th 硬编码 #f5f6f8 浅底 +
+   文字继承深色模式浅色）、加粗文本不可见（strong 硬编码 #17181b 黑字落在深底上）。
+   同法排查消息内卡片/对象卡/任务列表/名单弹窗的硬编码浅色值，全部用令牌覆盖；
+   蓝色点缀沿用 v1 既有深色调（#1c2733/#2c3c52/#8ab4f8），不改浅色模式任何表现。
+   ============================================================================ */
+/* --- Agent 消息 markdown 渲染容器（.agent-markdown，react-markdown + remark-gfm） --- */
+:root[data-theme="dark"] .agent-markdown h1,:root[data-theme="dark"] .agent-markdown h2,
+:root[data-theme="dark"] .agent-markdown h3,:root[data-theme="dark"] .agent-markdown h4{color:var(--text)}
+:root[data-theme="dark"] .agent-markdown strong{color:var(--text)}
+:root[data-theme="dark"] .agent-markdown hr{background:var(--line)}
+:root[data-theme="dark"] .agent-markdown blockquote{border-left-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .agent-markdown code{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-markdown pre{border-color:var(--line);background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-markdown a{color:var(--focus)}
+:root[data-theme="dark"] .agent-markdown th,:root[data-theme="dark"] .agent-markdown td{border-color:var(--line)}
+:root[data-theme="dark"] .agent-markdown th{background:var(--surface-sub)}
+:root[data-theme="dark"] .artifact-dialog .agent-markdown{color:var(--text)}
+:root[data-theme="dark"] .artifact-code{background:var(--surface-sub)}
+:root[data-theme="dark"] .artifact-file-only b{color:var(--text)}
+/* --- 消息内卡片：理解卡/待确认卡/执行回执/建议动作/策略补丁 --- */
+:root[data-theme="dark"] .agent-understanding-card,:root[data-theme="dark"] .agent-pending-intent,
+:root[data-theme="dark"] .agent-execution-receipt{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .agent-understanding-card>header,:root[data-theme="dark"] .agent-pending-intent>header{border-bottom-color:var(--line)}
+:root[data-theme="dark"] .agent-card-mark{background:#1c2733;color:#8ab4f8}
+:root[data-theme="dark"] .agent-understanding-card dl>div,:root[data-theme="dark"] .agent-pending-intent dl>div{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-understanding-card dd,:root[data-theme="dark"] .agent-pending-intent dd{color:var(--text)}
+:root[data-theme="dark"] .agent-understanding-risk,:root[data-theme="dark"] .agent-understanding-next,
+:root[data-theme="dark"] .agent-pending-intent>p{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-understanding-risk{background:var(--amber-soft);color:var(--amber)}
+:root[data-theme="dark"] .agent-understanding-next{color:var(--focus)}
+:root[data-theme="dark"] .agent-understanding-judgment{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-understanding-judgment b{color:var(--focus)}
+:root[data-theme="dark"] .agent-execution-receipt strong{color:var(--amber)}
+:root[data-theme="dark"] .agent-execution-receipt.verified strong{color:var(--green)}
+:root[data-theme="dark"] .agent-execution-receipt p{color:var(--text)}
+:root[data-theme="dark"] .agent-receipt-counts b{color:var(--text)}
+:root[data-theme="dark"] .agent-ambiguity-options{border-top-color:var(--line)}
+:root[data-theme="dark"] .agent-ambiguity-options>b{color:var(--amber)}
+:root[data-theme="dark"] .agent-ambiguity-options>button{background:var(--surface);border-color:var(--line);color:var(--text)}
+:root[data-theme="dark"] .agent-ambiguity-options>button:hover{border-color:#4f76ad;background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-suggested-actions button{background:var(--surface);border-color:var(--line);color:var(--text)}
+:root[data-theme="dark"] .agent-suggested-actions button:hover{border-color:#4f76ad;background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-suggested-actions button.needs-confirmation{border-color:#4d3b16;background:var(--amber-soft);color:var(--amber)}
+:root[data-theme="dark"] .agent-pending-intent>footer{border-top-color:var(--line)}
+:root[data-theme="dark"] .agent-pending-intent>footer button{background:var(--surface);border-color:var(--line);color:var(--text)}
+:root[data-theme="dark"] .agent-pending-intent>footer button.primary{background:var(--focus);border-color:var(--focus);color:#0f1a14}
+:root[data-theme="dark"] .agent-strategy-patch{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .agent-strategy-patch>header{background:var(--surface-sub);border-bottom-color:var(--line)}
+:root[data-theme="dark"] .agent-strategy-patch>header>span{background:#1c2733;color:#8ab4f8}
+:root[data-theme="dark"] .agent-strategy-changes label{border-color:var(--line)}
+:root[data-theme="dark"] .agent-strategy-changes label:has(input:checked){border-color:#4f76ad;background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-strategy-changes span{color:var(--focus)}
+:root[data-theme="dark"] .agent-strategy-changes em,:root[data-theme="dark"] .agent-strategy-patch dd{color:var(--text)}
+:root[data-theme="dark"] .agent-strategy-patch>footer{border-top-color:var(--line)}
+:root[data-theme="dark"] .agent-strategy-patch>footer button{background:var(--surface);color:var(--text)}
+:root[data-theme="dark"] .agent-strategy-patch>footer button.primary{border-color:var(--focus);background:var(--focus);color:#0f1a14}
+:root[data-theme="dark"] .agent-invalidated-notice{background:var(--surface-sub);border-color:var(--line)}
+/* --- DSH 编排层 badge（模型参与标记）+ 模型审计抽屉 --- */
+:root[data-theme="dark"] .agent-model-participation{background:var(--surface-sub);border-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .agent-model-participation.model,:root[data-theme="dark"] .agent-model-participation.model_tools{border-color:#2c3c52;background:#1c2733;color:#8ab4f8}
+:root[data-theme="dark"] .agent-model-audit{background:var(--surface);border-left-color:var(--line);box-shadow:-18px 0 45px rgba(0,0,0,.5)}
+:root[data-theme="dark"] .agent-model-audit>header,:root[data-theme="dark"] .agent-model-audit-summary{background:var(--surface)}
+:root[data-theme="dark"] .agent-model-audit-filters select{background:var(--surface);color:var(--text)}
+:root[data-theme="dark"] .agent-model-audit-list article{background:var(--surface)}
+/* --- 消息内对象卡（.agent-object 族：工作流摘要/候选人 console/岗位 console） --- */
+:root[data-theme="dark"] .agent-object,:root[data-theme="dark"] .agent-object-toggle{background:var(--surface)}
+:root[data-theme="dark"] .agent-object-toggle:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-object-toggle>svg:first-child{color:var(--focus)}
+:root[data-theme="dark"] .agent-object-body dl>div{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-workflow-summary{background:var(--surface-sub);border-color:var(--line)}
+:root[data-theme="dark"] .agent-workflow-summary-head span{color:var(--focus)}
+:root[data-theme="dark"] .agent-workflow-summary dd{color:var(--text)}
+:root[data-theme="dark"] .agent-workflow-meter{background:var(--line-soft)}
+:root[data-theme="dark"] .agent-workflow-risk{color:var(--amber)!important}
+:root[data-theme="dark"] .agent-workflow-task{color:var(--text)!important}
+:root[data-theme="dark"] .agent-workflow-current span{color:var(--text)}
+:root[data-theme="dark"] .agent-candidate-facts{background:var(--surface-sub);border-left-color:var(--line)}
+:root[data-theme="dark"] .agent-candidate-facts span{color:var(--muted)}
+:root[data-theme="dark"] .agent-candidate-target,:root[data-theme="dark"] .agent-job-focus{background:var(--surface)}
+:root[data-theme="dark"] .agent-job-focus{background:var(--amber-soft);border-color:#4d3b16}
+:root[data-theme="dark"] .agent-job-badges em{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .agent-workflow-console>header>div{background:#1c2733;border-left-color:#4f76ad}
+:root[data-theme="dark"] .agent-workflow-console li svg{color:var(--muted)}
+:root[data-theme="dark"] .agent-workflow-console li.completed svg{color:var(--green)}
+:root[data-theme="dark"] .agent-workflow-console li.running em,:root[data-theme="dark"] .agent-workflow-console li.waiting_external em{color:var(--focus)}
+:root[data-theme="dark"] .agent-workflow-console li.waiting_approval em{color:var(--amber)}
+/* --- 任务列表（.agent-task-rail）与任务菜单 --- */
+:root[data-theme="dark"] .agent-task-rail article:hover{background:var(--surface)}
+:root[data-theme="dark"] .agent-task-rail article.active{border-color:#2c3c52;background:var(--surface)}
+:root[data-theme="dark"] .agent-task-main b{color:var(--text)}
+:root[data-theme="dark"] .agent-task-menu button:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-task-menu button svg{color:var(--focus)}
+/* --- 名单弹窗（.candidate-dialog）与候选人面板简历文本 --- */
+:root[data-theme="dark"] .candidate-dialog-group h4{color:var(--text)}
+:root[data-theme="dark"] .candidate-dialog-group h4 em{background:var(--surface-sub)}
+:root[data-theme="dark"] .candidate-dialog-row{background:var(--surface)}
+:root[data-theme="dark"] .candidate-dialog-row:hover:not(:disabled){background:var(--surface-sub);border-color:var(--line)}
+:root[data-theme="dark"] .candidate-dialog-foot{background:var(--surface-sub)}
+:root[data-theme="dark"] .candidate-list-trigger:hover{background:var(--surface-sub);border-color:var(--line)}
+:root[data-theme="dark"] .candidate-tabs{background:var(--surface)}
+:root[data-theme="dark"] .resume-overview dl>div{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .resume-overview dd{color:var(--text)}
+:root[data-theme="dark"] .resume-timeline b,:root[data-theme="dark"] .project-history header b,
+:root[data-theme="dark"] .education-history b{color:var(--text)}
+:root[data-theme="dark"] .resume-timeline span{color:var(--muted)}
+:root[data-theme="dark"] .project-history details{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .history-detail p,:root[data-theme="dark"] .education-history p,
+:root[data-theme="dark"] .project-preview{color:var(--muted)}
+:root[data-theme="dark"] .education-history i{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .resume-source-fallback pre,:root[data-theme="dark"] .raw-resume pre{background:var(--surface-sub);color:var(--muted)}
+/* --- 会话面杂项：跳转 pill/上下文条/附件/首页入口/thinking --- */
+:root[data-theme="dark"] .agent-message-time{color:var(--muted)}
+:root[data-theme="dark"] .agent-thinking{color:var(--muted)}
+:root[data-theme="dark"] .agent-jump-bottom{background:var(--surface);border-color:var(--line);color:var(--focus)}
+:root[data-theme="dark"] .agent-jump-bottom:hover{border-color:#4f76ad;background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-context-conflict,:root[data-theme="dark"] .agent-page-context-conflict{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}
+:root[data-theme="dark"] .agent-page-context{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .agent-page-context.stale{background:var(--amber-soft);border-color:#4d3b16}
+:root[data-theme="dark"] .agent-page-context.unavailable{background:var(--red-soft);border-color:#5a3230}
+:root[data-theme="dark"] .agent-page-context-toggle{color:var(--focus)}
+:root[data-theme="dark"] .agent-page-context-toggle:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-page-context-icon{background:#1c2733;color:#8ab4f8}
+:root[data-theme="dark"] .agent-page-context-copy small{color:var(--focus)}
+:root[data-theme="dark"] .agent-page-context-actions{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-attachment-list>span{background:var(--surface-sub);border-color:var(--line)}
+:root[data-theme="dark"] .agent-attachment-list>span.error{border-color:#5a3230;background:var(--red-soft)}
+:root[data-theme="dark"] .agent-attachment-list>span>svg:first-child{color:var(--focus)}
+:root[data-theme="dark"] .agent-attach{color:var(--muted)}
+:root[data-theme="dark"] .agent-composer:focus-within{border-color:#4f76ad;box-shadow:0 0 0 2px #1c2733}
+:root[data-theme="dark"] .agent-conversation-head>div:first-child>svg{color:var(--focus)}
+:root[data-theme="dark"] .agent-conversation-head .agent-session-id{color:var(--focus)}
+:root[data-theme="dark"] .agent-home-band>button,:root[data-theme="dark"] .agent-analysis-row>button:first-child{background:var(--surface)}
+:root[data-theme="dark"] .agent-home-band>button:hover,:root[data-theme="dark"] .agent-analysis-row>button:first-child:hover{background:var(--surface-sub)}
+:root[data-theme="dark"] .agent-home-band>button{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-analysis-row{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-home-band>button em,:root[data-theme="dark"] .agent-analysis-row em{color:var(--focus)}
