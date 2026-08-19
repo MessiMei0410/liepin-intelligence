@@ -1,9 +1,7 @@
 {
   "name": "dsh-profile-asa",
   "private": true,
-  "dependencies": {
-    "@asa/dsh-asa-tools": "file:../asa-tools"
-  },
+  "dependencies": {},
   "dsh": {
     "profile": {
       "bundles": [
