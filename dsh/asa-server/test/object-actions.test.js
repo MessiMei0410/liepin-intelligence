@@ -210,9 +210,12 @@ describe("job/workflow 引用相关性过滤（2026-08-19 验收：长越名单�
     assert.deepEqual(out.references, [
       { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
     ]);
-    // 回答提到客户名（subtitle）时岗位保留
-    const byClient = collector.outputs({ answer: "士兰微电源专家这条审批先说结论。" });
-    assert.ok(byClient.references.some((ref) => ref.id === 154));
+    // 岗位名命中则精确过滤：回答点名"机械高级工程师"→ 只留 137，154（电源专家）剔除
+    const byTitle = collector.outputs({ answer: "长越科技机械高级工程师岗的存量名单已筛完。" });
+    assert.deepEqual(byTitle.references.map((ref) => ref.id), [137]);
+    // 只提客户名、任何岗位名都未命中 → 触发兜底整组放回（宁可多不可丢）
+    const byClient = collector.outputs({ answer: "长越科技这个岗位的名单已出。" });
+    assert.deepEqual(byClient.references.map((ref) => ref.id), [154, 137]);
   });
 
   it("无回答文本时不过滤（兼容无 answer 调用方）", () => {
@@ -220,5 +223,18 @@ describe("job/workflow 引用相关性过滤（2026-08-19 验收：长越名单�
     collector.add([{ type: "job", id: 154, label: "电源专家", subtitle: "士兰微" }]);
     const out = collector.outputs({});
     assert.equal(out.references.length, 1);
+  });
+});
+
+describe("相关性兜底：全未命中时整组放回 job/workflow", () => {
+  it("回答以别的方式指代（无任何对象名命中）时放回非 candidate 对象", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 154, label: "电源专家", subtitle: "士兰微" },
+      { type: "candidate", id: 531, label: "张三" },
+    ]);
+    const out = collector.outputs({ answer: "这个岗位的情况如上所述。" });
+    // 岗位名未命中 → 兜底放回 job；candidate 不参与兜底（维持全弃）
+    assert.deepEqual(out.references, [{ type: "job", id: 154, label: "电源专家", subtitle: "士兰微" }]);
   });
 });
