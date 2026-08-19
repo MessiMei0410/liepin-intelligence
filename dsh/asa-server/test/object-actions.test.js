@@ -162,7 +162,7 @@ describe("createObjectRefCollector", () => {
       { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
     ]);
     const { suggested_actions, references } = collector.outputs({
-      answer: "候选人 张三、李四 的名单如下。",
+      answer: "电源专家岗位候选人 张三、李四 的名单如下，关联 R3 外部寻访审批。",
       candidateListCard: true,
     });
     assert.deepEqual(suggested_actions, [
@@ -175,7 +175,7 @@ describe("createObjectRefCollector", () => {
     ]);
   });
 
-  it("candidate 引用按 answer 文本命中过滤：未提及的全弃，workflow/job 保底保留", () => {
+  it("candidate 引用按 answer 文本命中过滤：未提及的全弃（job/workflow 同规则，见专项）", () => {
     const collector = createObjectRefCollector();
     collector.add([
       { type: "candidate", id: 531, label: "张三" },
@@ -184,17 +184,41 @@ describe("createObjectRefCollector", () => {
       { type: "job", id: 142, label: "电源专家" },
       { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
     ]);
-    // 回答只提到张三：李四（无文本命中）与无名候选人（无真实 label 可命中）都从
-    // references 剔除；芯片不受文本过滤（入口上限规则不变）。
+    // 回答只提到张三：李四（无文本命中）、无名候选人（无真实 label 可命中）、
+    // 未提及的 job/workflow（2026-08-19 起同规则过滤）全部剔除；芯片与 references 同一判定。
     const { suggested_actions, references } = collector.outputs({ answer: "推荐候选人 张三。" });
-    assert.deepEqual(references, [
-      { type: "candidate", id: 531, label: "张三" },
-      { type: "job", id: 142, label: "电源专家" },
-      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
-    ]);
+    assert.deepEqual(references, [{ type: "candidate", id: 531, label: "张三" }]);
     assert.deepEqual(
       suggested_actions.map((action) => `${action.type}:${action.id}`),
-      ["open_candidate:531", "open_candidate:532", "open_job:142", "open_workflow:workflow_aaa"],
+      ["open_candidate:531"],
     );
+  });
+});
+
+describe("job/workflow 引用相关性过滤（2026-08-19 验收：长越名单下出现电源专家芯片）", () => {
+  it("未在回答中命中的岗位从芯片和 references 同步剔除；客户名命中可救回", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 154, label: "电源专家", subtitle: "士兰微" },
+      { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
+    ]);
+    // 回答只讲长越机械岗，未提电源专家/士兰微
+    const out = collector.outputs({ answer: "长越科技机械高级工程师岗的存量名单已筛完，A-核心 20 人。" });
+    assert.deepEqual(out.suggested_actions, [
+      { type: "open_job", id: 137, label: "打开岗位：机械高级工程师", subtitle: "长越科技" },
+    ]);
+    assert.deepEqual(out.references, [
+      { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
+    ]);
+    // 回答提到客户名（subtitle）时岗位保留
+    const byClient = collector.outputs({ answer: "士兰微电源专家这条审批先说结论。" });
+    assert.ok(byClient.references.some((ref) => ref.id === 154));
+  });
+
+  it("无回答文本时不过滤（兼容无 answer 调用方）", () => {
+    const collector = createObjectRefCollector();
+    collector.add([{ type: "job", id: 154, label: "电源专家", subtitle: "士兰微" }]);
+    const out = collector.outputs({});
+    assert.equal(out.references.length, 1);
   });
 });

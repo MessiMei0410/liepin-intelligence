@@ -60,12 +60,22 @@ export function createObjectRefCollector() {
    * options.candidateListCard：本轮已投影 candidate_list action_card 时置真——名单卡
    *   本身提供全部人选入口，candidate 的 references 与 open_candidate 芯片全部抑制
    *   （2026-08-19 验收：名单回答下再嵌 8 张候选人对象卡全是噪音）。
-   * options.answer：本轮最终回答文本。candidate 引用只保留 label 在回答中实际命中的
-   *   （工具原始结果前 8 条不等于回答提及的对象）；workflow/job 保底保留。
+   * options.answer：本轮最终回答文本。有显式名称的引用（named）只保留 label 或
+   *   subtitle（客户/公司）在回答中实际命中的——工具原始结果里的对象不等于回答
+   *   提及的对象（2026-08-19 验收：长越名单下出现"打开岗位：电源专家"）。无名引用
+   *   （兜底文案）job/workflow 保底保留，candidate 丢弃。references 与 suggested_actions
+   *   共用同一相关性判定，芯片不再绕过过滤。
    */
   function outputs(options = {}) {
     const answer = String(options.answer || "");
-    const visible = options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs;
+    const relevant = (ref) => {
+      if (!answer) return true; // 无回答文本不过滤（兼容无 answer 调用方）
+      if (ref.type === "candidate") return ref.named && answer.includes(ref.label);
+      if (!ref.named) return true; // 无名 job/workflow 保底
+      return answer.includes(ref.label) || Boolean(ref.subtitle && answer.includes(ref.subtitle));
+    };
+    const visible = (options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs)
+      .filter(relevant);
     const perType = new Map();
     const suggested_actions = [];
     for (const ref of visible) {
@@ -84,7 +94,6 @@ export function createObjectRefCollector() {
     // references 面向前端对象卡：action_label/approval_id/named 为 asa-server 内部
     // 附加信息，不下发。
     const references = visible
-      .filter((ref) => ref.type !== "candidate" || (ref.named && answer.includes(ref.label)))
       .slice(0, REFERENCES_MAX)
       .map(({ approval_id: _approvalId, action_label: _actionLabel, named: _named, ...ref }) => ref);
     return { suggested_actions, references };
