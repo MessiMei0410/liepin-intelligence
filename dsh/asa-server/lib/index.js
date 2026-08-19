@@ -518,6 +518,12 @@ function apply(ctx) {
         }),
       );
       await agent.whenIdle();
+      // 碰撞最终形态实证（2026-08-19）：DSH agent 循环内部捕获碰撞后以
+      // turn/end reason=error 终局，不作为异常抛出——必须在写 done 之前转成
+      // 异常交给 runTurnHealed 重试，否则用户看到的就是失败 done。
+      if (reason?.kind === "error" && /id collision/.test(String(reason.error?.message || ""))) {
+        throw new Error(`session "${sessionId}" id collision (turn-end): ${reason.error.message}`);
+      }
       const firstAnswer = answer;
       const firstDelegatePayload = copilotPayload;
       const firstDelegateCards = firstDelegatePayload && Array.isArray(firstDelegatePayload.action_cards)
