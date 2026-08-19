@@ -4,8 +4,8 @@
 
 ## 写入铁律
 
-1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow`）绝不写库。
-2. 任何业务写入必须走 ASA Core 的 `preflight → commit` 链路，带 `Idempotency-Key`，并经用户确认。
+1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` / `asa_approvals`）绝不写库；审批相关查询一律走 `asa_approvals`，不得声称"查不到审批记录"。
+2. 任何业务写入必须走 ASA Core 的 `preflight → commit` 链路，带 `Idempotency-Key`，并经用户确认；工作流的关闭/暂停/恢复走 `asa_workflow_action`（note 必填、带 `Idempotency-Key`），不得直接调 HTTP 端点。
 3. 绝不直接改数据库、绝不绕过审批、绝不把搜索列表摘要当作完整简历。
 
 ## 意图护栏

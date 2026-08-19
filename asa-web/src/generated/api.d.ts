@@ -1400,6 +1400,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Approvals */
+        get: operations["approvals_api_v1_approvals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/approvals/{approval_id}/decision": {
         parameters: {
             query?: never;
@@ -1925,6 +1942,44 @@ export interface components {
              * @default
              */
             note: string;
+        };
+        /** ApprovalItemResponse */
+        ApprovalItemResponse: {
+            /** Approval Id */
+            approval_id: string;
+            /** Workflow Id */
+            workflow_id: string;
+            /** Goal Id */
+            goal_id: string;
+            /**
+             * Risk Level
+             * @default
+             */
+            risk_level: string;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /** Status */
+            status: string;
+            /**
+             * Created At
+             * @default
+             */
+            created_at: string;
+            /** Goal Title */
+            goal_title?: string | null;
+        };
+        /** ApprovalListResponse */
+        ApprovalListResponse: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /** Items */
+            items?: components["schemas"]["ApprovalItemResponse"][];
         };
         /** AssessmentAdvisorActionPatch */
         AssessmentAdvisorActionPatch: {
@@ -5882,6 +5937,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approvals_api_v1_approvals_get: {
+        parameters: {
+            query?: {
+                status?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalListResponse"];
                 };
             };
             /** @description Validation Error */

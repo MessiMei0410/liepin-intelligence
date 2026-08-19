@@ -93,6 +93,26 @@ function apply(ctx) {
     },
   }));
 
+  ctx.tools.register(defineTool({
+    name: "asa_approvals",
+    description:
+      "读取 ASA 审批列表（只读）：默认只返回待审批（pending）记录，含 approval_id/workflow_id/goal_id/risk_level/title/status/created_at/goal_title。对应 GET /api/v1/approvals。绝不写库。",
+    parameters: {
+      status: { type: "string", description: "审批状态过滤，默认 pending；传空串表示不按状态过滤。" },
+      limit: { type: "integer", description: "返回条数上限，默认 100，最大 500。" },
+    },
+    output: output(),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const params = new URLSearchParams();
+      if (args.status !== undefined && args.status !== null) params.set("status", String(args.status));
+      if (args.limit) params.set("limit", String(args.limit));
+      const qs = params.toString();
+      return await getJson(`/api/v1/approvals${qs ? `?${qs}` : ""}`, exec);
+    },
+  }));
+
   // ── Phase 2：受控写动作（preflight → commit，带幂等）。安全由 Core 服务端兜底：
   //    一次性 5 分钟 token + Idempotency-Key + 停止/阶段不可倒退校验。
   ctx.tools.register(defineTool({
@@ -170,6 +190,39 @@ function apply(ctx) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(`approval decision -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
+      return data;
+    },
+  }));
+
+  // 工作流动作（受控写）：cancel/pause/resume，note 必填，带 Idempotency-Key 幂等。
+  ctx.tools.register(defineTool({
+    name: "asa_workflow_action",
+    description:
+      "对工作流执行受控动作（真实写入）：action 取值 cancel=关闭 / pause=暂停 / resume=恢复，note 必填说明原因。对应 POST /api/v1/workflows/{workflow_id}/{action}，带 Idempotency-Key 幂等。",
+    parameters: {
+      workflow_id: { type: "string", required: true, description: "工作流 ID，例如 workflow_a32622d8ff0c。" },
+      action: { type: "string", required: true, description: "cancel | pause | resume" },
+      note: { type: "string", required: true, description: "必填：执行该动作的原因说明。" },
+    },
+    output: output(),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      if (!["cancel", "pause", "resume"].includes(args.action)) {
+        throw new Error(`不支持的工作流动作：${args.action}（仅 cancel | pause | resume）`);
+      }
+      if (!String(args.note || "").trim()) {
+        throw new Error("asa_workflow_action 要求 note 必填：请说明执行该动作的原因。");
+      }
+      const requestId = crypto.randomUUID();
+      const res = await fetch(`${ASA_BASE}/api/v1/workflows/${encodeURIComponent(args.workflow_id)}/${args.action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA, "Idempotency-Key": requestId },
+        body: JSON.stringify({ request_id: requestId, note: args.note }),
+        signal: exec.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`workflow ${args.action} -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
       return data;
     },
   }));
