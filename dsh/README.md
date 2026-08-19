@@ -83,6 +83,21 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
   ≤4、按出现顺序去重）与 `references`（≤8）随 done 下发——「都打开我看下」场景的回答
   里有可点击入口（打开工作流详情/人选/岗位弹窗），并随 record-turn 回填（恢复会话后
   操作芯片仍可点击）。
+- Copilot 委托载荷透传（2026-08-19）：`asa_copilot_ask` 把 Copilot 脑 done 的
+  `understanding_card`/`execution_receipt`/`workflow` 进度原料（`workflow_id`/`workflow`/
+  `progress`/`plan_summary`/`approvals`/`goal`）/`business_focus`/`model_participation`/
+  `action_cards`/`context` 经 `presentationMeta` 投到 `tool/result` meta 的
+  `copilot_payload`，常驻服务器轮末并入 done（工作流原料按 Core bridge 同形组装为
+  `workflow_progress`）——前端渲染路径与 Copilot 脑直连一致（理解卡/执行回执/焦点条/
+  模型参与 badge/工作流进度卡），并随 record-turn 回填（恢复会话后这些卡/条仍在；
+  `business_focus` 只落消息级 structured，不写 `agent_copilot_focus`，焦点仲裁仍是
+  Python 脑职责）。
+- 委托会话治理（2026-08-19）：`asa_copilot_ask` 不再每次用一次性随机 session
+  （`dsh-${uuid}` 会在会话列表产生孤儿会话）。委托轮次落到当前 DSH 会话派生的固定
+  session `<dsh会话>::dsh-delegate`（同会话多次委托共享上下文，消息可审计），并打标
+  `context.source='dsh_delegate'`；Core 会话列表 rollup 过滤 `::dsh-delegate` 后缀与
+  遗留 `dsh-` 前缀，委托会话不进任务列表。故意不复用 DSH 用户会话：委托轮次的
+  user/assistant 行会和用户轮次交错，恢复会话时消息流错乱。
 
 > headless 一次性回退：直接 `dsh --profile asa "<任务>"`（无跨轮记忆）；
 > 常驻服务器（8891）是当前前端 DSH 路径。

@@ -6,6 +6,7 @@ import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { createObjectRefCollector } from "./object-actions.js";
+import { delegateDoneFields } from "./copilot-payload.js";
 
 /**
  * @asa/dsh-asa-server — ASA 常驻 Agent 服务器（resident runner）。
@@ -212,6 +213,11 @@ function apply(ctx) {
     // 本轮业务对象收集器：tool/result meta.object_refs（asa-tools 投影的工作流/
     // 候选人/岗位 ID）轮末聚合成 suggested_actions/references 随 done 下发。
     const objectRefs = createObjectRefCollector();
+    // 本轮 Copilot 委托载荷：asa_copilot_ask 把 Copilot 脑 done 的结构化字段投到
+    // meta.copilot_payload（理解卡/执行回执/工作流进度原料/焦点/模型参与/复数卡片/
+    // 上下文），轮末组装成 workflow_progress 等并入 done（与 Copilot 脑直连同形）。
+    // 一轮可能多次委托，最后一次的载荷生效（与 action_card 单卡语义一致）。
+    let copilotPayload = null;
 
     // 客户端断连（前端 abort / 关页）：取消本轮，止损并尽早释放会话队列。
     const onClose = () => {
@@ -258,6 +264,13 @@ function apply(ctx) {
         // 对象操作入口：asa-tools 只读工具把结果里的业务对象 ID 投到 meta.object_refs，
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
+        // Copilot 委托载荷：轮末并入 done（前端按 Copilot 同形字段渲染）。
+        // tool/result data 没有顶层 name（name 在 tool/call 上）；copilot_payload
+        // 只有 asa_copilot_ask 投影，凭键存在即可归属。
+        const delegatePayload = event.data && event.data.meta && event.data.meta.copilot_payload;
+        if (delegatePayload && typeof delegatePayload === "object") {
+          copilotPayload = delegatePayload;
+        }
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
       }
@@ -279,6 +292,10 @@ function apply(ctx) {
         ok: reason?.kind === "completed",
         ...(suggested_actions.length ? { suggested_actions } : {}),
         ...(references.length ? { references } : {}),
+        // Copilot 委托载荷并入 done：understanding_card/execution_receipt/business_focus/
+        // model_participation/action_cards/context 原样透传，workflow 原料组装为
+        // workflow_progress（buildWorkflowProgress，与 Core bridge 同形）。
+        ...delegateDoneFields(copilotPayload),
         error: reason?.kind === "error"
           ? reason.error.message
           : reason?.kind === "aborted"
