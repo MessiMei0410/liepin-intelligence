@@ -35,6 +35,7 @@ export function delegateDoneFields(payload) {
   const fields = {};
   if (isRecord(payload.understanding_card)) fields.understanding_card = payload.understanding_card;
   if (isRecord(payload.execution_receipt)) fields.execution_receipt = payload.execution_receipt;
+  if (isRecord(payload.analysis_card)) fields.analysis_card = payload.analysis_card;
   if (isRecord(payload.business_focus)) fields.business_focus = payload.business_focus;
   if (isRecord(payload.model_participation)) fields.model_participation = payload.model_participation;
   if (isRecord(payload.context)) fields.context = payload.context;

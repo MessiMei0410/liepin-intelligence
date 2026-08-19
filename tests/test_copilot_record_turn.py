@@ -145,6 +145,7 @@ class CopilotRecordTurnTest(AgentDbCase):
         恢复会话时理解卡/执行回执/焦点/模型参与/工作流进度卡仍透出。"""
         understanding = {"show": True, "summary": "我理解为要士兰微电源专家名单"}
         receipt = {"state": "已生成建议", "verified": False}
+        analysis = {"headline": "候选人分档", "metrics": [{"label": "已确认", "value": 3}], "next_step": "核验 2 人"}
         focus = {"client": "士兰微", "action": "寻访"}
         participation = {"mode": "model_tools", "label": "模型生成 + 工具证据", "model": "deepseek-v4"}
         workflow_progress = {
@@ -162,6 +163,7 @@ class CopilotRecordTurnTest(AgentDbCase):
             source="dsh",
             understanding_card=understanding,
             execution_receipt=receipt,
+            analysis_card=analysis,
             business_focus=focus,
             model_participation=participation,
             workflow_progress=workflow_progress,
@@ -175,6 +177,7 @@ class CopilotRecordTurnTest(AgentDbCase):
         assistant = detail["messages"][1]
         self.assertEqual(assistant["understanding_card"], understanding)
         self.assertEqual(assistant["execution_receipt"], receipt)
+        self.assertEqual(assistant["analysis_card"], analysis)
         self.assertEqual(assistant["business_focus"], focus)
         self.assertEqual(assistant["model_participation"], participation)
         self.assertEqual(assistant["workflow_progress"], workflow_progress)

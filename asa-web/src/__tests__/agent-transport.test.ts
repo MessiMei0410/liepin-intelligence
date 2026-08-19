@@ -441,6 +441,7 @@ describe('Agent transport', () => {
     const delegate = {
       understanding_card: { show: true, summary: '我理解为…' },
       execution_receipt: { state: '已生成建议' },
+      analysis_card: { headline: '候选人分档', next_step: '核验 2 人' },
       business_focus: { client: '士兰微', action: '寻访' },
       model_participation: { mode: 'model_tools', label: '模型生成 + 工具证据', model: 'deepseek-v4' },
       workflow_id: 'workflow_aaa',

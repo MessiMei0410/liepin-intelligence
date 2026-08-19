@@ -20,6 +20,7 @@ export type AgentTurnResult = {
   suggested_actions?: Array<Record<string, unknown>>
   understanding_card?: Record<string, unknown> | null
   execution_receipt?: Record<string, unknown> | null
+  analysis_card?: Record<string, unknown> | null
   business_focus?: Record<string, unknown> | null
   workflow_id?: string | null
   workflow_progress?: Record<string, unknown> | null
@@ -74,7 +75,7 @@ const cardEventSchema = structuredRecord
 const doneEventSchema = z.object({
   ok: z.boolean().optional(), session_id: z.string().min(1), answer: z.string(), error: z.string().optional(), context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(), suggested_actions: z.array(structuredRecord).optional(),
-  business_focus: structuredRecord.nullable().optional(), workflow_id: z.string().nullable().optional(),
+  business_focus: structuredRecord.nullable().optional(), analysis_card: structuredRecord.nullable().optional(), workflow_id: z.string().nullable().optional(),
   workflow: structuredRecord.nullable().optional(), progress: structuredRecord.nullable().optional(),
   approvals: z.array(structuredRecord).optional(), plan_summary: z.array(structuredRecord).optional(),
   goal: structuredRecord.nullable().optional(),
@@ -238,6 +239,7 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         // 工作流进度卡一并回填，恢复会话时这些卡/条仍可重渲染。
         ...(data.understanding_card && typeof data.understanding_card === 'object' ? { understanding_card: data.understanding_card } : {}),
         ...(data.execution_receipt && typeof data.execution_receipt === 'object' ? { execution_receipt: data.execution_receipt } : {}),
+        ...(data.analysis_card && typeof data.analysis_card === 'object' ? { analysis_card: data.analysis_card } : {}),
         ...(data.business_focus && typeof data.business_focus === 'object' ? { business_focus: data.business_focus } : {}),
         ...(data.model_participation && typeof data.model_participation === 'object' ? { model_participation: data.model_participation } : {}),
         ...(data.workflow_progress && typeof data.workflow_progress === 'object' ? { workflow_progress: data.workflow_progress } : {}),

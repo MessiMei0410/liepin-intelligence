@@ -94,6 +94,7 @@ function copilotPayload(value) {
   return {
     understanding_card: recordOrNull(d.understanding_card),
     execution_receipt: recordOrNull(d.execution_receipt),
+    ...(recordOrNull(d.analysis_card) ? { analysis_card: recordOrNull(d.analysis_card) } : {}),
     workflow_id: d.workflow_id != null && d.workflow_id !== "" ? String(d.workflow_id) : null,
     workflow: recordOrNull(d.workflow),
     progress: recordOrNull(d.progress),
@@ -284,7 +285,7 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_pool_filter",
     description:
-      "生成/刷新岗位候选人名单（只读）：纯查询重建名单卡，不写库、不建工作流、不走 LLM。对应 POST /api/v1/jobs/{job_id}/candidate-list/refresh。filter_mode 默认 ''（宽松口径：全量名单按阶段分组——未停止/已停止，bonder=true 时固晶/共晶/键合背景单列优先组）；传 'grade_filter' 为严格口径（按岗位职能域硬证据分级 A-核心/A-强/B-中，仅机械/软件/电源类岗位有确定性筛选模型，不支持的岗位会报错）。筛名单/看存量名单一律用本工具，不要委托 asa_copilot_ask 出名单。绝不写库。",
+      "生成/刷新岗位候选人名单（只读）：纯查询重建名单卡，不写库、不建工作流、不走 LLM。对应 POST /api/v1/jobs/{job_id}/candidate-list/refresh。filter_mode 默认 ''（宽松口径：全量名单按阶段分组——未停止/已停止，bonder=true 时固晶/共晶/键合背景单列优先组）；传 'grade_filter' 为严格口径（按岗位职能域硬证据分级 A-核心/A-强/B-中，仅机械/软件/电源类岗位有确定性筛选模型，不支持的岗位会报错）。名单卡只是证据输入；用户给出优先/匹配/经验要求等筛选条件时，调用后必须继续证据核验并给出已确认、相邻经验、待核验/不满足的分档判断、推荐顺序、依据和下一步，不能只返回名单。筛名单/看存量名单一律用本工具，不要委托 asa_copilot_ask 出名单。绝不写库。",
     parameters: {
       job_id: { type: "integer", required: true, description: "岗位 ID（jobs.id），例如 137。" },
       filter_mode: { type: "string", description: "默认 '' 宽松全量名单；'grade_filter' = 严格分级过滤（仅机械/软件/电源域岗位支持）。" },

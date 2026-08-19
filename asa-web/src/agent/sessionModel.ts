@@ -38,6 +38,7 @@ const messageSchema = z.object({
   suggested_actions: z.array(structuredRecord).optional(),
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
+  analysis_card: structuredRecord.nullable().optional(),
   business_focus: structuredRecord.nullable().optional(),
   workflow_id: z.string().nullable().optional(),
   workflow_progress: structuredRecord.nullable().optional(),

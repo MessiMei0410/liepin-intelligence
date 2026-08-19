@@ -76,6 +76,51 @@ export function ExecutionReceipt({ receipt }: { receipt?: Record<string, unknown
   return <section className={`agent-execution-receipt ${verified ? 'verified' : ''}`} aria-label="执行回执"><div><b>执行回执</b><strong>{state}</strong></div><p>{text(receipt.summary, '尚未执行写入或外部动作')}</p>{counts.length > 0 && <div className="agent-receipt-counts">{counts.map(item => <span key={item.label}>{item.label} <b>{String(item.value)}</b></span>)}</div>}<small>{verified ? '已完成服务端回查' : '等待真实执行结果'}{text(scope.label || scope.type) && ` · 范围 ${text(scope.label || scope.type)}`}{text(receipt.failure_reason) && ` · ${text(receipt.failure_reason)}`}{reasons.length > 0 && ` · ${reasons.join('；')}`}</small>{text(receipt.next_step) && <p className="agent-understanding-next"><ChevronRight size={14}/>{text(receipt.next_step)}</p>}</section>
 }
 
+const analysisList = (value: unknown): Array<string | Record<string, unknown>> => list(value)
+  .map(item => typeof item === 'string' ? item.trim() : record(item))
+  .filter(item => typeof item === 'string' ? Boolean(item) : Object.keys(item).length > 0)
+
+const analysisItemText = (value: string | Record<string, unknown>): string => typeof value === 'string'
+  ? value
+  : text(value.text || value.label || value.name || value.value || value.detail || value.reason)
+
+const analysisMetrics = (value: unknown): Array<{ label: string; value: string }> => {
+  if (Array.isArray(value)) return value.map(item => {
+    const metric = record(item)
+    return { label: text(metric.label || metric.name || metric.key, '指标'), value: text(metric.value ?? metric.count ?? metric.amount ?? metric.rate) }
+  }).filter(item => item.value)
+  return Object.entries(record(value)).map(([label, metric]) => ({ label, value: text(metric) })).filter(item => item.value)
+}
+
+export function AnalysisCard({ card, onOpenAnalysis }: {
+  card?: Record<string, unknown> | null
+  onOpenAnalysis?: (id: string) => void
+}) {
+  if (!card) return null
+  const data = { ...record(card.result), ...card }
+  const headline = text(data.headline || data.title || data.conclusion || data.key_conclusion || data.summary)
+  const metrics = analysisMetrics(data.metrics)
+  const evidence = analysisList(data.evidence || data.evidences)
+  const risks = analysisList(data.risk || data.risks)
+  const gaps = analysisList(data.gap || data.gaps)
+  const pending = analysisList(data.pending_verification || data.pending_items || data.to_verify || data['待核验'])
+  const nextStep = text(data.next_step || data.nextStep || data.next_action)
+  const openAction = data.open_analysis
+  const openId = text(data.run_id || (typeof openAction === 'string' ? openAction : record(openAction).id || record(openAction).run_id))
+  const hasContent = Boolean(headline || metrics.length || evidence.length || risks.length || gaps.length || pending.length || nextStep)
+  if (!hasContent) return null
+  const renderList = (label: string, items: Array<string | Record<string, unknown>>) => items.length > 0 && <div className="agent-analysis-card-list"><b>{label}</b><ul>{items.map((item, index) => <li key={`${label}-${index}`}>{analysisItemText(item)}</li>)}</ul></div>
+  return <section className="agent-analysis-card" aria-label="分析卡">
+    <header><span className="agent-card-mark"><Search size={14}/></span><div><b>{headline || '分析结论'}</b><small>基于当前真实证据</small></div>{openId && <button type="button" className="icon-btn" aria-label="查看分析" title="查看分析" onClick={() => onOpenAnalysis?.(openId)}><ChevronRight size={15}/></button>}</header>
+    {metrics.length > 0 && <div className="agent-analysis-metrics">{metrics.map((metric, index) => <div key={`${metric.label}-${index}`}><span>{metric.label}</span><b>{` ${metric.value}`}</b></div>)}</div>}
+    {renderList('证据', evidence)}
+    {renderList('风险', risks)}
+    {renderList('缺口', gaps)}
+    {renderList('待核验', pending)}
+    {nextStep && <p className="agent-understanding-next"><ChevronRight size={14}/><span><b>下一步</b>{nextStep}</span></p>}
+  </section>
+}
+
 export function CandidateIntentConfirmation({ intent, sessionId }: { intent?: Record<string, unknown> | null; sessionId: string }) {
   const [cancelled, setCancelled] = useState(false)
   const [busy, setBusy] = useState(false)

@@ -42,9 +42,13 @@ describe('Agent conversation state machine', () => {
     expect(foreign.messages[1].thinking).toBe('先看岗位，再看人选')
 
     const done = agentConversationReducer(withText, {
-      type: 'turn_done', requestId: 'request-1', result: { ok: true, session_id: 'task-1', answer: '结论如下' },
+      type: 'turn_done', requestId: 'request-1', result: {
+        ok: true, session_id: 'task-1', answer: '结论如下',
+        analysis_card: { headline: '分析结论' },
+      },
     })
     expect(done.messages[1].thinking).toBe('先看岗位，再看人选')
+    expect(done.messages[1].analysis_card).toEqual({ headline: '分析结论' })
     expect(done.messages[1].content).toBe('结论如下')
   })
 

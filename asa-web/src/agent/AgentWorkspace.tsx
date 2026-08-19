@@ -17,7 +17,7 @@ import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
 import { AgentContext, AgentReference, AgentTurn, createAgentTurn, streamAgentTurn } from './transport'
 import { AGENT_ATTACHMENT_ACCEPT, AGENT_ATTACHMENT_MAX_COUNT, formatAttachmentSize, QueuedAgentAttachment, uploadAgentAttachment, UploadedAgentAttachment, validateAgentAttachment } from './attachments'
-import { CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard, WriteConfirmationCard } from './AgentInteractionCards'
+import { AnalysisCard, CandidateIntentConfirmation, ExecutionReceipt, SuggestedActionBar, UnderstandingCard, WriteConfirmationCard } from './AgentInteractionCards'
 import { StrategyPatchCard } from './StrategyPatchCard'
 import { compareCandidatePageContext, CandidatePageConflict } from './pageContextConflict'
 import { readThemePreference, setThemePreference, type ThemeMode } from './theme'
@@ -1100,6 +1100,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           {message.role === 'user' && uploadedAttachments(message.context).length > 0 && <div className="agent-message-attachments" aria-label="消息附件">{uploadedAttachments(message.context).map((item, attachmentIndex) => <span key={`${item.attachment_id || item.file_name}:${attachmentIndex}`}><FileText/><b>{item.file_name || '附件'}</b><small>{item.status || '已读取'}</small></span>)}</div>}
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
           {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
+          {message.role === 'assistant' && !message.invalidated && <AnalysisCard card={message.analysis_card} onOpenAnalysis={onOpenAnalysis}/>}
           {message.role === 'assistant' && !message.invalidated && <CandidateIntentConfirmation intent={message.pending_intent} sessionId={sessionId}/>}
           {message.role === 'assistant' && !message.invalidated && <WriteConfirmationCard request={message.confirm_request ? { client_request_id: message.turnRequestId || '', ...message.confirm_request } : message.confirm_request} sessionId={sessionId}/>}
           {message.role === 'assistant' && !message.invalidated && message.strategy_patch && (message.strategy_patch.display_requested === true || message.strategy_patch_applied) && <StrategyPatchCard

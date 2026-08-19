@@ -824,6 +824,7 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
                     "turn_decision": structured.get("turn_decision"),
                     "understanding_card": structured.get("understanding_card"),
                     "execution_receipt": structured.get("execution_receipt"),
+                    "analysis_card": structured.get("analysis_card"),
                     "invalidated": bool(structured.get("invalidated")),
                     "invalidated_reason": str(structured.get("invalidated_reason") or (
                         "用户纠正或修改条件" if structured.get("invalidated") else ""
@@ -933,6 +934,7 @@ def record_external_copilot_turn(
     confirm_result: dict[str, Any] | None = None,
     understanding_card: dict[str, Any] | None = None,
     execution_receipt: dict[str, Any] | None = None,
+    analysis_card: dict[str, Any] | None = None,
     workflow_progress: dict[str, Any] | None = None,
     workflow_id: str | None = None,
     business_focus: dict[str, Any] | None = None,
@@ -951,10 +953,10 @@ def record_external_copilot_turn(
     确认/取消后再带 confirm_result 调本函数，按 (session_id, request_id) 回写
     同轮 assistant 消息的 confirm_request.state/execution_receipt——恢复会话
     时确认卡呈现终态（已确认/已取消；过期由前端按 expires_at 判定）。
-    understanding_card/execution_receipt/workflow_progress/workflow_id/
+    understanding_card/execution_receipt/analysis_card/workflow_progress/workflow_id/
     business_focus/model_participation/action_cards 是 asa_copilot_ask 委托
     载荷经 DSH done 的透传字段：落 structured_json 后恢复会话时理解卡/执行
-    回执/焦点条/模型参与 badge/工作流进度卡仍可重渲染。business_focus 只落
+    回执/分析卡/焦点条/模型参与 badge/工作流进度卡仍可重渲染。business_focus 只落
     消息级 structured，不写 agent_copilot_focus（焦点仲裁仍是 Python 脑职责，
     避免回填绕过置信度仲裁污染焦点状态）。
     """
@@ -1024,6 +1026,8 @@ def record_external_copilot_turn(
             assistant_structured["understanding_card"] = understanding_card
         if isinstance(execution_receipt, dict) and execution_receipt:
             assistant_structured["execution_receipt"] = execution_receipt
+        if isinstance(analysis_card, dict) and analysis_card:
+            assistant_structured["analysis_card"] = analysis_card
         if isinstance(workflow_progress, dict) and workflow_progress:
             assistant_structured["workflow_progress"] = workflow_progress
         if workflow_id:
