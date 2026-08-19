@@ -337,17 +337,19 @@ function apply(ctx) {
     let handle;
     try {
       handle = await createAgent();
+      await handle.agent.whenIdle();
     } catch (error) {
       // 会话碰撞自愈（2026-08-19 实证）：部署重启恰逢在跑轮次时，旧 agent 被取消
       // 会在磁盘留下与新 agent 事件流不匹配的持久化日志，DSH 会话存储拒绝收养
-      // （id collision），此后该会话 id 每轮毫秒级失败。归档陈旧日志并重试一次；
+      // （id collision），此后该会话 id 每轮毫秒级失败。碰撞可能在 create 或
+      // 异步收养（whenIdle）阶段抛出，两处都要兜住。归档陈旧日志并重试一次；
       // 界面历史由 Core 回填承载，DSH 侧仅丢失该线程的工作记忆。
       if (!/id collision/.test(String(error && error.message))) throw error;
       archiveStaleSessionLog(sessionId);
       console.warn(`[asa-resident] session ${sessionId} id collision，已归档陈旧日志并重试`);
       handle = await createAgent();
+      await handle.agent.whenIdle();
     }
-    await handle.agent.whenIdle();
     const entry = { handle, agent: handle.agent, busy: false, evictTimer: null };
     pool.set(sessionId, entry);
     touch(sessionId, entry);
