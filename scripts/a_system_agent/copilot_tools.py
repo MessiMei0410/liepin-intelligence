@@ -35,7 +35,7 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "filter_candidates",
-            "description": "按岗位专用硬性证据模型分级过滤候选池，当前支持机械、软件和电源岗位；未知岗位失败关闭，不套用其他岗位规则。输出 A-核心/A-强/B/C 名单并排除禁挖公司。",
+            "description": "按岗位专用硬性证据模型分级过滤候选池，当前支持机械、软件和电源岗位；未知岗位失败关闭，不套用其他岗位规则。输出 A-核心/A-强/B/C 名单并排除禁挖公司。返回体带 data_as_of 数据时点与 truncated 截断标记：回答引用分级数字/占比时必须声明口径时点，truncated=true 时严禁把 summary 计数当全池口径。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -45,7 +45,7 @@ COPILOT_TOOLS: list[dict[str, Any]] = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "最多返回人数，默认 200",
+                        "description": "最多返回人数，默认 2000（覆盖全池；调小时返回体 truncated=true，计数为截断口径）",
                     },
                     "max_salary_k": {
                         "type": "integer",
@@ -294,7 +294,7 @@ def _safe_query(conn, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
 def execute_filter_candidates(
     db_path: str,
     job_id: int,
-    limit: int = 200,
+    limit: int = 2000,
     max_salary_k: int | None = None,
     cities: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -302,7 +302,12 @@ def execute_filter_candidates(
 
     max_salary_k: 期望月薪上限(K)，超出者归入 D-期望超限。
     cities: 允许的期望城市关键词，不匹配者归入 D-城市不符。
+    limit 默认 2000（与 filter_job_candidates 一致）覆盖全池——旧默认 200 会把
+    大池子的分级计数静默截断（dogfood P1-3：C-弱 180 被报成 134）；返回体始终
+    声明数据时点与截断口径，引用数字时必须带上。
     """
+    from datetime import datetime
+
     from .candidate_pool_filter import filter_job_candidates
     import sqlite3
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -317,7 +322,7 @@ def execute_filter_candidates(
     client = str(jrow["client"]) if jrow is not None else ""
     try:
         result = filter_job_candidates(
-            db_path, job_id, client=client, max_candidates=int(limit or 200),
+            db_path, job_id, client=client, max_candidates=int(limit or 2000),
             max_salary_k=max_salary_k, cities=cities,
         )
     except Exception as exc:
@@ -326,6 +331,7 @@ def execute_filter_candidates(
     grades: dict[str, list[dict[str, Any]]] = {}
     for c in candidates:
         grades.setdefault(c.get("grade") or "未知", []).append(c)
+    truncated = bool(result.get("truncated"))
     return {
         "success": True,
         "data": {
@@ -333,6 +339,12 @@ def execute_filter_candidates(
             "client": client,
             "total": result.get("total") or 0,
             "summary": {g: len(items) for g, items in grades.items()},
+            # 口径声明：分级数字的数据时点 + 是否截断。截断时 summary 只是子集口径，
+            # 回答里必须明说（"截至 HH:MM，分级覆盖前 N/M 人"），不得当作全池占比。
+            "data_as_of": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "truncated": truncated,
+            "returned": int(result.get("returned") or len(candidates)),
+            **({"note": f"分级结果按分数截断：仅覆盖前 {result.get('returned') or len(candidates)}/{result.get('total')} 人，summary 计数为截断口径，引用前请放大 limit 取全量。"} if truncated else {}),
             "groups": [
                 {"grade": g, "label": g, "candidates": items[:50]}
                 for g, items in sorted(grades.items(), key=lambda kv: -len(kv[1]))
