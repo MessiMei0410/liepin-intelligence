@@ -60,6 +60,12 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
   （如候选人名单卡），工具经 `presentationMeta` 挂到 `tool/result` meta（不受 render 16k
   截断影响），常驻服务器转成 SSE `card` 事件，前端合并进 done 渲染名单弹窗并随
   record-turn 回填 Core（恢复会话后卡片仍在）。
+- 轮末对象操作入口（2026-08-19）：`asa_approvals`/`asa_workflow`/`asa_candidates`/`asa_jobs`
+  经 `presentationMeta` 把结果里的业务对象 ID 投到 `tool/result` meta 的 `object_refs`，
+  常驻服务器轮末聚合成 `suggested_actions`（`open_workflow`/`open_candidate`/`open_job`，
+  ≤4、按出现顺序去重）与 `references`（≤8）随 done 下发——「都打开我看下」场景的回答
+  里有可点击入口（打开工作流详情/人选/岗位弹窗），并随 record-turn 回填（恢复会话后
+  操作芯片仍可点击）。
 
 > headless 一次性回退：直接 `dsh --profile asa "<任务>"`（无跨轮记忆）；
 > 常驻服务器（8891）是当前前端 DSH 路径。

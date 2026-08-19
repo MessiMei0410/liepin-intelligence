@@ -2460,6 +2460,14 @@ export interface components {
             action_card?: {
                 [key: string]: unknown;
             } | null;
+            /** Suggested Actions */
+            suggested_actions?: {
+                [key: string]: unknown;
+            }[];
+            /** References */
+            references?: {
+                [key: string]: unknown;
+            }[];
         };
         /** CopilotTurnRecordResponse */
         CopilotTurnRecordResponse: {

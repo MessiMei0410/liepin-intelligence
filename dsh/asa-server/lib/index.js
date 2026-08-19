@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { createObjectRefCollector } from "./object-actions.js";
 
 /**
  * @asa/dsh-asa-server — ASA 常驻 Agent 服务器（resident runner）。
@@ -13,7 +14,10 @@ import { SessionId } from "@deepseek-ai/dsh-session";
  *   POST /turn {message, session_id?} -> SSE 流（text 增量 + card + done），会话复用
  *   GET  /health                     -> {ok}
  * 流式：订阅 agent 会话的 session/event 火线，把 assistant/chunk(text-delta) 实时转成
- * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件；轮结束发 `done`。同 session_id 复用 live agent（多轮记忆）。
+ * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件；轮结束发 `done`。
+ * done 除 session_id/answer/ok/error 外，还聚合本轮工具结果 meta.object_refs 里的业务对象
+ * （asa-tools 投影的工作流/候选人/岗位 ID）为 suggested_actions（操作芯片：打开工作流/
+ * 人选/岗位弹窗，≤4）与 references（对象卡，≤8），空则不携带。同 session_id 复用 live agent（多轮记忆）。
  *
  * v1.3 加固（审计后）：
  * - 事件订阅在 finally 中 dispose，异常路径不再残留监听器（此前会叠加重复推流）。
@@ -192,6 +196,9 @@ function apply(ctx) {
     let answer = "";
     let reason;
     let finished = false;
+    // 本轮业务对象收集器：tool/result meta.object_refs（asa-tools 投影的工作流/
+    // 候选人/岗位 ID）轮末聚合成 suggested_actions/references 随 done 下发。
+    const objectRefs = createObjectRefCollector();
 
     // 客户端断连（前端 abort / 关页）：取消本轮，止损并尽早释放会话队列。
     const onClose = () => {
@@ -234,6 +241,9 @@ function apply(ctx) {
         // 不受 render 16k 截断影响）。前端收到 card 事件后挂到本轮 assistant 消息。
         const card = event.data && event.data.meta && event.data.meta.action_card;
         if (card && typeof card === "object") writeSse(res, "card", card);
+        // 对象操作入口：asa-tools 只读工具把结果里的业务对象 ID 投到 meta.object_refs，
+        // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
+        objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
       }
@@ -248,10 +258,13 @@ function apply(ctx) {
         }),
       );
       await agent.whenIdle();
+      const { suggested_actions, references } = objectRefs.outputs();
       writeSse(res, "done", {
         session_id: sessionId,
         answer,
         ok: reason?.kind === "completed",
+        ...(suggested_actions.length ? { suggested_actions } : {}),
+        ...(references.length ? { references } : {}),
         error: reason?.kind === "error"
           ? reason.error.message
           : reason?.kind === "aborted"

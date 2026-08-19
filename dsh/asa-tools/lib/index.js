@@ -34,6 +34,20 @@ function output() {
   };
 }
 
+// 业务对象引用投影：只读查询结果里涉及的工作流/候选人/岗位，经 presentationMeta
+// 挂到 tool/result 的 meta（完整 JSON 快照，不受 render 16k 截断影响）。常驻服务器
+// 轮末据此聚合 suggested_actions/references，让回答里的对象可点击打开（同 action_card 模式）。
+// 上限 8 条：列表查询可能很长，轮末操作入口只需要前几个主对象。
+const OBJECT_REF_MAX = 8;
+
+function objectRefsMeta(refs) {
+  return { object_refs: (Array.isArray(refs) ? refs : []).filter(Boolean).slice(0, OBJECT_REF_MAX) };
+}
+
+function listItems(value) {
+  return value && typeof value === "object" && Array.isArray(value.items) ? value.items : [];
+}
+
 function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_dashboard",
@@ -53,7 +67,14 @@ function apply(ctx) {
     description:
       "读取 ASA 岗位列表（只读）。返回活跃/在推岗位及其优先级、状态、活跃候选人数。对应 GET /api/v1/jobs。绝不写库。",
     parameters: {},
-    output: output(),
+    output: {
+      ...output(),
+      presentationMeta: (_args, value) => objectRefsMeta(
+        listItems(value).map((item) => item && item.id != null
+          ? { type: "job", id: item.id, label: String(item.title || `岗位 #${item.id}`), subtitle: String(item.client || "") }
+          : null),
+      ),
+    },
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(_args, exec) {
@@ -66,7 +87,14 @@ function apply(ctx) {
     description:
       "读取 ASA 候选人列表（只读）。返回候选人及其当前阶段、岗位、公司、职位。对应 GET /api/v1/candidates。绝不写库。",
     parameters: {},
-    output: output(),
+    output: {
+      ...output(),
+      presentationMeta: (_args, value) => objectRefsMeta(
+        listItems(value).map((item) => item && item.id != null
+          ? { type: "candidate", id: item.id, label: String(item.name || `人选 #${item.id}`), subtitle: String(item.current_company || "") }
+          : null),
+      ),
+    },
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(_args, exec) {
@@ -85,7 +113,20 @@ function apply(ctx) {
         description: "工作流 ID，例如 workflow_ba826dbdccf0。",
       },
     },
-    output: output(),
+    output: {
+      ...output(),
+      presentationMeta: (args, value) => {
+        // id 优先取返回值（value.workflow 是 agent_workflows 行），args 兜底；
+        // label 用目标标题，退化为当前阶段。
+        const workflow = value && typeof value === "object" && value.workflow && typeof value.workflow === "object" ? value.workflow : {};
+        const goal = value && typeof value === "object" && value.goal && typeof value.goal === "object" ? value.goal : {};
+        const id = workflow.workflow_id ?? (value && typeof value === "object" ? value.workflow_id : undefined) ?? args.workflow_id;
+        return objectRefsMeta(id == null || id === "" ? [] : [{
+          type: "workflow", id,
+          label: String(goal.title || workflow.current_stage || "工作流"),
+        }]);
+      },
+    },
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -101,7 +142,20 @@ function apply(ctx) {
       status: { type: "string", description: "审批状态过滤，默认 pending；传空串表示不按状态过滤。" },
       limit: { type: "integer", description: "返回条数上限，默认 100，最大 500。" },
     },
-    output: output(),
+    output: {
+      ...output(),
+      presentationMeta: (_args, value) => objectRefsMeta(
+        // 审批条目归属于工作流：轮末操作入口是打开对应工作流详情弹窗（查看并审批），
+        // approval_id 一并带上供调用方需要时使用。
+        listItems(value).map((item) => item && item.workflow_id
+          ? {
+            type: "workflow", id: item.workflow_id,
+            label: String(item.title || item.goal_title || "工作流审批"),
+            ...(item.approval_id ? { approval_id: item.approval_id } : {}),
+          }
+          : null),
+      ),
+    },
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {

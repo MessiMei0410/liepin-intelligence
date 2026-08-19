@@ -923,14 +923,17 @@ def record_external_copilot_turn(
     source: str = "dsh",
     model: str = "",
     action_card: dict[str, Any] | None = None,
+    suggested_actions: list[dict[str, Any]] | None = None,
+    references: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
     DSH 路径的对话只存在于 DSH 常驻服务器内存，不写 Core；而会话列表/恢复是
     对 agent_copilot_messages 的 rollup，回填 user+assistant 两行即可让外部
     会话出现在任务列表并可刷新恢复。按 request_id 幂等（网络重试/重复提交不
-    产生重复行）。action_card（如候选人名单卡）一并落 structured_json，
-    恢复会话时前端可重渲染卡片。
+    产生重复行）。action_card（如候选人名单卡）与 suggested_actions/references
+    （轮末对象操作入口/对象卡）一并落 structured_json，恢复会话时前端可重渲染
+    卡片且操作芯片仍可点击。
     """
     session_id = str(session_id or "").strip()
     request_id = str(request_id or "").strip()
@@ -962,6 +965,12 @@ def record_external_copilot_turn(
         if isinstance(action_card, dict) and action_card:
             assistant_structured["action_card"] = action_card
             assistant_structured["action_cards"] = [action_card]
+        clean_actions = [dict(item) for item in (suggested_actions or []) if isinstance(item, dict)]
+        if clean_actions:
+            assistant_structured["suggested_actions"] = clean_actions
+        clean_references = [dict(item) for item in (references or []) if isinstance(item, dict)]
+        if clean_references:
+            assistant_structured["references"] = clean_references
         conn.executemany(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)
