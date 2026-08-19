@@ -57,13 +57,13 @@ describe('候选人列表 Candidates', () => {
     expect(screen.queryByText('候选人5')).not.toBeInTheDocument()
   })
 
-  it('点击行、回车与空格都能打开候选人', () => {
+  it('点击行、回车与空格都能打开候选人，并携带当前列表顺序', () => {
     const openCandidate = vi.fn()
     render(<Candidates items={[makeCandidate(7)]} openCandidate={openCandidate} />)
     const row = screen.getByRole('row', { name: /候选人7/ })
 
     fireEvent.click(row)
-    expect(openCandidate).toHaveBeenCalledWith(7)
+    expect(openCandidate).toHaveBeenCalledWith(7, [7])
 
     fireEvent.keyDown(row, { key: 'Enter' })
     expect(openCandidate).toHaveBeenCalledTimes(2)

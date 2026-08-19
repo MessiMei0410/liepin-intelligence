@@ -30,7 +30,7 @@ export function SourcingCandidatesPage({
 }: {
   workflowId: string
   onBack?: () => void
-  onOpenCandidate?: (id: number) => void
+  onOpenCandidate?: (id: number, navIds?: number[]) => void
 }) {
   const PAGE_SIZE = 50
   const [items, setItems] = useState<WorkflowCandidateItem[]>([])
@@ -139,7 +139,7 @@ export function SourcingCandidatesPage({
                   <button
                     className="button"
                     disabled={!onOpenCandidate}
-                    onClick={() => onOpenCandidate?.(candidate.id)}
+                    onClick={() => onOpenCandidate?.(candidate.id, items.map(item => item.id))}
                   >
                     <ExternalLink />
                     查看

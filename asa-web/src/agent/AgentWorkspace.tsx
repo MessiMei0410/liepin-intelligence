@@ -247,7 +247,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
   jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext; templateBusyId?: string;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
   onManageTemplate: (template: AnalysisTemplate) => void; onCreateTemplate: () => void;
-  onWorkbenchAction: (item: WorkbenchItem) => void; onOpenFullObject: (reference: AgentReference) => void;
+  onWorkbenchAction: (item: WorkbenchItem) => void; onOpenFullObject: (reference: AgentReference, navIds?: number[]) => void;
 }) {
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([])
   const [sessionId, setSessionId] = useState(() => localStorage.getItem(ACTIVE_SESSION_KEY) || '')
@@ -1222,12 +1222,12 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     {candidateListDialog && (
       <CandidateListDialog
         data={candidateListDialog}
-        onOpenCandidate={jobCandidateId => {
+        onOpenCandidate={(jobCandidateId, navIds) => {
           const candidate = (candidateListDialog.groups || []).flatMap(group => group.candidates || []).find(item => item.id === jobCandidateId)
           // 暂存名单，详情关闭后恢复（见 candidateListStashRef）。
           candidateListStashRef.current = candidateListDialog
           setCandidateListDialog(null)
-          onOpenFullObject({ type: 'candidate', id: jobCandidateId, label: candidate?.name || '人选' })
+          onOpenFullObject({ type: 'candidate', id: jobCandidateId, label: candidate?.name || '人选' }, navIds)
         }}
         onOpenJob={jobId => {
           // 岗位详情同样是 overlay，同样暂存后关闭。

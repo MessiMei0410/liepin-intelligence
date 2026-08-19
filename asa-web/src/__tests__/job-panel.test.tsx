@@ -179,7 +179,7 @@ describe('JobPanel 岗位详情', () => {
     expect(screen.getByText('30 人')).toBeInTheDocument()
     fireEvent.click(within(list).getByRole('button', { name: '打开候选人 候选人5' }))
     expect(openCandidate).toHaveBeenCalledTimes(1)
-    expect(openCandidate).toHaveBeenCalledWith(5)
+    expect(openCandidate).toHaveBeenCalledWith(5, candidates.map(candidate => candidate.id))
     expect(within(list).getAllByText('S1 待复核')).toHaveLength(30)
   })
 

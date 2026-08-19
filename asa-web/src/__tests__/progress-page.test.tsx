@@ -65,11 +65,11 @@ describe('人选进度 Progress', () => {
     expect(within(screen.getByRole('region', { name: '复试' })).getByText('候选人101')).toBeInTheDocument()
   })
 
-  it('点击候选人卡片打开候选人', () => {
+  it('点击候选人卡片打开候选人，并携带当前看板顺序', () => {
     const openCandidate = vi.fn()
     render(<Progress items={[makeCandidate(7, '初筛')]} openCandidate={openCandidate} />)
     fireEvent.click(screen.getByRole('button', { name: /候选人7/ }))
-    expect(openCandidate).toHaveBeenCalledWith(7)
+    expect(openCandidate).toHaveBeenCalledWith(7, [7])
   })
 
   it('搜索跨字段过滤并联动阶段计数', () => {

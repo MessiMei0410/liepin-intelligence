@@ -38,7 +38,7 @@ function LimitNote({ total, limit, expanded, onToggle, unit = '条' }: {
   )
 }
 
-export function JobPanel({ value, close, openCandidate, changed }: { value: JobDetail; close: () => void; openCandidate: (id: number) => void; changed?: () => void | Promise<void> }) {
+export function JobPanel({ value, close, openCandidate, changed }: { value: JobDetail; close: () => void; openCandidate: (id: number, navIds?: number[]) => void; changed?: () => void | Promise<void> }) {
   const [followupExpanded, setFollowupExpanded] = useState(false)
   const [eventExpanded, setEventExpanded] = useState(false)
   const [experimentExpanded, setExperimentExpanded] = useState(false)
@@ -169,7 +169,7 @@ export function JobPanel({ value, close, openCandidate, changed }: { value: JobD
               ? <div className="aside-empty"><UserRoundSearch /><span>当前岗位还没有人选，可交给 Agent 启动寻访</span></div>
               : <div className="job-candidate-list" aria-label="岗位人选列表">
                   {value.candidates.map(candidate => (
-                    <button key={candidate.id} type="button" onClick={() => openCandidate(candidate.id)} aria-label={`打开候选人 ${candidate.name}`} title={`${candidate.name} · ${candidate.current_company || '公司待补充'} · ${candidate.current_title || '职位待补充'}`}>
+                    <button key={candidate.id} type="button" onClick={() => openCandidate(candidate.id, value.candidates.map(item => item.id))} aria-label={`打开候选人 ${candidate.name}`} title={`${candidate.name} · ${candidate.current_company || '公司待补充'} · ${candidate.current_title || '职位待补充'}`}>
                       <UserRoundSearch />
                       <div><b>{candidate.name}</b><span>{candidate.current_company || '公司待补充'} · {candidate.current_title || '职位待补充'}</span><small className={`tag ${stageTone(candidate.clean_stage || candidate.flow_bucket)}`}>{candidate.clean_stage || candidate.flow_bucket || '待复核'}</small></div>
                       <ChevronRight />

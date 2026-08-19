@@ -9,7 +9,7 @@ export function WorkflowSurface({ value, jobs, close, reload, openCandidate, arc
   jobs: Job[]
   close: () => void
   reload: () => void | Promise<void>
-  openCandidate: (id: number) => void
+  openCandidate: (id: number, navIds?: number[]) => void
   archived: () => void
 }) {
   const [detail, setDetail] = useState<WorkflowDetailSection | null>(null)

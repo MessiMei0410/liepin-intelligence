@@ -1473,7 +1473,7 @@ describe('Agent workspace', () => {
     fireEvent.click(await screen.findByText('张雯', {}, { timeout: 8000 }))
     // 名单关闭并打开详情
     await waitFor(() => expect(screen.queryByText('张雯')).not.toBeInTheDocument())
-    expect(onOpenFullObject).toHaveBeenCalledWith(expect.objectContaining({ type: 'candidate', id: 1203 }))
+    expect(onOpenFullObject).toHaveBeenCalledWith(expect.objectContaining({ type: 'candidate', id: 1203 }), [1203])
     // 详情关闭后名单自动恢复
     fireEvent(window, new CustomEvent(FULL_OBJECT_CLOSED_EVENT))
     expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()

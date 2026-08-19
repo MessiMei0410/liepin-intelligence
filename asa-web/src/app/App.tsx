@@ -61,6 +61,8 @@ export function App() {
   const [dashboard, setDashboard] = useState<Dashboard>()
   const [jobs, setJobs] = useState<Job[]>([])
   const [candidates, setCandidates] = useState<Candidate[]>([])
+  // 候选人详情页"上一位/下一位"的顺序快照，由名单点击行时传入（见 openCandidate）。
+  const [candidateNavIds, setCandidateNavIds] = useState<number[]>([])
   const [job, setJob] = useState<JobDetail>()
   const [candidate, setCandidate] = useState<CandidateDetail>()
   const [workflow, setWorkflow] = useState<Workflow>()
@@ -145,13 +147,24 @@ export function App() {
     return () => { active = false }
   }, [refreshKey, refreshWorkbench])
 
+  // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
+  // dashboard 计数由统一轮询自然收敛。
+  const refreshCandidateList = useCallback(async () => {
+    const refreshId = ++candidatesRefreshRef.current
+    try {
+      const result = await api.allCandidates()
+      if (refreshId === candidatesRefreshRef.current) setCandidates(result.items)
+    } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
+  }, [])
+
   useEffect(() => {
     let active = true
     let refreshing = false
     const refresh = async () => {
       if (!active || refreshing || document.hidden) return
       refreshing = true
-      try { await Promise.all([refreshWorkbench(), probeCore()]) } finally { refreshing = false }
+      // 候选人列表一并轮询：猎聘助手/X-SaaS/Agent 等外部写库的路径不发前端事件，只能靠周期回读收敛。
+      try { await Promise.all([refreshWorkbench(), probeCore(), refreshCandidateList()]) } finally { refreshing = false }
     }
     queueMicrotask(() => void probeCore())
     const timer = window.setInterval(() => void refresh(), 15_000)
@@ -167,17 +180,7 @@ export function App() {
       document.removeEventListener('visibilitychange', onVisible)
       source?.close()
     }
-  }, [refreshWorkbench])
-
-  // R7：候选人变化只增量刷新候选人详情与列表，不再触发 bootstrap/jobs 全量重拉；
-  // dashboard 计数由统一轮询自然收敛。
-  const refreshCandidateList = useCallback(async () => {
-    const refreshId = ++candidatesRefreshRef.current
-    try {
-      const result = await api.allCandidates()
-      if (refreshId === candidatesRefreshRef.current) setCandidates(result.items)
-    } catch { /* 列表刷新失败时保留现状，下一轮再试。 */ }
-  }, [])
+  }, [refreshWorkbench, refreshCandidateList])
 
   const refreshCreatedCandidate = useCallback(async (candidateId: number) => {
     const refreshId = ++candidatesRefreshRef.current
@@ -194,6 +197,9 @@ export function App() {
 
   // Mapping 等入口新建岗位关系后，立即让四主 tab 的岗位/人选数据回读数据库。
   // 普通阶段更新仍走详情增量刷新，不触发这条全量列表路径。
+  // 注意：非新建事件不能在这里补刷新——Mapping 批量入库按人逐个派发事件，中途触发的
+  // allCandidates 会通过 candidatesRefreshRef 挤掉 created 分支的权威回读（e2e 回归实证）。
+  // 外部写库（猎聘助手/X-SaaS 等不发前端事件）由 15s 统一轮询收敛。
   useEffect(() => {
     const onCandidateUpdated = (event: Event) => {
       const detail = (event as CustomEvent<CandidateUpdatedDetail>).detail
@@ -289,9 +295,18 @@ export function App() {
     action?.()
   }
 
-  const openCandidate = async (id: number) => {
-    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); pushHash(`candidate=${id}${isBareDetached() ? '&bare=1' : ''}`) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  // 详情页"上一位/下一位"的顺序快照：仅由候选人名单在点击行那一刻传入；其他入口
+  // （人选进度/岗位面板/工作台/hash 恢复）不传 → 无导航，避免拿陈旧顺序冒充当前名单。
+  const openCandidate = async (id: number, navIds?: number[]) => {
+    setCandidateNavIds(navIds ?? [])
+    try { setJob(undefined); setWorkflow(undefined); setAnalysis(undefined); setAnalysisTrend(undefined); setAnalysisTemplateId(''); setBareList(false); setCandidate((await api.candidate(id)).candidate); pushHash(`candidate=${id}${navIds?.length ? `&nav=${navIds.join(',')}` : ''}${isBareDetached() ? '&bare=1' : ''}`) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
+  const candidateNav = (() => {
+    if (!candidate || !candidateNavIds.length) return undefined
+    const index = candidateNavIds.indexOf(candidate.id)
+    if (index < 0) return undefined
+    return { prevId: candidateNavIds[index - 1], nextId: candidateNavIds[index + 1], index, total: candidateNavIds.length }
+  })()
   const refreshCandidateDetail = async (id: number) => {
     const fresh = (await api.candidate(id)).candidate
     candidateStateRef.current = fresh
@@ -355,7 +370,12 @@ export function App() {
       if (tabId) setTab(tabId)
       if (sourcingCandidatesId) { openSourcingCandidates(sourcingCandidatesId); return }
       if (analysisId) { void openAnalysis(analysisId); return }
-      if (candidateId) { void openCandidate(candidateId); return }
+      if (candidateId) {
+        // 名单顺序经 nav 参数入 hash：刷新/独立详情窗口恢复后仍能按原名单顺序切换上一位/下一位。
+        const navIds = (hash.get('nav') || '').split(',').map(Number).filter(id => Number.isInteger(id) && id > 0)
+        void openCandidate(candidateId, navIds.length ? navIds : undefined)
+        return
+      }
       if (workflowId) { void openWorkflow(workflowId); return }
       if (jobId) { void openJob(jobId); return }
       // 回到无对象的 tab 视图（多为浏览器返回）：清空 overlay，并通知名单暂存恢复。
@@ -518,8 +538,8 @@ export function App() {
     else if (action.type === 'open_workflow') void openWorkflow(action.id)
     else if (action.type === 'open_analysis') void openAnalysis(action.id)
   }
-  const openAgentObject = (reference: AgentReference) => {
-    if (reference.type === 'candidate' || reference.type === 'job_candidate') void openCandidate(Number(reference.id))
+  const openAgentObject = (reference: AgentReference, navIds?: number[]) => {
+    if (reference.type === 'candidate' || reference.type === 'job_candidate') void openCandidate(Number(reference.id), navIds)
     else if (reference.type === 'job') {
       void api.job(Number(reference.id)).then(result => setJob(result.job)).catch(error => setError(error instanceof Error ? error.message : String(error)))
     } else if (reference.type === 'workflow') void openWorkflow(String(reference.id))
@@ -528,10 +548,10 @@ export function App() {
   // 纯净模式（独立窗口，hash 带 bare=1）：只渲染目标页面，不带 Agent 主界面/导航/侧栏。
   if (isBareDetached()) {
     return <div className="shell bare-shell">
-      {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
+      {bareList && <BareCandidateList onOpenCandidate={(id, navIds) => void openCandidate(id, navIds)} />}
       <Suspense fallback={panelFallback}>
         {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
-        {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+        {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} nav={candidateNav} onNavigate={id => void openCandidate(id, candidateNavIds)} />}
         {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
       </Suspense>
       {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
@@ -578,7 +598,7 @@ export function App() {
     </aside>}
     <Suspense fallback={panelFallback}>
       {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
-      {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
+      {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} nav={candidateNav} onNavigate={id => void openCandidate(id, candidateNavIds)} />}
       {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
       {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
       {pendingLeave && <LeaveConfirmDialog dirtyCount={dirtyCount} onConfirm={confirmLeave} onCancel={() => setPendingLeave(undefined)} />}

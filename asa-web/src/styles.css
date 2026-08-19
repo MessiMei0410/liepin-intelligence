@@ -57,6 +57,9 @@
 .candidate-head>.detail-actions{position:static;display:flex;flex:initial;flex-wrap:wrap;justify-content:flex-start;gap:7px;padding-left:46px}
 .candidate-head>.detail-actions .button{white-space:nowrap}
 .candidate-head>.detail-actions .button:disabled{opacity:.5;cursor:default}
+.candidate-nav{display:inline-flex;align-items:center;gap:2px}
+.candidate-nav .icon-btn:disabled{opacity:.35;cursor:default}
+.candidate-nav-index{font-size:11px;color:var(--muted);min-width:38px;text-align:center;font-variant-numeric:tabular-nums}
 .candidate-panel .detail-body{grid-template-columns:minmax(0,1fr) 280px}
 .candidate-panel .detail-body>main{padding:18px 22px 28px}
 .candidate-main-content{width:100%;max-width:860px;margin:0 auto}
