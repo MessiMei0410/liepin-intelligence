@@ -417,3 +417,64 @@ def test_mark_review_passed_imperative_pends_not_create_plan(db_path: Path) -> N
         assert not body.get("goal_id")
         assert not body.get("plan_summary")
     assert _candidate_row(db_path) == ACTIVE_STAGE
+
+
+# ---------------------------------------------------------------------------
+# F2 回归（2026-08-19 DSH 验收）：只读存量筛查请求不得创建计划工作流。
+# 用户对 DSH 说“存量你再筛选下给我名单”，DSH 委托 Copilot 的模型转述文本
+# （“做一轮存量候选人筛查（只读）”）被 turn_decision 误路由 create_plan，
+# 建了 5 步寻访计划工作流（workflow_67e3059d3bfa，计划写着“只读”却有
+# “执行多渠道寻访”步骤）。修复：_is_readonly_pool_review 以“只读/存量”
+# 池内限定为准判定只读名单请求，直走 candidate_pool_filter 名单答案；
+# 执行性寻访请求（“开始新一轮寻访”）不受收敛影响，仍 create_plan。
+# ---------------------------------------------------------------------------
+
+READONLY_JOB_CONTEXT = {"type": "job", "id": 137, "source": "dsh_delegate"}
+
+
+def _table_count(db_path: Path, table: str) -> int:
+    conn = sqlite3.connect(db_path)
+    count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    conn.close()
+    return count
+
+
+def test_readonly_pool_filter_request_returns_list_without_plan(db_path: Path) -> None:
+    """用户原文“存量你再筛选下给我名单”：直出名单，零 goal/零 workflow。"""
+    goals_before = _table_count(db_path, "agent_goals")
+    workflows_before = _table_count(db_path, "agent_workflows")
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        body = _post_message(client, "存量你再筛选下给我名单", READONLY_JOB_CONTEXT)
+        assert not body.get("workflow_id")
+        assert not body.get("goal_id")
+        assert not body.get("plan_summary")
+        assert "名单" in body["answer"]
+        assert "已启动寻访" not in body["answer"]
+        assert "已建立目标" not in body["answer"]
+    assert _table_count(db_path, "agent_goals") == goals_before
+    assert _table_count(db_path, "agent_workflows") == workflows_before
+
+
+def test_dsh_delegated_readonly_screening_never_creates_plan(db_path: Path) -> None:
+    """DSH 委托转述原文形态“做一轮存量候选人筛查（只读）”：走分级名单答案，零计划。"""
+    goals_before = _table_count(db_path, "agent_goals")
+    workflows_before = _table_count(db_path, "agent_workflows")
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        body = _post_message(client, "做一轮存量候选人筛查（只读）", READONLY_JOB_CONTEXT)
+        assert not body.get("workflow_id")
+        assert not body.get("goal_id")
+        assert not body.get("plan_summary")
+        # candidate_pool_filter 分级名单（严格筛选），不是寻访计划步骤。
+        assert "名单" in body["answer"]
+        assert "寻访计划" not in body["answer"]
+    assert _table_count(db_path, "agent_goals") == goals_before
+    assert _table_count(db_path, "agent_workflows") == workflows_before
+
+
+def test_executive_sourcing_request_still_creates_plan(db_path: Path) -> None:
+    """不误伤正常计划创建：执行性寻访请求“开始新一轮寻访”仍走 create_plan。"""
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        body = _post_message(client, "开始新一轮寻访", READONLY_JOB_CONTEXT)
+        assert body.get("workflow_id")
+        assert body.get("goal_id")
+        assert body.get("plan_summary")

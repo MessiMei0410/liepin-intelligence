@@ -504,6 +504,52 @@ def _is_candidate_list_query(message: str) -> bool:
     return True
 
 
+# 只读存量筛查请求（2026-08-19 DSH 验收）：用户对 DSH 说“存量你再筛选下给我
+# 名单”，DSH 委托 Copilot 的文本是模型转述（如“做一轮存量候选人筛查（只读）”），
+# 不含“名单”字面，_is_candidate_list_query 不命中，turn_decision 误路由
+# create_plan 建了 5 步寻访计划工作流（workflow_67e3059d3bfa，计划里写着“只读”
+# 却有“执行多渠道寻访”步骤）。判定以“是否只读/存量”池内限定为准而非动词字面：
+# 含池内限定词 + 只读分析/名单意图词，且无出池执行措辞（触达/外部寻访/发给客户
+# 等）时，视为只读名单请求，直接走候选池名单答案，不建计划工作流。
+_READONLY_SCOPE_MARKERS = (
+    "存量", "在库", "库里", "库内", "池内", "候选池", "人才库",
+    "现有候选", "已有人选",
+)
+_READONLY_ANALYSIS_MARKERS = (
+    "筛查", "筛选", "筛一下", "盘点", "梳理", "汇总", "分析", "名单", "列表",
+    "复核", "评估", "过一遍", "过一下", "挑一下",
+)
+# 硬性出池动作：出现即不是只读请求（无论是否有“只读/存量”字样）。
+_READONLY_HARD_EXCLUSIONS = (
+    "触达", "开聊", "发送", "发给", "联系候选人", "补池",
+    "外部寻访", "发起寻访", "开始寻访", "启动寻访", "执行寻访", "新一轮寻访",
+    "推荐给客户", "提交客户",
+)
+# 软性执行措辞：只在消息没有“只读”字面时否决（不误伤正常计划创建）；
+# 显式标注“只读”的转述文本以只读为准。
+_READONLY_SOFT_EXCLUSIONS = ("计划", "执行", "启动", "开始", "创建")
+
+
+def _is_readonly_pool_review(message: str) -> bool:
+    """判断消息是否为“只读存量筛查”请求（池内筛查/盘点/名单，不建计划）。
+
+    与 _is_candidate_list_query 的区别：后者要求“名单/筛出”等字面，本函数
+    面向 DSH 委托的模型转述文本（“做一轮存量候选人筛查（只读）”），以
+    池内限定词（存量/只读/在库/人才库…）+ 只读分析意图词判定。
+    """
+    text = " ".join(str(message or "").split())
+    if not text or _is_explicit_question(text):
+        return False
+    readonly_tagged = "只读" in text
+    if not readonly_tagged and not any(marker in text for marker in _READONLY_SCOPE_MARKERS):
+        return False
+    if any(token in text for token in _READONLY_HARD_EXCLUSIONS):
+        return False
+    if not readonly_tagged and any(token in text for token in _READONLY_SOFT_EXCLUSIONS):
+        return False
+    return any(marker in text for marker in _READONLY_ANALYSIS_MARKERS)
+
+
 def _requests_grade_filter(message: str) -> bool:
     """判断消息是否请求“分级过滤”（按硬性证据输出 A/B/C 名单）。
 

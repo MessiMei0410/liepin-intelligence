@@ -73,6 +73,7 @@ from .copilot_intent import (
     _is_explicit_question,
     _is_plain_query,
     _is_candidate_list_query,
+    _is_readonly_pool_review,
     _requests_grade_filter,
     _format_candidate_list_answer,
     _build_candidate_list_card,
