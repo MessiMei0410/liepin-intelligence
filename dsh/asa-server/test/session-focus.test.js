@@ -79,7 +79,7 @@ describe("会话焦点随轮次附着", () => {
     }
   });
 
-  it("全程 page 上下文时不注入焦点噪音", async () => {
+  it("全程 page 上下文时不注入焦点噪音（仍带每轮日期锚点，R2-2）", async () => {
     const sent = [];
     const ctx = {
       get(service) {
@@ -98,7 +98,9 @@ describe("会话焦点随轮次附着", () => {
         body: JSON.stringify({ message: "今天有哪些待办", session_id: "asa-focus-2", context: { type: "page", page: "agent" } }),
       }).then((res) => res.text());
       assert.equal(sent.length, 1);
-      assert.equal(sent[0], "今天有哪些待办");
+      assert.match(sent[0], /^\[当前本地时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}（星期[一二三四五六日]，/);
+      assert.ok(!sent[0].includes("当前业务焦点"), "无焦点时不注入焦点锚点");
+      assert.ok(sent[0].endsWith("今天有哪些待办"), "用户原文保留在锚点之后");
     } finally {
       server.close();
     }

@@ -979,6 +979,34 @@ def record_external_copilot_turn(
         context_id = None
     conn = self._connect()
     try:
+
+        def _apply_confirm_result() -> dict[str, Any] | None:
+            """终态回写：只更新同轮 assistant 消息的 confirm_request，不新增行。"""
+            if not (isinstance(confirm_result, dict) and confirm_result.get("state")):
+                return None
+            row = conn.execute(
+                """SELECT id,structured_json FROM agent_copilot_messages
+                   WHERE session_id=? AND role='assistant'
+                     AND json_extract(structured_json,'$.request_id')=? LIMIT 1""",
+                (session_id, request_id),
+            ).fetchone()
+            if not row:
+                return None
+            structured = _loads(row["structured_json"], {})
+            stored = structured.get("confirm_request") if isinstance(structured.get("confirm_request"), dict) else {}
+            stored["state"] = str(confirm_result.get("state") or "")
+            if confirm_result.get("summary"):
+                stored["result_summary"] = str(confirm_result["summary"])
+            structured["confirm_request"] = stored
+            if isinstance(confirm_result.get("execution_receipt"), dict):
+                structured["execution_receipt"] = confirm_result["execution_receipt"]
+            conn.execute(
+                "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
+                (_dumps(structured), row["id"]),
+            )
+            conn.commit()
+            return {"ok": True, "session_id": session_id, "recorded": False, "updated": True}
+
         existing = conn.execute(
             """SELECT 1 FROM agent_copilot_messages
                WHERE session_id=? AND role='user'
@@ -986,29 +1014,9 @@ def record_external_copilot_turn(
             (session_id, request_id),
         ).fetchone()
         if existing:
-            # 终态回写：只更新同轮 assistant 消息的 confirm_request，不新增行。
-            if isinstance(confirm_result, dict) and confirm_result.get("state"):
-                row = conn.execute(
-                    """SELECT id,structured_json FROM agent_copilot_messages
-                       WHERE session_id=? AND role='assistant'
-                         AND json_extract(structured_json,'$.request_id')=? LIMIT 1""",
-                    (session_id, request_id),
-                ).fetchone()
-                if row:
-                    structured = _loads(row["structured_json"], {})
-                    stored = structured.get("confirm_request") if isinstance(structured.get("confirm_request"), dict) else {}
-                    stored["state"] = str(confirm_result.get("state") or "")
-                    if confirm_result.get("summary"):
-                        stored["result_summary"] = str(confirm_result["summary"])
-                    structured["confirm_request"] = stored
-                    if isinstance(confirm_result.get("execution_receipt"), dict):
-                        structured["execution_receipt"] = confirm_result["execution_receipt"]
-                    conn.execute(
-                        "UPDATE agent_copilot_messages SET structured_json=? WHERE id=?",
-                        (_dumps(structured), row["id"]),
-                    )
-                    conn.commit()
-                    return {"ok": True, "session_id": session_id, "recorded": False, "updated": True}
+            updated = _apply_confirm_result()
+            if updated:
+                return updated
             return {"ok": True, "session_id": session_id, "recorded": False}
         user_structured = {"source": source, "request_id": request_id}
         assistant_structured = {
@@ -1057,14 +1065,35 @@ def record_external_copilot_turn(
         # 非 completed 轮（aborted/超时）中断原因：恢复会话时可区分「部分回答」与完整回答。
         if str(turn_error or "").strip():
             assistant_structured["turn_error"] = str(turn_error).strip()[:500]
-        conn.executemany(
+        # 原子落库（dogfood R2-1：前端与服务端回填同 request_id 竞速）：
+        # user 行用 INSERT…WHERE NOT EXISTS 单语句写入，并发重放时后到者
+        # rowcount=0 不再插 assistant 行——两条回填通道谁先谁赢，绝不双份。
+        cursor = conn.execute(
+            """INSERT INTO agent_copilot_messages
+               (session_id,context_type,context_id,role,content,structured_json)
+               SELECT ?,?,?,?,?,?
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM agent_copilot_messages
+                   WHERE session_id=? AND role='user'
+                     AND json_extract(structured_json,'$.request_id')=?
+               )""",
+            (
+                session_id, context_type, context_id, "user",
+                str(message or ""), _dumps(user_structured),
+                session_id, request_id,
+            ),
+        )
+        if not cursor.rowcount:
+            # 并发竞速落败：另一方（前端/asa-server）已落库同一 request_id。
+            updated = _apply_confirm_result()
+            if updated:
+                return updated
+            return {"ok": True, "session_id": session_id, "recorded": False}
+        conn.execute(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)
                VALUES (?,?,?,?,?,?)""",
-            [
-                (session_id, context_type, context_id, "user", str(message or ""), _dumps(user_structured)),
-                (session_id, context_type, context_id, "assistant", str(answer or ""), _dumps(assistant_structured)),
-            ],
+            (session_id, context_type, context_id, "assistant", str(answer or ""), _dumps(assistant_structured)),
         )
         conn.commit()
         return {"ok": True, "session_id": session_id, "recorded": True}

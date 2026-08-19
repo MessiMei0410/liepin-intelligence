@@ -286,6 +286,44 @@ class CopilotRecordTurnTest(AgentDbCase):
         self.assertEqual(detail["messages"][1]["turn_error"], "")
         service.close()
 
+    def test_record_turn_concurrent_replay_records_exactly_once(self) -> None:
+        """前端与服务端回填同 request_id 竞速（dogfood R2-1：asa-server 轮末服务端
+        回填 + 前端 recordDshTurn 并行）：user 行 INSERT…WHERE NOT EXISTS 原子落库，
+        多连接并发提交只有一份 user+assistant——绝不双份。"""
+        import threading
+
+        kwargs = dict(
+            session_id="asa-test-race", request_id="req-race-1",
+            message="并发问句", answer="并发答案",
+            context={"type": "page"}, source="dsh",
+        )
+        results: list[dict] = []
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+            try:
+                results.append(service.record_external_copilot_turn(**kwargs))
+            except Exception as exc:  # noqa: BLE001 测试收集后统一断言
+                errors.append(exc)
+            finally:
+                service.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(sum(1 for result in results if result.get("recorded")), 1)
+        self.assertTrue(all(result.get("ok") for result in results))
+
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        detail = service.get_copilot_session("asa-test-race")
+        self.assertEqual([m["role"] for m in detail["messages"]], ["user", "assistant"])
+        service.close()
+
     def test_delegate_sessions_hidden_from_session_list_but_auditable(self) -> None:
         """孤儿会话治理：::dsh-delegate 派生 session 与遗留 dsh- 前缀 session
         不进会话列表 rollup，但消息仍在库中可审计（详情可按 id 取回）。"""

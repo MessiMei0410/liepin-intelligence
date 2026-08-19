@@ -361,7 +361,9 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   const response = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ message: turn.message, session_id: turn.sessionId, context: turn.context }),
+    // request_id 随轮次上送：asa-server 轮末服务端回填 Core（R2-1）与前端回填
+    // 共用同一幂等键，Core 原子去重、先到先赢——刷新/断网时会话不再整丢。
+    body: JSON.stringify({ message: turn.message, session_id: turn.sessionId, context: turn.context, request_id: turn.requestId }),
     signal,
   })
   if (!response.ok) {

@@ -9,6 +9,8 @@ import { SessionId } from "@deepseek-ai/dsh-session";
 import { createObjectRefCollector } from "./object-actions.js";
 import { delegateDoneFields } from "./copilot-payload.js";
 import { createSubagentTracker } from "./subagent-events.js";
+import { backfillTurnToCore, buildBackfillBody } from "./core-backfill.js";
+import { localDateAnchorText } from "./date-anchor.js";
 
 /**
  * @asa/dsh-asa-server — ASA 常驻 Agent 服务器（resident runner）。
@@ -40,6 +42,13 @@ import { createSubagentTracker } from "./subagent-events.js";
  * - CORS 从 `*` 收紧为白名单回显（Core 8765 + vite dev 5173）。
  * - 会话串行队列在队尾排空后删除条目，Map 不再无界增长。
  * - 优雅停机：SIGTERM/SIGINT 停接新连接、取消在跑轮次、dispose 全部 agent 后退出（10s 硬退兜底）。
+ *
+ * v1.4（dogfood R2）：
+ * - 服务端回填 Core：轮末（completed 与 aborted/超时都）按前端带上来的 request_id
+ *   POST Core record-turn——刷新/关页/断网时 done 到不了前端、前端回填不发生，
+ *   会话不再整丢（Core 按 request_id 原子去重，与前端回填先到先赢）。
+ * - 每轮注入本地日期锚点（lib/date-anchor.js）：模型推算"明天/下周"一律以本机
+ *   本地日期为准，不再依赖 LLM 服务端隐式日期（时区口径不明，曾漂移一天）。
  */
 
 const name = "asa-resident-runner";
@@ -90,6 +99,8 @@ const TOOL_LABELS = {
   asa_approval_preflight: "审批决定预检（发起界面确认）",
   asa_workflow_action_preflight: "工作流动作预检（发起界面确认）",
   asa_resume_backfill: "简历回填预检（发起界面确认）",
+  asa_job_filter_notes: "读取岗位筛选口径便签",
+  asa_job_filter_note_preflight: "岗位筛选口径便签申请（发起界面确认）",
   asa_copilot_ask: "委托 Copilot 做领域分析",
 };
 
@@ -406,7 +417,7 @@ function apply(ctx) {
   }
 
   /** 跑一轮：订阅事件火线实时转 SSE，断连/超时即时 cancel，监听器 finally 回收。 */
-  async function runTurn(req, res, sessionId, message, turnContext) {
+  async function runTurn(req, res, sessionId, message, turnContext, requestId) {
     const entry = await ensureAgent(sessionId);
     entry.busy = true;
     // 显式业务上下文更新会话焦点（page/global 不覆盖既有焦点）。
@@ -416,8 +427,17 @@ function apply(ctx) {
     const firstSeq = agent.session.seq;
     const startedAt = Date.now();
     let answer = "";
+    // 已流式输出的 text 增量累计：中断轮（刷新/断连 cancel）时 assistant/message 可能
+    // 从未落地，done.answer 只剩上一条完整消息——部分答案靠它回填 Core（R2-1）。
+    let partialAnswer = "";
     let reason;
     let finished = false;
+    // 本轮透传给前端的名单卡/写确认请求（tool/result meta 投影）：轮末服务端回填
+    // Core 时随 done 一并落库（与前端 transport 合并进 done 的语义一致）。
+    let lastActionCard = null;
+    let lastConfirmRequest = null;
+    // 轮末 done 载荷快照：服务端回填 Core 用；异常路径（id collision 重试等）为 null 不回填。
+    let donePayload = null;
     // 本轮业务对象收集器：tool/result meta.object_refs（asa-tools 投影的工作流/
     // 候选人/岗位 ID）轮末聚合成 suggested_actions/references 随 done 下发。
     const objectRefs = createObjectRefCollector();
@@ -460,7 +480,10 @@ function apply(ctx) {
       if (event.seq < firstSeq) return;
       if (event.type === "assistant/chunk") {
         const delta = chunkSseDelta(event.data && event.data.chunk);
-        if (delta) deltas.push(delta[0], delta[1]);
+        if (delta) {
+          if (delta[0] === "text") partialAnswer += delta[1];
+          deltas.push(delta[0], delta[1]);
+        }
       } else if (event.type === "assistant/message") {
         const content = event.data && event.data.message && event.data.message.content;
         if (Array.isArray(content)) {
@@ -483,7 +506,10 @@ function apply(ctx) {
         // assistant 消息；收到 confirm_request 事件后渲染确认卡，用户确认后由前端调
         // Core activate + 写端点完成写入。
         deltas.flush();
-        for (const [type, payload] of toolResultSseEvents(event.data)) writeSse(res, type, payload);
+        for (const [type, payload] of toolResultSseEvents(event.data)) {
+          if (type === "confirm_request") lastConfirmRequest = payload;
+          writeSse(res, type, payload);
+        }
         // 工具结果已回、LLM 接续生成：补一条进度，让结果回传到首个 text/thinking
         // 之间的静默段也有状态可见（前端在文本到达前保持 AgentThinking 动画）。
         writeSse(res, "progress", { message: TOOL_RESULT_PROGRESS_MESSAGE });
@@ -491,6 +517,9 @@ function apply(ctx) {
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
         const projectedCard = event.data && event.data.meta && event.data.meta.action_card;
+        if (projectedCard && typeof projectedCard === "object") {
+          lastActionCard = projectedCard;
+        }
         if (projectedCard && projectedCard.type === "candidate_list") {
           sawCandidateListCard = true;
           // 名单卡岗位上下文是最新的明确焦点（「查看名单」后追问默认指这份名单的岗位）。
@@ -543,11 +572,12 @@ function apply(ctx) {
 
     try {
       writeSse(res, "progress", { message: "DSH 编排中…" });
-      // 追问轮注入最近明确焦点作指代锚点（无焦点时原文直发，不引入噪音）。
-      const focusNote = focusNoteText(entry.focus);
+      // 每轮注入本地日期锚点（R2-2：模型不得依赖隐式日期来源推算"明天/下周"），
+      // 追问轮再叠加最近明确焦点作指代锚点（无焦点时只有日期锚点，不引入噪音）。
+      const anchorNotes = [localDateAnchorText(), focusNoteText(entry.focus)].filter(Boolean).join("\n");
       agent.followup(
         createUserMessage({
-          content: [{ type: "text", text: focusNote ? `${focusNote}\n\n${message}` : message }],
+          content: [{ type: "text", text: `${anchorNotes}\n\n${message}` }],
           source: { kind: "user" },
         }),
       );
@@ -595,9 +625,12 @@ function apply(ctx) {
       // 子代理终态快照：本轮派生的子代理（含仍 running 的后台委派）随 done 下发，
       // 前端渲染终态卡片并随 record-turn 回填。
       const subagentRuns = subagents.list();
-      writeSse(res, "done", {
+      const delegateFields = delegateDoneFields(copilotPayload);
+      donePayload = {
         session_id: sessionId,
-        answer,
+        // completed 轮以 assistant/message 的完整答案为准；中断轮退回已流式输出的
+        // 部分文本（用户刷新前在界面上看到的内容），回填 Core 不丢部分答案。
+        answer: reason?.kind === "completed" ? answer : partialAnswer || answer,
         ok: reason?.kind === "completed",
         ...(subagentRuns.length ? { subagents: subagentRuns } : {}),
         ...(suggested_actions.length ? { suggested_actions } : {}),
@@ -605,13 +638,18 @@ function apply(ctx) {
         // Copilot 委托载荷并入 done：understanding_card/execution_receipt/business_focus/
         // model_participation/action_cards/context 原样透传，workflow 原料组装为
         // workflow_progress（buildWorkflowProgress，与 Core bridge 同形）。
-        ...delegateDoneFields(copilotPayload),
+        ...delegateFields,
+        // 工具直投影的名单卡/写确认请求并入 done（前端 transport 此前在 SSE card /
+        // confirm_request 事件上做的合并，服务端回填需要同一份数据）。
+        ...(lastActionCard ? { action_card: lastActionCard } : {}),
+        ...(lastConfirmRequest ? { confirm_request: lastConfirmRequest } : {}),
         error: reason?.kind === "error"
           ? reason.error.message
           : reason?.kind === "aborted"
             ? `turn aborted (${reason.reason?.reason || reason.reason?.kind || "unknown"})`
             : void 0,
-      });
+      };
+      writeSse(res, "done", donePayload);
     } finally {
       finished = true;
       clearTimeout(timeout);
@@ -625,6 +663,19 @@ function apply(ctx) {
       if (pool.has(sessionId)) touch(sessionId, entry);
       // 每轮一行观测日志（session/结果/答案长度/耗时），用于排查截断与卡轮。
       console.log(`[asa-resident] turn session=${sessionId} ok=${reason?.kind === "completed"} reason=${reason?.kind || "unknown"} answer_chars=${answer.length} ms=${Date.now() - startedAt}`);
+      // 服务端回填 Core（dogfood R2-1）：刷新/关页/断网时 done 到不了前端，
+      // 前端回填不会发生——服务端持有轮次完整数据，自己落库（completed 全量 /
+      // 非 completed 最小回填 + turn_error）。幂等键 = 前端经 /turn 带上来的
+      // request_id，Core 按 (session_id, request_id) 原子去重，与前端回填先到先赢。
+      // 请求体没带 request_id（旧版前端 bundle）时跳过，避免双键双份。
+      // 异常路径（id collision 等，donePayload 为 null）不回填——重试轮会回填。
+      if (donePayload && requestId) {
+        const body = buildBackfillBody({
+          sessionId, requestId, message, context: turnContext, done: donePayload,
+        });
+        const persisted = await backfillTurnToCore(body).catch(() => false);
+        if (!persisted) console.warn(`[asa-resident] turn session=${sessionId} 服务端回填 Core 未成功（request_id=${requestId}）`);
+      }
     }
   }
 
@@ -632,15 +683,15 @@ function apply(ctx) {
    *  （DSH 持久化日志的收养是惰性的，create 成功不代表收养成功——2026-08-19
    *  连续三个会话实证 ensureAgent 级兜底接不住）。整轮重试一次：丢弃池内 agent、
    *  归档陈旧日志、重跑。progress 事件在重试时会重复一行，无害。 */
-  async function runTurnHealed(req, res, sessionId, message, turnContext) {
+  async function runTurnHealed(req, res, sessionId, message, turnContext, requestId) {
     try {
-      await runTurn(req, res, sessionId, message, turnContext);
+      await runTurn(req, res, sessionId, message, turnContext, requestId);
     } catch (error) {
       if (!/id collision/.test(String(error && error.message))) throw error;
       console.warn(`[asa-resident] session ${sessionId} id collision（turn 级），丢弃 agent 归档日志并重试`);
       await discardAgent(sessionId);
       archiveStaleSessionLog(sessionId);
-      await runTurn(req, res, sessionId, message, turnContext);
+      await runTurn(req, res, sessionId, message, turnContext, requestId);
     }
   }
 
@@ -670,6 +721,9 @@ function apply(ctx) {
       const sessionId = String(payload.session_id || `asa-${randomUUID()}`);
       // 前端每轮携带的上下文（transport turn.context）：追问轮的焦点来源（P1-2）。
       const turnContext = payload.context && typeof payload.context === "object" && !Array.isArray(payload.context) ? payload.context : {};
+      // 前端生成的轮次幂等键：服务端回填 Core（R2-1）与前端回填共用同一 request_id，
+      // Core 原子去重、先到先赢；缺省（旧前端）时服务端不回填，避免双份。
+      const requestId = String(payload.request_id || "").trim().slice(0, 120);
       if (!message) {
         writeJson(res, req, 400, { ok: false, error: "message is required" });
         return;
@@ -681,7 +735,7 @@ function apply(ctx) {
         ...corsHeaders(req),
       });
       try {
-        await serializeTurn(sessionId, () => runTurnHealed(req, res, sessionId, message, turnContext));
+        await serializeTurn(sessionId, () => runTurnHealed(req, res, sessionId, message, turnContext, requestId));
       } catch (error) {
         writeSse(res, "done", {
           session_id: sessionId,
@@ -740,3 +794,5 @@ function apply(ctx) {
 
 export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey, isIntermediateAnswer, shouldFollowupCandidateList, CANDIDATE_LIST_FOLLOWUP_PROMPT, mergeCopilotPayload, businessFocusOf, focusNoteText };
 export { createSubagentTracker, isSubagentToolCall, subagentSummaryText, subagentTerminalStatus, subagentToolCallLabel } from "./subagent-events.js";
+export { buildBackfillBody, backfillTurnToCore } from "./core-backfill.js";
+export { localDateAnchorText, localTimeZone } from "./date-anchor.js";
