@@ -118,6 +118,22 @@ class ApprovalDecision(WriteEnvelope):
     note: str = ""
 
 
+class ApprovalItemResponse(BaseModel):
+    approval_id: str
+    workflow_id: str
+    goal_id: str
+    risk_level: str = ""
+    title: str = ""
+    status: str
+    created_at: str = ""
+    goal_title: str | None = None
+
+
+class ApprovalListResponse(BaseModel):
+    ok: bool = True
+    items: list[ApprovalItemResponse] = Field(default_factory=list)
+
+
 class CopilotMessage(WriteEnvelope):
     message: str = Field(min_length=1)
     session_id: str = ""
@@ -1397,6 +1413,11 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         if action_name not in actions:
             raise HTTPException(404, "unknown workflow action")
         return idem(f"workflow.{action_name}", body, idempotency_key, "workflow", workflow_id, actions[action_name])
+
+    @app.get("/api/v1/approvals")
+    def approvals(status: str = Query("pending"), limit: int = Query(100, ge=1, le=500)) -> ApprovalListResponse:
+        # 只读审批列表（默认 pending），供 Agent/工作台查询待审批记录；status 传空串表示不按状态过滤。
+        return ApprovalListResponse.model_validate(core.list_approvals(status, limit))
 
     @app.post("/api/v1/approvals/{approval_id}/decision")
     def approval(approval_id: str, body: ApprovalDecision, idempotency_key: str = Header(alias="Idempotency-Key")):

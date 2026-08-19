@@ -9,18 +9,18 @@ DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在�
 
 ## 目录
 
-- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（8 个工具，见下）。
+- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（10 个工具，见下）。
 - `asa-profile/` — `asa` profile 源（headless 一次性）：persona + 12 条业务护栏（`AGENTS.md`）+ 插件装配。
 - `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn`（SSE 流式）+ 会话复用（多轮记忆）。
 - `asa-server-profile/` — `asa-server` profile 源（bundles = `dsh-base` + `@asa/dsh-asa-server`）。
 - （`bridge/` v0 per-turn 子进程桥接已于 2026-08-19 删除——无任何引用，headless 一次性需求用 `dsh --profile asa` 直跑。）
 
-## 工具面（8 个）
+## 工具面（10 个）
 
 | 类 | 工具 | 说明 |
 | --- | --- | --- |
-| 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` | 直读 ASA Core（GET） |
-| 受控写 | `asa_candidate_preflight` / `asa_candidate_commit` / `asa_approval_decision` | preflight→commit + `Idempotency-Key` |
+| 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` / `asa_approvals` | 直读 ASA Core（GET） |
+| 受控写 | `asa_candidate_preflight` / `asa_candidate_commit` / `asa_approval_decision` / `asa_workflow_action` | preflight→commit / 工作流动作（cancel·pause·resume，note 必填）+ `Idempotency-Key` |
 | 领域情报委托 | `asa_copilot_ask` | 转发 `/api/v1/copilot/stream`，取现有 Copilot 富答案 |
 
 ## 快速开始（常驻服务器，推荐）

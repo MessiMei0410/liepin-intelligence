@@ -788,6 +788,29 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin):
         finally:
             conn.close()
 
+    def list_approvals(self, status: str = "pending", limit: int = 100) -> dict[str, Any]:
+        """只读审批列表：默认只返回 pending；status 传空串表示不按状态过滤。"""
+        conn = connect(self.db_path)
+        try:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if status.strip():
+                clauses.append("a.status=?")
+                params.append(status.strip())
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            items = [_row(row) for row in conn.execute(
+                f"""SELECT a.approval_id,a.workflow_id,a.goal_id,a.risk_level,a.title,a.status,a.created_at,
+                           g.title AS goal_title
+                      FROM agent_approvals a
+                      LEFT JOIN agent_goals g ON g.goal_id=a.goal_id
+                      {where}
+                     ORDER BY a.created_at DESC, a.id DESC LIMIT ?""",
+                (*params, min(max(int(limit), 1), 500)),
+            )]
+            return {"ok": True, "items": items}
+        finally:
+            conn.close()
+
     def model_audit(self, limit: int = 50, operation: str = "", status: str = "") -> dict[str, Any]:
         """Recent LLM calls with privacy-safe previews and a compact 24-hour summary."""
         conn = connect(self.db_path)
