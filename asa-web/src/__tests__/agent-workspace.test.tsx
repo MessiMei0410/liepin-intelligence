@@ -1520,6 +1520,52 @@ describe('Agent workspace', () => {
     expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
   })
 
+  it('同一张名单卡随后续轮次重复投影时不重复自动弹窗，常驻入口不受影响', { timeout: 30000 }, async () => {
+    // 2026-08-19 dogfood：DSH 把上一轮名单卡并入后续每条回复的 done，弹窗逐条重复弹出遮挡正文。
+    localStorage.clear()
+    const listCard = {
+      type: 'candidate_list',
+      title: '岗位 137 候选名单',
+      context: { type: 'job', id: 137 },
+      summary: { total: 1, active: 1 },
+      groups: [{ key: 'active', label: '其余可推进候选', candidates: [{ id: 1203, name: '张雯', company: 'ASM中国', title: '高级机械设计工程师', stage: '已触达' }] }],
+    }
+    let turn = 0
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) {
+        turn += 1
+        return streamResponse(
+          `event: context\ndata: {"session_id":"task-repeat-list"}\n\nevent: done\ndata: ${JSON.stringify({
+            ok: true, session_id: 'task-repeat-list', answer: turn === 1 ? '名单如下' : '补充说明',
+            action_cards: [listCard],
+          })}\n\n`,
+        )
+      }
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    // 第一轮：新卡自动弹
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '给我名单' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('关闭名单'))
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+
+    // 第二轮：同一张卡重复投影 → 不再自动弹
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '再补充一点' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.queryByText('补充说明')).toBeTruthy(), { timeout: 8000 })
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+
+    // 常驻「查看完整名单」按钮仍可手动打开
+    fireEvent.click(screen.getAllByRole('button', { name: /查看完整名单/ })[0])
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+  })
+
   it('恢复的历史消息名单只在 action_cards：常驻「查看名单」可打开，候选人引用被抑制', { timeout: 30000 }, async () => {
     localStorage.setItem('asaAgentSessionId', 'task-restored-list')
     const listCard = {

@@ -1,7 +1,7 @@
 import type { AgentMessage } from './sessionModel'
 import type { AgentContext, AgentSubagentRun, AgentTurnResult } from './transport'
 
-type ConversationMessage = AgentMessage & { turnRequestId?: string }
+type ConversationMessage = AgentMessage & { turnRequestId?: string; notice?: string }
 
 export type AgentConversationState = {
   phase: 'idle' | 'restoring' | 'streaming' | 'failed' | 'stopped'
@@ -25,6 +25,9 @@ export type AgentConversationAction =
   | { type: 'turn_thinking'; requestId: string; content: string }
   | { type: 'turn_subagent'; requestId: string; run: AgentSubagentRun }
   | { type: 'turn_done'; requestId: string; result: AgentTurnResult }
+  // 轮后通知（如回填 Core 失败）：按 turnRequestId 挂到本轮 assistant 消息，
+  // 在 done 之后到达也生效——不能走 activeRequestId 守卫（done 已将其清空）。
+  | { type: 'turn_notice'; requestId: string; notice: string }
   | { type: 'turn_failed'; requestId: string; error: string }
   | { type: 'turn_stopped'; requestId: string }
   | { type: 'card_refreshed'; sourceCard: Record<string, unknown>; content: string; action_card: Record<string, unknown> | null }
@@ -40,6 +43,13 @@ export const agentConversationReducer = (
   // 进行中的流式轮次（streaming）不受影响，避免打断生成。
   if (action.type === 'history_prepended') return { ...state, messages: [...action.messages, ...state.messages] }
   if (action.type === 'restore_failed') return { ...initialAgentConversationState, phase: 'failed', error: action.error }
+  // 轮后通知：只按 turnRequestId 定位消息，不看 activeRequestId（done 已清空）。
+  if (action.type === 'turn_notice') return {
+    ...state,
+    messages: state.messages.map(message => message.role === 'assistant' && message.turnRequestId === action.requestId
+      ? { ...message, notice: action.notice }
+      : message),
+  }
   if (action.type === 'turn_started') {
     const retained = action.retry
       ? state.messages.filter(message => message.turnRequestId !== action.requestId)

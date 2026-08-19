@@ -13,6 +13,8 @@ import { useDialogFocus } from '../shared/useDialogFocus'
 import { DialogModal } from '../shared/Dialog'
 import { CANDIDATE_UPDATED_EVENT, CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { updateCandidateListDialogData } from './candidateListDialogUpdate'
+import { shouldAutoOpenCandidateList } from './candidateListCardSignature'
+import { plainTextPreview } from './agentTextSanitize'
 import { FULL_OBJECT_CLOSED_EVENT } from './navigation'
 import { useCandidateListUpdates } from './useCandidateListUpdates'
 import { agentConversationReducer, initialAgentConversationState } from './conversationState'
@@ -571,8 +573,21 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
           // 查询型名单直答：自动弹出完整名单弹窗（非消息内嵌卡）。
           // DSH 委托轮名单卡在 action_cards 数组里（无单卡 action_card），同一入口派生。
+          // 只对"新卡"自动弹：DSH 会把上一轮名单卡并入后续 done（卡片携带语义），同一
+          // 张卡随每条新回复重复到达，2026-08-19 dogfood 逐条回复重复弹窗遮挡正文。
+          // 与消息流里最近一张名单卡比签名，同卡/历史恢复不弹；常驻「查看名单」按钮不受影响。
           const doneListCard = candidateListCardOf(event.data)
-          if (doneListCard) setCandidateListDialog(doneListCard)
+          if (doneListCard) {
+            const previousListCard = [...messages].reverse().reduce<CandidateListCardData | undefined>(
+              (found, message) => found || (message.role === 'assistant' ? candidateListCardOf(message) : undefined),
+              undefined,
+            )
+            if (shouldAutoOpenCandidateList(previousListCard, doneListCard)) setCandidateListDialog(doneListCard)
+          }
+        } else if (event.type === 'persist_failed') {
+          // 回填 Core 重试后仍失败（transport 本地合成事件）：在本轮 assistant 消息下
+          // 渲染可见提示——不阻断使用，也不影响本轮答案展示。
+          dispatch({ type: 'turn_notice', requestId: turn.requestId, notice: event.data.message })
         } else if (event.type === 'card') {
           // DSH 透传的结构化卡片：transport 已合并进 done（action_card），这里不单独处理。
         } else if (event.type === 'confirm_request') {
@@ -1122,6 +1137,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           {message.role === 'assistant' && !message.invalidated && !message.pending_intent && <SuggestedActionBar actions={message.suggested_actions} busy={structuredActionBusy} onAction={action => void runStructuredAction(action)}/>}
           {message.role === 'assistant' && <ExecutionReceipt receipt={message.execution_receipt}/>}
           {message.role === 'assistant' && interactionError && index === messages.length - 1 && <p className="agent-card-error" role="alert">{interactionError}</p>}
+          {message.role === 'assistant' && message.notice && <p className="agent-card-error" role="alert">{message.notice}</p>}
           {message.role === 'assistant' && message.action_card && (message.action_card as SourcingResultCardData).type === 'sourcing_result' && (
             <SourcingResultCard
               data={message.action_card as SourcingResultCardData}
@@ -1194,7 +1210,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
       <ModelAuditPanel open={modelAuditOpen} onClose={() => setModelAuditOpen(false)}/>
     </section>
     <aside className={`agent-task-rail ${historyOpen ? 'open' : ''} ${taskRailCollapsed ? 'collapsed' : ''}`} aria-label="任务历史">{taskRailCollapsed ? <span className="agent-rail-collapsed-wrap">{sessions.length > 0 && <span className="agent-rail-badge" aria-label={`${sessions.length} 个任务`}>{sessions.length > 99 ? '99+' : sessions.length}</span>}<button className="icon-btn agent-rail-reopen" title="显示任务栏" aria-label="显示任务栏" onClick={() => setRailCollapsed(false)}><PanelRightOpen/></button></span> : <><header><div><History/><b>任务{sessions.length > 0 ? `（${sessions.length}）` : ''}</b></div><div><button className="icon-btn" title="归档全部任务" aria-label="归档全部任务" onClick={() => { setBulkArchiveError(''); setBulkArchiveOpen(true); setArchiveConfirmId(''); setRenamingId('') }}><Archive/></button><button className="icon-btn agent-rail-collapse" title="隐藏任务栏" aria-label="隐藏任务栏" onClick={() => setRailCollapsed(true)}><PanelRightClose/></button><button className="icon-btn agent-history-close" aria-label="关闭任务历史" onClick={() => setHistoryOpen(false)}><X/></button></div></header><label className="agent-task-search"><Search/><input aria-label="搜索任务" value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder="搜索任务"/></label>{taskError && <p className="agent-task-error">{taskError}</p>}<div>{visibleSessions.map(item => <article key={item.session_id} className={item.session_id === sessionId ? 'active' : ''} onContextMenu={event => { if (renamingId !== item.session_id) { event.preventDefault(); const menuWidth = 224; const menuHeight = 156; setTaskMenu({ sessionId: item.session_id, x: Math.max(4, Math.min(event.clientX, window.innerWidth - menuWidth)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - menuHeight)) }) } }}>
-      {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{item.preview}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></button>}
+      {renamingId === item.session_id ? <form aria-label="重命名任务" onSubmit={event => void renameTask(event, item)}><input aria-label="任务名称" value={renameValue} onChange={event => setRenameValue(event.target.value)} autoFocus/><button className="button" type="submit" disabled={taskBusy === item.session_id}>保存</button></form> : <button className="agent-task-main" onClick={() => void restoreSession(item.session_id)}><b>{item.title}</b><span>最近：{plainTextPreview(item.preview)}</span><small>{item.message_count} 条消息{relativeTime(item.updated_at) && ` · ${relativeTime(item.updated_at)}`}</small></button>}
       <div className="agent-task-actions"><button className="icon-btn" disabled={!!taskBusy} aria-label={`重命名任务：${item.title}`} title="重命名任务" onClick={() => { setRenamingId(item.session_id); setRenameValue(item.title); setArchiveConfirmId(''); setTaskError('') }}><Pencil/></button>{archiveConfirmId === item.session_id ? <button className="button danger" disabled={taskBusy === item.session_id} aria-label={`确认归档任务：${item.title}`} onClick={() => void archiveTask(item)}>确认归档</button> : <button className="icon-btn" disabled={!!taskBusy} aria-label={`归档任务：${item.title}`} title="归档任务" onClick={() => { setArchiveConfirmId(item.session_id); setRenamingId(''); setTaskError('') }}><Archive/></button>}</div>
     </article>)}{!visibleSessions.length && <p>{taskQuery ? '没有匹配任务' : '暂无历史任务'}</p>}</div></>}</aside>
     {taskMenu && <div className="agent-task-menu-backdrop" role="presentation" onClick={() => setTaskMenu(undefined)} onContextMenu={event => { event.preventDefault(); setTaskMenu(undefined) }}>
