@@ -52,6 +52,48 @@ describe('Agent conversation state machine', () => {
     expect(done.messages[1].content).toBe('结论如下')
   })
 
+  it('turn_subagent 按 run.id 归并流式更新；turn_done 的 subagents 快照覆盖流式聚合', () => {
+    const streaming = agentConversationReducer(initialAgentConversationState, {
+      type: 'turn_started', requestId: 'request-1', message: '背调这两个人', context: { type: 'page' }, retry: false,
+    })
+    const s1 = agentConversationReducer(streaming, {
+      type: 'turn_subagent', requestId: 'request-1', run: { id: 'run-1', label: '背调甲', status: 'running' },
+    })
+    const s2 = agentConversationReducer(s1, {
+      type: 'turn_subagent', requestId: 'request-1', run: { id: 'run-2', label: '背调乙', status: 'running' },
+    })
+    expect(s2.messages[1].subagents).toEqual([
+      { id: 'run-1', label: '背调甲', status: 'running' },
+      { id: 'run-2', label: '背调乙', status: 'running' },
+    ])
+    // end 事件按 id 归并更新（label 缺省时保留 start 的 label）
+    const s3 = agentConversationReducer(s2, {
+      type: 'turn_subagent', requestId: 'request-1', run: { id: 'run-1', label: '', status: 'done', summary: '甲已核实' },
+    })
+    expect(s3.messages[1].subagents?.[0]).toEqual({ id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' })
+
+    // 非本轮 request 的 subagent 事件被忽略
+    const foreign = agentConversationReducer(s3, {
+      type: 'turn_subagent', requestId: 'request-x', run: { id: 'run-9', label: '不该出现', status: 'running' },
+    })
+    expect(foreign.messages[1].subagents).toHaveLength(2)
+
+    // done 快照（run-1 完成、run-2 仍 running）覆盖流式聚合
+    const done = agentConversationReducer(s3, {
+      type: 'turn_done', requestId: 'request-1', result: {
+        ok: true, session_id: 'task-1', answer: '背调结果如下',
+        subagents: [
+          { id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' },
+          { id: 'run-2', label: '背调乙', status: 'running' },
+        ],
+      },
+    })
+    expect(done.messages[1].subagents).toEqual([
+      { id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' },
+      { id: 'run-2', label: '背调乙', status: 'running' },
+    ])
+  })
+
   it('turn_failed 清空 activeRequestId，迟到事件不再改动状态', () => {
     const streaming = agentConversationReducer(initialAgentConversationState, {
       type: 'turn_started', requestId: 'request-1', message: '继续推进', context: { type: 'job', id: 154 }, retry: false,

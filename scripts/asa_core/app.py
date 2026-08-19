@@ -246,6 +246,8 @@ class CopilotMessageResponse(BaseModel):
     # DSH 脑写确认请求（preflight 申请投影）：恢复会话时重渲染确认卡终态。
     confirm_request: dict[str, Any] | None = None
     model_participation: dict[str, Any] | None = None
+    # DSH 子代理运行终态：恢复会话时重渲染「子代理执行」卡片。
+    subagents: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str | None = None
 
 
@@ -294,6 +296,9 @@ class CopilotTurnRecordRequest(BaseModel):
     business_focus: dict[str, Any] | None = None
     model_participation: dict[str, Any] | None = None
     action_cards: list[dict[str, Any]] = Field(default_factory=list)
+    # DSH 子代理运行终态（asa-server SSE subagent 事件聚合）：恢复会话时重渲染
+    # 「子代理执行」卡片。元素形态 {id, label, status: running|done|failed|stopped, summary?}。
+    subagents: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CopilotTurnRecordResponse(BaseModel):
@@ -1167,6 +1172,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             business_focus=body.business_focus,
             model_participation=body.model_participation,
             action_cards=body.action_cards,
+            subagents=body.subagents,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "record failed")

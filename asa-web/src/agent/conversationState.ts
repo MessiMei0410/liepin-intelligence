@@ -1,5 +1,5 @@
 import type { AgentMessage } from './sessionModel'
-import type { AgentContext, AgentTurnResult } from './transport'
+import type { AgentContext, AgentSubagentRun, AgentTurnResult } from './transport'
 
 type ConversationMessage = AgentMessage & { turnRequestId?: string }
 
@@ -23,6 +23,7 @@ export type AgentConversationAction =
   | { type: 'turn_started'; requestId: string; message: string; context: AgentContext; retry: boolean; continuation?: boolean }
   | { type: 'turn_text'; requestId: string; content: string }
   | { type: 'turn_thinking'; requestId: string; content: string }
+  | { type: 'turn_subagent'; requestId: string; run: AgentSubagentRun }
   | { type: 'turn_done'; requestId: string; result: AgentTurnResult }
   | { type: 'turn_failed'; requestId: string; error: string }
   | { type: 'turn_stopped'; requestId: string }
@@ -90,6 +91,21 @@ export const agentConversationReducer = (
       ? { ...message, thinking: (message.thinking || '') + action.content }
       : message),
   }
+  // DSH 子代理运行（SSE subagent 事件）：按 run.id 归并到本轮 assistant 消息的
+  // subagents 数组，流式更新卡片状态（running→done/failed/stopped）。
+  if (action.type === 'turn_subagent') return {
+    ...state,
+    messages: state.messages.map(message => {
+      if (message.role !== 'assistant' || message.turnRequestId !== action.requestId) return message
+      const existing = message.subagents || []
+      const index = existing.findIndex(run => run.id === action.run.id)
+      // end 增量不带 label（asa-server 只在 start 发）：归并时保留 start 的描述。
+      const subagents = index >= 0
+        ? existing.map((run, i) => (i === index ? { ...run, ...action.run, label: action.run.label || run.label } : run))
+        : [...existing, action.run]
+      return { ...message, subagents }
+    }),
+  }
   if (action.type === 'turn_done') {
     const revokedIds = new Set(
       (action.result.revoked_actions || []).flatMap(item => [
@@ -132,6 +148,8 @@ export const agentConversationReducer = (
           workflow_progress: action.result.workflow_progress,
           workflow_id: action.result.workflow_id, pending_intent: action.result.pending_intent,
           action_card: action.result.action_card, confirm_request: action.result.confirm_request,
+          // 子代理终态快照：done 携带时覆盖流式聚合（含轮末仍 running 的后台委派）。
+          subagents: action.result.subagents || message.subagents,
           // 复数卡片随轮保存：DSH 委托轮 done 只带 action_cards 不带 action_card，
           // 常驻「查看名单」按钮/自动弹窗/引用抑制都要能从数组里找到 candidate_list。
           action_cards: action.result.action_cards,

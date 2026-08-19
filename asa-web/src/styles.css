@@ -618,6 +618,22 @@ body{background:var(--bg)}
 .agent-thinking-block[open]>summary::before{transform:rotate(90deg)}
 .agent-thinking-block.streaming>summary{color:#4774b8}
 .agent-thinking-body{max-height:180px;overflow:auto;padding:0 10px 8px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;font-size:10.5px;color:#6e756c}
+/* DSH 子代理执行卡片：折叠态一行摘要，展开列出各子代理描述+状态+摘要 */
+.agent-subagent-block{margin:0 0 8px;border:1px solid var(--line);border-radius:7px;background:#f6f7f9;font-size:11px;color:#5d6470}
+.agent-subagent-block>summary{padding:6px 10px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;color:#676d77;user-select:none;font-size:10.5px}
+.agent-subagent-block>summary::-webkit-details-marker{display:none}
+.agent-subagent-block>summary::before{content:"";width:0;height:0;border-left:4px solid currentColor;border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;transition:transform .15s ease}
+.agent-subagent-block[open]>summary::before{transform:rotate(90deg)}
+.agent-subagent-block.streaming>summary{color:#4774b8}
+.agent-subagent-list{list-style:none;margin:0;padding:0 10px 8px;display:grid;gap:6px}
+.agent-subagent-item{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;align-items:baseline;font-size:10.5px;line-height:1.5}
+.agent-subagent-status{grid-row:span 2;display:inline-block;padding:1px 6px;border-radius:4px;font-size:9.5px;white-space:nowrap;background:#e3e7ee;color:#5d6470}
+.agent-subagent-status.running{background:#dbe7f8;color:#2f5f9e}
+.agent-subagent-status.done{background:#dff0e2;color:#2f7a3d}
+.agent-subagent-status.failed{background:#f7e1de;color:#b03a2e}
+.agent-subagent-status.stopped{background:#ece5d4;color:#8a6d1f}
+.agent-subagent-label{color:#454b55;overflow-wrap:anywhere}
+.agent-subagent-summary{grid-column:2;color:#6e756c;overflow-wrap:anywhere;white-space:pre-wrap}
 .progress-summary{padding:2px 2px 14px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 .agent-home-band>header>span{margin-left:auto;color:var(--muted);font-size:9.5px}.agent-home-band>button.agent-home-more{min-height:36px;display:flex;justify-content:center;color:#2459a9;font-size:10px}
 /* S6 判人评估可读性：加载态 status、长文本/长引用换行、证据按维度分组 */
@@ -1625,6 +1641,16 @@ button:disabled{cursor:not-allowed;opacity:.58}
 :root[data-theme="dark"] .agent-thinking-block>summary{color:var(--muted)}
 :root[data-theme="dark"] .agent-thinking-block.streaming>summary{color:#8ab4f8}
 :root[data-theme="dark"] .agent-thinking-body{color:var(--muted)}
+:root[data-theme="dark"] .agent-subagent-block{background:var(--surface);border-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .agent-subagent-block>summary{color:var(--muted)}
+:root[data-theme="dark"] .agent-subagent-block.streaming>summary{color:#8ab4f8}
+:root[data-theme="dark"] .agent-subagent-status{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .agent-subagent-status.running{background:#1d3350;color:#8ab4f8}
+:root[data-theme="dark"] .agent-subagent-status.done{background:#1e3a26;color:#7bc78c}
+:root[data-theme="dark"] .agent-subagent-status.failed{background:#42251f;color:#e8927c}
+:root[data-theme="dark"] .agent-subagent-status.stopped{background:#3a3018;color:#d3b25c}
+:root[data-theme="dark"] .agent-subagent-label{color:var(--text)}
+:root[data-theme="dark"] .agent-subagent-summary{color:var(--muted)}
 :root[data-theme="dark"] .agent-jump-bottom{background:var(--surface);border-color:var(--line);color:var(--focus)}
 :root[data-theme="dark"] .agent-jump-bottom:hover{border-color:#4f76ad;background:var(--surface-sub)}
 :root[data-theme="dark"] .agent-context-conflict,:root[data-theme="dark"] .agent-page-context-conflict{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}

@@ -2420,6 +2420,10 @@ export interface components {
             model_participation?: {
                 [key: string]: unknown;
             } | null;
+            /** Subagents */
+            subagents?: {
+                [key: string]: unknown;
+            }[];
             /** Created At */
             created_at?: string | null;
         } & {
@@ -2667,6 +2671,10 @@ export interface components {
             } | null;
             /** Action Cards */
             action_cards?: {
+                [key: string]: unknown;
+            }[];
+            /** Subagents */
+            subagents?: {
                 [key: string]: unknown;
             }[];
         };
