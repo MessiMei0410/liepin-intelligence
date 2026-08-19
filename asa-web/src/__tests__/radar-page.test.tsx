@@ -4,9 +4,17 @@ import { RadarPage } from '../pages/Radar'
 import type { Job } from '../api'
 import { mockResponse } from './helpers'
 
+// 榜单日期默认取今天：避免陈旧告警横幅（>7 天未扫描时展示）干扰既有断言；
+// 陈旧提示由专门的用例覆盖。
+const todayIso = () => {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
 const scanPayload = {
   radar_scan: {
-    scan_date: '2026-08-05',
+    scan_date: todayIso(),
     stats: {},
     signals: [{
       company: '示例科技',
@@ -126,8 +134,21 @@ describe('人才雷达页面', () => {
     expect(activateAttempts).toBe(2)
   })
 
-  it('空榜单给出空态说明并支持重新加载', async () => {
-    let attempts = 0
+  it('榜单超过 7 天未更新时显示陈旧提示而非静默过期', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({
+      radar_scan: { ...scanPayload.radar_scan, scan_date: '2026-07-27' },
+    })))
+
+    render(<RadarPage jobs={jobs} />)
+
+    expect(await screen.findByText(/1\. 示例科技/)).toBeInTheDocument()
+    const warning = screen.getByRole('status')
+    expect(warning).toHaveTextContent(/榜单已 \d+ 天未更新/)
+    expect(warning).toHaveTextContent('周度自动扫描当前未在运行')
+    expect(screen.getByText(/榜单（2026-07-27，已过期）/)).toBeInTheDocument()
+  })
+
+  it('空榜单给出空态说明并支持重新加载', async () => {    let attempts = 0
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => {
       attempts += 1
       return mockResponse(attempts === 1 ? { radar_scan: { ...scanPayload.radar_scan, ranking: [] } } : scanPayload)

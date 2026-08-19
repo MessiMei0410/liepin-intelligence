@@ -131,13 +131,21 @@ export function RadarPage({ jobs }: { jobs: Job[] }) {
   </div>
   if (!scan) return <div className="empty" role="status">正在读取本周人才流动雷达榜单…</div>
   const ranking = scan.ranking || []
+  // 数据陈旧可见提示（P10）：周度扫描未运行时榜单静默停留旧日期，这里显式告警，
+  // 不再让"本周榜单"悄无声息地过期。扫描日期距今超过 7 天即视为陈旧。
+  const scanTimestamp = new Date(scan.scan_date.includes('T') ? scan.scan_date : `${scan.scan_date}T00:00:00`).getTime()
+  const scanAgeDays = Number.isFinite(scanTimestamp) ? Math.floor((Date.now() - scanTimestamp) / 86_400_000) : 0
+  const scanStale = scanAgeDays > 7
   const signalsByCompany = (scan.signals || []).reduce<Record<string, RadarSignal[]>>((acc, signal) => {
     (acc[signal.company] ||= []).push(signal); return acc
   }, {})
 
   return <div>
+    {scanStale && <p role="status" className="radar-stale-warning" style={{ margin: '0 0 12px', padding: '9px 10px', background: 'var(--amber-soft, #fff5d6)', color: 'var(--amber, #8a6500)', borderRadius: 6, fontSize: 12, lineHeight: 1.6 }}>
+      榜单已 {scanAgeDays} 天未更新：周度自动扫描当前未在运行，以下信号截至 {scan.scan_date}，可能已过时。恢复扫描后榜单会自动刷新。
+    </p>}
     <p style={{ color: 'var(--muted, #6b7a72)', margin: '0 0 12px' }}>
-      本周榜单（{scan.scan_date}）：信号全部来自公开信息，「可能意味着」是推测，仅供顾问本人判断；系统不自动触达任何人选。
+      {scanStale ? `榜单（${scan.scan_date}，已过期）` : `本周榜单（${scan.scan_date}）`}：信号全部来自公开信息，「可能意味着」是推测，仅供顾问本人判断；系统不自动触达任何人选。
     </p>
     {notice && <div className="toast" role="status" style={{ position: 'static', marginBottom: 12 }}>{notice}</div>}
     {actionError && <div className="toast" role="alert" style={{ position: 'static', marginBottom: 12 }}>{actionError}</div>}
