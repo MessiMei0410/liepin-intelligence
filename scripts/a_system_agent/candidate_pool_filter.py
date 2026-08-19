@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime
 from typing import Any
 
 # 简历原文硬性证据关键词（按岗位类型可扩展；机械/精密设备岗默认集）
@@ -453,7 +454,18 @@ def filter_job_candidates(
         })
 
     results.sort(key=lambda x: -x["score"])
-    return {"job_id": job_id, "client": client, "total": len(results), "candidates": results[:max_candidates]}
+    capped = results[:max_candidates]
+    return {
+        "job_id": job_id,
+        "client": client,
+        "total": len(results),
+        "candidates": capped,
+        # 截断口径声明（dogfood P1-3：total 是全量分级人数，candidates 可能被
+        # max_candidates 截断；消费方引用分级数字/占比时必须知道是否截断，
+        # 否则截断子集的计数会被当成全池口径——C-弱 180 被报成 134 的根因）。
+        "returned": len(capped),
+        "truncated": len(capped) < len(results),
+    }
 
 
 def format_grade_list(result: dict[str, Any]) -> str:
@@ -468,6 +480,16 @@ def format_grade_list(result: dict[str, Any]) -> str:
     review_count = sum(1 for c in candidates if c.get("grade") in review_grades)
     excluded_count = sum(1 for c in candidates if c.get("grade") in excluded_grades)
     lines = [f"## 严格筛选名单（候选池共 {result['total']} 人）"]
+    # 口径声明（dogfood P1-3）：数字必须带数据时点与覆盖范围，截断时明确警告，
+    # 避免"回答里的分级数字和名单卡对不上"。
+    if result.get("truncated"):
+        lines.append(
+            f"数据口径：{datetime.now():%Y-%m-%d %H:%M} 实时计算；⚠️ 名单按分级分数截断，"
+            f"仅覆盖前 {result.get('returned') or len(candidates)}/{result['total']} 人，"
+            "各级人数为截断口径，引用占比前请先放大 max_candidates 取全量。"
+        )
+    else:
+        lines.append(f"数据口径：{datetime.now():%Y-%m-%d %H:%M} 实时计算，分级覆盖全池。")
     lines.append(
         f"可推进 {review_count} 人（仅 A/B 级）；已排除 {excluded_count} 人（C/D/U 及明确排除证据）。"
     )

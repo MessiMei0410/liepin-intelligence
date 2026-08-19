@@ -93,6 +93,26 @@ const TOOL_LABELS = {
   asa_copilot_ask: "委托 Copilot 做领域分析",
 };
 
+// 会话业务焦点（dogfood P1-2：名单轮后追问"前 3 人精读"被答成另一个岗位 137→142）。
+// 前端每轮带 turn.context，但 /turn 此前完全不消费，模型只能靠会话记忆猜指代。
+// 焦点只被显式信号更新：前轮携带的业务上下文、本轮名单卡/委托载荷的岗位上下文；
+// page/global 不覆盖既有焦点。追问轮把焦点作为锚点注入 agent 可见文本。
+function businessFocusOf(context) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
+  const type = String(context.type || "");
+  if (type !== "job" && type !== "candidate") return null;
+  const id = Number(context.id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const label = String(context.label || context.title || context.job || context.candidate || "");
+  return { type, id, label };
+}
+
+function focusNoteText(focus) {
+  if (!focus) return "";
+  const kind = focus.type === "job" ? "岗位" : "候选人";
+  return `[当前业务焦点：${kind} #${focus.id}${focus.label ? `（${focus.label}）` : ""}。追问里的"这/那/前 N 人/他"等指代默认锚定该焦点，除非用户明确切换到别的对象]`;
+}
+
 function corsHeaders(req) {
   const headers = {
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -386,9 +406,12 @@ function apply(ctx) {
   }
 
   /** 跑一轮：订阅事件火线实时转 SSE，断连/超时即时 cancel，监听器 finally 回收。 */
-  async function runTurn(req, res, sessionId, message) {
+  async function runTurn(req, res, sessionId, message, turnContext) {
     const entry = await ensureAgent(sessionId);
     entry.busy = true;
+    // 显式业务上下文更新会话焦点（page/global 不覆盖既有焦点）。
+    const incomingFocus = businessFocusOf(turnContext);
+    if (incomingFocus) entry.focus = incomingFocus;
     const agent = entry.agent;
     const firstSeq = agent.session.seq;
     const startedAt = Date.now();
@@ -468,13 +491,21 @@ function apply(ctx) {
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
         const projectedCard = event.data && event.data.meta && event.data.meta.action_card;
-        if (projectedCard && projectedCard.type === "candidate_list") sawCandidateListCard = true;
+        if (projectedCard && projectedCard.type === "candidate_list") {
+          sawCandidateListCard = true;
+          // 名单卡岗位上下文是最新的明确焦点（「查看名单」后追问默认指这份名单的岗位）。
+          const cardFocus = businessFocusOf(projectedCard.context);
+          if (cardFocus) entry.focus = { ...cardFocus, label: cardFocus.label || String(projectedCard.title || "") };
+        }
         // Copilot 委托载荷：轮末并入 done（前端按 Copilot 同形字段渲染）。
         // tool/result data 没有顶层 name（name 在 tool/call 上）；copilot_payload
         // 只有 asa_copilot_ask 投影，凭键存在即可归属。
         const delegatePayload = event.data && event.data.meta && event.data.meta.copilot_payload;
         if (delegatePayload && typeof delegatePayload === "object") {
           copilotPayload = mergeCopilotPayload(copilotPayload, delegatePayload);
+          // 委托轮的业务上下文同样是明确焦点信号。
+          const delegateFocus = businessFocusOf(delegatePayload.context);
+          if (delegateFocus) entry.focus = delegateFocus;
         }
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
@@ -512,9 +543,11 @@ function apply(ctx) {
 
     try {
       writeSse(res, "progress", { message: "DSH 编排中…" });
+      // 追问轮注入最近明确焦点作指代锚点（无焦点时原文直发，不引入噪音）。
+      const focusNote = focusNoteText(entry.focus);
       agent.followup(
         createUserMessage({
-          content: [{ type: "text", text: message }],
+          content: [{ type: "text", text: focusNote ? `${focusNote}\n\n${message}` : message }],
           source: { kind: "user" },
         }),
       );
@@ -599,15 +632,15 @@ function apply(ctx) {
    *  （DSH 持久化日志的收养是惰性的，create 成功不代表收养成功——2026-08-19
    *  连续三个会话实证 ensureAgent 级兜底接不住）。整轮重试一次：丢弃池内 agent、
    *  归档陈旧日志、重跑。progress 事件在重试时会重复一行，无害。 */
-  async function runTurnHealed(req, res, sessionId, message) {
+  async function runTurnHealed(req, res, sessionId, message, turnContext) {
     try {
-      await runTurn(req, res, sessionId, message);
+      await runTurn(req, res, sessionId, message, turnContext);
     } catch (error) {
       if (!/id collision/.test(String(error && error.message))) throw error;
       console.warn(`[asa-resident] session ${sessionId} id collision（turn 级），丢弃 agent 归档日志并重试`);
       await discardAgent(sessionId);
       archiveStaleSessionLog(sessionId);
-      await runTurn(req, res, sessionId, message);
+      await runTurn(req, res, sessionId, message, turnContext);
     }
   }
 
@@ -635,6 +668,8 @@ function apply(ctx) {
       }
       const message = String(payload.message || "").trim();
       const sessionId = String(payload.session_id || `asa-${randomUUID()}`);
+      // 前端每轮携带的上下文（transport turn.context）：追问轮的焦点来源（P1-2）。
+      const turnContext = payload.context && typeof payload.context === "object" && !Array.isArray(payload.context) ? payload.context : {};
       if (!message) {
         writeJson(res, req, 400, { ok: false, error: "message is required" });
         return;
@@ -646,7 +681,7 @@ function apply(ctx) {
         ...corsHeaders(req),
       });
       try {
-        await serializeTurn(sessionId, () => runTurnHealed(req, res, sessionId, message));
+        await serializeTurn(sessionId, () => runTurnHealed(req, res, sessionId, message, turnContext));
       } catch (error) {
         writeSse(res, "done", {
           session_id: sessionId,
@@ -703,5 +738,5 @@ function apply(ctx) {
   return server;
 }
 
-export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey, isIntermediateAnswer, shouldFollowupCandidateList, CANDIDATE_LIST_FOLLOWUP_PROMPT, mergeCopilotPayload };
+export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey, isIntermediateAnswer, shouldFollowupCandidateList, CANDIDATE_LIST_FOLLOWUP_PROMPT, mergeCopilotPayload, businessFocusOf, focusNoteText };
 export { createSubagentTracker, isSubagentToolCall, subagentSummaryText, subagentTerminalStatus, subagentToolCallLabel } from "./subagent-events.js";

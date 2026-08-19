@@ -171,3 +171,41 @@ def test_mechanical_six_dof_stage_counts_as_hard_evidence(tmp_path: Path) -> Non
     assert any("运动台" in hit or "六自由度" in hit or "工件台" in hit for hit in graded[201]["hard_hits"])
     # 无证据者维持 D 级，不被新关键词误抬
     assert graded[202]["grade"] == "D-无证据"
+
+
+def test_truncation_is_declared_in_result_and_answer(tmp_path: Path) -> None:
+    """dogfood P1-3：旧默认 limit=200 静默截断，分级计数被当成全池口径
+    （C-弱 180 报成 134）。截断必须在结果与回答文本里显式声明。"""
+    db_path = _filter_db(tmp_path)
+    result = filter_job_candidates(str(db_path), 142, client="士兰微", max_candidates=3)
+    assert result["total"] == 6
+    assert result["returned"] == 3
+    assert result["truncated"] is True
+    answer = format_grade_list(result)
+    assert "数据口径" in answer
+    assert "截断" in answer
+    assert "3/6" in answer
+
+
+def test_full_pool_result_declares_freshness_without_truncation(tmp_path: Path) -> None:
+    result = filter_job_candidates(str(_filter_db(tmp_path)), 142, client="士兰微")
+    assert result["truncated"] is False
+    assert result["returned"] == result["total"]
+    answer = format_grade_list(result)
+    assert "数据口径" in answer
+    assert "实时计算，分级覆盖全池" in answer
+
+
+def test_tool_result_covers_full_pool_by_default_and_declares_as_of(tmp_path: Path) -> None:
+    db_path = _filter_db(tmp_path)
+    tool_result = execute_filter_candidates(str(db_path), 142)
+    assert tool_result["success"] is True
+    data = tool_result["data"]
+    # 默认 limit 覆盖全池：summary 计数与 total 一致，可直接引用
+    assert data["truncated"] is False
+    assert data["data_as_of"]
+    assert sum(data["summary"].values()) == data["total"]
+    # 显式调小 limit 时给调用方（LLM）不可忽略的截断警告
+    limited = execute_filter_candidates(str(db_path), 142, limit=2)
+    assert limited["data"]["truncated"] is True
+    assert "截断口径" in limited["data"]["note"]

@@ -297,6 +297,9 @@ export type AgentCandidateAssessResult = WriteAck & {
 export type AgentRunResult = AgentCandidateAssessResult & { updated_at?: string }
 export type CandidateActionResult = WriteAck & {
   candidate_id?: number; action?: string; stage?: string; already_applied?: boolean;
+  // record_event（生命周期事件）回执：事件快照 + 幂等重放标记。
+  already_recorded?: boolean;
+  event?: { id?: number; event_type?: string; event_type_label?: string; event_status?: string; event_time?: string; summary?: string };
   receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number };
 }
 export type ConsultantRecommendationPreflight = PreflightResult & {
@@ -893,9 +896,15 @@ export const api = {
     const body: CandidateActionRequest = { request_id: requestId(), candidate_id, action }
     return json<PreflightResult>('/api/v1/candidate-actions/preflight', { method: 'POST', body: JSON.stringify(body) })
   },
-  commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string, loser_id?: number) => {
+  commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string, loser_id?: number, event?: { event_type: string; event_status?: string; occurred_at?: string }) => {
     // loser_id：合并去重（action=merge）的废弃方关系 ID，确认卡 merge 分支传入。
-    const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}), ...(loser_id ? { loser_id } : {}) }
+    // event：生命周期事件（action=record_event）的事件类型/状态/时间，确认卡 record_event 分支传入。
+    const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = {
+      candidate_id, action, preflight_token, note,
+      // 事件字段在生成契约里是带默认值的必填键：非 record_event 动作给空串缺省。
+      event_type: event?.event_type ?? '', event_status: event?.event_status ?? '', occurred_at: event?.occurred_at ?? '',
+      ...(reason ? { reason } : {}), ...(loser_id ? { loser_id } : {}),
+    }
     return candidateCommitConfirmed(candidate_id, body)
   },
   resumeBackfillCommit: (candidate_id: number, preflight_token: string, note = '') =>

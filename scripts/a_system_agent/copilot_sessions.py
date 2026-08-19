@@ -841,6 +841,8 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
                     "model_participation": structured.get("model_participation"),
                     # DSH 子代理运行终态：恢复会话时重渲染「子代理执行」卡片。
                     "subagents": structured.get("subagents") or [],
+                    # 非 completed 轮的中断原因（部分回答标记）。
+                    "turn_error": structured.get("turn_error") or "",
                     "analysis_card": structured.get("analysis_card"),
                     # 策略建议补丁：浮窗恢复会话时可重渲染「应用到策略」操作栏
                     "strategy_patch": structured.get("strategy_patch"),
@@ -943,6 +945,7 @@ def record_external_copilot_turn(
     model_participation: dict[str, Any] | None = None,
     action_cards: list[dict[str, Any]] | None = None,
     subagents: list[dict[str, Any]] | None = None,
+    turn_error: str = "",
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
@@ -1051,6 +1054,9 @@ def record_external_copilot_turn(
         clean_subagents = [dict(item) for item in (subagents or []) if isinstance(item, dict)]
         if clean_subagents:
             assistant_structured["subagents"] = clean_subagents
+        # 非 completed 轮（aborted/超时）中断原因：恢复会话时可区分「部分回答」与完整回答。
+        if str(turn_error or "").strip():
+            assistant_structured["turn_error"] = str(turn_error).strip()[:500]
         conn.executemany(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)

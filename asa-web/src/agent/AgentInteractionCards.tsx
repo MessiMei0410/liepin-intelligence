@@ -157,6 +157,7 @@ export function CandidateIntentConfirmation({ intent, sessionId }: { intent?: Re
 
 const candidateActionText: Record<string, string> = {
   advance: '复核通过', contact: '已联系', recommend: '已推荐给客户', stop: '停止推进', review: '评分复核', merge: '合并去重',
+  record_event: '记录面试/事件',
 }
 const decisionText: Record<string, string> = { approve: '批准', reject: '拒绝', revise: '退回修改' }
 const workflowActionText: Record<string, string> = { cancel: '关闭工作流', pause: '暂停工作流', resume: '恢复工作流' }
@@ -180,6 +181,9 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const mergeLoser = record(merge.loser)
   const isMerge = kind === 'candidate_action' && text(request.action) === 'merge'
   const mergeDiff = (list(merge.diff).filter(item => item && typeof item === 'object') as Array<Record<string, unknown>>)
+  // 生命周期事件（action=record_event）：event 带事件类型/时间/状态/备注（Core 预检回显）。
+  const isRecordEvent = kind === 'candidate_action' && text(request.action) === 'record_event'
+  const eventInfo = record(request.event)
   // 简历回填：resume 带快照元信息，diff 为分段新旧比对（字数 + 摘要 + 变化类型）。
   const isResumeBackfill = kind === 'resume_backfill'
   const backfillResume = record(request.resume)
@@ -217,6 +221,13 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
             { label: '保留方', value: `${text(candidate.name, '待确认')}（关系 #${text(candidate.id)}）` },
             { label: '废弃方', value: `${text(mergeLoser.name, '待确认')}（关系 #${text(mergeLoser.id)}）` },
             { label: '废弃方阶段', value: text(mergeLoser.stage, '待确认') },
+          ]
+        : isRecordEvent
+        ? [
+            { label: '人选', value: `${text(candidate.name, `#${text(candidate.id)}`)}（当前阶段：${text(candidate.stage, '待确认')}）` },
+            { label: '事件', value: text(eventInfo.label, text(eventInfo.event_type, '待确认')) },
+            { label: '事件时间', value: text(eventInfo.occurred_at, '记录当前时间') },
+            { label: '事件状态', value: text(eventInfo.event_status, '默认') },
           ]
         : [
             { label: '人选', value: text(candidate.name, `#${text(candidate.id)}`) },
@@ -262,6 +273,21 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           }
           await api.commit(candidateId, 'merge', text(request.preflight_token), noteText, undefined, loserId)
           summary = `已合并去重：${text(mergeLoser.name, '废弃方')} 已停止并指向 ${text(candidate.name, '保留方')}`
+        } else if (isRecordEvent) {
+          const eventType = text(eventInfo.event_type)
+          if (!eventType) {
+            setError('确认请求缺少事件类型')
+            return
+          }
+          const response = await api.commit(candidateId, 'record_event', text(request.preflight_token), text(eventInfo.notes, noteText), undefined, undefined, {
+            event_type: eventType,
+            event_status: text(eventInfo.event_status) || undefined,
+            occurred_at: text(eventInfo.occurred_at) || undefined,
+          })
+          const recorded = record(response.event)
+          summary = response.already_recorded
+            ? `${text(candidate.name, '当前人选')}的「${text(eventInfo.label, '事件')}」此前已记录，未重复写入`
+            : `已记录：${text(candidate.name, '当前人选')}「${text(recorded.event_type_label, text(eventInfo.label, '事件'))}」${text(recorded.event_time, text(eventInfo.occurred_at))}`
         } else {
           const response = await api.commit(candidateId, text(request.action), text(request.preflight_token), noteText)
           summary = `已同步到 ASA：${text(candidate.name, '当前人选')} ${candidateActionText[text(request.action)] || '状态已更新'}${response.stage ? `，当前阶段为“${response.stage}”` : ''}`

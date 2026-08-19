@@ -2159,6 +2159,21 @@ export interface components {
             preflight_token: string;
             /** Loser Id */
             loser_id?: number | null;
+            /**
+             * Event Type
+             * @default
+             */
+            event_type: string;
+            /**
+             * Event Status
+             * @default
+             */
+            event_status: string;
+            /**
+             * Occurred At
+             * @default
+             */
+            occurred_at: string;
         };
         /**
          * CandidateListRefreshBody
@@ -2711,6 +2726,11 @@ export interface components {
             subagents?: {
                 [key: string]: unknown;
             }[];
+            /**
+             * Turn Error
+             * @default
+             */
+            turn_error: string;
         };
         /** CopilotTurnRecordResponse */
         CopilotTurnRecordResponse: {

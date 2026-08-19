@@ -192,3 +192,66 @@ describe('DSH 写确认卡', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+// dogfood P2：记面试/生命周期事件确认卡（record_event）——事件要点展示 + commit 携带事件字段。
+const recordEventRequest = {
+  kind: 'candidate_action',
+  preflight_token: 'tok-dsh-re',
+  expires_at: '2099-01-01T00:00:00',
+  action: 'record_event',
+  candidate: { id: 968, name: '陈**', stage: '触达待核验' },
+  event: {
+    event_type: 'interview_scheduled', label: '面试安排',
+    event_status: 'scheduled', occurred_at: '2026-08-20 14:00:00', notes: '一面：客户现场',
+  },
+  impact: '将在业务时间线记录「面试安排」事件，并自动生成跟进待办（不自动对外发任何消息）。',
+  client_request_id: 'agent_req-re',
+}
+
+describe('DSH 写确认卡（record_event 记面试）', () => {
+  let fetchMock: Mock<typeof fetch>
+
+  beforeEach(() => {
+    fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
+      if (url.includes(commitUrl)) return mockResponse({
+        ok: true, already_recorded: false,
+        event: { id: 5001, event_type: 'interview_scheduled', event_type_label: '面试安排', event_status: 'scheduled', event_time: '2026-08-20 14:00:00', summary: '面试安排：一面：客户现场' },
+        followup: { id: 77, task_type: 'interview_followup', due_at: '2026-08-22 14:00:00', status: 'open' },
+      })
+      if (url.includes(recordTurnUrl)) return mockResponse({ ok: true, updated: true })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('渲染事件要点：人选/阶段/事件类型/时间/状态', () => {
+    render(<WriteConfirmationCard request={recordEventRequest} sessionId="asa-s1" />)
+    const card = screen.getByRole('region', { name: '写入确认' })
+    expect(card).toHaveTextContent('记录面试/事件')
+    expect(card).toHaveTextContent('陈**')
+    expect(card).toHaveTextContent('触达待核验')
+    expect(card).toHaveTextContent('面试安排')
+    expect(card).toHaveTextContent('2026-08-20 14:00:00')
+    expect(card).toHaveTextContent('跟进待办')
+  })
+
+  it('确认：commit 携带 event_type/occurred_at/note，回执展示已记录', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={recordEventRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('面试安排')
+    const commit = fetchMock.mock.calls.find(([input]) => String(input).includes(commitUrl))
+    expect(commit).toBeDefined()
+    expect(JSON.parse(String((commit?.[1] as RequestInit).body))).toMatchObject({
+      candidate_id: 968, action: 'record_event', preflight_token: 'tok-dsh-re',
+      event_type: 'interview_scheduled', event_status: 'scheduled', occurred_at: '2026-08-20 14:00:00',
+      note: '一面：客户现场',
+    })
+  })
+})

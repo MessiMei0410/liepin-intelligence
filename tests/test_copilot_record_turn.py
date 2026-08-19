@@ -249,6 +249,43 @@ class CopilotRecordTurnTest(AgentDbCase):
         self.assertEqual(detail["messages"][1]["subagents"], [])
         service.close()
 
+    def test_record_turn_persists_turn_error_for_incomplete_turn(self) -> None:
+        """非 completed 轮（aborted/超时）回填：用户问句与部分答案落库并带 turn_error
+        中断原因——刷新后会话不丢整轮（dogfood P0-2：委托连续超时 → turn 300s abort）。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-incomplete",
+            request_id="req-incomplete-1",
+            message="长越机械岗下一步怎么打",
+            answer="我先看下岗位管道数据……（回答中断）",
+            context={"type": "job", "id": 137},
+            source="dsh",
+            turn_error="turn aborted (timeout)",
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recorded"])
+
+        detail = service.get_copilot_session("asa-test-incomplete")
+        self.assertEqual([m["role"] for m in detail["messages"]], ["user", "assistant"])
+        assistant = detail["messages"][1]
+        self.assertEqual(assistant["content"], "我先看下岗位管道数据……（回答中断）")
+        self.assertEqual(assistant["turn_error"], "turn aborted (timeout)")
+        service.close()
+
+    def test_record_turn_without_turn_error_defaults_empty(self) -> None:
+        """正常 completed 轮不带 turn_error，恢复时为空串（不是部分回答）。"""
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-complete",
+            request_id="req-complete-1",
+            message="你好", answer="你好！",
+            context={"type": "page"}, source="dsh",
+        )
+        self.assertTrue(result["recorded"])
+        detail = service.get_copilot_session("asa-test-complete")
+        self.assertEqual(detail["messages"][1]["turn_error"], "")
+        service.close()
+
     def test_delegate_sessions_hidden_from_session_list_but_auditable(self) -> None:
         """孤儿会话治理：::dsh-delegate 派生 session 与遗留 dsh- 前缀 session
         不进会话列表 rollup，但消息仍在库中可审计（详情可按 id 取回）。"""
