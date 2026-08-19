@@ -898,6 +898,8 @@ export const api = {
     const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}), ...(loser_id ? { loser_id } : {}) }
     return candidateCommitConfirmed(candidate_id, body)
   },
+  resumeBackfillCommit: (candidate_id: number, preflight_token: string, note = '') =>
+    resumeBackfillCommitConfirmed(candidate_id, preflight_token, note),
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
     fetch('/api/asa/floating/candidate-update', {
       method: 'POST',
@@ -1057,6 +1059,24 @@ const candidateCommitConfirmed = async (
 ): Promise<CandidateActionResult> => {
   await activateWriteConfirmation(body.preflight_token)
   return write<CandidateActionResult>('/api/v1/candidate-actions/commit', body)
+}
+
+// 简历回填（#61 写确认链路）：Core 返回动态 dict，按 service_resume_backfill 实际 payload 收窄声明。
+export type ResumeBackfillCommitResult = WriteAck & {
+  action?: string; candidate_id?: number; person_id?: number; source_profile_id?: number;
+  profile_updated?: boolean; business_event_id?: number; summary?: string; already_applied?: boolean;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number | string }
+}
+
+const resumeBackfillCommitConfirmed = async (
+  candidateId: number,
+  preflightToken: string,
+  note = '',
+): Promise<ResumeBackfillCommitResult> => {
+  await activateWriteConfirmation(preflightToken)
+  return write<ResumeBackfillCommitResult>('/api/v1/candidates/resume-backfill/commit', {
+    candidate_id: candidateId, preflight_token: preflightToken, note,
+  })
 }
 
 const approvalDecisionConfirmed = async (id: string, decision: string, preflightToken = '', note = ''): Promise<WriteAck> => {

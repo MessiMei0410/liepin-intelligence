@@ -89,6 +89,7 @@ const TOOL_LABELS = {
   asa_pool_filter: "生成/筛选岗位候选名单",
   asa_approval_preflight: "审批决定预检（发起界面确认）",
   asa_workflow_action_preflight: "工作流动作预检（发起界面确认）",
+  asa_resume_backfill: "简历回填预检（发起界面确认）",
   asa_copilot_ask: "委托 Copilot 做领域分析",
 };
 
