@@ -111,7 +111,7 @@ export function CandidateIntentConfirmation({ intent, sessionId }: { intent?: Re
 // 终态经 record-turn confirm_result 回写 Core，会话恢复后呈现终态。
 
 const candidateActionText: Record<string, string> = {
-  advance: '复核通过', contact: '已联系', recommend: '已推荐给客户', stop: '停止推进', review: '评分复核',
+  advance: '复核通过', contact: '已联系', recommend: '已推荐给客户', stop: '停止推进', review: '评分复核', merge: '合并去重',
 }
 const decisionText: Record<string, string> = { approve: '批准', reject: '拒绝', revise: '退回修改' }
 const workflowActionText: Record<string, string> = { cancel: '关闭工作流', pause: '暂停工作流', resume: '恢复工作流' }
@@ -127,6 +127,11 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const candidate = record(request.candidate)
   const approval = record(request.approval)
   const workflow = record(request.workflow)
+  // 合并去重（action=merge）：candidate=保留方（winner），merge 带废弃方与字段 diff。
+  const merge = record(request.merge)
+  const mergeLoser = record(merge.loser)
+  const isMerge = kind === 'candidate_action' && text(request.action) === 'merge'
+  const mergeDiff = (list(merge.diff).filter(item => item && typeof item === 'object') as Array<Record<string, unknown>>)
   const expiresAt = Date.parse(text(request.expires_at))
   const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
   const clientRequestId = text(request.client_request_id)
@@ -146,10 +151,16 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           { label: '工作流', value: text(workflow.title, text(workflow.workflow_id, '待确认')) },
           { label: '当前状态', value: text(workflow.status, '待确认') },
         ]
-      : [
-          { label: '人选', value: text(candidate.name, `#${text(candidate.id)}`) },
-          { label: '当前阶段', value: text(candidate.stage, '待确认') },
-        ]
+      : isMerge
+        ? [
+            { label: '保留方', value: `${text(candidate.name, '待确认')}（关系 #${text(candidate.id)}）` },
+            { label: '废弃方', value: `${text(mergeLoser.name, '待确认')}（关系 #${text(mergeLoser.id)}）` },
+            { label: '废弃方阶段', value: text(mergeLoser.stage, '待确认') },
+          ]
+        : [
+            { label: '人选', value: text(candidate.name, `#${text(candidate.id)}`) },
+            { label: '当前阶段', value: text(candidate.stage, '待确认') },
+          ]
   const noteText = text(request.note)
 
   const backfill = (state: 'confirmed' | 'cancelled', summary: string, receipt?: Record<string, unknown>) => {
@@ -172,8 +183,18 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           setError('确认请求缺少候选人或动作信息')
           return
         }
-        const response = await api.commit(candidateId, text(request.action), text(request.preflight_token), noteText)
-        summary = `已同步到 ASA：${text(candidate.name, '当前人选')} ${candidateActionText[text(request.action)] || '状态已更新'}${response.stage ? `，当前阶段为“${response.stage}”` : ''}`
+        if (isMerge) {
+          const loserId = Number(mergeLoser.id)
+          if (!Number.isFinite(loserId)) {
+            setError('确认请求缺少废弃方（loser）信息')
+            return
+          }
+          await api.commit(candidateId, 'merge', text(request.preflight_token), noteText, undefined, loserId)
+          summary = `已合并去重：${text(mergeLoser.name, '废弃方')} 已停止并指向 ${text(candidate.name, '保留方')}`
+        } else {
+          const response = await api.commit(candidateId, text(request.action), text(request.preflight_token), noteText)
+          summary = `已同步到 ASA：${text(candidate.name, '当前人选')} ${candidateActionText[text(request.action)] || '状态已更新'}${response.stage ? `，当前阶段为“${response.stage}”` : ''}`
+        }
       }
       const receipt = {
         version: 'execution_receipt_v1', state: '已完成', summary,
@@ -209,6 +230,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   return <section className="agent-pending-intent" aria-label="写入确认">
     <header><div><small>ASA 发起写入申请</small><b>{title}</b></div><button type="button" aria-label="取消本次写入" onClick={cancelWrite} disabled={busy}><X size={15}/></button></header>
     <dl>{targetLines.map(line => <div key={line.label}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}{noteText && <div><dt>原因</dt><dd>{noteText}</dd></div>}</dl>
+    {isMerge && mergeDiff.length > 0 && <dl aria-label="合并字段比对">{mergeDiff.map(item => <div key={text(item.field)}><dt>{text(item.label, '字段')}</dt><dd>{item.same === true ? text(item.winner, '—') : `保留：${text(item.winner, '—')} ｜ 废弃：${text(item.loser, '—')}`}</dd></div>)}</dl>}
     <p>{text(request.impact, '确认后将写入 ASA，并记入统一审计。')}</p>
     {error && <div className="agent-card-error" role="alert">{error}（本次申请已失效，如需执行请让 ASA 重新发起）</div>}
     <footer><button type="button" onClick={cancelWrite} disabled={busy}>取消</button><button type="button" className="primary" disabled={busy || Boolean(error)} onClick={() => void confirmWrite()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer>

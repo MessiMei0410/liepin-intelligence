@@ -510,7 +510,12 @@ class CandidateActionsMixin:
             "sourcing_learning": learning,
         }
 
-    def candidate_preflight(self, candidate_id: int, action: str) -> dict[str, Any]:
+    def candidate_preflight(self, candidate_id: int, action: str, loser_id: int | None = None) -> dict[str, Any]:
+        if action == "merge":
+            # 合并去重（护栏第 6 条机制）：三证据校验 + diff 在 CandidateDedupeMixin。
+            if loser_id is None:
+                raise ValueError("合并去重（merge）必须携带 loser_id（废弃方关系 ID）")
+            return self.candidate_merge_preflight(candidate_id, int(loser_id))
         if action not in {"advance", "review", "contact", "recommend", "stop"}:
             raise ValueError("unsupported candidate action")
         detail = self.candidate(candidate_id)["candidate"]

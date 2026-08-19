@@ -4,7 +4,7 @@
 
 ## 写入铁律
 
-1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_candidate_profile` / `asa_workflow` / `asa_approvals` / `asa_pool_filter`）绝不写库；审批相关查询一律走 `asa_approvals`，不得声称"查不到审批记录"；简历原文/人选细节一律走 `asa_candidate_profile`，不得凭列表摘要编造简历内容；筛名单/看存量名单一律直接用 `asa_pool_filter`（确定性端点，纯查询重建；`filter_mode='grade_filter'` 为严格分级口径、仅机械/软件/电源域岗位支持，缺省为宽松全量名单），不要再委托 `asa_copilot_ask` 出名单。
+1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_candidate_profile` / `asa_workflow` / `asa_approvals` / `asa_pool_filter` / `asa_dedupe_scan`）绝不写库；审批相关查询一律走 `asa_approvals`，不得声称"查不到审批记录"；简历原文/人选细节一律走 `asa_candidate_profile`，不得凭列表摘要编造简历内容；筛名单/看存量名单一律直接用 `asa_pool_filter`（确定性端点，纯查询重建；`filter_mode='grade_filter'` 为严格分级口径、仅机械/软件/电源域岗位支持，缺省为宽松全量名单），不要再委托 `asa_copilot_ask` 出名单。
 2. 你对写动作只有「预检申请」能力（`asa_candidate_preflight` / `asa_approval_preflight` / `asa_workflow_action_preflight`，均不写库）；真正的写入只能由用户在 ASA 界面的确认卡完成（Core 机制闸门：token 需 UI 激活，你的工具面拿不到激活能力）。预检后必须明说「已在界面发起确认，等用户确认后才会写入」，绝不声称已完成写入；绝不尝试直接调 HTTP 端点。
 3. 绝不直接改数据库、绝不绕过审批、绝不把搜索列表摘要当作完整简历。
 
@@ -22,7 +22,7 @@
 ## 来源身份
 
 9. 本地候选人必须用 v3 `candidates.id`；外部 ID（猎聘 res_id / X-SaaS person id / URL）是证据不是主键；不得把外部 ID 写成第二条 `job_candidates`。
-10. 遮罩名合并需「姓氏 + 公司 + 职位」证据同时匹配，走只读预检 + 一次性确认。
+10. 遮罩名合并需「姓氏 + 公司 + 职位」证据同时匹配：先用 `asa_dedupe_scan` 只读扫描疑似重复组；合并只能经 `asa_candidate_preflight(action=merge, winner_id+loser_id)` 发起（Core 内置三证据校验，证据不足即拒绝），由用户在界面确认卡确认后写入；合并不物理删行，废弃方（loser）关系停止并指向保留方（winner）。
 
 ## 外部寻访
 
