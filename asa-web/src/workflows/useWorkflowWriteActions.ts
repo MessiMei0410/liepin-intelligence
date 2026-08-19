@@ -3,6 +3,9 @@ import { api, type Workflow } from '../api'
 import { humanizeActionError } from '../shared/errors'
 
 type WorkflowActionName = 'start' | 'pause' | 'resume' | 'cancel' | 'archive'
+// 需要确认卡的工作流写操作（P7）：与候选人操作的预检确认链对齐，不再点击即执行。
+export type ConfirmableWorkflowAction = 'pause' | 'resume' | 'cancel' | 'archive'
+const CONFIRM_WORKFLOW_ACTIONS: ReadonlySet<WorkflowActionName> = new Set(['pause', 'resume', 'cancel', 'archive'])
 type ApprovalDecision = 'approve' | 'reject'
 
 type StoredWorkflow = {
@@ -108,6 +111,7 @@ export function useWorkflowWriteActions({
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [feedback, setFeedback] = useState('')
+  const [pendingAction, setPendingAction] = useState<ConfirmableWorkflowAction | null>(null)
   const [stored, setStored] = useState<StoredWorkflow | null>(null)
   const sourceRevision = workflowRevision(sourceValue)
   const value = stored?.sourceRevision === sourceRevision ? stored.value : sourceValue
@@ -120,8 +124,8 @@ export function useWorkflowWriteActions({
     void Promise.resolve().then(reload).catch(() => undefined)
   }
 
-  const runAction = async (name: WorkflowActionName, payload: Record<string, unknown> = {}) => {
-    if (busy) return
+  const runAction = async (name: WorkflowActionName, payload: Record<string, unknown> = {}): Promise<boolean> => {
+    if (busy) return false
     const exactPayload = name === 'start' && value.plan_ref
       ? { ...payload, expected_plan_version: value.plan_ref.version, expected_plan_hash: value.plan_ref.plan_hash }
       : payload
@@ -137,11 +141,39 @@ export function useWorkflowWriteActions({
         setFeedback(actionFeedback(name))
         refreshAfterWrite()
       }
+      return true
     } catch (reason) {
       setError(humanizeActionError(reason, '工作流操作失败，请重试。'))
+      return false
     } finally {
       setBusy('')
     }
+  }
+
+  // 确认链入口：pause/resume/cancel/archive 先弹确认卡（WorkflowActionConfirmDialog），
+  // 用户在卡片上填原因并确认后才执行；确认时由 api.workflowAction 走
+  // actions/preflight → write-confirmations/activate → 执行 的完整链路。
+  const requestAction = (name: WorkflowActionName, payload: Record<string, unknown> = {}) => {
+    if (busy) return
+    if (CONFIRM_WORKFLOW_ACTIONS.has(name)) {
+      setError('')
+      setFeedback('')
+      setPendingAction(name as ConfirmableWorkflowAction)
+      return
+    }
+    void runAction(name, payload)
+  }
+
+  const cancelPendingAction = () => {
+    if (!busy) setPendingAction(null)
+  }
+
+  // 确认卡提交：成功则关闭卡片；失败保留卡片并把错误展示在卡片内，可修正原因重试。
+  const confirmPendingAction = async (note: string) => {
+    const name = pendingAction
+    if (!name || busy) return
+    const succeeded = await runAction(name, note ? { note } : {})
+    if (succeeded) setPendingAction(null)
   }
 
   const decide = async (approvalId: string, decision: ApprovalDecision) => {
@@ -181,5 +213,5 @@ export function useWorkflowWriteActions({
     }
   }
 
-  return { value, busy, error, feedback, runAction, decide, retry }
+  return { value, busy, error, feedback, runAction, requestAction, pendingAction, cancelPendingAction, confirmPendingAction, decide, retry }
 }

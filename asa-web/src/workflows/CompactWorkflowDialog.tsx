@@ -12,6 +12,7 @@ import { elapsed } from '../shared/format'
 import { mapWorkflowStatus } from '../workflow/statusMapping'
 import { useWorkflowLiveSync } from './useWorkflowLiveSync'
 import { useWorkflowWriteActions } from './useWorkflowWriteActions'
+import { WorkflowActionConfirmDialog } from './WorkflowActionConfirmDialog'
 import { activeWorkflowStatuses, humanizeWorkflowError, stepStatusLabel } from './utils'
 
 export type WorkflowDetailSection = 'strategy' | 'candidates' | 'funnel' | 'events' | 'artifacts' | 'full'
@@ -41,6 +42,10 @@ export function CompactWorkflowDialog({
     error,
     feedback: actionFeedback,
     runAction,
+    requestAction,
+    pendingAction,
+    cancelPendingAction,
+    confirmPendingAction,
     decide,
     retry,
   } = useWorkflowWriteActions({ sourceValue: value, reload, archived })
@@ -139,14 +144,24 @@ export function CompactWorkflowDialog({
         <div className="compact-menu-wrap">
           <button className="icon-btn" aria-label="更多工作流操作" aria-haspopup="menu" aria-expanded={menu === 'more'} onClick={() => setMenu(current => current === 'more' ? '' : 'more')}><Ellipsis /></button>
           {menu === 'more' && <div className="compact-workflow-menu align-right" role="menu">
-            {live && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('pause') }}><Pause />暂停寻访</button>}
-            {status === 'paused' && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('resume') }}><Play />继续寻访</button>}
-            {!['cancelled', 'completed'].includes(status) && <button className="danger" role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('cancel') }}><Ban />立即停止寻访</button>}
-            {archiveAllowed && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); void runAction('archive') }}><Archive />归档工作流</button>}
+            {live && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); requestAction('pause') }}><Pause />暂停寻访</button>}
+            {status === 'paused' && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); requestAction('resume') }}><Play />继续寻访</button>}
+            {!['cancelled', 'completed'].includes(status) && <button className="danger" role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); requestAction('cancel') }}><Ban />立即停止寻访</button>}
+            {archiveAllowed && <button role="menuitem" disabled={!!busy} onClick={() => { setMenu(''); requestAction('archive') }}><Archive />归档工作流</button>}
           </div>}
         </div>
       </div>
     </footer>
+    {pendingAction && (
+      <WorkflowActionConfirmDialog
+        action={pendingAction}
+        workflowTitle={displayValue.goal.title}
+        busy={!!busy}
+        error={error}
+        onConfirm={note => void confirmPendingAction(note)}
+        onCancel={cancelPendingAction}
+      />
+    )}
   </DialogPanel>
 }
 

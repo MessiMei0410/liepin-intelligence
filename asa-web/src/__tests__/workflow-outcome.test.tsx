@@ -108,12 +108,17 @@ describe('R3 工作流业务终态', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-r3/revise'))).toBe(false)
   })
 
-  it('结束本轮 → 触发既有 archive action 并回调 archived', async () => {
+  it('结束本轮 → 确认卡确认后触发既有 archive action 并回调 archived', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => mockResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     const user = userEvent.setup()
     const { archived } = renderPanel(outcomeWorkflow('blocked', 'completed_pool_insufficient', { steps: finishedSteps }))
     await user.click(screen.getByRole('button', { name: '结束本轮' }))
+    // P7 确认链：归档先弹确认卡，确认后才发 archive 写请求
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('归档工作流')
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/workflows/wf-r3/archive'))).toBe(false)
+    await user.click(screen.getByRole('button', { name: '确认归档' }))
     await waitFor(() => expect(archived).toHaveBeenCalledTimes(1))
     const archiveCall = fetchMock.mock.calls.find(([input]) => String(input).includes('/api/v1/workflows/wf-r3/archive'))
     expect(archiveCall).toBeDefined()
