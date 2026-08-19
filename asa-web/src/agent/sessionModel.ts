@@ -43,6 +43,9 @@ const messageSchema = z.object({
   workflow_progress: structuredRecord.nullable().optional(),
   pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
+  // 复数卡片（DSH 委托载荷 action_cards；恢复会话时 Core 回填）：candidate_list 可能
+  // 只在数组里而不在单卡 action_card 上，常驻「查看名单」入口与名单卡抑制都要看它。
+  action_cards: z.array(structuredRecord).optional(),
   // DSH 写确认卡（含 state 终态：pending/confirmed/cancelled；过期由前端按 expires_at 判定）。
   confirm_request: structuredRecord.nullable().optional(),
   model_participation: structuredRecord.nullable().optional(),

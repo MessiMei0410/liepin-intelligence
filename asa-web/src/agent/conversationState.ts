@@ -57,13 +57,23 @@ export const agentConversationReducer = (
   // 名单卡刷新：只更新被点击的那条消息——同一岗位可能同时存在普通名单卡和严格筛选
   // 名单卡，按 jobId 全覆盖会把另一张卡的内容也替换掉。以发起刷新时的卡片对象引用
   // （sourceCard）定位消息；消息流与弹窗始终持有同一卡片对象，引用匹配是精确的。
+  // 名单卡也可能只在复数卡 action_cards 里（DSH 委托轮无单卡 action_card），同样按引用定位。
   if (action.type === 'card_refreshed') return {
     ...state,
-    messages: state.messages.map(message =>
-      message.role === 'assistant' && message.action_card === action.sourceCard
-        ? { ...message, content: action.content, action_card: action.action_card }
-        : message
-    ),
+    messages: state.messages.map(message => {
+      if (message.role !== 'assistant') return message
+      const directHit = message.action_card === action.sourceCard
+      const arrayHit = Array.isArray(message.action_cards) && message.action_cards.some(card => card === action.sourceCard)
+      if (!directHit && !arrayHit) return message
+      return {
+        ...message,
+        content: action.content,
+        action_card: directHit || !message.action_card ? action.action_card : message.action_card,
+        action_cards: arrayHit && Array.isArray(message.action_cards)
+          ? message.action_cards.map(card => (card === action.sourceCard ? action.action_card : card)).filter((card): card is Record<string, unknown> => Boolean(card))
+          : message.action_cards,
+      }
+    }),
   }
   if (action.requestId !== state.activeRequestId) return state
   if (action.type === 'turn_text') return {
@@ -121,6 +131,9 @@ export const agentConversationReducer = (
           business_focus: action.result.business_focus, workflow_progress: action.result.workflow_progress,
           workflow_id: action.result.workflow_id, pending_intent: action.result.pending_intent,
           action_card: action.result.action_card, confirm_request: action.result.confirm_request,
+          // 复数卡片随轮保存：DSH 委托轮 done 只带 action_cards 不带 action_card，
+          // 常驻「查看名单」按钮/自动弹窗/引用抑制都要能从数组里找到 candidate_list。
+          action_cards: action.result.action_cards,
           model_participation: action.result.model_participation,
           strategy_patch: action.result.strategy_patch,
           strategy_patch_applied: action.result.strategy_patch_applied,

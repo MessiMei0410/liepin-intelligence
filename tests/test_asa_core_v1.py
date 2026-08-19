@@ -262,6 +262,51 @@ def test_copilot_sessions_can_be_archived_in_one_idempotent_action(db_path: Path
     )
 
 
+def test_copilot_session_list_updated_at_stays_message_time_after_patch(db_path: Path) -> None:
+    # 排序键（latest_id）与列表 updated_at 都是纯消息时间：PATCH（重命名/归档/解除焦点）
+    # 只写 metadata.updated_at，不得把无新消息的旧会话顶成"刚刚"（2026-08-19 验收）。
+    app = create_app(db_path=db_path, start_legacy=False)
+    service = app.state.core.agent_service
+    service.copilot(
+        "旧任务消息",
+        session_id="touch-old",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+    service.copilot(
+        "新任务消息",
+        session_id="touch-new",
+        context={"type": "job", "id": 154, "client": "士兰微", "job": "电源专家"},
+    )
+
+    with TestClient(app) as client:
+        renamed = client.patch(
+            "/api/v1/copilot/sessions/touch-old",
+            headers={"Idempotency-Key": "touch-old-rename"},
+            json={"request_id": "touch-old-rename-1", "title": "旧任务改名"},
+        )
+        listed = client.get("/api/v1/copilot/sessions", params={"limit": 100})
+
+    assert renamed.status_code == 200
+    sessions = listed.json()["sessions"]
+    ids = [item["session_id"] for item in sessions]
+    # 旧会话刚被 PATCH 过，但排序仍按最新消息：新会话必须排在它前面。
+    assert ids.index("touch-new") < ids.index("touch-old")
+    old = next(item for item in sessions if item["session_id"] == "touch-old")
+    conn = sqlite3.connect(db_path)
+    try:
+        old_message_at = conn.execute(
+            "SELECT MAX(created_at) FROM agent_copilot_messages WHERE session_id='touch-old'"
+        ).fetchone()[0]
+        metadata_at = conn.execute(
+            "SELECT updated_at FROM agent_copilot_sessions WHERE session_id='touch-old'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    # metadata 确实被 PATCH 触碰（字段仍记录元数据变更），但列表展示的 updated_at 是消息时间。
+    assert metadata_at >= old_message_at
+    assert old["updated_at"] == old_message_at
+
+
 def test_copilot_session_patch_requires_visible_messages(db_path: Path) -> None:
     # 仅存在于 metadata 或 focus、没有任何消息的会话在列表里永远不可见，
     # PATCH 必须按不存在处理（与 GET detail 的 404 语义一致）。

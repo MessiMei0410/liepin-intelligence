@@ -250,8 +250,7 @@ describe('Agent transport', () => {
     try {
       const events: AgentSseEvent[] = []
       await streamAgentTurn(createAgentTurn('s-dsh', '你好', { type: 'page' }, 'request-9'), new AbortController().signal, event => events.push(event))
-      // 回填是 fire-and-forget，让出一个事件循环等它发出
-      await new Promise(resolve => setTimeout(resolve, 0))
+      // 回填先于 streamAgentTurn resolve（上层 refreshSessions 不会抢在回填前读到旧列表）
       const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
       expect(record).toBeTruthy()
       expect(JSON.parse(record?.body || '{}')).toMatchObject({
@@ -259,6 +258,55 @@ describe('Agent transport', () => {
       })
       // 回填接口 500 不影响本轮流式结果
       expect(events.map(event => event.type)).toEqual(['done'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('record-turn 回填完成前 streamAgentTurn 不 resolve（任务栏刷新不会抢到旧列表）', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = 'event: done\r\ndata: {"ok":true,"session_id":"s-race","answer":"完成"}\r\n\r\n'
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    let releaseRecord!: () => void
+    const recordGate = new Promise<void>(resolve => { releaseRecord = resolve })
+    let recordRequested = false
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        recordRequested = true
+        await recordGate
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      let streamResolved = false
+      const pending = streamAgentTurn(createAgentTurn('s-race', '你好', { type: 'page' }, 'request-race'), new AbortController().signal, () => {})
+        .then(() => { streamResolved = true })
+      // done 已消费、回填请求已发出但未返回：流式 Promise 必须仍在等待
+      await vi.waitFor(() => expect(recordRequested).toBe(true))
+      expect(streamResolved).toBe(false)
+      releaseRecord()
+      await pending
+      expect(streamResolved).toBe(true)
     } finally {
       vi.unstubAllGlobals()
     }

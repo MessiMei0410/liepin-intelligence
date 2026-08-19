@@ -1094,8 +1094,11 @@ def list_copilot_sessions(
                   AND messages.session_id NOT LIKE 'dsh-%'
                 GROUP BY messages.session_id
             )
+            -- updated_at 一律用纯消息时间：metadata.updated_at 会被无新消息的路径
+            -- （PATCH 重命名/归档/解除焦点）触碰，若 COALESCE 进列表字段，旧会话会
+            -- 显示成"刚刚"，与 latest_id 的消息序矛盾（2026-08-19 验收 asa-6e609002）。
             SELECT rollup.session_id, rollup.message_count, rollup.latest_id,
-                   COALESCE(metadata.updated_at, rollup.message_updated_at) AS updated_at,
+                   rollup.message_updated_at AS updated_at,
                    COALESCE(NULLIF(metadata.title, ''), rollup.derived_title) AS title,
                    rollup.preview, rollup.context_type, rollup.context_id,
                    metadata.archived_at,
