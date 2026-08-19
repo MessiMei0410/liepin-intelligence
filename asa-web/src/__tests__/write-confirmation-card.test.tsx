@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { WriteConfirmationCard } from '../agent/AgentInteractionCards'
 import { mockResponse } from './helpers'
@@ -121,6 +121,44 @@ describe('DSH 写确认卡', () => {
     expect(decision).toBeDefined()
     expect(JSON.parse(String((decision?.[1] as RequestInit).body))).toMatchObject({
       decision: 'approve', note: '同意本轮寻访', preflight_token: 'tok-dsh-2',
+    })
+  })
+
+  it('合并去重卡：展示双方 diff，确认走 activate + commit（携带 loser_id）', async () => {
+    const mergeRequest = {
+      kind: 'candidate_action',
+      preflight_token: 'tok-dsh-merge',
+      expires_at: '2099-01-01T00:00:00',
+      action: 'merge',
+      candidate: { id: 969, name: '武先生', stage: '触达待核验' },
+      merge: {
+        winner: { id: 969, name: '武先生' },
+        loser: { id: 546, name: '武斌', stage: 'H5 最近寻访/初筛不通过' },
+        diff: [
+          { field: 'name', label: '姓名', winner: '武先生', loser: '武斌', same: false },
+          { field: 'current_company', label: '当前公司', winner: '晶盛机电（半导体、光伏设备）', loser: '晶盛机电', same: false },
+          { field: 'current_title', label: '当前职位', winner: '机械工程师', loser: '机械工程师', same: true },
+        ],
+        loser_already_stopped: false,
+      },
+      impact: '合并不物理删行：废弃方关系将停止推进（停止原因：重复人选）并备注指向保留方。',
+      client_request_id: 'agent_req-merge',
+    }
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={mergeRequest} sessionId="asa-s1" />)
+    const card = screen.getByRole('region', { name: '写入确认' })
+    expect(card).toHaveTextContent('合并去重')
+    expect(card).toHaveTextContent('武先生（关系 #969）')
+    expect(card).toHaveTextContent('武斌（关系 #546）')
+    const diff = within(card).getByLabelText('合并字段比对')
+    expect(diff).toHaveTextContent('保留：武先生 ｜ 废弃：武斌')
+    expect(diff).toHaveTextContent('机械工程师')
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('已合并去重')
+    const commit = fetchMock.mock.calls.find(([input]) => String(input).includes(commitUrl))
+    expect(commit).toBeDefined()
+    expect(JSON.parse(String((commit?.[1] as RequestInit).body))).toMatchObject({
+      candidate_id: 969, action: 'merge', loser_id: 546, preflight_token: 'tok-dsh-merge',
     })
   })
 

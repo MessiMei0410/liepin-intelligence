@@ -320,6 +320,40 @@ function apply(ctx) {
     },
   }));
 
+  // 疑似重复人选扫描（护栏第 6 条配套，只读）：Core 按「姓氏+公司+职位」三证据
+  // 口径聚类 job_candidates，返回组内关系数 >1 的疑似重复组；每组带建议保留方
+  // （suggested_winner_id）。合并动作走 asa_candidate_preflight(action=merge)。
+  ctx.tools.register(defineTool({
+    name: "asa_dedupe_scan",
+    description:
+      "扫描候选人池疑似重复关系（只读）：按「姓氏+当前公司+当前职位」三证据口径聚类，返回疑似重复组（含各关系 id/姓名/阶段/停止状态/来源/最近事件时间/person_id 与建议保留方 suggested_winner_id）。对应 GET /api/v1/candidates/dedupe-scan。绝不写库；确认重复后如需合并，用 asa_candidate_preflight(action=merge, winner_id+loser_id) 发起界面确认。",
+    parameters: {
+      job_id: { type: "integer", description: "可选：只扫描某个岗位的候选人关系。" },
+    },
+    output: {
+      ...output(),
+      presentationMeta: (_args, value) => objectRefsMeta(
+        (value && typeof value === "object" && Array.isArray(value.groups) ? value.groups : [])
+          .flatMap((group) => (Array.isArray(group.members) ? group.members : []))
+          .map((member) => member && member.relation_id != null
+            ? {
+              type: "candidate", id: member.relation_id,
+              label: String(member.name || `人选 #${member.relation_id}`),
+              subtitle: String(member.current_company || ""),
+            }
+            : null),
+      ),
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const params = new URLSearchParams();
+      if (args.job_id) params.set("job_id", String(args.job_id));
+      const qs = params.toString();
+      return await getJson(`/api/v1/candidates/dedupe-scan${qs ? `?${qs}` : ""}`, exec);
+    },
+  }));
+
   // ── 写动作 = 预检申请（人确认走 UI 激活，模型面无 commit/decision/action 工具）。
   //    三个 preflight 工具都只读预检 + 铸造一次性 token，绝不写库；presentationMeta
   //    把 confirm_request（token + 动作摘要 + 对象信息）投影到 tool/result meta，
@@ -334,10 +368,12 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_candidate_preflight",
     description:
-      "对候选人动作做只读预检并发起写入确认申请（不写库）：返回一次性 preflight token（5 分钟有效）与影响预览；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
+      "对候选人动作做只读预检并发起写入确认申请（不写库）：返回一次性 preflight token（5 分钟有效）与影响预览；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进 / merge=合并去重（废弃方停止并指向保留方；需三证据：姓氏+公司+职位同时匹配，先用 asa_dedupe_scan 只读扫描确认疑似重复组）。merge 必须携带 winner_id（保留方关系 id，缺省取 candidate_id）与 loser_id（废弃方关系 id）。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
     parameters: {
-      candidate_id: { type: "integer", required: true, description: "job_candidates 关系 ID。" },
-      action: { type: "string", required: true, description: "advance | contact | recommend | stop" },
+      candidate_id: { type: "integer", required: true, description: "job_candidates 关系 ID（merge 时为保留方，同 winner_id）。" },
+      action: { type: "string", required: true, description: "advance | contact | recommend | stop | merge" },
+      winner_id: { type: "integer", description: "merge 必填：保留方关系 ID（缺省取 candidate_id）。" },
+      loser_id: { type: "integer", description: "merge 必填：废弃方关系 ID（该关系将被停止并指向保留方）。" },
     },
     output: confirmMeta((value) => ({
       kind: "candidate_action",
@@ -346,13 +382,33 @@ function apply(ctx) {
       action: value.action || "",
       candidate: value.candidate && typeof value.candidate === "object" ? value.candidate : {},
       impact: value.impact || "",
+      // merge：确认卡展示双方关键字段 diff（姓名/公司/职位/阶段/来源/person_id/简历摘要）。
+      ...(value.action === "merge" && value.loser && typeof value.loser === "object"
+        ? {
+          merge: {
+            winner: value.winner && typeof value.winner === "object" ? value.winner : {},
+            loser: value.loser,
+            diff: Array.isArray(value.diff) ? value.diff : [],
+            loser_already_stopped: Boolean(value.loser_already_stopped),
+          },
+        }
+        : {}),
     })),
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      return await postJson("/api/v1/candidate-actions/preflight", {
+      const payload = {
         candidate_id: args.candidate_id, action: args.action, note: "", reason: "", preflight_token: "",
-      }, exec);
+      };
+      if (args.action === "merge") {
+        const winnerId = args.winner_id ?? args.candidate_id;
+        if (!Number.isInteger(winnerId) || !Number.isInteger(args.loser_id)) {
+          throw new Error("asa_candidate_preflight(action=merge) 要求 winner_id 与 loser_id 均为关系 ID（整数）：先用 asa_dedupe_scan 扫描确认疑似重复组。");
+        }
+        payload.candidate_id = winnerId;
+        payload.loser_id = args.loser_id;
+      }
+      return await postJson("/api/v1/candidate-actions/preflight", payload, exec);
     },
   }));
 

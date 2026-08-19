@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/dedupe-scan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Candidate Dedupe Scan */
+        get: operations["candidate_dedupe_scan_api_v1_candidates_dedupe_scan_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/{candidate_id}": {
         parameters: {
             query?: never;
@@ -2089,6 +2106,8 @@ export interface components {
              * @default
              */
             preflight_token: string;
+            /** Loser Id */
+            loser_id?: number | null;
         };
         /**
          * CandidateListRefreshBody
@@ -3649,6 +3668,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    candidate_dedupe_scan_api_v1_candidates_dedupe_scan_get: {
+        parameters: {
+            query?: {
+                job_id?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

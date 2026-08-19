@@ -405,6 +405,8 @@ class CandidateAction(BaseModel):
     note: str = ""
     reason: str = ""
     preflight_token: str = ""
+    # 合并去重（action=merge）必填：废弃方关系 ID；candidate_id 为保留方（winner）。
+    loser_id: int | None = None
 
 
 class SourcingAdjustmentDecision(WriteEnvelope):
@@ -764,6 +766,12 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/candidates/stop-reasons/summary")
     def stop_reasons_summary() -> dict[str, Any]: return core.stop_reasons_summary()
+
+    @app.get("/api/v1/candidates/dedupe-scan")
+    def candidate_dedupe_scan(job_id: int | None = None) -> dict[str, Any]:
+        # 疑似重复组扫描（只读，护栏第 6 条配套）：§6.4 口径（姓氏+公司+职位
+        # 三证据）对 job_candidates 聚类，返回组内关系数 >1 的组。
+        return core.dedupe_scan(job_id=job_id)
 
     @app.get("/api/v1/candidates/{candidate_id}")
     def candidate(candidate_id: int) -> dict[str, Any]: return core.candidate(candidate_id)
@@ -1516,7 +1524,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.post("/api/v1/candidate-actions/preflight")
     def candidate_preflight(body: CandidateAction) -> dict[str, Any]:
         try:
-            return core.candidate_preflight(body.candidate_id, body.action)
+            return core.candidate_preflight(body.candidate_id, body.action, loser_id=body.loser_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1524,11 +1532,16 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def candidate_commit(body: CandidateAction, idempotency_key: str = Header(alias="Idempotency-Key")):
         if not body.preflight_token:
             raise HTTPException(400, "preflight_token is required")
+        if body.action == "merge" and body.loser_id is None:
+            raise HTTPException(400, "loser_id is required for merge")
 
         def commit() -> dict[str, Any]:
             # 人确认闸门：token 必须先经 UI 激活（write-confirmations/activate），
             # 未激活 → 409 confirmation_required（不消费 token，UI 仍可在有效期内激活）。
             core.require_activated_preflight_token(body.preflight_token)
+            if body.action == "merge":
+                # 合并去重（护栏第 6 条机制）：candidate_id=保留方（winner），loser_id=废弃方。
+                return core.candidate_merge_commit(body.candidate_id, int(body.loser_id or 0), body.note, body.preflight_token)
             return core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason)
 
         return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id), commit)

@@ -893,8 +893,9 @@ export const api = {
     const body: CandidateActionRequest = { request_id: requestId(), candidate_id, action }
     return json<PreflightResult>('/api/v1/candidate-actions/preflight', { method: 'POST', body: JSON.stringify(body) })
   },
-  commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string) => {
-    const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}) }
+  commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string, loser_id?: number) => {
+    // loser_id：合并去重（action=merge）的废弃方关系 ID，确认卡 merge 分支传入。
+    const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}), ...(loser_id ? { loser_id } : {}) }
     return candidateCommitConfirmed(candidate_id, body)
   },
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
