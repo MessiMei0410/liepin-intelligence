@@ -208,6 +208,8 @@ async function getDshConfig(): Promise<{ token: string; url: string }> {
 
 // DSH 轮次回填 Core：DSH 对话只存在其服务器内存，回填后才会进入会话列表
 //（agent_copilot_messages rollup）并可刷新恢复。失败仅告警，绝不影响流式主流程。
+// 调用方必须 await：上层 done 后立即 refreshSessions，若回填仍在飞行，列表会抢在
+// 回填落库前返回——新会话在任务栏"消失"直到下次刷新（2026-08-19 验收 asa-9564e93f）。
 async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Promise<void> {
   try {
     // 写确认请求一并回填（注入本轮 request_id：恢复会话后确认/取消的终态
@@ -327,7 +329,9 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
     if (done) break
   }
   parseAgentSse(buffer).forEach(track)
-  if (doneData && (doneData as { ok?: unknown }).ok !== false) void recordDshTurn(turn, doneData)
+  // 回填先于 resolve：调用方随后 refreshSessions 时新会话必然已在列表里。
+  // recordDshTurn 内部捕获全部异常，await 不会打断流式结果。
+  if (doneData && (doneData as { ok?: unknown }).ok !== false) await recordDshTurn(turn, doneData)
 }
 
 export async function streamAgentTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {

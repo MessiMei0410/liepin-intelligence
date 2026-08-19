@@ -272,6 +272,9 @@ function apply(ctx) {
     // 本轮业务对象收集器：tool/result meta.object_refs（asa-tools 投影的工作流/
     // 候选人/岗位 ID）轮末聚合成 suggested_actions/references 随 done 下发。
     const objectRefs = createObjectRefCollector();
+    // 本轮已投影 candidate_list action_card（工具 meta.action_card 或委托载荷
+    // action_cards）：轮末抑制 candidate references/open_candidate 芯片（名单卡自带入口）。
+    let sawCandidateListCard = false;
     // 本轮 Copilot 委托载荷：asa_copilot_ask 把 Copilot 脑 done 的结构化字段投到
     // meta.copilot_payload（理解卡/执行回执/工作流进度原料/焦点/模型参与/复数卡片/
     // 上下文），轮末组装成 workflow_progress 等并入 done（与 Copilot 脑直连同形）。
@@ -332,6 +335,8 @@ function apply(ctx) {
         // 对象操作入口：asa-tools 只读工具把结果里的业务对象 ID 投到 meta.object_refs，
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
+        const projectedCard = event.data && event.data.meta && event.data.meta.action_card;
+        if (projectedCard && projectedCard.type === "candidate_list") sawCandidateListCard = true;
         // Copilot 委托载荷：轮末并入 done（前端按 Copilot 同形字段渲染）。
         // tool/result data 没有顶层 name（name 在 tool/call 上）；copilot_payload
         // 只有 asa_copilot_ask 投影，凭键存在即可归属。
@@ -353,7 +358,10 @@ function apply(ctx) {
         }),
       );
       await agent.whenIdle();
-      const { suggested_actions, references } = objectRefs.outputs();
+      const delegateCards = copilotPayload && Array.isArray(copilotPayload.action_cards) ? copilotPayload.action_cards : [];
+      const hasCandidateListCard = sawCandidateListCard
+        || delegateCards.some((card) => card && card.type === "candidate_list");
+      const { suggested_actions, references } = objectRefs.outputs({ answer, candidateListCard: hasCandidateListCard });
       // 轮末强制 flush：聚合窗口里残留的 text/thinking 必须先于 done 下发保序。
       deltas.flush();
       writeSse(res, "done", {

@@ -1482,6 +1482,85 @@ describe('Agent workspace', () => {
     expect(screen.queryByText('张雯')).not.toBeInTheDocument()
   })
 
+  it('委托轮名单只在 action_cards：自动弹窗 + 常驻「查看名单」可重复打开，候选人引用被抑制', { timeout: 30000 }, async () => {
+    // DSH 委托轮 done 只带 action_cards 不带 action_card：名单入口必须同样可用；
+    // 名单卡在场时同轮候选人对象卡（references）不再渲染（2026-08-19 验收噪音卡）。
+    const listCard = {
+      type: 'candidate_list',
+      title: '岗位 137 候选名单',
+      context: { type: 'job', id: 137 },
+      summary: { total: 1, active: 1 },
+      groups: [{ key: 'active', label: '其余可推进候选', candidates: [{ id: 1203, name: '张雯', company: 'ASM中国', title: '高级机械设计工程师', stage: '已触达' }] }],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/stream')) return streamResponse(
+        `event: context\ndata: {"session_id":"task-delegate-list"}\n\nevent: done\ndata: ${JSON.stringify({
+          ok: true, session_id: 'task-delegate-list', answer: '名单如下',
+          action_cards: [listCard],
+          references: [{ type: 'candidate', id: 531, label: '路人甲' }],
+        })}\n\n`,
+      )
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    fireEvent.change(screen.getByLabelText('Agent 消息'), { target: { value: '给我名单' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    // 自动弹窗（名单来自 action_cards）
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+    // 名单卡在场：候选人对象卡不渲染
+    expect(screen.queryByText('路人甲')).not.toBeInTheDocument()
+    // 关掉弹窗后消息内常驻入口可重新打开
+    fireEvent.click(screen.getByLabelText('关闭名单'))
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /查看完整名单/ }))
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+  })
+
+  it('恢复的历史消息名单只在 action_cards：常驻「查看名单」可打开，候选人引用被抑制', { timeout: 30000 }, async () => {
+    localStorage.setItem('asaAgentSessionId', 'task-restored-list')
+    const listCard = {
+      type: 'candidate_list',
+      title: '岗位 137 候选名单',
+      context: { type: 'job', id: 137 },
+      summary: { total: 1, active: 1 },
+      groups: [{ key: 'active', label: '其余可推进候选', candidates: [{ id: 1203, name: '张雯', company: 'ASM中国', title: '高级机械设计工程师', stage: '已触达' }] }],
+    }
+    const fetchMock = vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/copilot/sessions/task-restored-list?limit=100')) return mockResponse({
+        ok: true, session_id: 'task-restored-list', business_focus: null,
+        messages: [
+          { role: 'user', content: '给我名单', context: { type: 'job', id: 137 }, created_at: '2026-08-19 14:00:00' },
+          {
+            role: 'assistant', content: '名单如下', context: { type: 'job', id: 137 }, created_at: '2026-08-19 14:00:05',
+            action_cards: [listCard],
+            references: [{ type: 'candidate', id: 531, label: '路人甲' }],
+          },
+        ],
+      })
+      if (url.includes('/api/v1/copilot/sessions')) return mockResponse({ ok: true, sessions: [] })
+      return mockResponse({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWorkspace({ type: 'page', page: 'agent' })
+
+    // 恢复后弹窗不自动打开，但常驻入口在；候选人对象卡不渲染
+    const trigger = await screen.findByRole('button', { name: /查看完整名单/ }, { timeout: 8000 })
+    expect(screen.queryByText('路人甲')).not.toBeInTheDocument()
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+    fireEvent.click(trigger)
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('关闭名单'))
+    expect(screen.queryByText('张雯')).not.toBeInTheDocument()
+    // 再次打开仍可用
+    fireEvent.click(screen.getByRole('button', { name: /查看完整名单/ }))
+    expect(await screen.findByText('张雯', {}, { timeout: 8000 })).toBeInTheDocument()
+  })
+
   it('中文输入法组词确认的 Enter 不发送，非组合态 Enter 正常发送', async () => {
     let streamCalled = false
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {

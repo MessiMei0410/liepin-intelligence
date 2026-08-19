@@ -1,6 +1,7 @@
 // 轮末对象操作入口聚合单测（node --test，本机跑；CI 暂无 dsh JS 测试门禁）。
 // 验证：tool/result meta.object_refs → done 的 suggested_actions/references
-// 提取、type+id 去重保序、上限（suggested_actions ≤4 / references ≤8）、非法项剔除。
+// 提取、type+id 去重保序、上限（suggested_actions ≤4 / references ≤8）、非法项剔除、
+// candidate_list 名单卡在场时候选人引用/芯片抑制、候选人引用按 answer 文本命中过滤。
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -38,7 +39,8 @@ describe("createObjectRefCollector", () => {
     const collector = createObjectRefCollector();
     collector.add([{ type: "candidate", id: 531, label: "张三", subtitle: "某半导体" }]);
     collector.add([{ type: "job", id: 142, label: "电源专家", subtitle: "士兰微" }]);
-    const { suggested_actions, references } = collector.outputs();
+    // 候选人 reference 要求 label 在 answer 中命中（相关性过滤见专项用例）。
+    const { suggested_actions, references } = collector.outputs({ answer: "候选人 张三 匹配电源专家岗位。" });
     assert.deepEqual(suggested_actions, [
       { type: "open_candidate", id: 531, label: "打开人选：张三", subtitle: "某半导体" },
       { type: "open_job", id: 142, label: "打开岗位：电源专家", subtitle: "士兰微" },
@@ -148,5 +150,51 @@ describe("createObjectRefCollector", () => {
     );
     assert.equal(references[0].id, "workflow_0");
     assert.equal(references[REFERENCES_MAX - 1].id, `workflow_${REFERENCES_MAX - 1}`);
+  });
+
+  it("candidate_list 名单卡在场：candidate references 与 open_candidate 芯片全抑制，workflow/job 保留", () => {
+    // 2026-08-19 验收：名单类回答 action_card 已承载名单，下面再嵌 8 张候选人对象卡全是噪音。
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "candidate", id: 531, label: "张三", subtitle: "某半导体" },
+      { type: "candidate", id: 532, label: "李四", subtitle: "某电子" },
+      { type: "job", id: 142, label: "电源专家", subtitle: "士兰微" },
+      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
+    ]);
+    const { suggested_actions, references } = collector.outputs({
+      answer: "候选人 张三、李四 的名单如下。",
+      candidateListCard: true,
+    });
+    assert.deepEqual(suggested_actions, [
+      { type: "open_job", id: 142, label: "打开岗位：电源专家", subtitle: "士兰微" },
+      { type: "open_workflow", id: "workflow_aaa", label: "查看并审批：R3 外部寻访审批" },
+    ]);
+    assert.deepEqual(references, [
+      { type: "job", id: 142, label: "电源专家", subtitle: "士兰微" },
+      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
+    ]);
+  });
+
+  it("candidate 引用按 answer 文本命中过滤：未提及的全弃，workflow/job 保底保留", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "candidate", id: 531, label: "张三" },
+      { type: "candidate", id: 532, label: "李四" },
+      { type: "candidate", id: 533 },
+      { type: "job", id: 142, label: "电源专家" },
+      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
+    ]);
+    // 回答只提到张三：李四（无文本命中）与无名候选人（无真实 label 可命中）都从
+    // references 剔除；芯片不受文本过滤（入口上限规则不变）。
+    const { suggested_actions, references } = collector.outputs({ answer: "推荐候选人 张三。" });
+    assert.deepEqual(references, [
+      { type: "candidate", id: 531, label: "张三" },
+      { type: "job", id: 142, label: "电源专家" },
+      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
+    ]);
+    assert.deepEqual(
+      suggested_actions.map((action) => `${action.type}:${action.id}`),
+      ["open_candidate:531", "open_candidate:532", "open_job:142", "open_workflow:workflow_aaa"],
+    );
   });
 });

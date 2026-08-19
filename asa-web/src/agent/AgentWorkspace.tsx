@@ -229,6 +229,19 @@ const messageReferences = (message: AgentMessage): AgentReference[] => {
   return refs.filter(item => !genericReferenceLabel(item.label) || !refs.some(other => other !== item && other.type === item.type && !genericReferenceLabel(other.label)))
 }
 
+// 消息/轮结果携带的 candidate_list 名单卡：单卡 action_card 优先，其次复数卡
+// action_cards（DSH 委托轮 done 只带 action_cards 不带 action_card；恢复的历史
+// 消息两者都可能有）。常驻「查看名单」入口、自动弹窗与引用抑制共用同一来源。
+const candidateListCardOf = (source: {
+  action_card?: Record<string, unknown> | null
+  action_cards?: Array<Record<string, unknown>>
+}): CandidateListCardData | undefined => {
+  const direct = source.action_card as CandidateListCardData | null | undefined
+  if (direct && direct.type === 'candidate_list') return direct
+  const cards = Array.isArray(source.action_cards) ? source.action_cards : []
+  return cards.find(card => card && (card as CandidateListCardData).type === 'candidate_list') as CandidateListCardData | undefined
+}
+
 export function AgentWorkspace({ jobs = [], workbench, templates, context, templateBusyId = '', onOpenAnalysis, onRunTemplate, onManageTemplate, onCreateTemplate, onWorkbenchAction, onOpenFullObject }: {
   jobs?: Job[]; workbench: Workbench; templates: AnalysisTemplate[]; context: AgentContext; templateBusyId?: string;
   onOpenAnalysis: (id: string) => void; onRunTemplate: (id: string) => void;
@@ -556,9 +569,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           dispatch({ type: 'turn_done', requestId: turn.requestId, result: event.data })
           localStorage.setItem(ACTIVE_SESSION_KEY, event.data.session_id)
           // 查询型名单直答：自动弹出完整名单弹窗（非消息内嵌卡）。
-          if (event.data.action_card && (event.data.action_card as CandidateListCardData).type === 'candidate_list') {
-            setCandidateListDialog(event.data.action_card as CandidateListCardData)
-          }
+          // DSH 委托轮名单卡在 action_cards 数组里（无单卡 action_card），同一入口派生。
+          const doneListCard = candidateListCardOf(event.data)
+          if (doneListCard) setCandidateListDialog(doneListCard)
         } else if (event.type === 'card') {
           // DSH 透传的结构化卡片：transport 已合并进 done（action_card），这里不单独处理。
         } else if (event.type === 'confirm_request') {
@@ -1070,6 +1083,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
         {messages.map((message, index) => {
           const messageKey = `${index}:${message.created_at || ''}`
           const dayLabel = dayLabelFor(message.created_at, messages[index - 1]?.created_at)
+          // 常驻名单入口：单卡或复数卡里的 candidate_list 都能重新打开完整名单弹窗。
+          const listCard = message.role === 'assistant' ? candidateListCardOf(message) : undefined
           return <Fragment key={messageKey}>
             {dayLabel && <div className="agent-day-divider" role="separator"><span>{dayLabel}</span></div>}
             <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`}>
@@ -1122,24 +1137,24 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
               }}
             />
           )}
-          {message.role === 'assistant' && message.action_card && (message.action_card as CandidateListCardData).type === 'candidate_list' && (
+          {listCard && (
             <div className="candidate-list-trigger-row">
-              <button className="candidate-list-trigger" onClick={() => setCandidateListDialog(message.action_card as CandidateListCardData)}>
+              <button className="candidate-list-trigger" onClick={() => setCandidateListDialog(listCard)}>
                 <Users size={14} />
-                <span>查看完整名单（{(message.action_card as CandidateListCardData).summary?.total ?? ''} 人）</span>
+                <span>查看完整名单（{listCard.summary?.total ?? ''} 人）</span>
               </button>
               <button
                 className="candidate-list-refresh"
-                onClick={() => void refreshCandidateList(message.action_card as CandidateListCardData)}
-                disabled={refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id)}
+                onClick={() => void refreshCandidateList(listCard)}
+                disabled={refreshingCardJob === Number(listCard.context?.id)}
                 title="重新按库内最新状态生成名单"
               >
-                {refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id) ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}
-                <span>{refreshingCardJob === Number((message.action_card as CandidateListCardData).context?.id) ? '刷新中' : '刷新'}</span>
+                {refreshingCardJob === Number(listCard.context?.id) ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}
+                <span>{refreshingCardJob === Number(listCard.context?.id) ? '刷新中' : '刷新'}</span>
               </button>
             </div>
           )}
-          {message.role === 'assistant' && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
+          {message.role === 'assistant' && !listCard && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
           </div>
           </Fragment>
         })}
