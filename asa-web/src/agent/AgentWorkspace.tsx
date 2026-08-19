@@ -1011,7 +1011,9 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
     finally { setBulkArchiveBusy(false) }
   }
   // 名单卡刷新：重新按库内最新状态生成 candidate_list 卡片，同步更新消息流 + 弹窗。
+  // 子集卡（subset=true，指定一组候选人的名单）不适用整池刷新语义，直接忽略。
   const refreshCandidateList = async (card: CandidateListCardData) => {
+    if (card.subset) return
     const jobId = card.context?.type === 'job' ? Number(card.context.id) : 0
     if (!jobId || !Number.isFinite(jobId) || refreshingCardJob === jobId) return
     const bonder = Array.isArray(card.groups) && card.groups.some(group => group.key === 'bonder')
@@ -1143,6 +1145,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
                 <Users size={14} />
                 <span>查看完整名单（{listCard.summary?.total ?? ''} 人）</span>
               </button>
+              {!listCard.subset && (
               <button
                 className="candidate-list-refresh"
                 onClick={() => void refreshCandidateList(listCard)}
@@ -1152,6 +1155,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
                 {refreshingCardJob === Number(listCard.context?.id) ? <LoaderCircle className="spin" size={14}/> : <RefreshCw size={14}/>}
                 <span>{refreshingCardJob === Number(listCard.context?.id) ? '刷新中' : '刷新'}</span>
               </button>
+              )}
             </div>
           )}
           {message.role === 'assistant' && !listCard && !['sourcing_result', 'candidate_list'].includes(String((message.action_card as SourcingResultCardData | undefined)?.type)) && messageReferences(message).map(reference => <AgentObjectEmbed key={`${reference.type}:${reference.id}`} reference={reference} workflowProgress={reference.type === 'workflow' ? message.workflow_progress : undefined} actionCard={reference.type === 'workflow' ? message.action_card : undefined} onOpenFull={onOpenFullObject} />)}
@@ -1222,7 +1226,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           onOpenFullObject({ type: 'job', id: jobId, label: candidateListDialog.title })
         }}
         onClose={() => setCandidateListDialog(null)}
-        onRefresh={() => void refreshCandidateList(candidateListDialog)}
+        onRefresh={candidateListDialog.subset ? undefined : () => void refreshCandidateList(candidateListDialog)}
         refreshing={refreshingCardJob === Number(candidateListDialog.context?.id)}
       />
     )}

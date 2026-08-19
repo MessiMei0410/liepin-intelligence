@@ -21,6 +21,9 @@ export type CandidateListCardData = {
   title: string
   context?: { type: string; id: string | number }
   filter_mode?: 'grade_filter'
+  /** 子集名单卡（精读/评审/去重等指定一组候选人，POST /api/v1/candidates/list-card）：
+   *  刷新语义只对整池卡成立，前端据此隐藏「刷新」按钮。 */
+  subset?: boolean
   summary?: {
     total?: number
     active?: number

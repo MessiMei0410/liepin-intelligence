@@ -9,18 +9,19 @@ DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在�
 
 ## 目录
 
-- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（10 个工具，见下）。
+- `asa-tools/` — Cordis 工具插件 `@asa/dsh-asa-tools`（13 个工具，见下）。
 - `asa-profile/` — `asa` profile 源（headless 一次性）：persona + 12 条业务护栏（`AGENTS.md`）+ 插件装配。
 - `asa-server/` — 常驻服务器 bundle `@asa/dsh-asa-server`：HTTP `POST /turn`（SSE 流式）+ 会话复用（多轮记忆）。
 - `asa-server-profile/` — `asa-server` profile 源（bundles = `dsh-base` + `@asa/dsh-asa-server`）。
 - （`bridge/` v0 per-turn 子进程桥接已于 2026-08-19 删除——无任何引用，headless 一次性需求用 `dsh --profile asa` 直跑。）
 
-## 工具面（12 个）
+## 工具面（13 个）
 
 | 类 | 工具 | 说明 |
 | --- | --- | --- |
 | 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_candidate_profile` / `asa_workflow` / `asa_approvals` / `asa_dedupe_scan` | 直读 ASA Core（GET；`asa_candidate_profile` 取单人完整档案含简历原文，full_text 8000 字截断；`asa_dedupe_scan` 按「姓氏+公司+职位」三证据扫描疑似重复人选组） |
 | 只读（名单） | `asa_pool_filter` | 岗位候选名单生成/筛选：POST `/api/v1/jobs/{id}/candidate-list/refresh`，语义纯查询重建（**不写库、不走 LLM**）；`filter_mode='grade_filter'` 严格分级（仅机械/软件/电源域），缺省宽松全量；名单卡经 `presentationMeta` → SSE `card` → 前端名单弹窗。筛名单一律用本工具，不委托 `asa_copilot_ask` |
+| 只读（子集名单） | `asa_candidate_list_card` | 指定一组候选人（job_candidates id）的子集名单卡：POST `/api/v1/candidates/list-card`，同 pool_filter 口径纯查询组装（**不写库、不走 LLM**）；精读/评审/去重等"指定一组候选人"场景（如"精读 20 人后 ✅ 通过 4 人"）必须用本工具出卡，**禁止只给 markdown 表格名单**；参数 candidate_ids/title 必填，groups 可选分组（未覆盖的 id 自动归「未分组」），job_id 可选岗位上下文；不存在的 id 在卡片 summary.skipped 注明；卡片带 `subset=true`，前端不提供整池刷新按钮 |
 | 写动作预检申请 | `asa_candidate_preflight`（含 `action=merge` 合并去重，参数 winner_id+loser_id）/ `asa_approval_preflight` / `asa_workflow_action_preflight` | 只读预检 + 铸造一次性 token（**不写库**）；确认请求经 `presentationMeta` → SSE `confirm_request` → 前端确认卡 |
 | 领域情报委托 | `asa_copilot_ask` | 转发 `/api/v1/copilot/stream`，取现有 Copilot 富答案 |
 

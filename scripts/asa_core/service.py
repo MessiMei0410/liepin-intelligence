@@ -310,6 +310,138 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, C
             raise LookupError("job not found")
         return {"ok": True, "answer": answer, "card": card}
 
+    def candidate_subset_list_card(
+        self,
+        candidate_ids: list[int],
+        title: str,
+        *,
+        groups: list[dict[str, Any]] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """子集名单卡：把一组指定 job_candidates id 组装成 candidate_list 卡片。
+
+        供精读/评审/去重等"指定一组候选人"场景（例：精读 20 人后"✅ 通过 4 人"）
+        出可操作名单卡，替代静态 markdown 表格。与 candidate_list/refresh 同口径：
+        纯查询组装——不写库、不建工作流、不走 LLM。
+
+        - candidate_ids 为空 → 409（ValueError）
+        - 库中不存在的 id 不报错，在 card.summary.skipped 注明
+        - groups 可选分组 [{key,label,candidate_ids,priority?}]；未被任何组覆盖的
+          id 自动归入末尾「未分组」；未传 groups 时全部进单一 "subset" 组
+        - 卡片与整池 candidate_list 卡同 schema（type/title/context/summary/groups），
+          额外带 subset=true 标记，前端据此隐藏"刷新"按钮（刷新语义只对整池卡成立）
+        """
+        requested: list[int] = []
+        for raw in candidate_ids or []:
+            cid = int(raw)
+            if cid <= 0:
+                raise ValueError("candidate_ids 必须全部是正整数（job_candidates.id）")
+            if cid not in requested:
+                requested.append(cid)
+        if not requested:
+            raise ValueError("candidate_ids 不能为空")
+        text_title = str(title or "").strip()
+        if not text_title:
+            raise ValueError("title 不能为空")
+
+        conn = connect(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT jc.id AS jc_id, p.display_name, p.current_company, p.current_title,
+                       jc.clean_stage, jc.flow_bucket
+                FROM job_candidates jc
+                LEFT JOIN people p ON p.id = jc.person_id
+                WHERE jc.id IN (%s)
+                """
+                % ",".join("?" * len(requested)),
+                requested,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        by_id = {int(r["jc_id"]): r for r in rows}
+        skipped = [cid for cid in requested if cid not in by_id]
+
+        def to_candidate(cid: int) -> dict[str, Any]:
+            r = by_id[cid]
+            return {
+                "id": cid,
+                "name": str(r["display_name"] or "未知"),
+                "company": str(r["current_company"] or ""),
+                "title": str(r["current_title"] or ""),
+                "stage": str(r["clean_stage"] or ""),
+                "flow_bucket": str(r["flow_bucket"] or ""),
+            }
+
+        card_groups: list[dict[str, Any]] = []
+        covered: set[int] = set()
+        for group in groups or []:
+            gids = [int(i) for i in (group.get("candidate_ids") or []) if int(i) in by_id]
+            covered.update(gids)
+            card_groups.append({
+                "key": str(group.get("key") or f"group{len(card_groups) + 1}"),
+                "label": str(group.get("label") or "未命名分组"),
+                "priority": bool(group.get("priority", False)),
+                "candidates": [to_candidate(cid) for cid in gids],
+            })
+        if card_groups:
+            leftover = [cid for cid in requested if cid in by_id and cid not in covered]
+            if leftover:
+                card_groups.append({
+                    "key": "ungrouped", "label": "未分组",
+                    "priority": False, "candidates": [to_candidate(cid) for cid in leftover],
+                })
+        else:
+            card_groups.append({
+                "key": "subset", "label": text_title,
+                "priority": False,
+                "candidates": [to_candidate(cid) for cid in requested if cid in by_id],
+            })
+
+        loaded = sum(len(g["candidates"]) for g in card_groups)
+        _STOP_TOKENS = ("初筛不通过", "停止", "淘汰", "关闭")
+        stopped = sum(
+            1 for g in card_groups for c in g["candidates"]
+            if any(k in c["stage"] for k in _STOP_TOKENS)
+        )
+        card = {
+            "type": "candidate_list",
+            "title": text_title,
+            "context": {"type": "job", "id": int(context["id"])} if context else None,
+            "summary": {
+                "total": loaded, "active": loaded - stopped, "stopped": stopped,
+                "requested": len(requested), "skipped": skipped,
+            },
+            "groups": card_groups,
+            "subset": True,
+        }
+
+        def fmt(c: dict[str, Any]) -> str:
+            parts = [c["name"]]
+            if c["company"]:
+                parts.append(c["company"])
+            if c["title"]:
+                parts.append(c["title"])
+            label = " | ".join(dict.fromkeys(parts))
+            return f"- {label}（{c['stage']}）" if c["stage"] else f"- {label}"
+
+        lines = [f"## {text_title}"]
+        head = f"共 {loaded} 人"
+        if skipped:
+            head += f"；{len(skipped)} 个 ID 在库中不存在已跳过（{', '.join(str(i) for i in skipped)}）"
+        lines.append(head + "。\n")
+        for group in card_groups:
+            candidates = group["candidates"]
+            if not candidates:
+                continue
+            lines.append(f"### {group['label']}（{len(candidates)} 人）")
+            lines.extend(fmt(c) for c in candidates[:15])
+            if len(candidates) > 15:
+                lines.append(f"- …等 {len(candidates)} 人，完整名单见卡片")
+            lines.append("")
+        return {"ok": True, "answer": "\n".join(lines).rstrip(), "card": card}
+
     def job(self, job_id: int) -> dict[str, Any]:
         conn = connect(self.db_path)
         try:
