@@ -2456,6 +2456,10 @@ export interface components {
              * @default
              */
             model: string;
+            /** Action Card */
+            action_card?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** CopilotTurnRecordResponse */
         CopilotTurnRecordResponse: {

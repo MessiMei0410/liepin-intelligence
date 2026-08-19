@@ -228,6 +228,8 @@ class CopilotTurnRecordRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     source: str = Field(default="dsh", max_length=40)
     model: str = Field(default="", max_length=120)
+    # 外部编排层透传的结构化卡片（如名单卡）：恢复会话时重渲染用。
+    action_card: dict[str, Any] | None = None
 
 
 class CopilotTurnRecordResponse(BaseModel):
@@ -1065,6 +1067,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             context=body.context,
             source=body.source,
             model=body.model,
+            action_card=body.action_card,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "record failed")

@@ -254,4 +254,65 @@ describe('Agent transport', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('解析 DSH 常驻服务器透传的 card 事件', () => {
+    const events = parseAgentSse('event: card\ndata: {"type":"candidate_list","context":{"type":"job","id":142},"summary":{"total":7}}\n\n')
+    expect(events).toEqual([
+      { type: 'card', data: { type: 'candidate_list', context: { type: 'job', id: 142 }, summary: { total: 7 } } },
+    ])
+  })
+
+  it('DSH card 事件合并进 done（不单独转发），回填 record-turn 带 action_card', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const card = { type: 'candidate_list', context: { type: 'job', id: 142 }, summary: { total: 7 } }
+    const sse = [
+      'event: progress\r\ndata: {"message":"委托 Copilot 做领域分析…"}\r\n\r\n',
+      `event: card\r\ndata: ${JSON.stringify(card)}\r\n\r\n`,
+      'event: text\r\ndata: {"content":"名单如下"}\r\n\r\n',
+      'event: done\r\ndata: {"ok":true,"session_id":"s-card","answer":"名单如下"}\r\n\r\n',
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-card', '名单给我', { type: 'job', id: 142 }, 'request-card'), new AbortController().signal, event => events.push(event))
+      // card 不单独转发（上层事件循环只认 context/progress/text/done/error），合并进 done
+      expect(events.map(event => event.type)).toEqual(['progress', 'text', 'done'])
+      expect(events[2]).toEqual({ type: 'done', data: expect.objectContaining({ answer: '名单如下', action_card: card }) })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
+      expect(record).toBeTruthy()
+      expect(JSON.parse(record?.body || '{}')).toMatchObject({
+        session_id: 's-card', request_id: 'request-card', source: 'dsh', action_card: card,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

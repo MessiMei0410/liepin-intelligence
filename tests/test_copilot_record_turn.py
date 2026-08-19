@@ -63,6 +63,50 @@ class CopilotRecordTurnTest(AgentDbCase):
         self.assertEqual(service.list_copilot_sessions()["sessions"], [])
         service.close()
 
+    def test_record_turn_persists_action_card_for_session_restore(self) -> None:
+        """DSH 透传的名单卡回填后落 structured_json，恢复会话时详情带出 action_card。"""
+        card = {
+            "type": "candidate_list",
+            "context": {"type": "job", "id": 142},
+            "summary": {"total": 7},
+            "filter_mode": "strict",
+        }
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-card",
+            request_id="req-card-1",
+            message="士兰微电源专家名单给我",
+            answer="名单如下……",
+            context={"type": "job", "id": 142},
+            source="dsh",
+            action_card=card,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recorded"])
+
+        detail = service.get_copilot_session("asa-test-card")
+        assistant = detail["messages"][1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["action_card"], card)
+        self.assertEqual(assistant["action_cards"], [card])
+        service.close()
+
+    def test_record_turn_without_action_card_keeps_detail_clean(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-nocard",
+            request_id="req-nocard-1",
+            message="你好",
+            answer="你好！",
+            context={"type": "page"},
+            source="dsh",
+        )
+        self.assertTrue(result["recorded"])
+        detail = service.get_copilot_session("asa-test-nocard")
+        self.assertIsNone(detail["messages"][1]["action_card"])
+        self.assertEqual(detail["messages"][1]["action_cards"], [])
+        service.close()
+
 
 if __name__ == "__main__":
     unittest.main()

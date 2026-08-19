@@ -10,10 +10,10 @@ import { SessionId } from "@deepseek-ai/dsh-session";
  * @asa/dsh-asa-server — ASA 常驻 Agent 服务器（resident runner）。
  * 与 dsh-headless 的 one-shot runner 同源：都用 agents/sessions/agentDefaultModel
  * 跑 agent 循环，但不 exit，而是起一个 node:http 服务器：
- *   POST /turn {message, session_id?} -> SSE 流（text 增量 + done），会话复用
+ *   POST /turn {message, session_id?} -> SSE 流（text 增量 + card + done），会话复用
  *   GET  /health                     -> {ok}
  * 流式：订阅 agent 会话的 session/event 火线，把 assistant/chunk(text-delta) 实时转成
- * SSE `text` 事件；轮结束发 `done`。同 session_id 复用 live agent（多轮记忆）。
+ * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件；轮结束发 `done`。同 session_id 复用 live agent（多轮记忆）。
  *
  * v1.3 加固（审计后）：
  * - 事件订阅在 finally 中 dispose，异常路径不再残留监听器（此前会叠加重复推流）。
@@ -228,6 +228,12 @@ function apply(ctx) {
         // 工具执行段本无任何输出（「死寂」），转发为进度事件让等待可见。
         const toolName = event.data && event.data.name;
         if (toolName) writeSse(res, "progress", { message: `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…` });
+      } else if (event.type === "tool/result") {
+        // 结构化卡片透传：asa_copilot_ask 经 presentationMeta 把 Copilot 的
+        // action_card（候选人名单卡等）挂到 tool/result 的 meta（完整 JSON 快照，
+        // 不受 render 16k 截断影响）。前端收到 card 事件后挂到本轮 assistant 消息。
+        const card = event.data && event.data.meta && event.data.meta.action_card;
+        if (card && typeof card === "object") writeSse(res, "card", card);
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
       }

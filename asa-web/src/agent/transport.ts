@@ -46,6 +46,7 @@ export type AgentSseEvent =
   | { type: 'context'; data: { session_id: string; context?: AgentContext; references?: AgentReference[]; suggested_actions?: Array<Record<string, unknown>> } }
   | { type: 'progress'; data: { message: string } }
   | { type: 'text'; data: { content: string } }
+  | { type: 'card'; data: Record<string, unknown> }
   | { type: 'done'; data: AgentTurnResult }
   | { type: 'error'; data: { error: string } }
 
@@ -64,6 +65,7 @@ const contextEventSchema = z.object({
 })
 const textEventSchema = z.object({ content: z.string() })
 const progressEventSchema = z.object({ message: z.string() })
+const cardEventSchema = structuredRecord
 const doneEventSchema = z.object({
   ok: z.boolean().optional(), session_id: z.string().min(1), answer: z.string(), error: z.string().optional(), context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(), suggested_actions: z.array(structuredRecord).optional(),
@@ -119,14 +121,16 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   const parsed = event === 'context' ? contextEventSchema.safeParse(value)
     : event === 'text' ? textEventSchema.safeParse(value)
       : event === 'progress' ? progressEventSchema.safeParse(value)
-        : event === 'done' ? doneEventSchema.safeParse(value)
-          : event === 'error' ? errorEventSchema.safeParse(value)
-            : undefined
+        : event === 'card' ? cardEventSchema.safeParse(value)
+          : event === 'done' ? doneEventSchema.safeParse(value)
+            : event === 'error' ? errorEventSchema.safeParse(value)
+              : undefined
   if (!parsed) return undefined
   if (!parsed.success) return { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } }
   if (event === 'context') return { type: 'context', data: parsed.data as Extract<AgentSseEvent, { type: 'context' }>['data'] }
   if (event === 'text') return { type: 'text', data: parsed.data as Extract<AgentSseEvent, { type: 'text' }>['data'] }
   if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
+  if (event === 'card') return { type: 'card', data: parsed.data as Record<string, unknown> }
   if (event === 'done') {
     const data = parsed.data as AgentTurnResult
     return { type: 'done', data: { ...data, workflow_progress: synthesizeWorkflowProgress(data) } }
@@ -205,6 +209,8 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         answer: String(data.answer || ''),
         context: turn.context,
         source: 'dsh',
+        // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
+        ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
       }),
     })
   } catch (error) {
@@ -231,8 +237,20 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   const decoder = new TextDecoder()
   let buffer = ''
   let doneData: Record<string, unknown> | null = null
+  // DSH 常驻服务器把工具结果里的 action_card 以独立 `card` 事件透传（工具结果没有
+  // 会话级归属字段，只能按序到达）。这里暂存并合并进 done：与 Copilot 脑一致在轮末
+  // 挂到 assistant 消息（turn_done / 名单弹窗自动打开 / record-turn 回填同一条路径），
+  // 不单独转发 card——上层事件循环只认 context/progress/text/done/error。
+  let cardData: Record<string, unknown> | null = null
   const track = (event: AgentSseEvent) => {
-    if (event.type === 'done') doneData = (event.data || {}) as Record<string, unknown>
+    if (event.type === 'card') {
+      cardData = event.data
+      return
+    }
+    if (event.type === 'done') {
+      if (cardData && !event.data.action_card) event.data = { ...event.data, action_card: cardData }
+      doneData = (event.data || {}) as Record<string, unknown>
+    }
     onEvent(event)
   }
   while (true) {
