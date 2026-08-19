@@ -108,6 +108,65 @@ function copilotPayload(value) {
   };
 }
 
+// asa_copilot_ask 超时与流式读取（dogfood P1-1：名单/策略类委托富答案生成 2-4 分钟，
+// 旧的 120s 绝对超时 + 整流缓冲导致连续 3 次超时、300s 轮预算被 abort）：
+// - timeoutMs 上调到 280s（ASA_DSH_TURN_TIMEOUT_MS 300s 轮预算内最多一次完整尝试，
+//   不再 3×120s 白烧轮预算）；
+// - 增量读 SSE：完整的 done 块到达即返回，不等连接收尾；
+// - 静默看门狗：慢但在产出（progress/thinking 持续来）不算超时，超过
+//   INACTIVITY_MS 没有任何字节才判卡死。
+const COPILOT_ASK_TIMEOUT_MS = Number(process.env.ASA_COPILOT_ASK_TIMEOUT_MS || 280_000);
+const COPILOT_ASK_INACTIVITY_MS = Number(process.env.ASA_COPILOT_ASK_INACTIVITY_MS || 90_000);
+
+function hasCompleteDoneBlock(buffer) {
+  // done 块完整性的两种判据：块后有终止空行（不是流尾残片），或 data 已是合法 JSON
+  //（done 多为最后一个写块，服务器可能不收尾，靠 JSON 可解析判完整，避免截断提前返回）。
+  const blocks = buffer.split(/\r?\n\r?\n/);
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (!block || !/(?:^|\r?\n)event:\s*done(?:\r?\n|$)/.test(block)) continue;
+    if (index < blocks.length - 1) return true; // 后面还有内容，本块必然完整
+    const dataLine = block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("");
+    if (!dataLine) continue;
+    try {
+      JSON.parse(dataLine);
+      return true;
+    } catch { /* data 还在路上，继续等 */ }
+  }
+  return false;
+}
+
+async function readCopilotSse(res) {
+  // 无流式 body 的环境（测试桩/旧运行时）退回整体文本。
+  if (!res.body || typeof res.body.getReader !== "function") return await res.text();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      let watchdog;
+      const inactivity = new Promise((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error(`copilot stream 静默超过 ${Math.round(COPILOT_ASK_INACTIVITY_MS / 1000)}s，判定卡死`)),
+          COPILOT_ASK_INACTIVITY_MS,
+        );
+      });
+      let chunk;
+      try {
+        chunk = await Promise.race([reader.read(), inactivity]);
+      } finally {
+        clearTimeout(watchdog);
+      }
+      const { value, done } = chunk;
+      buffer += decoder.decode(value, { stream: !done });
+      if (done) return buffer;
+      if (hasCompleteDoneBlock(buffer)) return buffer; // done 提前返回
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* 连接已收尾时 cancel 报错可忽略 */ }
+  }
+}
+
 function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_dashboard",
@@ -610,7 +669,7 @@ function apply(ctx) {
         copilot_payload: copilotPayload(value),
       }),
     },
-    timeoutMs: 120000,
+    timeoutMs: COPILOT_ASK_TIMEOUT_MS,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const requestId = crypto.randomUUID();
@@ -627,8 +686,10 @@ function apply(ctx) {
         }),
         signal: exec.signal,
       });
-      const text = await res.text();
-      if (!res.ok) throw new Error(`copilot stream -> HTTP ${res.status}: ${text.slice(0, 500)}`);
+      if (!res.ok) throw new Error(`copilot stream -> HTTP ${res.status}: ${(await res.text()).slice(0, 500)}`);
+      // 增量读流：done 块完整到达即返回（富答案生成 2-4 分钟属正常，整流缓冲 +
+      // 120s 绝对超时是 dogfood P1-1 连续超时的直接原因）；静默看门狗判真卡死。
+      const text = await readCopilotSse(res);
       // 解析 SSE：done 事件里的 answer 是最终答案；done 原生携带顶层 action_card
       // （/api/v1/copilot/stream 的 done 即 copilot() 完整结果，见 copilot_api.py）。
       for (const block of text.split(/\r?\n\r?\n/)) {
