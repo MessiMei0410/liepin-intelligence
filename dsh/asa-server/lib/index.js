@@ -123,6 +123,50 @@ function chunkSseDelta(chunk) {
   return null;
 }
 
+const INTERMEDIATE_ANSWER_PATTERNS = [
+  /子代理仍在执行/,
+  /子代理(?:还在|正在)执行/,
+  /等(?:它|其|子代理)返回/,
+  /稍后(?:给出|提供)(?:最终|完整)/,
+  /等待(?:子代理|它|其)返回/,
+];
+
+/** 识别“仍在执行/等待返回”中间答复；只有配合名单卡才触发收尾。 */
+function isIntermediateAnswer(answer) {
+  const text = typeof answer === "string" ? answer.trim() : "";
+  return Boolean(text) && INTERMEDIATE_ANSWER_PATTERNS.some(pattern => pattern.test(text));
+}
+
+function shouldFollowupCandidateList(answer, hasCandidateListCard) {
+  return hasCandidateListCard === true && isIntermediateAnswer(answer);
+}
+
+function mergeCopilotPayload(previous, next) {
+  if (!previous || typeof previous !== "object") return next;
+  if (!next || typeof next !== "object") return previous;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(next)) {
+    if (value !== undefined) merged[key] = value;
+  }
+  for (const key of ["understanding_card", "execution_receipt", "analysis_card", "business_focus", "model_participation", "context"]) {
+    if (!next[key] || typeof next[key] !== "object" || Array.isArray(next[key])) {
+      if (previous[key] !== undefined) merged[key] = previous[key];
+      else delete merged[key];
+    }
+  }
+  const previousCards = Array.isArray(previous.action_cards) ? previous.action_cards : [];
+  const nextCards = Array.isArray(next.action_cards) ? next.action_cards : [];
+  const previousCandidateCard = previousCards.find(card => card && card.type === "candidate_list");
+  if (!nextCards.length) merged.action_cards = previousCards;
+  else if (previousCandidateCard && !nextCards.some(card => card && card.type === "candidate_list")) {
+    merged.action_cards = [previousCandidateCard, ...nextCards];
+  }
+  return merged;
+}
+
+const CANDIDATE_LIST_FOLLOWUP_PROMPT = "基于本轮已经返回的真实候选名单工具证据完成收尾：不要再返回“子代理仍在执行”“等待返回”或“稍后给最终结果”等中间态。请直接给出已确认、相邻经验、待核验/不满足的分档判断、推荐顺序、证据依据和下一步；如果用户没有提出筛选条件，就简要说明名单已生成及可执行的下一步。不要重复调用名单工具。";
+const CANDIDATE_LIST_FOLLOWUP_INCOMPLETE = "名单已生成，但本轮分析收尾仍未完成，暂未形成可靠的分档推荐结论；请重新发起分析或指定要核验的候选人。";
+
 /** text/thinking 增量聚合器：token 级小 chunk 合并成低频 SSE 事件，降低前端重渲染频率。
  *  push() 累积；满 maxChars 立即 flush 该类型，否则开一个 windowMs 定时器 flush 全部。
  *  其他 SSE 事件（card/confirm_request/progress/done）写出前必须 flush() 保序。 */
@@ -407,7 +451,7 @@ function apply(ctx) {
         // 只有 asa_copilot_ask 投影，凭键存在即可归属。
         const delegatePayload = event.data && event.data.meta && event.data.meta.copilot_payload;
         if (delegatePayload && typeof delegatePayload === "object") {
-          copilotPayload = delegatePayload;
+          copilotPayload = mergeCopilotPayload(copilotPayload, delegatePayload);
         }
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
@@ -423,10 +467,38 @@ function apply(ctx) {
         }),
       );
       await agent.whenIdle();
-      const delegateCards = copilotPayload && Array.isArray(copilotPayload.action_cards) ? copilotPayload.action_cards : [];
+      const firstAnswer = answer;
+      const firstDelegatePayload = copilotPayload;
+      const firstDelegateCards = firstDelegatePayload && Array.isArray(firstDelegatePayload.action_cards)
+        ? firstDelegatePayload.action_cards
+        : [];
       const hasCandidateListCard = sawCandidateListCard
+        || firstDelegateCards.some((card) => card && card.type === "candidate_list");
+      if (shouldFollowupCandidateList(firstAnswer, hasCandidateListCard)) {
+        // 名单工具已经给出真实证据时，补一次同会话收尾；不再调用名单工具，避免重复查询。
+        deltas.flush();
+        writeSse(res, "progress", { message: "基于名单证据整理最终判断…" });
+        try {
+          agent.followup(createUserMessage({
+            content: [{ type: "text", text: CANDIDATE_LIST_FOLLOWUP_PROMPT }],
+            source: { kind: "user" },
+          }));
+          await agent.whenIdle();
+          if (isIntermediateAnswer(answer)) {
+            // 只允许一次收尾；二次仍是中间态时止损，不能递归调用或把等待文案当结论。
+            answer = CANDIDATE_LIST_FOLLOWUP_INCOMPLETE;
+          }
+        } catch (error) {
+          // 收尾失败时保留首轮名单卡和答案，避免把已有真实证据变成错误态。
+          console.warn(`[asa-resident] candidate-list followup failed: ${error instanceof Error ? error.message : String(error)}`);
+          answer = CANDIDATE_LIST_FOLLOWUP_INCOMPLETE;
+          copilotPayload = firstDelegatePayload;
+        }
+      }
+      const delegateCards = copilotPayload && Array.isArray(copilotPayload.action_cards) ? copilotPayload.action_cards : [];
+      const finalHasCandidateListCard = hasCandidateListCard
         || delegateCards.some((card) => card && card.type === "candidate_list");
-      const { suggested_actions, references } = objectRefs.outputs({ answer, candidateListCard: hasCandidateListCard });
+      const { suggested_actions, references } = objectRefs.outputs({ answer, candidateListCard: finalHasCandidateListCard });
       // 轮末强制 flush：聚合窗口里残留的 text/thinking 必须先于 done 下发保序。
       deltas.flush();
       writeSse(res, "done", {
@@ -551,4 +623,4 @@ function apply(ctx) {
   return server;
 }
 
-export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey };
+export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey, isIntermediateAnswer, shouldFollowupCandidateList, CANDIDATE_LIST_FOLLOWUP_PROMPT, mergeCopilotPayload };

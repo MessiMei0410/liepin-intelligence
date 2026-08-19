@@ -128,7 +128,8 @@ export const agentConversationReducer = (
           ...message, content: action.result.answer || message.content, context: action.result.context,
           references: action.result.references, suggested_actions: action.result.suggested_actions,
           understanding_card: action.result.understanding_card, execution_receipt: action.result.execution_receipt,
-          business_focus: action.result.business_focus, workflow_progress: action.result.workflow_progress,
+          analysis_card: action.result.analysis_card, business_focus: action.result.business_focus,
+          workflow_progress: action.result.workflow_progress,
           workflow_id: action.result.workflow_id, pending_intent: action.result.pending_intent,
           action_card: action.result.action_card, confirm_request: action.result.confirm_request,
           // 复数卡片随轮保存：DSH 委托轮 done 只带 action_cards 不带 action_card，

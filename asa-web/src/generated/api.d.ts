@@ -2404,6 +2404,14 @@ export interface components {
             action_card?: {
                 [key: string]: unknown;
             } | null;
+            /** Action Cards */
+            action_cards?: {
+                [key: string]: unknown;
+            }[];
+            /** Analysis Card */
+            analysis_card?: {
+                [key: string]: unknown;
+            } | null;
             /** Confirm Request */
             confirm_request?: {
                 [key: string]: unknown;
@@ -2637,6 +2645,10 @@ export interface components {
             } | null;
             /** Execution Receipt */
             execution_receipt?: {
+                [key: string]: unknown;
+            } | null;
+            /** Analysis Card */
+            analysis_card?: {
                 [key: string]: unknown;
             } | null;
             /** Workflow Progress */

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from '../agent/AgentInteractionCards'
+import { AnalysisCard, ExecutionReceipt, SuggestedActionBar, UnderstandingCard } from '../agent/AgentInteractionCards'
 
 describe('Agent interaction cards', () => {
   it('理解卡展示对象、目标、判断和无选项澄清问题', () => {
@@ -56,5 +56,26 @@ describe('Agent interaction cards', () => {
       state: '已完成', summary: '已读取候选名单', succeeded: 1, verified: false,
     }}/>)
     expect(screen.queryByRole('region', { name: '执行回执' })).not.toBeInTheDocument()
+  })
+
+  it('分析卡展示结论、指标、下一步并打开分析', () => {
+    const onOpenAnalysis = vi.fn()
+    render(<AnalysisCard card={{
+      headline: '候选人分档结论', run_id: 'run-42',
+      metrics: [{ label: '已确认', value: 3 }, { label: '待核验', value: 2 }],
+      evidence: ['简历中有服务器电源经历'],
+      next_step: '核验 2 人的量产经历',
+    }} onOpenAnalysis={onOpenAnalysis}/>)
+    const card = screen.getByRole('region', { name: '分析卡' })
+    expect(card).toHaveTextContent('候选人分档结论')
+    expect(card).toHaveTextContent('已确认 3')
+    expect(card).toHaveTextContent('核验 2 人的量产经历')
+    fireEvent.click(screen.getByRole('button', { name: '查看分析' }))
+    expect(onOpenAnalysis).toHaveBeenCalledWith('run-42')
+  })
+
+  it('分析卡没有有效内容时不渲染', () => {
+    render(<AnalysisCard card={{ run_id: 'run-empty' }}/>)
+    expect(screen.queryByRole('region', { name: '分析卡' })).not.toBeInTheDocument()
   })
 })
