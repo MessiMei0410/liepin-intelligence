@@ -370,6 +370,17 @@ function apply(ctx) {
     return next;
   };
 
+  /** 丢弃会话的池内 agent（碰撞自愈用）：dispose 后下次 ensureAgent 全新创建。 */
+  async function discardAgent(sessionId) {
+    const entry = pool.get(sessionId);
+    if (!entry) return;
+    pool.delete(sessionId);
+    if (entry.evictTimer) clearTimeout(entry.evictTimer);
+    try {
+      await entry.handle.dispose();
+    } catch { /* agent 可能已 dispose */ }
+  }
+
   /** 跑一轮：订阅事件火线实时转 SSE，断连/超时即时 cancel，监听器 finally 回收。 */
   async function runTurn(req, res, sessionId, message) {
     const entry = await ensureAgent(sessionId);
@@ -533,6 +544,22 @@ function apply(ctx) {
     }
   }
 
+  /** turn 级碰撞自愈：碰撞可能在 ensureAgent / followup / whenIdle 任一阶段抛出
+   *  （DSH 持久化日志的收养是惰性的，create 成功不代表收养成功——2026-08-19
+   *  连续三个会话实证 ensureAgent 级兜底接不住）。整轮重试一次：丢弃池内 agent、
+   *  归档陈旧日志、重跑。progress 事件在重试时会重复一行，无害。 */
+  async function runTurnHealed(req, res, sessionId, message) {
+    try {
+      await runTurn(req, res, sessionId, message);
+    } catch (error) {
+      if (!/id collision/.test(String(error && error.message))) throw error;
+      console.warn(`[asa-resident] session ${sessionId} id collision（turn 级），丢弃 agent 归档日志并重试`);
+      await discardAgent(sessionId);
+      archiveStaleSessionLog(sessionId);
+      await runTurn(req, res, sessionId, message);
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       res.writeHead(204, corsHeaders(req));
@@ -568,7 +595,7 @@ function apply(ctx) {
         ...corsHeaders(req),
       });
       try {
-        await serializeTurn(sessionId, () => runTurn(req, res, sessionId, message));
+        await serializeTurn(sessionId, () => runTurnHealed(req, res, sessionId, message));
       } catch (error) {
         writeSse(res, "done", {
           session_id: sessionId,

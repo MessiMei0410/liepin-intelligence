@@ -87,3 +87,52 @@ describe("会话碰撞自愈", () => {
     }
   });
 });
+
+describe("turn 级碰撞自愈（followup 阶段抛出）", () => {
+  it("create 成功但 followup 抛 id collision：丢弃 agent 归档日志整轮重试", async () => {
+    const root = mkdtempSync(join(tmpdir(), "asa-dsh-sessions-"));
+    process.env.ASA_DSH_SESSIONS_ROOT = root;
+    const dir = join(root, projectKey(process.cwd()), encodeSegment(SESSION_ID));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "session.jsonl.zstd"), "stale");
+
+    let createCalls = 0;
+    const collisionAgent = fakeAgent();
+    collisionAgent.followup = () => {
+      throw new Error(`session "${SESSION_ID}" already has a persisted log on disk that does not match this live session (id collision)`);
+    };
+    const ctx = {
+      get(service) {
+        if (service === "agentDefaultModel") return { currentSelection: () => ({ provider: "p", model: "m" }) };
+        if (service === "agents") {
+          return {
+            async create() {
+              createCalls += 1;
+              return { agent: createCalls === 1 ? collisionAgent : fakeAgent(), dispose: async () => {} };
+            },
+          };
+        }
+        throw new Error(`unexpected ctx.get: ${service}`);
+      },
+    };
+    const port = 8990 + Math.floor(Math.random() * 9);
+    const server = (() => {
+      process.env.ASA_DSH_RESIDENT_PORT = String(port);
+      return apply(ctx);
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/turn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer collision-test-token" },
+        body: JSON.stringify({ message: "hi", session_id: SESSION_ID }),
+      });
+      const text = await res.text();
+      assert.equal(createCalls, 2);
+      assert.ok(text.includes("event: done"));
+      assert.ok(readdirSync(dir).some((name) => name.startsWith("session.jsonl.zstd.bak-")));
+    } finally {
+      server.close();
+    }
+  });
+});
