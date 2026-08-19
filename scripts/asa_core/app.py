@@ -454,6 +454,11 @@ class CandidateAction(BaseModel):
     preflight_token: str = ""
     # 合并去重（action=merge）必填：废弃方关系 ID；candidate_id 为保留方（winner）。
     loser_id: int | None = None
+    # 生命周期事件（action=record_event）：event_type 必填（六枚举），event_status/
+    # occurred_at 选填；note 复用为事件备注。预检与提交携带同一事件类型（token 绑定）。
+    event_type: str = ""
+    event_status: str = ""
+    occurred_at: str = ""
 
 
 class SourcingAdjustmentDecision(WriteEnvelope):
@@ -1589,7 +1594,11 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     @app.post("/api/v1/candidate-actions/preflight")
     def candidate_preflight(body: CandidateAction) -> dict[str, Any]:
         try:
-            return core.candidate_preflight(body.candidate_id, body.action, loser_id=body.loser_id)
+            return core.candidate_preflight(
+                body.candidate_id, body.action, loser_id=body.loser_id,
+                event_type=body.event_type, event_status=body.event_status,
+                occurred_at=body.occurred_at, note=body.note,
+            )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1599,6 +1608,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             raise HTTPException(400, "preflight_token is required")
         if body.action == "merge" and body.loser_id is None:
             raise HTTPException(400, "loser_id is required for merge")
+        if body.action == "record_event" and not body.event_type.strip():
+            raise HTTPException(400, "event_type is required for record_event")
 
         def commit() -> dict[str, Any]:
             # 人确认闸门：token 必须先经 UI 激活（write-confirmations/activate），
@@ -1607,6 +1618,14 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             if body.action == "merge":
                 # 合并去重（护栏第 6 条机制）：candidate_id=保留方（winner），loser_id=废弃方。
                 return core.candidate_merge_commit(body.candidate_id, int(body.loser_id or 0), body.note, body.preflight_token)
+            if body.action == "record_event":
+                # 生命周期事件（面试/Offer/入职）：token 绑定事件类型，写入走
+                # record_lifecycle_event（业务时间线 + 自动跟进待办 + request_id 幂等）。
+                return core.candidate_record_event_commit(
+                    body.candidate_id, body.event_type, body.note, body.preflight_token,
+                    event_status=body.event_status, occurred_at=body.occurred_at,
+                    request_id=body.request_id,
+                )
             return core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason)
 
         return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id), commit)

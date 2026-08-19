@@ -510,12 +510,17 @@ class CandidateActionsMixin:
             "sourcing_learning": learning,
         }
 
-    def candidate_preflight(self, candidate_id: int, action: str, loser_id: int | None = None) -> dict[str, Any]:
+    def candidate_preflight(self, candidate_id: int, action: str, loser_id: int | None = None, *, event_type: str = "", event_status: str = "", occurred_at: str = "", note: str = "") -> dict[str, Any]:
         if action == "merge":
             # 合并去重（护栏第 6 条机制）：三证据校验 + diff 在 CandidateDedupeMixin。
             if loser_id is None:
                 raise ValueError("合并去重（merge）必须携带 loser_id（废弃方关系 ID）")
             return self.candidate_merge_preflight(candidate_id, int(loser_id))
+        if action == "record_event":
+            return self._record_event_preflight(
+                candidate_id, event_type=event_type, event_status=event_status,
+                occurred_at=occurred_at, note=note,
+            )
         if action not in {"advance", "review", "contact", "recommend", "stop"}:
             raise ValueError("unsupported candidate action")
         detail = self.candidate(candidate_id)["candidate"]
@@ -537,6 +542,75 @@ class CandidateActionsMixin:
             "candidate": {"id": candidate_id, "name": detail["name"], "stage": detail.get("clean_stage")},
             "impact": "候选人关系状态将更新，并写入业务时间线和统一审计。",
         }
+
+    def _record_event_preflight(
+        self,
+        candidate_id: int,
+        *,
+        event_type: str,
+        event_status: str = "",
+        occurred_at: str = "",
+        note: str = "",
+    ) -> dict[str, Any]:
+        """记录生命周期事件（面试/Offer/入职）的预检（dogfood P2 工具面缺口）。
+
+        校验事件类型/状态/时间格式（与 record_lifecycle_event 同一套枚举与
+        时间规范化），返回事件要点供确认卡展示；token 绑定 record_event:{event_type}
+        且铸造为未激活——必须经 UI 激活（#61 确认链）后 commit 才能消费。
+        """
+        event_type = str(event_type or "").strip()
+        spec = LIFECYCLE_EVENT_TYPES.get(event_type)
+        if not spec:
+            raise ValueError(f"未知生命周期事件类型：{event_type or '空'}（可选：{'/'.join(LIFECYCLE_EVENT_TYPES)}）")
+        event_status = str(event_status or "").strip() or str(spec["default_status"])
+        if event_status not in spec["statuses"]:
+            raise ValueError(f"事件状态非法：{event_status}（{spec['label']} 可选：{'/'.join(spec['statuses'])}）")
+        event_time = self._normalize_lifecycle_time(occurred_at)
+        detail = self.candidate(candidate_id)["candidate"]
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=5)
+        with self._preflight_lock:
+            now = datetime.now()
+            self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
+            self._preflight_tokens[token] = (candidate_id, f"record_event:{event_type}", expires, False)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": "record_event",
+            "candidate": {"id": candidate_id, "name": detail["name"], "stage": detail.get("clean_stage")},
+            "event": {
+                "event_type": event_type,
+                "label": str(spec["label"]),
+                "event_status": event_status,
+                "occurred_at": event_time,
+                "notes": " ".join(str(note or "").split()),
+            },
+            "impact": f"将在业务时间线记录「{spec['label']}」事件，并自动生成跟进待办（不自动对外发任何消息）。",
+        }
+
+    def candidate_record_event_commit(
+        self,
+        candidate_id: int,
+        event_type: str,
+        note: str,
+        preflight_token: str,
+        *,
+        event_status: str = "",
+        occurred_at: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """record_event 提交：token 绑定事件类型（预检什么类型就只能提交什么类型），
+        写入复用 record_lifecycle_event（事件 + 自动跟进待办 + 幂等重放）。"""
+        action_key = f"record_event:{str(event_type or '').strip()}"
+        with self._preflight_lock:
+            grant = self._preflight_tokens.pop(preflight_token, None)
+        if not grant or grant[0] != candidate_id or grant[1] != action_key or grant[2] <= datetime.now():
+            raise ValueError("preflight token is invalid, expired, or already used")
+        return self.record_lifecycle_event(
+            candidate_id, event_type,
+            notes=note, occurred_at=occurred_at, event_status=event_status, request_id=request_id,
+        )
 
     def candidate_update_preflight(self, candidate_id: int, update_type: str) -> dict[str, Any]:
         if update_type not in CANDIDATE_UPDATE_LABELS:

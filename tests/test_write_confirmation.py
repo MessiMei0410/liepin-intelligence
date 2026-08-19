@@ -365,3 +365,103 @@ def test_record_turn_stores_confirm_request_and_applies_terminal_state(db_path: 
     detail = service.get_copilot_session(session_id)
     assert detail["messages"][1]["confirm_request"]["state"] == "cancelled"
     service.close()
+
+
+def _record_event_commit(client: TestClient, token: str, event_type: str, **extra):
+    request_id = f"wc-re-commit-{uuid.uuid4().hex[:8]}"
+    return client.post(
+        "/api/v1/candidate-actions/commit",
+        headers={"Idempotency-Key": request_id},
+        json={
+            "request_id": request_id,
+            "candidate_id": CANDIDATE_ID,
+            "action": "record_event",
+            "event_type": event_type,
+            "preflight_token": token,
+            **extra,
+        },
+    )
+
+
+def test_record_event_preflight_commit_chain(db_path: Path) -> None:
+    """记面试写工具（dogfood P2）：record_event 走 #61 确认链——
+    预检（事件要点回显）→ UI 激活 → commit 写业务时间线 + 自动跟进待办。"""
+    _reset_candidate(db_path)
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        response = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={
+                "request_id": f"wc-re-preflight-{uuid.uuid4().hex[:8]}",
+                "candidate_id": CANDIDATE_ID,
+                "action": "record_event",
+                "event_type": "interview_scheduled",
+                "occurred_at": "2026-08-20 14:00",
+                "note": "一面：客户现场",
+            },
+        )
+        assert response.status_code == 200, response.text
+        preflight = response.json()
+        assert preflight["action"] == "record_event"
+        assert preflight["event"]["label"] == "面试安排"
+        assert preflight["event"]["occurred_at"] == "2026-08-20 14:00:00"
+        assert preflight["event"]["notes"] == "一面：客户现场"
+        assert "跟进待办" in preflight["impact"]
+
+        # 未激活 commit → 409 confirmation_required（不消费 token）。
+        blocked = _record_event_commit(client, preflight["token"], "interview_scheduled", occurred_at="2026-08-20 14:00", note="一面：客户现场")
+        assert blocked.status_code == 409
+        assert "confirmation_required" in blocked.json()["detail"]
+
+        assert _activate(client, preflight["token"]).status_code == 200
+        committed = _record_event_commit(client, preflight["token"], "interview_scheduled", occurred_at="2026-08-20 14:00", note="一面：客户现场")
+        assert committed.status_code == 200, committed.text
+        payload = committed.json()
+        assert payload["already_recorded"] is False
+        assert payload["event"]["event_type_label"] == "面试安排"
+        assert payload["event"]["event_time"] == "2026-08-20 14:00:00"
+        assert payload["followup"]["task_type"] == "interview_followup"
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM candidate_events WHERE id=? AND event_type='interview_scheduled' AND job_candidate_id=?",
+                (payload["event_id"], CANDIDATE_ID),
+            ).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+
+def test_record_event_preflight_validation(db_path: Path) -> None:
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        # 未知事件类型 → 409
+        bad_type = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": f"wc-re-bad-{uuid.uuid4().hex[:8]}", "candidate_id": CANDIDATE_ID, "action": "record_event", "event_type": "hired"},
+        )
+        assert bad_type.status_code == 409
+        assert "未知生命周期事件类型" in bad_type.json()["detail"]
+        # 非法事件状态 → 409
+        bad_status = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": f"wc-re-bad2-{uuid.uuid4().hex[:8]}", "candidate_id": CANDIDATE_ID, "action": "record_event", "event_type": "interview_scheduled", "event_status": "done"},
+        )
+        assert bad_status.status_code == 409
+        # 非法时间格式 → 409
+        bad_time = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": f"wc-re-bad3-{uuid.uuid4().hex[:8]}", "candidate_id": CANDIDATE_ID, "action": "record_event", "event_type": "interview_scheduled", "occurred_at": "明天下午两点"},
+        )
+        assert bad_time.status_code == 409
+        assert "时间格式非法" in bad_time.json()["detail"]
+
+
+def test_record_event_token_bound_to_event_type(db_path: Path) -> None:
+    """token 绑定事件类型：按 interview_scheduled 预检的 token 不能提交 offer_extended。"""
+    _reset_candidate(db_path)
+    with TestClient(create_app(db_path=db_path, start_legacy=False)) as client:
+        preflight = client.post(
+            "/api/v1/candidate-actions/preflight",
+            json={"request_id": f"wc-re-bind-{uuid.uuid4().hex[:8]}", "candidate_id": CANDIDATE_ID, "action": "record_event", "event_type": "interview_scheduled"},
+        ).json()
+        assert _activate(client, preflight["token"]).status_code == 200
+        mismatched = _record_event_commit(client, preflight["token"], "offer_extended")
+        assert mismatched.status_code == 409

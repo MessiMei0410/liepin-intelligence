@@ -143,3 +143,51 @@ describe("asa_workflow_action_preflight", () => {
     }
   });
 });
+
+describe("asa_candidate_preflight(action=record_event)", () => {
+  it("缺 event_type 直接报错（不发请求）", async () => {
+    const tool = registerTools().get("asa_candidate_preflight");
+    await assert.rejects(
+      () => tool.execute({ candidate_id: 968, action: "record_event" }, { signal: undefined }),
+      /event_type/,
+    );
+  });
+
+  it("预检请求携带事件字段，event 投影进 confirm_request", async () => {
+    const preflight = {
+      ok: true,
+      token: "tok-re-1",
+      expires_at: "2026-08-19T12:05:00",
+      action: "record_event",
+      candidate: { id: 968, name: "陈**", stage: "触达待核验" },
+      event: {
+        event_type: "interview_scheduled", label: "面试安排",
+        event_status: "scheduled", occurred_at: "2026-08-20 14:00:00", notes: "一面：客户现场",
+      },
+      impact: "将在业务时间线记录「面试安排」事件，并自动生成跟进待办（不自动对外发任何消息）。",
+    };
+    const fetchMock = mock.method(globalThis, "fetch", async () => ({
+      ok: true, status: 200, json: async () => preflight,
+    }));
+    try {
+      const tool = registerTools().get("asa_candidate_preflight");
+      const result = await tool.execute(
+        { candidate_id: 968, action: "record_event", event_type: "interview_scheduled", occurred_at: "2026-08-20 14:00", note: "一面：客户现场" },
+        { signal: undefined },
+      );
+      const [, init] = fetchMock.mock.calls[0].arguments;
+      const body = JSON.parse(String(init.body));
+      assert.equal(body.action, "record_event");
+      assert.equal(body.event_type, "interview_scheduled");
+      assert.equal(body.occurred_at, "2026-08-20 14:00");
+      assert.equal(body.note, "一面：客户现场");
+      const meta = tool.output.presentationMeta({ candidate_id: 968, action: "record_event" }, result);
+      assert.equal(meta.confirm_request.action, "record_event");
+      assert.equal(meta.confirm_request.event.label, "面试安排");
+      assert.equal(meta.confirm_request.event.occurred_at, "2026-08-20 14:00:00");
+      assert.equal(meta.confirm_request.preflight_token, "tok-re-1");
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});

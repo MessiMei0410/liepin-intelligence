@@ -504,12 +504,16 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_candidate_preflight",
     description:
-      "对候选人动作做只读预检并发起写入确认申请（不写库）：返回一次性 preflight token（5 分钟有效）与影响预览；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进 / merge=合并去重（废弃方停止并指向保留方；需三证据：姓氏+公司+职位同时匹配，先用 asa_dedupe_scan 只读扫描确认疑似重复组）。merge 必须携带 winner_id（保留方关系 id，缺省取 candidate_id）与 loser_id（废弃方关系 id）。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
+      "对候选人动作做只读预检并发起写入确认申请（不写库）：返回一次性 preflight token（5 分钟有效）与影响预览；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进 / merge=合并去重（废弃方停止并指向保留方；需三证据：姓氏+公司+职位同时匹配，先用 asa_dedupe_scan 只读扫描确认疑似重复组）/ record_event=记录生命周期事件（面试/Offer/入职：event_type 六枚举 interview_scheduled/interview_completed/offer_extended/offer_accepted/offer_declined/onboarded，occurred_at 事件时间如 2026-08-20 14:00，event_status 选填，note 备注）。merge 必须携带 winner_id（保留方关系 id，缺省取 candidate_id）与 loser_id（废弃方关系 id）。记录面试安排一律用 record_event，不要拿 contact 凑。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
     parameters: {
       candidate_id: { type: "integer", required: true, description: "job_candidates 关系 ID（merge 时为保留方，同 winner_id）。" },
-      action: { type: "string", required: true, description: "advance | contact | recommend | stop | merge" },
+      action: { type: "string", required: true, description: "advance | contact | recommend | stop | merge | record_event" },
       winner_id: { type: "integer", description: "merge 必填：保留方关系 ID（缺省取 candidate_id）。" },
       loser_id: { type: "integer", description: "merge 必填：废弃方关系 ID（该关系将被停止并指向保留方）。" },
+      event_type: { type: "string", description: "record_event 必填：interview_scheduled | interview_completed | offer_extended | offer_accepted | offer_declined | onboarded。" },
+      occurred_at: { type: "string", description: "record_event 选填：事件时间（如 2026-08-20 14:00），缺省为服务端当前时间。" },
+      event_status: { type: "string", description: "record_event 选填：事件状态（缺省用事件类型默认状态）。" },
+      note: { type: "string", description: "record_event 选填：事件备注（如「一面，客户现场」）。" },
     },
     output: confirmMeta((value) => ({
       kind: "candidate_action",
@@ -518,6 +522,10 @@ function apply(ctx) {
       action: value.action || "",
       candidate: value.candidate && typeof value.candidate === "object" ? value.candidate : {},
       impact: value.impact || "",
+      // record_event：确认卡展示事件要点（类型/时间/状态/备注）。
+      ...(value.action === "record_event" && value.event && typeof value.event === "object"
+        ? { event: value.event }
+        : {}),
       // merge：确认卡展示双方关键字段 diff（姓名/公司/职位/阶段/来源/person_id/简历摘要）。
       ...(value.action === "merge" && value.loser && typeof value.loser === "object"
         ? {
@@ -543,6 +551,15 @@ function apply(ctx) {
         }
         payload.candidate_id = winnerId;
         payload.loser_id = args.loser_id;
+      }
+      if (args.action === "record_event") {
+        if (!String(args.event_type || "").trim()) {
+          throw new Error("asa_candidate_preflight(action=record_event) 要求 event_type（interview_scheduled/interview_completed/offer_extended/offer_accepted/offer_declined/onboarded）。");
+        }
+        payload.event_type = String(args.event_type).trim();
+        if (args.occurred_at) payload.occurred_at = String(args.occurred_at);
+        if (args.event_status) payload.event_status = String(args.event_status);
+        payload.note = String(args.note || "");
       }
       return await postJson("/api/v1/candidate-actions/preflight", payload, exec);
     },
