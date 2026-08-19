@@ -30,3 +30,20 @@ export const shouldAutoOpenCandidateList = (
   previous: CandidateListCardData | undefined,
   next: CandidateListCardData,
 ): boolean => !previous || candidateListCardSignature(previous) !== candidateListCardSignature(next)
+
+/** 待确认写确认卡判定：confirm_request 未带终态（confirmed/cancelled）即视为活跃待确认。 */
+export const isPendingConfirmRequest = (value: unknown): boolean => {
+  if (!value || typeof value !== 'object') return false
+  const state = String((value as Record<string, unknown>).state || 'pending')
+  return state !== 'confirmed' && state !== 'cancelled'
+}
+
+/** 名单弹窗让位判定（dogfood R2-5：合并预检确认卡被重新弹出的名单卡压住，需先关
+ *  名单卡才能点确认/取消）。确认卡优先级最高：
+ *  - 本轮 done 带着待确认 confirm_request（含前轮卡片携带重投）时，名单弹窗不得自动弹出；
+ *  - 消息流里已有活跃待确认卡时，同样不自动弹出（常驻「查看名单」按钮不受影响）。 */
+export const listAutoOpenBlockedByConfirm = (
+  doneConfirmRequest: unknown,
+  messages: Array<{ confirm_request?: unknown }>,
+): boolean => isPendingConfirmRequest(doneConfirmRequest)
+  || messages.some(message => isPendingConfirmRequest(message.confirm_request))
