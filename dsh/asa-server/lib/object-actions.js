@@ -72,10 +72,20 @@ export function createObjectRefCollector() {
       if (!answer) return true; // 无回答文本不过滤（兼容无 answer 调用方）
       if (ref.type === "candidate") return ref.named && answer.includes(ref.label);
       if (!ref.named) return true; // 无名 job/workflow 保底
-      return answer.includes(ref.label) || Boolean(ref.subtitle && answer.includes(ref.subtitle));
+      // 只认对象名（岗位标题/工作流标题）命中：客户名（subtitle）命中不可靠——
+      // 同客户多岗位时会把无关岗位救回（2026-08-19 验收：长越名单下"自动化软件
+      // 高级工程师"芯片，因 subtitle 同为"长越科技"被误留）。
+      return answer.includes(ref.label);
     };
-    const visible = (options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs)
-      .filter(relevant);
+    const visibleAll = options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs;
+    let visible = visibleAll.filter(relevant);
+    // 兜底：有回答文本但一个都没命中时，说明回答以别的方式指代这些对象，
+    // 整组放回 job/workflow（宁可多不可丢——历史 Copilot 轮与转述轮 answer 形态
+    // 不一）；candidate 不参与兜底（全量名单前 N 条不等于回答提及，维持全弃）。
+    if (answer && visible.length === 0) {
+      const nonCandidate = visibleAll.filter((ref) => ref.type !== "candidate");
+      if (nonCandidate.length > 0) visible = nonCandidate;
+    }
     const perType = new Map();
     const suggested_actions = [];
     for (const ref of visible) {
