@@ -33,7 +33,7 @@ from .conversation_state import (
 
 # Cross-module references (split from copilot_handler.py)
 from .copilot_evidence import _build_fact_receipt, _build_strategy_patch, _candidate_evidence_question, _client_aliases, _confirmed_assistant_refinement, _continued_sourcing_requested, _copilot_assessment_context, _copilot_context_job_id, _copilot_job_evidence, _copilot_response_detail, _dedupe_copilot_references, _format_ambiguous_job_scope, _format_candidate_evidence_answer, _format_candidate_result_observation_answer, _format_job_budget_fact_answer, _format_non_action_fact_answer, _is_candidate_result_observation, _is_job_budget_fact_update, _jobs_relevant_to_selected_context, _new_candidate_outreach_requested, _persistable_attachment_payload, _stopped_candidate_action_requested, _strategy_revision_instruction, _strategy_revision_requested
-from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_batch_stop, _requests_full_list, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
+from .copilot_intent import _build_candidate_list_card, _build_candidate_list_composition_answer, _compact_workflow_context, _company_profile_query_name, _copilot_pending_plan, _copilot_plan_from_anchor, _copilot_plan_matches_selected, _format_company_profile_answer, _format_salary_benchmark_answer, _format_talent_map_answer, _interpret_copilot_message, _is_candidate_list_composition_question, _is_candidate_list_query, _is_job_requirement_message, _is_plain_query, _is_readonly_pool_review, _latest_assistant_plan_anchor, _latest_assistant_plan_confirmation, _plan_confirmation_reply, _requests_batch_stop, _requests_full_list, _requests_grade_filter, _salary_plan_confirmation_reply, _salary_query, _salary_recap_amounts, _talent_map_query, _workflow_strategy_question
 from .copilot_sessions import _format_context_mismatch_answer, _format_workflow_strategy_answer
 
 
@@ -939,7 +939,7 @@ def _copilot_impl(
         pending_plan_ref=pending_plan_ref,
         raw_constraint_changes=intent_understanding.get("raw_constraint_changes"),
     )
-    if _is_candidate_list_query(message):
+    if _is_candidate_list_query(message) or _is_readonly_pool_review(message):
         if _requests_batch_stop(message):
             # 分级过滤 + 明确停止措辞：这是内部写库动作，而不是只读名单查询。
             turn_decision.update({
@@ -1461,6 +1461,8 @@ def _copilot_impl(
     }
     # 查询型名单请求直答：顾问要“名单/筛出/列表”时直接返回候选池，不建
     # 等待确认的执行计划（2026-08-10 长越机械人选名单卡在 create_plan）。
+    # 只读存量筛查同理（2026-08-19 DSH 验收：委托转述“做一轮存量候选人筛查
+    # （只读）”被误建 5 步寻访计划工作流）：走同一只读名单直答路径。
     # 必须放在 action_context_rule 之前，否则“请先选择要核验的岗位”会先抢答，
     # 名单拦截永远执行不到（kimi review #5）。
     candidate_list_answer = ""
@@ -1472,7 +1474,7 @@ def _copilot_impl(
     if (
         forced_answer is None
         and not suppress_goal_intent
-        and _is_candidate_list_query(message)
+        and (_is_candidate_list_query(message) or _is_readonly_pool_review(message))
     ):
         list_job_id = 0
         # 消息里明确提到的唯一岗位优先；没有明确岗位时才回到当前人选/岗位焦点。
@@ -1504,7 +1506,7 @@ def _copilot_impl(
                     (existing_focus.get("list_filters") if isinstance(existing_focus, dict) else None) or {}
                 ).get(str(list_job_id)) or ""
             )
-            explicit_grade = _requests_grade_filter(message)
+            explicit_grade = _requests_grade_filter(message) or _is_readonly_pool_review(message)
             explicit_full = _requests_full_list(message)
             if explicit_grade:
                 use_grade_filter = True

@@ -32,6 +32,7 @@ from a_system_agent.copilot_handler import (  # noqa: E402
     _format_candidate_list_answer,
     _is_candidate_list_composition_question,
     _is_candidate_list_query,
+    _is_readonly_pool_review,
 )
 from asa_core.service import CoreService  # noqa: E402
 
@@ -87,6 +88,42 @@ def _make_db() -> Path:
     conn.commit()
     conn.close()
     return Path(path)
+
+
+class ReadonlyPoolReviewTest(unittest.TestCase):
+    """只读存量筛查判定（_is_readonly_pool_review）回归守护。
+
+    背景（2026-08-19 DSH 验收）：用户对 DSH 说“存量你再筛选下给我名单”，
+    DSH 委托 Copilot 的模型转述文本“做一轮存量候选人筛查（只读）”不含
+    “名单”字面，turn_decision 误路由 create_plan 建了 5 步寻访计划工作流
+    （计划里写着“只读”却有“执行多渠道寻访”步骤）。判定以“是否只读/存量”
+    为准而非动词字面；执行性寻访请求必须不受影响。
+    """
+
+    def test_readonly_pool_review_markers(self) -> None:
+        # DSH 委托转述原文形态：无“名单”字面，以 只读/存量 判定为只读筛查。
+        self.assertTrue(_is_readonly_pool_review("做一轮存量候选人筛查（只读）"))
+        self.assertTrue(_is_readonly_pool_review("存量你再筛选下给我名单"))
+        self.assertTrue(_is_readonly_pool_review("把人才库里的候选人盘点一下"))
+        self.assertTrue(_is_readonly_pool_review("库里现有候选人梳理一份名单"))
+        # “只读”字面优先于执行性动词字面（转述可能带“做一轮…筛查/寻访”）。
+        self.assertTrue(_is_readonly_pool_review("做一轮存量候选人寻访筛查（只读）"))
+
+    def test_executive_requests_not_readonly(self) -> None:
+        # 正常计划创建不得被误伤：无池内限定词的执行性请求一律不命中。
+        self.assertFalse(_is_readonly_pool_review("开始新一轮寻访"))
+        self.assertFalse(_is_readonly_pool_review("制定寻访计划"))
+        self.assertFalse(_is_readonly_pool_review("执行外部寻访"))
+        self.assertFalse(_is_readonly_pool_review("为长越科技机械高级工程师启动一轮多渠道寻访，目标 10 人"))
+        # 池内但明确要计划/执行的，不当作只读请求。
+        self.assertFalse(_is_readonly_pool_review("帮我制定一个存量候选人梳理计划"))
+        self.assertFalse(_is_readonly_pool_review("把人才库的候选人梳理一下，然后发起寻访"))
+        # 出池动作（触达/发给客户）即使带存量字样也不是只读。
+        self.assertFalse(_is_readonly_pool_review("把存量候选人名单发给客户"))
+        self.assertFalse(_is_readonly_pool_review("触达一遍存量候选人"))
+        # 无分析意图的池内提及不升级（保守不拦截）。
+        self.assertFalse(_is_readonly_pool_review("激活存量人选"))
+        self.assertFalse(_is_readonly_pool_review(""))
 
 
 class CandidateListQueryTest(unittest.TestCase):
