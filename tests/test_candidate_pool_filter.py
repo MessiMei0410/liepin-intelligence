@@ -119,3 +119,55 @@ def test_power_filter_requires_direct_power_evidence_for_a_or_b(tmp_path: Path) 
     assert card["filter_mode"] == "grade_filter"
     assert [group["key"] for group in card["groups"]] == ["A-核心"]
     assert sum(len(group["candidates"]) for group in card["groups"]) == 1
+
+
+def _mechanical_db(tmp_path: Path) -> Path:
+    db_path = tmp_path / "mechanical-filter.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE clients (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE jobs (id INTEGER PRIMARY KEY, client_id INTEGER, title TEXT);
+        CREATE TABLE people (
+            id INTEGER PRIMARY KEY, display_name TEXT, current_company TEXT,
+            current_title TEXT, city TEXT, education TEXT, experience TEXT
+        );
+        CREATE TABLE job_candidates (
+            id INTEGER PRIMARY KEY, job_id INTEGER, person_id INTEGER,
+            clean_stage TEXT, flow_bucket TEXT, source_candidate_id TEXT, updated_at TEXT
+        );
+        CREATE TABLE candidate_profiles (
+            id INTEGER PRIMARY KEY, candidate_id INTEGER, candidate_name TEXT,
+            candidate_company TEXT, position TEXT, education_level TEXT,
+            seniority TEXT, profile_summary TEXT
+        );
+
+        INSERT INTO clients VALUES (1, '长越科技');
+        INSERT INTO jobs VALUES (137, 1, '机械高级工程师');
+        INSERT INTO people VALUES
+            (1, '运动台甲', '上海微电子装备', '机械设计工程师', '上海', '硕士', '10年'),
+            (2, '零件乙', '某机床厂', '机械工程师', '苏州', '本科', '8年');
+        INSERT INTO job_candidates VALUES
+            (201, 137, 1, 'S1 新增寻访/待复核', '待复核', '301', '2026-08-19'),
+            (202, 137, 2, 'S1 新增寻访/待复核', '待复核', '302', '2026-08-19');
+        INSERT INTO candidate_profiles VALUES
+            (1, 301, '运动台甲', '上海微电子装备', '机械设计工程师', '硕士', '10年',
+             '主导六自由度超精密气浮运动台（工件台）整机设计，多轴联动对准台，微米级定位，使用 Ansys 做有限元、模态与热变形分析'),
+            (2, 302, '零件乙', '某机床厂', '机械工程师', '本科', '8年',
+             '负责机床防护罩与钣金结构设计');
+        """
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_mechanical_six_dof_stage_counts_as_hard_evidence(tmp_path: Path) -> None:
+    db_path = _mechanical_db(tmp_path)
+    result = filter_job_candidates(str(db_path), 137, domain="mechanical")
+    graded = {item["id"]: item for item in result["candidates"]}
+    # 六自由度运动台经历计入硬证据并满足运动部件维度：A-核心（精密+半导体设备/运动部件+仿真全占）
+    assert graded[201]["grade"] == "A-核心"
+    assert any("运动台" in hit or "六自由度" in hit or "工件台" in hit for hit in graded[201]["hard_hits"])
+    # 无证据者维持 D 级，不被新关键词误抬
+    assert graded[202]["grade"] == "D-无证据"
