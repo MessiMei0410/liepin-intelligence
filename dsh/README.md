@@ -47,8 +47,10 @@ Python 脑既有链路不受影响：`pending_intent` 签名确认（`/api/v1/co
 ```bash
 # 1. 安装 profile 到 ~/.dsh/profiles/asa-server（bundles = dsh-base + @asa/dsh-asa-server）
 mkdir -p ~/.dsh/profiles/asa-server
-cp asa-server-profile/{cordis.patch.yml,AGENTS.md,pnpm-workspace.yaml} ~/.dsh/profiles/asa-server/
-#   并把 package.json 里的 file: 相对路径改成绝对路径后，在该目录 pnpm install
+cp asa-server-profile/{package.json,cordis.patch.yml,AGENTS.md,pnpm-workspace.yaml} ~/.dsh/profiles/asa-server/
+#   dependencies 保持空：运行期 bundle 解析不走 package.json——@asa 实体目录由
+#   deploy-asa-server.sh 同步进 node_modules，@deepseek-ai/* 经 shared fallback
+#   指向 toolchain。不要手填 file: 依赖（见「关键坑」，指到 Documents = launchd EPERM 雷）。
 
 # 2. 起常驻服务器（默认 8891，env ASA_DSH_RESIDENT_PORT 可改）
 dsh --profile asa-server
@@ -107,7 +109,7 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
 
 ## 部署与守护
 
-profile 的 `file:` 安装是**拷贝**：改完 `asa-server/` 或 `asa-tools/` 必须同步到
+profile 里的 `@asa/*` 是**实体拷贝**：改完 `asa-server/` 或 `asa-tools/` 必须同步到
 `~/.dsh/profiles/asa-server/node_modules/@asa/` 并重启常驻服务器才生效。一键完成：
 
 ```bash
@@ -137,7 +139,18 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.asa.dsh-server.plist
 
 ## 关键坑（已记录，勿重踩）
 
-- 插件 `file:` 安装是**拷贝**：改 `asa-tools/lib/index.js` 后需在 profile 目录重新 `pnpm install`（或 `dsh plugin` 重装）。
-- `link:` 会让 `@deepseek-ai/dsh-tools`（peerDep）从软链 realpath 解析不到 → 插件树 `ERR_MODULE_NOT_FOUND`；回退 `file:` 时记得清 `pnpm-lock.yaml` 里残留的 `link:` 条目。
+- **profile 的 `file:` 依赖指到 `~/Documents` 下路径（仓库本体或快照 worktree）= launchd EPERM 雷**
+  （2026-08-17 实证，`~/.dsh/asa-server.err.log`）：pnpm install 会把 `node_modules/@asa/*`
+  链成指向该路径的软链，node 对入口/模块做 realpath 后落在 Documents；launchd 拉起的进程
+  没有 ~/Documents 的 TCC 授权，`open()` 即 `EPERM: operation not permitted`，进程入口直接崩，
+  KeepAlive 反复重启反复崩。因此安装后的 profile **不声明任何 `file:` 依赖**
+  （`dependencies: {}`）——运行期 bundle 解析不走 package.json：`@asa/*` 实体目录由
+  `deploy-asa-server.sh` rsync 进 profile 的 node_modules，`@deepseek-ai/*` 经
+  `~/.dsh/profiles/node_modules` shared fallback 指到 toolchain（`~/.dsh/asa-server-toolchain`，
+  TCC 安全）。部署脚本会清空 profile 里残留的 `file:` 依赖、拒绝穿透软链 rsync，
+  并校验 profile 树内所有软链的 realpath 都在 `~/.dsh` 内。
+- 同理，`rsync` 到软链目标会**穿透**写进链接指向的目录：部署前发现 `@asa/*` 是软链必须先删再同步。
+- 改 `asa-tools/lib/index.js` 等 bundle 源码后跑 `dsh/bin/deploy-asa-server.sh` 同步实体拷贝并重启才生效；常驻服务器无热重载。
+- `link:` 会让 `@deepseek-ai/dsh-tools`（peerDep）从软链 realpath 解析不到 → 插件树 `ERR_MODULE_NOT_FOUND`；软链回退实体目录时记得清 `pnpm-lock.yaml` 里残留的 `link:`/`file:` 条目。
 - 工具参数里 `object` 类型必须显式 `additionalProperties: true/false`，否则 `UNSUPPORTED_SCHEMA`。
 - 写动作正式库零接触：测试一律用 `/tmp` DB 副本 + 独立端口 Core（见 e2e `global-setup.ts` 的隔离模式）。
