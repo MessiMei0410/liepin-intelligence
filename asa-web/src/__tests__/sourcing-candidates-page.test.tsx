@@ -37,4 +37,27 @@ describe('独立寻访名单来源证据', () => {
     expect(screen.getByText('推荐')).toBeInTheDocument()
     expect(String(fetchMock.mock.calls[0][0])).toContain('/api/v1/workflows/wf-1/candidates')
   })
+
+  it('意向列的 raw_status 枚举映射为中文，自由文本原样保留（P8）', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({
+      ok: true,
+      workflow_id: 'wf-1',
+      total: 3,
+      limit: 50,
+      offset: 0,
+      items: [
+        { id: 1, person_id: 11, name: '王**', intention: 'screen_rejected', updated_at: '2026-08-14 10:00:00' },
+        { id: 2, person_id: 12, name: '李**', intention: 'search_shortlisted', updated_at: '2026-08-14 10:00:00' },
+        { id: 3, person_id: 13, name: '张**', intention: '对方近期沟通过【上海】机会', updated_at: '2026-08-14 10:00:00' },
+      ],
+    })))
+
+    render(<SourcingCandidatesPage workflowId="wf-1" />)
+
+    expect(await screen.findByText('初筛未通过')).toBeInTheDocument()
+    expect(screen.getByText('搜索入库 · 待复核')).toBeInTheDocument()
+    expect(screen.getByText('对方近期沟通过【上海】机会')).toBeInTheDocument()
+    expect(screen.queryByText('screen_rejected')).not.toBeInTheDocument()
+    expect(screen.queryByText('search_shortlisted')).not.toBeInTheDocument()
+  })
 })

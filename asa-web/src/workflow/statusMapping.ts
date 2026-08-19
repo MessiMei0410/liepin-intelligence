@@ -1,4 +1,5 @@
 import type { Workflow } from '../api'
+import { eventStatusLabel } from '../shared/format'
 
 // R3 业务终态映射：把后端 (status, business_outcome) 二元组收敛为面板可直接渲染的
 // 中文文案 + 语义色调 + 是否展示“下一步操作”。
@@ -88,3 +89,45 @@ export const zeroAttributionLabel = (code?: string | null): string => {
 // 归因标签的语义色调：真实无结果是渠道健康的信息态，其余一律告警色。
 export const zeroAttributionTone = (code?: string | null): 'muted' | 'warn' =>
   String(code || '').trim() === 'no_results' ? 'muted' : 'warn'
+
+// ── 候选人侧英文枚举收口（P8）──────────────────────────────────────
+// 寻访名单「意向」列与详情时间线「最近动态」不得渲染数据库枚举原形。
+// 意向列的 intention 字段混装自由中文文本与 raw_status 枚举：枚举一律映射成中文，
+// 无法识别的纯英文枚举值回落「状态待同步」，自由文本原样保留。
+
+export const intentionStatusLabels: Record<string, string> = {
+  search_shortlisted: '搜索入库 · 待复核',
+  xsaas_search_shortlisted: 'X-SaaS 入库 · 待复核',
+  candidate_intake: '已入库',
+  screen_rejected: '初筛未通过',
+  xsaas_review_stop: '复核未通过',
+  rejected: '已淘汰',
+  stopped: '已停止',
+  closed: '已关闭',
+}
+
+export const intentionLabel = (value?: string | null): string => {
+  const key = String(value || '').trim()
+  if (!key) return '-'
+  const known = intentionStatusLabels[key.toLowerCase()]
+  if (known) return known
+  // 漏网的纯英文枚举（小写+下划线形态）不直出；自由文本（多为中文沟通记录）原样保留。
+  if (/^[a-z][a-z0-9_]*$/.test(key)) return '状态待同步'
+  return key
+}
+
+// 时间线 event_status 增补枚举：shared/format.eventStatusLabel 的既有映射继续生效，
+// 本表只补它漏掉的值；仍无法识别且含英文字母的回落「状态待同步」，绝不渲染英文原形。
+export const candidateEventStatusLabels: Record<string, string> = {
+  corrected: '已纠正',
+  job_chat_verified: '猎聘触达已核验',
+}
+
+export const humanizeEventStatus = (value?: string | null): string => {
+  const key = String(value || '').trim()
+  if (!key) return ''
+  const known = candidateEventStatusLabels[key]
+  if (known) return known
+  const label = eventStatusLabel(key)
+  return /[A-Za-z]/.test(label) ? '状态待同步' : label
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mapWorkflowStatus } from '../workflow/statusMapping'
+import { mapWorkflowStatus, intentionLabel, humanizeEventStatus } from '../workflow/statusMapping'
 
 const steps = [
   { status: 'completed', business_label: '生成寻访策略' },
@@ -72,5 +72,47 @@ describe('mapWorkflowStatus 业务终态映射', () => {
 
   it('未知 status → 中文兜底，不渲染英文原形', () => {
     expect(mapWorkflowStatus({ status: 'mystery_state', business_outcome: null }).label).toBe('状态待同步')
+  })
+})
+
+describe('intentionLabel 寻访名单意向列枚举收口（P8）', () => {
+  it('raw_status 枚举一律映射为中文', () => {
+    expect(intentionLabel('screen_rejected')).toBe('初筛未通过')
+    expect(intentionLabel('xsaas_review_stop')).toBe('复核未通过')
+    expect(intentionLabel('search_shortlisted')).toBe('搜索入库 · 待复核')
+    expect(intentionLabel('xsaas_search_shortlisted')).toBe('X-SaaS 入库 · 待复核')
+    expect(intentionLabel('rejected')).toBe('已淘汰')
+    expect(intentionLabel('stopped')).toBe('已停止')
+    expect(intentionLabel('closed')).toBe('已关闭')
+    expect(intentionLabel('candidate_intake')).toBe('已入库')
+  })
+
+  it('自由中文文本原样保留，空值为占位符', () => {
+    expect(intentionLabel('对方近期沟通过【上海】地区机会')).toBe('对方近期沟通过【上海】地区机会')
+    expect(intentionLabel('')).toBe('-')
+    expect(intentionLabel(undefined)).toBe('-')
+  })
+
+  it('漏网的纯英文枚举不直出，回落中文兜底', () => {
+    expect(intentionLabel('some_new_status')).toBe('状态待同步')
+  })
+})
+
+describe('humanizeEventStatus 时间线事件状态收口（P8）', () => {
+  it('增补枚举映射为中文', () => {
+    expect(humanizeEventStatus('corrected')).toBe('已纠正')
+    expect(humanizeEventStatus('job_chat_verified')).toBe('猎聘触达已核验')
+  })
+
+  it('既有映射继续生效', () => {
+    expect(humanizeEventStatus('completed')).toBe('已完成')
+    expect(humanizeEventStatus('verified')).toBe('已核验')
+    expect(humanizeEventStatus('pending_review')).toBe('待复核')
+  })
+
+  it('未知英文枚举不渲染原形，空值返回空串', () => {
+    expect(humanizeEventStatus('brand_new_status')).toBe('状态待同步')
+    expect(humanizeEventStatus('')).toBe('')
+    expect(humanizeEventStatus(undefined)).toBe('')
   })
 })

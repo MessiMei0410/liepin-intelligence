@@ -5,6 +5,7 @@ import { WorkflowCandidateItem } from '../workflow/workflowSummary'
 import { date } from '../shared/format'
 import { sourcingAttributionChannel, sourcingAttributionQuery, sourcingAttributionRound, sourcingAttributionStatus } from '../workflow/sourcingAttribution'
 import { candidateRecommendationLabel, candidateRecommendationTone } from '../shared/candidateRecommendation'
+import { intentionLabel } from '../workflow/statusMapping'
 
 function resumeStatusLabel(status?: string) {
   if (!status || status === 'not_requested') return '未抓取'
@@ -125,7 +126,7 @@ export function SourcingCandidatesPage({
                   <div>{candidate.stage || '-'}</div>
                   <small>{candidate.flow_bucket || '-'}</small>
                 </td>
-                <td className="candidate-intention">{candidate.intention || '-'}</td>
+                <td className="candidate-intention">{intentionLabel(candidate.intention)}</td>
                 <td>
                   <div className="candidate-score">
                     <b>{candidate.fit_score ?? '-'}</b>
