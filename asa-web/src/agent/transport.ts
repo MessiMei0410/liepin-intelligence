@@ -49,6 +49,7 @@ export type AgentSseEvent =
   | { type: 'context'; data: { session_id: string; context?: AgentContext; references?: AgentReference[]; suggested_actions?: Array<Record<string, unknown>> } }
   | { type: 'progress'; data: { message: string } }
   | { type: 'text'; data: { content: string } }
+  | { type: 'thinking'; data: { content: string } }
   | { type: 'card'; data: Record<string, unknown> }
   | { type: 'confirm_request'; data: Record<string, unknown> }
   | { type: 'done'; data: AgentTurnResult }
@@ -126,6 +127,7 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   try { value = JSON.parse(rawData) } catch { return { type: 'error', data: { error: 'Agent 返回了无法解析的数据' } } }
   const parsed = event === 'context' ? contextEventSchema.safeParse(value)
     : event === 'text' ? textEventSchema.safeParse(value)
+      : event === 'thinking' ? textEventSchema.safeParse(value)
       : event === 'progress' ? progressEventSchema.safeParse(value)
         : event === 'card' ? cardEventSchema.safeParse(value)
           : event === 'confirm_request' ? cardEventSchema.safeParse(value)
@@ -136,6 +138,7 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   if (!parsed.success) return { type: 'error', data: { error: 'Agent 返回数据与约定格式不一致' } }
   if (event === 'context') return { type: 'context', data: parsed.data as Extract<AgentSseEvent, { type: 'context' }>['data'] }
   if (event === 'text') return { type: 'text', data: parsed.data as Extract<AgentSseEvent, { type: 'text' }>['data'] }
+  if (event === 'thinking') return { type: 'thinking', data: parsed.data as Extract<AgentSseEvent, { type: 'thinking' }>['data'] }
   if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
   if (event === 'card') return { type: 'card', data: parsed.data as Record<string, unknown> }
   if (event === 'confirm_request') return { type: 'confirm_request', data: parsed.data as Record<string, unknown> }
@@ -294,7 +297,7 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   // DSH 常驻服务器把工具结果里的 action_card / confirm_request 以独立事件透传（工具结果
   // 没有会话级归属字段，只能按序到达）。这里暂存并合并进 done：与 Copilot 脑一致在轮末
   // 挂到 assistant 消息（turn_done / 名单弹窗自动打开 / record-turn 回填同一条路径），
-  // 不单独转发——上层事件循环只认 context/progress/text/done/error。
+  // 不单独转发——上层事件循环只认 context/progress/text/thinking/done/error。
   let cardData: Record<string, unknown> | null = null
   let confirmRequestData: Record<string, unknown> | null = null
   const track = (event: AgentSseEvent) => {

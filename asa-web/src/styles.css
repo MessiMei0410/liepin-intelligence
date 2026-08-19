@@ -610,6 +610,14 @@ body{background:var(--bg)}
 @keyframes agent-thinking-pulse{0%,60%,100%{opacity:.28;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
 @media(max-width:650px){.agent-mode .main{height:calc(100% - 58px)}}
 @media(prefers-reduced-motion:reduce){.agent-thinking-dots i{animation:none;opacity:.65}}
+/* DSH 思考过程折叠区：流式展开滚底，轮末收起；纯文本无 markdown 解析 */
+.agent-thinking-block{margin:0 0 8px;border:1px solid var(--line);border-radius:7px;background:#f6f7f9;font-size:11px;color:#5d6470}
+.agent-thinking-block>summary{padding:6px 10px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;color:#676d77;user-select:none;font-size:10.5px}
+.agent-thinking-block>summary::-webkit-details-marker{display:none}
+.agent-thinking-block>summary::before{content:"";width:0;height:0;border-left:4px solid currentColor;border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;transition:transform .15s ease}
+.agent-thinking-block[open]>summary::before{transform:rotate(90deg)}
+.agent-thinking-block.streaming>summary{color:#4774b8}
+.agent-thinking-body{max-height:180px;overflow:auto;padding:0 10px 8px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6;font-size:10.5px;color:#6e756c}
 .progress-summary{padding:2px 2px 14px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
 .agent-home-band>header>span{margin-left:auto;color:var(--muted);font-size:9.5px}.agent-home-band>button.agent-home-more{min-height:36px;display:flex;justify-content:center;color:#2459a9;font-size:10px}
 /* S6 判人评估可读性：加载态 status、长文本/长引用换行、证据按维度分组 */
@@ -1613,6 +1621,10 @@ button:disabled{cursor:not-allowed;opacity:.58}
 /* --- 会话面杂项：跳转 pill/上下文条/附件/首页入口/thinking --- */
 :root[data-theme="dark"] .agent-message-time{color:var(--muted)}
 :root[data-theme="dark"] .agent-thinking{color:var(--muted)}
+:root[data-theme="dark"] .agent-thinking-block{background:var(--surface);border-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .agent-thinking-block>summary{color:var(--muted)}
+:root[data-theme="dark"] .agent-thinking-block.streaming>summary{color:#8ab4f8}
+:root[data-theme="dark"] .agent-thinking-body{color:var(--muted)}
 :root[data-theme="dark"] .agent-jump-bottom{background:var(--surface);border-color:var(--line);color:var(--focus)}
 :root[data-theme="dark"] .agent-jump-bottom:hover{border-color:#4f76ad;background:var(--surface-sub)}
 :root[data-theme="dark"] .agent-context-conflict,:root[data-theme="dark"] .agent-page-context-conflict{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}

@@ -15,8 +15,13 @@ import { delegateDoneFields } from "./copilot-payload.js";
  *   POST /turn {message, session_id?} -> SSE 流（text 增量 + card + done），会话复用
  *   GET  /health                     -> {ok}
  * 流式：订阅 agent 会话的 session/event 火线，把 assistant/chunk(text-delta) 实时转成
- * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件、confirm_request
+ * SSE `text` 事件、assistant/chunk(reasoning-delta) 转成 SSE `thinking` 事件（思考过程透传）；
+ * tool/result meta 里的 action_card 转成 SSE `card` 事件、confirm_request
  * 转成 SSE `confirm_request` 事件（写确认卡）；轮结束发 `done`。
+ * text/thinking 增量走时间窗聚合（createDeltaAggregator）：token 级小 chunk 不逐条发 SSE
+ * （前端每事件一次 setState + markdown 全量重解析，高频重渲染肉眼卡顿），攒够
+ * maxChars 或 windowMs 到点 flush 一次；card/confirm_request/progress/done 前强制 flush
+ * 保序，这些事件本身的实时性不受聚合影响。
  * done 除 session_id/answer/ok/error 外，还聚合本轮工具结果 meta.object_refs 里的业务对象
  * （asa-tools 投影的工作流/候选人/岗位 ID）为 suggested_actions（操作芯片：打开工作流/
  * 人选/岗位弹窗，≤4）与 references（对象卡，≤8），空则不携带。同 session_id 复用 live agent（多轮记忆）。
@@ -100,6 +105,60 @@ function writeSse(res, type, data) {
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
+
+// text/thinking 增量聚合窗口：攒够 maxChars 立即 flush，否则 windowMs 到点 flush。
+const TEXT_FLUSH_WINDOW_MS = Number(process.env.ASA_DSH_TEXT_FLUSH_WINDOW_MS || 50);
+const TEXT_FLUSH_MAX_CHARS = Number(process.env.ASA_DSH_TEXT_FLUSH_MAX_CHARS || 24);
+
+/** assistant/chunk → [SSE 事件名, 文本]：text-delta→text、reasoning-delta→thinking。
+ *  其余 chunk（tool-call-delta/block-start 等）与空文本返回 null。纯函数导出以便单测。 */
+function chunkSseDelta(chunk) {
+  if (!chunk || typeof chunk.text !== "string" || chunk.text === "") return null;
+  if (chunk.type === "text-delta") return ["text", chunk.text];
+  if (chunk.type === "reasoning-delta") return ["thinking", chunk.text];
+  return null;
+}
+
+/** text/thinking 增量聚合器：token 级小 chunk 合并成低频 SSE 事件，降低前端重渲染频率。
+ *  push() 累积；满 maxChars 立即 flush 该类型，否则开一个 windowMs 定时器 flush 全部。
+ *  其他 SSE 事件（card/confirm_request/progress/done）写出前必须 flush() 保序。 */
+function createDeltaAggregator(write, { windowMs = TEXT_FLUSH_WINDOW_MS, maxChars = TEXT_FLUSH_MAX_CHARS } = {}) {
+  const pending = { text: "", thinking: "" };
+  let timer = null;
+  const flushType = (type) => {
+    if (pending[type] === "") return;
+    write(type, { content: pending[type] });
+    pending[type] = "";
+  };
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    flushType("text");
+    flushType("thinking");
+  };
+  const push = (type, text) => {
+    pending[type] += text;
+    if (pending[type].length >= maxChars) {
+      flushType(type);
+      return;
+    }
+    if (!timer) {
+      timer = setTimeout(flush, windowMs);
+      timer.unref?.();
+    }
+  };
+  return { push, flush };
+}
+
+/** tool/call → SSE progress 文案（导出以便单测）。 */
+function toolCallProgressMessage(toolName) {
+  return `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…`;
+}
+
+// tool/result 后的进度文案：工具结果已回、LLM 接续生成，让「死寂段」持续可见。
+const TOOL_RESULT_PROGRESS_MESSAGE = "整理工具结果，生成中…";
 
 /** tool/result 事件 data → 待透传的 SSE 事件列表（card / confirm_request）。
  *  纯函数导出以便 node:test 单测。confirm_request 必须带 preflight_token 才算有效。 */
@@ -235,15 +294,17 @@ function apply(ctx) {
     }, TURN_TIMEOUT_MS);
     timeout.unref?.();
 
-    // 订阅本 agent 会话的事件火线：text-delta 实时转 SSE，同时增量聚合最终答案，
+    // text/thinking 增量聚合：token 级小 chunk 合并成低频 SSE，前端重渲染频率随之下降。
+    // card/confirm_request/progress/done 等其他事件写出前先 flush 保序（实时性不受影响）。
+    const deltas = createDeltaAggregator((type, data) => writeSse(res, type, data));
+
+    // 订阅本 agent 会话的事件火线：text-delta/reasoning-delta 实时转 SSE，同时增量聚合最终答案，
     // 不再每轮全量扫描 session.events（长会话 O(n²)）。
     const dispose = agent.ctx.on("session/event", (session, event) => {
       if (event.seq < firstSeq) return;
       if (event.type === "assistant/chunk") {
-        const chunk = event.data && event.data.chunk;
-        if (chunk && chunk.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") {
-          writeSse(res, "text", { content: chunk.text });
-        }
+        const delta = chunkSseDelta(event.data && event.data.chunk);
+        if (delta) deltas.push(delta[0], delta[1]);
       } else if (event.type === "assistant/message") {
         const content = event.data && event.data.message && event.data.message.content;
         if (Array.isArray(content)) {
@@ -253,14 +314,21 @@ function apply(ctx) {
       } else if (event.type === "tool/call") {
         // 工具执行段本无任何输出（「死寂」），转发为进度事件让等待可见。
         const toolName = event.data && event.data.name;
-        if (toolName) writeSse(res, "progress", { message: `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…` });
+        if (toolName) {
+          deltas.flush();
+          writeSse(res, "progress", { message: toolCallProgressMessage(toolName) });
+        }
       } else if (event.type === "tool/result") {
         // 结构化透传：presentationMeta 把 action_card（名单卡等）与 confirm_request
         // （写确认卡：preflight_token + 动作摘要 + 对象信息）挂到 tool/result meta
         // （完整 JSON 快照，不受 render 16k 截断影响）。前端收到 card 事件后挂到本轮
         // assistant 消息；收到 confirm_request 事件后渲染确认卡，用户确认后由前端调
         // Core activate + 写端点完成写入。
+        deltas.flush();
         for (const [type, payload] of toolResultSseEvents(event.data)) writeSse(res, type, payload);
+        // 工具结果已回、LLM 接续生成：补一条进度，让结果回传到首个 text/thinking
+        // 之间的静默段也有状态可见（前端在文本到达前保持 AgentThinking 动画）。
+        writeSse(res, "progress", { message: TOOL_RESULT_PROGRESS_MESSAGE });
         // 对象操作入口：asa-tools 只读工具把结果里的业务对象 ID 投到 meta.object_refs，
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
@@ -286,6 +354,8 @@ function apply(ctx) {
       );
       await agent.whenIdle();
       const { suggested_actions, references } = objectRefs.outputs();
+      // 轮末强制 flush：聚合窗口里残留的 text/thinking 必须先于 done 下发保序。
+      deltas.flush();
       writeSse(res, "done", {
         session_id: sessionId,
         answer,
@@ -305,6 +375,8 @@ function apply(ctx) {
     } finally {
       finished = true;
       clearTimeout(timeout);
+      // 聚合定时器必须随轮次回收（flush 幂等；res 已结束时 writeSse 静默丢弃）。
+      deltas.flush();
       res.off("close", onClose);
       dispose();
       entry.busy = false;
@@ -404,4 +476,4 @@ function apply(ctx) {
   process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
-export { apply, inject, name, toolResultSseEvents };
+export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE };

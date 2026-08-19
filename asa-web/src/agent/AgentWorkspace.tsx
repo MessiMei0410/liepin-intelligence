@@ -2,7 +2,7 @@ import { ClipboardEvent, DragEvent, FormEvent, Fragment, KeyboardEvent, lazy, Su
 import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, ClipboardCopy, Download, FileText, Filter, History, Keyboard, ListChecks, LoaderCircle, Map, MessageSquareText, Monitor, Moon, PanelRightClose, PanelRightOpen, Paperclip, Pencil, Plus, Radar, RefreshCw, Search, Send, Settings2, Square, Sun, Unlink, Users, X } from 'lucide-react'
 import { api, AgentMessage, AgentSessionSearchMatch, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
-import { AgentMessageContent, AgentThinking } from './AgentMessageContent'
+import { AgentMessageContent, AgentThinking, AgentThinkingBlock } from './AgentMessageContent'
 import { AgentPageContextBar } from './AgentPageContextBar'
 import { ModelAuditPanel } from './ModelAuditPanel'
 import { SourcingResultCard, type SourcingResultCardData } from '../workflows/SourcingResultCard'
@@ -532,6 +532,10 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
         } else if (event.type === 'progress') {
           // 受理/阶段进度提示：临时状态行，首个 text/done/error 到达后清除。
           setTurnProgress(event.data.message)
+        } else if (event.type === 'thinking') {
+          // DSH 思考过程流：折叠区自带「思考中…」状态，清掉进度行避免双状态并存。
+          setTurnProgress('')
+          dispatch({ type: 'turn_thinking', requestId: turn.requestId, content: event.data.content })
         } else if (event.type === 'text') {
           setTurnProgress('')
           dispatch({ type: 'turn_text', requestId: turn.requestId, content: event.data.content })
@@ -1069,11 +1073,13 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           return <Fragment key={messageKey}>
             {dayLabel && <div className="agent-day-divider" role="separator"><span>{dayLabel}</span></div>}
             <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`}>
-          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span>{message.created_at && <time className="agent-message-time" dateTime={message.created_at}>{formatMessageTime(message.created_at)}</time>}{message.role === 'assistant' && message.content && <button className={`agent-message-copy ${copiedMessageKey === `${index}:${message.created_at || ''}` ? 'copied' : ''}`} aria-label="复制消息内容" title="复制消息内容" onClick={() => void copyMessage(`${index}:${message.created_at || ''}`, message.content)}>{copiedMessageKey === `${index}:${message.created_at || ''}` ? <span>已复制</span> : <ClipboardCopy size={11}/>}</button>}<div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.content
+          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span>{message.created_at && <time className="agent-message-time" dateTime={message.created_at}>{formatMessageTime(message.created_at)}</time>}{message.role === 'assistant' && message.content && <button className={`agent-message-copy ${copiedMessageKey === `${index}:${message.created_at || ''}` ? 'copied' : ''}`} aria-label="复制消息内容" title="复制消息内容" onClick={() => void copyMessage(`${index}:${message.created_at || ''}`, message.content)}>{copiedMessageKey === `${index}:${message.created_at || ''}` ? <span>已复制</span> : <ClipboardCopy size={11}/>}</button>}<div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.role === 'assistant' && message.thinking && <AgentThinkingBlock thinking={message.thinking} streaming={loading && index === messages.length - 1}/>}{message.content
             ? <AgentMessageContent content={message.content}/>
             : loading && index === messages.length - 1
               ? <AgentThinking label={turnProgress ? `正在处理：${turnProgress}` : 'ASA 正在思考'}/>
-              : null}</div>
+              : null}{message.role === 'assistant' && loading && index === messages.length - 1 && Boolean(message.content) && turnProgress
+            ? <AgentThinking label={`正在处理：${turnProgress}`}/>
+            : null}</div>
           {message.role === 'user' && uploadedAttachments(message.context).length > 0 && <div className="agent-message-attachments" aria-label="消息附件">{uploadedAttachments(message.context).map((item, attachmentIndex) => <span key={`${item.attachment_id || item.file_name}:${attachmentIndex}`}><FileText/><b>{item.file_name || '附件'}</b><small>{item.status || '已读取'}</small></span>)}</div>}
           {message.invalidated && <p className="agent-invalidated-notice">本卡已因后续纠正失效{message.invalidated_reason ? `：${message.invalidated_reason}` : ''}</p>}
           {message.role === 'assistant' && !message.invalidated && <UnderstandingCard card={message.understanding_card} onSelectCandidate={option => selectAmbiguousObject(message.understanding_card || {}, option)} onReenter={() => composerRef.current?.focus()}/>}
