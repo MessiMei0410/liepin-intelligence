@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "猎聘专业回复助手",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "在猎聘职聊页生成专业回复草稿，并在简历详情页显示人岗匹配度和匹配点。",
   "permissions": [
     "storage",

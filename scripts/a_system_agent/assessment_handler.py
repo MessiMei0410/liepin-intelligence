@@ -27,6 +27,7 @@ from .panel import (
 )
 from .policy import action_decision, is_stopped
 from .privacy import sanitize_payload
+from .resume_persist import persist_captured_resume, resume_profile_summary
 from .schema import ensure_schema
 from .scoring import normalize_assessment
 from .skills import SkillRegistry, SkillSpec
@@ -375,172 +376,27 @@ def capture_liepin_resume(self, job_candidate_id: int, *, cdp_port: int = 9223) 
     resume = matches[0]
     relation = context["relation"]
     position = context["position"]
-    profile_payload = {
-        **resume,
-        "profile_text": "\n".join(
-            str(resume.get(key) or "")
-            for key in ("work_text", "project_text", "education_text", "full_text")
-            if resume.get(key)
-        )[:60000],
-        "capture_method": "asa_liepin_cdp_read_only",
-        "job_candidate_id": int(job_candidate_id),
-    }
-    full_text = str(resume.get("full_text") or "").strip()
-    profile_parts = [full_text] if full_text else []
-    for heading, field in (
-        ("工作经历", "work_text"),
-        ("项目经历", "project_text"),
-        ("教育经历", "education_text"),
-    ):
-        section_text = str(resume.get(field) or "").strip()
-        if section_text and heading not in full_text:
-            profile_parts.extend([heading, section_text])
-    profile_summary = "\n".join(profile_parts).strip()[:60000]
     conn = self._connect()
     try:
-        existing = conn.execute(
-            """
-            SELECT id FROM source_profiles
-            WHERE person_id=? AND source_type='liepin' AND source_candidate_id=?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (int(relation["person_id"]), str(resume["resume_id"])),
-        ).fetchone()
-        if existing:
-            source_profile_id = int(existing["id"])
-            conn.execute(
-                """
-                UPDATE source_profiles SET source_date=date('now','localtime'),raw_status=?,
-                    raw_client=?,raw_position=?,raw_json=? WHERE id=?
-                """,
-                (
-                    str(resume.get("status") or ""), position.get("client"), position.get("job"),
-                    _dumps(profile_payload), source_profile_id,
-                ),
-            )
-            updated = True
-        else:
-            cursor = conn.execute(
-                """
-                INSERT INTO source_profiles
-                (person_id,source_type,source_candidate_id,source_date,raw_status,raw_client,raw_position,raw_json)
-                VALUES (?,'liepin',?,date('now','localtime'),?,?,?,?)
-                """,
-                (
-                    int(relation["person_id"]), str(resume["resume_id"]), str(resume.get("status") or ""),
-                    position.get("client"), position.get("job"), _dumps(profile_payload),
-                ),
-            )
-            source_profile_id = int(cursor.lastrowid)
-            updated = False
-        conn.execute(
-            """
-            UPDATE people SET
-                current_company=CASE WHEN COALESCE(current_company,'')='' THEN ? ELSE current_company END,
-                current_title=CASE WHEN COALESCE(current_title,'')='' THEN ? ELSE current_title END,
-                city=CASE WHEN COALESCE(city,'')='' THEN ? ELSE city END,
-                education=CASE WHEN COALESCE(education,'')='' THEN ? ELSE education END,
-                experience=CASE WHEN COALESCE(experience,'')='' THEN ? ELSE experience END
-            WHERE id=?
-            """,
-            (
-                resume.get("company"), resume.get("title"), resume.get("city"),
-                resume.get("education"), resume.get("experience"), int(relation["person_id"]),
-            ),
+        persisted = persist_captured_resume(
+            conn,
+            relation=relation,
+            position=position,
+            identity=identity,
+            candidate_id=(context.get("candidate") or {}).get("id"),
+            resume=resume,
+            job_candidate_id=int(job_candidate_id),
+            capture_method="asa_liepin_cdp_read_only",
         )
-        candidate_id = (context.get("candidate") or {}).get("id")
-        if candidate_id and _table_exists(conn, "candidate_profiles"):
-            columns = _table_columns(conn, "candidate_profiles")
-            if "profile_summary" in columns:
-                existing_profile = conn.execute(
-                    """
-                    SELECT id FROM candidate_profiles
-                    WHERE candidate_id=? AND client=? AND position=?
-                    ORDER BY COALESCE(updated_at,'') DESC,id DESC LIMIT 1
-                    """,
-                    (int(candidate_id), position.get("client"), position.get("job")),
-                ).fetchone()
-                if existing_profile:
-                    conn.execute(
-                        """
-                        UPDATE candidate_profiles SET profile_summary=?,
-                            education_level=COALESCE(NULLIF(?,''),education_level),
-                            seniority=COALESCE(NULLIF(?,''),seniority),
-                            updated_at=datetime('now','localtime')
-                        WHERE id=?
-                        """,
-                        (
-                            profile_summary, str(resume.get("education") or ""),
-                            str(resume.get("experience") or ""), int(existing_profile["id"]),
-                        ),
-                    )
-                else:
-                    next_profile_id = int(
-                        conn.execute("SELECT COALESCE(MAX(id),0)+1 FROM candidate_profiles").fetchone()[0]
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO candidate_profiles
-                        (id,candidate_id,candidate_name,candidate_company,client,position,
-                         education_level,seniority,industry_tags_json,function_tags_json,
-                         risk_tags_json,profile_summary,updated_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
-                        """,
-                        (
-                            next_profile_id, int(candidate_id),
-                            resume.get("name") or identity.get("name"),
-                            resume.get("company") or identity.get("company"),
-                            position.get("client"), position.get("job"),
-                            resume.get("education"), resume.get("experience"),
-                            "[]", "[]", "[]", profile_summary,
-                        ),
-                    )
-        summary = (
-            f"ASA 从已打开的猎聘详情页补全简历：{resume.get('name') or identity.get('name')}；"
-            f"工作经历 {len(str(resume.get('work_text') or ''))} 字，"
-            f"项目经历 {len(str(resume.get('project_text') or ''))} 字，"
-            f"教育经历 {len(str(resume.get('education_text') or ''))} 字。"
-        )
-        event = conn.execute(
-            """
-            SELECT id FROM candidate_events
-            WHERE job_candidate_id=? AND event_type='resume_profile_captured'
-              AND source_table='source_profiles' AND source_id=?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (int(job_candidate_id), str(source_profile_id)),
-        ).fetchone()
-        event_payload = {
-            "source_profile_id": source_profile_id,
-            "resume_id": resume["resume_id"],
-            "source_url": resume.get("source_url"),
-            "capture_method": "asa_liepin_cdp_read_only",
-        }
-        if event:
-            event_id = int(event["id"])
-            conn.execute(
-                """
-                UPDATE candidate_events SET event_status='completed',event_time=datetime('now','localtime'),
-                    summary=?,raw_json=? WHERE id=?
-                """,
-                (summary, _dumps(event_payload), event_id),
-            )
-        else:
-            event_cursor = conn.execute(
-                """
-                INSERT INTO candidate_events
-                (job_candidate_id,person_id,job_id,event_type,event_status,event_time,summary,raw_json,source_table,source_id)
-                VALUES (?,?,?,'resume_profile_captured','completed',datetime('now','localtime'),?,?,'source_profiles',?)
-                """,
-                (
-                    int(job_candidate_id), int(relation["person_id"]), relation.get("job_id"),
-                    summary, _dumps(event_payload), str(source_profile_id),
-                ),
-            )
-            event_id = int(event_cursor.lastrowid)
         conn.commit()
     finally:
         conn.close()
+    source_profile_id = persisted["source_profile_id"]
+    event_id = persisted["event_id"]
+    updated = persisted["profile_updated"]
+    summary = persisted["summary"]
+    candidate_id = (context.get("candidate") or {}).get("id")
+    profile_summary = resume_profile_summary(resume)
     assessment = self.submit_assessment(
         int(job_candidate_id), force=True, trigger="liepin_resume_capture"
     )

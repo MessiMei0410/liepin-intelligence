@@ -132,6 +132,13 @@ ASA_FLOATING_ACTION_RECEIPTS: dict[str, dict[str, Any]] = {}
 # 以 job_id 为键，保存最近变更（含时间戳），超期自动清理。
 ASA_FLOATING_CANDIDATE_UPDATES: dict[int, list[dict[str, Any]]] = {}
 ASA_FLOATING_CANDIDATE_UPDATE_TTL_SECONDS = 300
+# 简历快照桥接存储：扩展在猎聘详情页读到完整简历后直推（独立于 3s 轮询的
+# 浮窗上下文，避免全文挤占热路径且不受上下文 4000 字截断）。Core 简历回填
+# preflight/commit 经 latest_resume_snapshot 读取；TTL 外一律视为无快照。
+ASA_FLOATING_RESUME_SNAPSHOTS: dict[str, dict[str, Any]] = {}
+ASA_FLOATING_RESUME_SNAPSHOT_LIMIT = 24
+ASA_FLOATING_RESUME_SNAPSHOT_TTL_SECONDS = 1800
+RESUME_SNAPSHOT_FIELD_LIMIT = 200_000
 ASA_UPLOAD_ROOT = Path.home() / "Library/Application Support/ASA/uploads"
 ASA_UPLOAD_MAX_BASE64_CHARS = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4 + 16
 ASA_FLOATING_APP_CANDIDATES = [
@@ -616,6 +623,97 @@ def update_floating_context(data: dict[str, Any]) -> dict[str, Any]:
             context["trigger"] = preserve_native_invocation_trigger(current, context, datetime.now())
         ASA_FLOATING_CONTEXTS[context_key] = context
     return {"ok": True, "context": context}
+
+
+def _resume_snapshot_field(value: Any, limit: int = RESUME_SNAPSHOT_FIELD_LIMIT) -> str:
+    return clean(str(value or ""))[:limit]
+
+
+def update_resume_snapshot(data: dict[str, Any]) -> dict[str, Any]:
+    """扩展直推的当前页简历快照：独立于浮窗上下文存储（全文不受 4000 字截断）。
+
+    只校验传输形态（surface/resume_id/全文非空），业务完整性（护栏第 12 条）
+    由 Core 简历回填 preflight 判定；这里不过滤 partial 快照，让 Core 能给出
+    「抓取不完整」的中文 409 而不是「没有快照」。
+    """
+    surface = normalize_bridge_surface(data.get("surface"))
+    if surface != "liepin":
+        raise ValueError("简历快照仅接受猎聘详情页（surface=liepin）")
+    resume = data.get("resume") if isinstance(data.get("resume"), dict) else {}
+    url = _resume_snapshot_field(data.get("url"), 600)
+    resume_id = _resume_snapshot_field(resume.get("resume_id"), 180) or extract_resume_id(url)
+    if not resume_id:
+        raise ValueError("简历快照缺少 resume_id（猎聘外部档案 ID）")
+    full_text = _resume_snapshot_field(resume.get("full_text"))
+    if not full_text:
+        raise ValueError("简历快照缺少 full_text（页面简历全文）")
+    snapshot = {
+        "surface": surface,
+        "resume_id": resume_id,
+        "url": url,
+        "source_url": _resume_snapshot_field(resume.get("source_url"), 600) or url,
+        "captured_at": _resume_snapshot_field(data.get("captured_at"), 60),
+        "received_at": time.time(),
+        "instance_id": _resume_snapshot_field(data.get("instance_id"), 120),
+        "resume": {
+            "resume_id": resume_id,
+            "name": _resume_snapshot_field(resume.get("name"), 120),
+            "status": _resume_snapshot_field(resume.get("status"), 120),
+            "company": _resume_snapshot_field(resume.get("company"), 200),
+            "title": _resume_snapshot_field(resume.get("title"), 200),
+            "city": _resume_snapshot_field(resume.get("city"), 60),
+            "education": _resume_snapshot_field(resume.get("education"), 60),
+            "experience": _resume_snapshot_field(resume.get("experience"), 60),
+            "work_text": _resume_snapshot_field(resume.get("work_text")),
+            "project_text": _resume_snapshot_field(resume.get("project_text")),
+            "education_text": _resume_snapshot_field(resume.get("education_text")),
+            "full_text": full_text,
+        },
+    }
+    with ASA_FLOATING_LOCK:
+        ASA_FLOATING_RESUME_SNAPSHOTS[resume_id] = snapshot
+        _prune_resume_snapshots()
+    return {"ok": True, "resume_id": resume_id, "full_text_chars": len(full_text)}
+
+
+def _prune_resume_snapshots(now: float | None = None) -> None:
+    """调用方须持有 ASA_FLOATING_LOCK：先清 TTL 过期，再按 received_at 保留最新 N 条。"""
+    current = now if now is not None else time.time()
+    expired = [
+        key for key, value in ASA_FLOATING_RESUME_SNAPSHOTS.items()
+        if current - float(value.get("received_at") or 0) > ASA_FLOATING_RESUME_SNAPSHOT_TTL_SECONDS
+    ]
+    for key in expired:
+        ASA_FLOATING_RESUME_SNAPSHOTS.pop(key, None)
+    if len(ASA_FLOATING_RESUME_SNAPSHOTS) > ASA_FLOATING_RESUME_SNAPSHOT_LIMIT:
+        ordered = sorted(
+            ASA_FLOATING_RESUME_SNAPSHOTS.items(),
+            key=lambda item: float(item[1].get("received_at") or 0),
+        )
+        for key, _value in ordered[: len(ASA_FLOATING_RESUME_SNAPSHOTS) - ASA_FLOATING_RESUME_SNAPSHOT_LIMIT]:
+            ASA_FLOATING_RESUME_SNAPSHOTS.pop(key, None)
+
+
+def latest_resume_snapshot(resume_id: str = "") -> dict[str, Any] | None:
+    """Core 侧读取：指定 resume_id 精确取，缺省取最新一条；过期一律视为无快照。"""
+    wanted = clean(resume_id)
+    with ASA_FLOATING_LOCK:
+        _prune_resume_snapshots()
+        if wanted:
+            snapshot = ASA_FLOATING_RESUME_SNAPSHOTS.get(wanted)
+            return dict(snapshot) if snapshot else None
+        if not ASA_FLOATING_RESUME_SNAPSHOTS:
+            return None
+        latest = max(
+            ASA_FLOATING_RESUME_SNAPSHOTS.values(),
+            key=lambda value: float(value.get("received_at") or 0),
+        )
+        return dict(latest)
+
+
+def clear_resume_snapshots() -> None:
+    with ASA_FLOATING_LOCK:
+        ASA_FLOATING_RESUME_SNAPSHOTS.clear()
 
 
 def enqueue_floating_command(data: dict[str, Any]) -> dict[str, Any]:
@@ -8554,6 +8652,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     json_response(self, {"ok": False, "error": "拒绝非本地 ASA 浮窗上传附件"}, HTTPStatus.FORBIDDEN)
                     return
                 json_response(self, prepare_floating_upload(data))
+            elif parsed.path == "/api/asa/floating/resume-snapshot":
+                if not bridge_origin_allowed(self):
+                    json_response(self, {"ok": False, "error": "拒绝非本地或候选人页面上报简历快照"}, HTTPStatus.FORBIDDEN)
+                    return
+                try:
+                    json_response(self, update_resume_snapshot(data))
+                except ValueError as exc:
+                    json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
             elif parsed.path == "/api/asa/floating/context":
                 if not bridge_origin_allowed(self):
                     json_response(self, {"ok": False, "error": "拒绝非本地或候选人页面上报 ASA 浮窗上下文"}, HTTPStatus.FORBIDDEN)

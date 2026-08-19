@@ -541,6 +541,48 @@ function apply(ctx) {
     },
   }));
 
+  // 简历回填申请：用户说"我打开了某人的详情页，更新他的简历"时使用。预检在 Core
+  // 侧完成：从桥接存储读当前页简历快照（扩展直推，模型不接触全文）、定位本地
+  // 候选人（外部 ID 只是证据，匹配不到即 409 不新建）、完整性守卫（partial 抓取
+  // 409）、新旧 diff；通过则发一次性未激活 token，界面确认卡由用户决定写入。
+  ctx.tools.register(defineTool({
+    name: "asa_resume_backfill",
+    description:
+      "对当前打开的猎聘详情页发起简历回填确认申请（不写库）：Core 读取页面简历快照（扩展直推），定位本地候选人（candidate_id 或猎聘 resume_id 至少给其一；匹配不到本地档案会 409，绝不新建记录），校验抓取完整性（partial 快照 409），生成新旧简历 diff 并返回一次性 preflight token（5 分钟有效）；随后 ASA 界面会向用户弹出确认卡，由用户决定是否写入。简历无变化时返回 unchanged=true（不发 token，直接告知用户已是最新）。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
+    parameters: {
+      candidate_id: { type: "integer", description: "job_candidates 关系 ID；已知时优先传（与当前页快照身份不一致会 409）。" },
+      resume_id: { type: "string", description: "猎聘外部档案 ID（res_id_encode）；不知道关系 ID 时用它反查本地人选。" },
+    },
+    output: confirmMeta((value) => {
+      // 无变化（unchanged）：不发确认卡，模型直接告知用户档案已是最新。
+      if (value.unchanged) return null;
+      return {
+        kind: "resume_backfill",
+        preflight_token: value.token || "",
+        expires_at: value.expires_at || "",
+        action: "resume_backfill",
+        candidate: value.candidate && typeof value.candidate === "object" ? value.candidate : {},
+        resume: value.resume && typeof value.resume === "object" ? value.resume : {},
+        // 新旧 diff：确认卡展示哪些段新增/变化（字数与摘要）。
+        diff: Array.isArray(value.diff) ? value.diff : [],
+        impact: value.impact || "",
+      };
+    }),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const candidateId = Number(args.candidate_id || 0);
+      const resumeId = typeof args.resume_id === "string" ? args.resume_id.trim() : "";
+      if (!candidateId && !resumeId) {
+        throw new Error("asa_resume_backfill 要求 candidate_id 或 resume_id 至少提供其一。");
+      }
+      const payload = {};
+      if (candidateId) payload.candidate_id = candidateId;
+      if (resumeId) payload.resume_id = resumeId;
+      return await postJson("/api/v1/candidates/resume-backfill/preflight", payload, exec);
+    },
+  }));
+
   // 路 2：委托现有 Python Copilot 回答领域情报问题（只读用途），返回其富答案。
   ctx.tools.register(defineTool({
     name: "asa_copilot_ask",

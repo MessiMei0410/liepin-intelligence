@@ -160,6 +160,9 @@ const candidateActionText: Record<string, string> = {
 }
 const decisionText: Record<string, string> = { approve: '批准', reject: '拒绝', revise: '退回修改' }
 const workflowActionText: Record<string, string> = { cancel: '关闭工作流', pause: '暂停工作流', resume: '恢复工作流' }
+// 简历回填 diff 变化类型（Core service_resume_backfill 口径）：
+// added=本地为空将新增 / updated=两端都有且不同将更新 / unchanged=一致 / kept=本地已有值保留（people 只回填空字段）。
+const resumeDiffChangeText: Record<string, string> = { added: '新增', updated: '更新', unchanged: '无变化', kept: '保留原值' }
 
 export function WriteConfirmationCard({ request, sessionId }: { request?: Record<string, unknown> | null; sessionId: string }) {
   const [cancelled, setCancelled] = useState(false)
@@ -177,6 +180,10 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const mergeLoser = record(merge.loser)
   const isMerge = kind === 'candidate_action' && text(request.action) === 'merge'
   const mergeDiff = (list(merge.diff).filter(item => item && typeof item === 'object') as Array<Record<string, unknown>>)
+  // 简历回填：resume 带快照元信息，diff 为分段新旧比对（字数 + 摘要 + 变化类型）。
+  const isResumeBackfill = kind === 'resume_backfill'
+  const backfillResume = record(request.resume)
+  const backfillDiff = (list(request.diff).filter(item => item && typeof item === 'object') as Array<Record<string, unknown>>)
   const expiresAt = Date.parse(text(request.expires_at))
   const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
   const clientRequestId = text(request.client_request_id)
@@ -185,7 +192,9 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
     ? `审批决定：${decisionText[text(approval.decision)] || text(approval.decision, '审批决定')}`
     : kind === 'workflow_action'
       ? workflowActionText[text(request.action)] || '工作流动作'
-      : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
+      : isResumeBackfill
+        ? '简历回填'
+        : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
   const targetLines: Array<{ label: string; value: string }> = kind === 'approval_decision'
     ? [
         { label: '审批', value: text(approval.title, text(approval.approval_id, '待审批事项')) },
@@ -196,7 +205,14 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           { label: '工作流', value: text(workflow.title, text(workflow.workflow_id, '待确认')) },
           { label: '当前状态', value: text(workflow.status, '待确认') },
         ]
-      : isMerge
+      : isResumeBackfill
+        ? [
+            { label: '人选', value: `${text(candidate.name, `#${text(candidate.id)}`)}（${[text(candidate.client), text(candidate.job)].filter(Boolean).join(' / ') || '岗位待确认'}）` },
+            { label: '当前阶段', value: text(candidate.stage, '待确认') },
+            { label: '简历来源', value: `猎聘详情页（档案 ${text(backfillResume.resume_id, '未知')}）` },
+            { label: '抓取时间', value: text(backfillResume.captured_at, '待确认') },
+          ]
+        : isMerge
         ? [
             { label: '保留方', value: `${text(candidate.name, '待确认')}（关系 #${text(candidate.id)}）` },
             { label: '废弃方', value: `${text(mergeLoser.name, '待确认')}（关系 #${text(mergeLoser.id)}）` },
@@ -222,6 +238,16 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
       } else if (kind === 'workflow_action') {
         await api.workflowAction(text(workflow.workflow_id), text(request.action), { note: noteText }, text(request.preflight_token))
         summary = `已执行：${workflowActionText[text(request.action)] || '工作流动作'}`
+      } else if (isResumeBackfill) {
+        const candidateId = Number(candidate.id)
+        if (!Number.isFinite(candidateId)) {
+          setError('确认请求缺少候选人信息')
+          return
+        }
+        const response = await api.resumeBackfillCommit(candidateId, text(request.preflight_token), noteText)
+        summary = response.already_applied
+          ? `${text(candidate.name, '当前人选')}的简历已是最新，无需重复回填`
+          : text(response.summary, `已回填 ${text(candidate.name, '当前人选')} 的简历`)
       } else {
         const candidateId = Number(candidate.id)
         if (!Number.isFinite(candidateId) || !text(request.action)) {
@@ -276,6 +302,19 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
     <header><div><small>ASA 发起写入申请</small><b>{title}</b></div><button type="button" aria-label="取消本次写入" onClick={cancelWrite} disabled={busy}><X size={15}/></button></header>
     <dl>{targetLines.map(line => <div key={line.label}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}{noteText && <div><dt>原因</dt><dd>{noteText}</dd></div>}</dl>
     {isMerge && mergeDiff.length > 0 && <dl aria-label="合并字段比对">{mergeDiff.map(item => <div key={text(item.field)}><dt>{text(item.label, '字段')}</dt><dd>{item.same === true ? text(item.winner, '—') : `保留：${text(item.winner, '—')} ｜ 废弃：${text(item.loser, '—')}`}</dd></div>)}</dl>}
+    {isResumeBackfill && backfillDiff.length > 0 && <dl aria-label="简历新旧比对">{backfillDiff.map(item => {
+      const change = text(item.change, 'unchanged')
+      return <div key={text(item.field)} data-change={change}>
+        <dt>{text(item.label, '字段')}</dt>
+        <dd>{change === 'unchanged'
+          ? `无变化（${Number(item.before_chars) || 0} 字）`
+          : change === 'kept'
+            ? `保留原值：${text(item.before_excerpt, '—')}`
+            : `${resumeDiffChangeText[change] || change}：本地 ${Number(item.before_chars) || 0} 字 → 页面 ${Number(item.after_chars) || 0} 字`}
+          {(change === 'added' || change === 'updated') && text(item.after_excerpt) && <small>{text(item.after_excerpt)}</small>}
+        </dd>
+      </div>
+    })}</dl>}
     <p>{text(request.impact, '确认后将写入 ASA，并记入统一审计。')}</p>
     {error && <div className="agent-card-error" role="alert">{error}（本次申请已失效，如需执行请让 ASA 重新发起）</div>}
     <footer><button type="button" onClick={cancelWrite} disabled={busy}>取消</button><button type="button" className="primary" disabled={busy || Boolean(error)} onClick={() => void confirmWrite()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer>

@@ -39,6 +39,7 @@ from .service_copilot_bridge import (  # noqa: F401 模块级兼容 re-export（
     _COPILOT_CORRECTION_RE,
 )
 from .service_dedupe import CandidateDedupeMixin  # noqa: F401
+from .service_resume_backfill import ResumeBackfillMixin  # noqa: F401
 from .service_workflow_ops import WorkflowOpsMixin, _funnel_detail  # noqa: F401
 from .stop_reasons import STOP_REASON_LABELS, UNLABELED_STOP_REASON_LABEL
 from a_system_agent import knowledge_base as kb_consumption
@@ -125,13 +126,14 @@ def _resume_overview_summary(resume: dict[str, Any]) -> str:
     return ""
 
 
-class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, CandidateDedupeMixin):
+class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, CandidateDedupeMixin, ResumeBackfillMixin):
     """ASA Core 服务门面。
 
     Mixin 组合 facade（P2-1）：候选人动作/预检/幂等在 CandidateActionsMixin
     （service_candidate_actions.py），copilot 消息桥接在 CopilotBridgeMixin
     （service_copilot_bridge.py），工作流操作在 WorkflowOpsMixin
-    （service_workflow_ops.py）；本类保留仪表盘/岗位/候选人读取、审计、
+    （service_workflow_ops.py），简历回填在 ResumeBackfillMixin
+    （service_resume_backfill.py）；本类保留仪表盘/岗位/候选人读取、审计、
     停止原因统计与雷达/周报薄封装。方法体逐字节迁移，语义不变。
     """
 

@@ -139,6 +139,20 @@ class WriteConfirmationActivate(WriteEnvelope):
     preflight_token: str = Field(min_length=1)
 
 
+class ResumeBackfillPreflight(WriteEnvelope):
+    # 简历回填预检：candidate_id（job_candidates 关系 ID）与 resume_id（猎聘外部
+    # 档案 ID）至少给其一；快照不经过请求体，由服务端从桥接存储读取（防模型编造）。
+    candidate_id: int = 0
+    resume_id: str = ""
+
+
+class ResumeBackfillCommit(WriteEnvelope):
+    candidate_id: int
+    # 必填：resume-backfill/preflight 签发且经 UI 激活的一次性 token。
+    preflight_token: str = Field(min_length=1)
+    note: str = ""
+
+
 class ApprovalItemResponse(BaseModel):
     approval_id: str
     workflow_id: str
@@ -1592,6 +1606,31 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             return core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason)
 
         return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id), commit)
+
+    @app.post("/api/v1/candidates/resume-backfill/preflight")
+    def resume_backfill_preflight(body: ResumeBackfillPreflight) -> dict[str, Any]:
+        if not body.candidate_id and not body.resume_id.strip():
+            raise HTTPException(400, "candidate_id 或 resume_id 至少提供其一")
+        try:
+            # 快照只从桥接存储取（扩展直推），不接受请求体携带——模型无法伪造简历内容。
+            snapshot = legacy.latest_resume_snapshot(body.resume_id.strip())
+            return core.resume_backfill_preflight(body.candidate_id, body.resume_id.strip(), snapshot=snapshot)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/candidates/resume-backfill/commit")
+    def resume_backfill_commit(body: ResumeBackfillCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        if not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
+
+        def commit() -> dict[str, Any]:
+            # 人确认闸门：token 必须先经 UI 激活（write-confirmations/activate），
+            # 未激活 → 409 confirmation_required（不消费 token，UI 仍可在有效期内激活）。
+            core.require_activated_preflight_token(body.preflight_token)
+            snapshot = legacy.latest_resume_snapshot()
+            return core.resume_backfill_commit(body.candidate_id, body.preflight_token, snapshot=snapshot, note=body.note)
+
+        return idem("resume_backfill.commit", body, idempotency_key, "job_candidate", str(body.candidate_id), commit)
 
     @app.post("/api/v1/write-confirmations/activate")
     def write_confirmation_activate(request: Request, body: WriteConfirmationActivate, idempotency_key: str = Header(alias="Idempotency-Key")):

@@ -59,6 +59,7 @@
     projectOptionsHydration: null,
     matchRefreshPromise: null,
     lastIntakeBridge: null,
+    lastResumeSnapshotSignature: '',
     lockedResumeKey: '',
     lockedResumeIdentity: null,
     floatingUserSelectedUntil: 0,
@@ -192,6 +193,53 @@
     const result = await postToWorkbench('/api/asa/floating/context', payload);
     state.bridgeStatus = result?.ok ? 'ASA 已连接' : `ASA 未连接：${result?.error || 'unknown'}`;
     renderBridgeStatusDot();
+    if (result?.ok && isLiepinResumeDetailPage()) {
+      await reportResumeSnapshot().catch(() => null);
+    }
+  }
+
+  function resumeSnapshotSignature(resume) {
+    const text = clean(resume?.fullText || '');
+    let hash = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      hash = ((hash * 31 + text.charCodeAt(index)) >>> 0);
+    }
+    return `${clean(resume?.resumeId || '')}|${text.length}|${hash.toString(16)}`;
+  }
+
+  // 简历快照直推：详情页全文独立于 3s 轮询的浮窗上下文上报（上下文只带 1200 字摘要），
+  // 供 ASA 简历回填 preflight/diff 使用。签名去重——页面内容没变就不重复推。
+  async function reportResumeSnapshot(resume) {
+    if (!isLiepinResumeDetailPage()) return;
+    const current = resume || state.currentContext?.resume || readResumeContext();
+    const fullText = clean(current?.fullText || '');
+    const resumeId = clean(current?.resumeId || resumeIdFromUrl(location.href));
+    if (!resumeId || !fullText) return;
+    const signature = resumeSnapshotSignature({ ...current, resumeId });
+    if (signature === state.lastResumeSnapshotSignature) return;
+    const identity = extractPrimaryWorkIdentity(current);
+    const result = await postToWorkbench('/api/asa/floating/resume-snapshot', {
+      surface: 'liepin',
+      instance_id: state.bridgeInstanceId,
+      plugin: 'liepin-reply-assistant',
+      version: EXTENSION_VERSION,
+      url: location.href,
+      page_type: 'resume_detail',
+      captured_at: new Date().toISOString(),
+      resume: {
+        resume_id: resumeId,
+        name: clean(current?.name || ''),
+        status: clean(current?.statusText || ''),
+        company: clean(identity?.company?.value || ''),
+        title: clean(current?.titleCompanyLine || ''),
+        work_text: clean(current?.workText || ''),
+        project_text: clean(current?.projectText || ''),
+        education_text: clean(current?.educationText || ''),
+        full_text: fullText,
+        source_url: location.href
+      }
+    });
+    if (result?.ok) state.lastResumeSnapshotSignature = signature;
   }
 
   async function reportFloatingCommandResult(command, statusKey, message, result = {}) {

@@ -1536,6 +1536,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/resume-backfill/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Backfill Preflight */
+        post: operations["resume_backfill_preflight_api_v1_candidates_resume_backfill_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/candidates/resume-backfill/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Backfill Commit */
+        post: operations["resume_backfill_commit_api_v1_candidates_resume_backfill_commit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/write-confirmations/activate": {
         parameters: {
             query?: never;
@@ -2915,6 +2949,35 @@ export interface components {
         RadarWeeklyReportCreate: {
             /** Request Id */
             request_id: string;
+        };
+        /** ResumeBackfillCommit */
+        ResumeBackfillCommit: {
+            /** Request Id */
+            request_id: string;
+            /** Candidate Id */
+            candidate_id: number;
+            /** Preflight Token */
+            preflight_token: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** ResumeBackfillPreflight */
+        ResumeBackfillPreflight: {
+            /** Request Id */
+            request_id: string;
+            /**
+             * Candidate Id
+             * @default 0
+             */
+            candidate_id: number;
+            /**
+             * Resume Id
+             * @default
+             */
+            resume_id: string;
         };
         /** SchedulerTaskCreate */
         SchedulerTaskCreate: {
@@ -6453,6 +6516,76 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CandidateAction"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_backfill_preflight_api_v1_candidates_resume_backfill_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumeBackfillPreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_backfill_commit_api_v1_candidates_resume_backfill_commit_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResumeBackfillCommit"];
             };
         };
         responses: {
