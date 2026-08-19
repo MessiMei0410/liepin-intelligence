@@ -90,7 +90,7 @@ describe('核心公司校准面板', () => {
 
     expect(await screen.findByText('杭州鲁滨逊测试技术有限公司')).toBeInTheDocument()
     expect(screen.getByText('苏州刻蚀先锋科技有限公司')).toBeInTheDocument()
-    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 1/50')
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 1 家 · 首批目标 50 家')
     expect(screen.getByText(/图谱共 589 家/)).toBeInTheDocument()
     // 状态徽标（过滤 tab 同名，故取全部匹配确认徽标存在）。
     expect(screen.getAllByText('未校准').length).toBeGreaterThanOrEqual(2)
@@ -141,7 +141,7 @@ describe('核心公司校准面板', () => {
     fireEvent.click(screen.getByRole('button', { name: '提交校准' }))
 
     expect(await screen.findByText(/已保存「杭州鲁滨逊测试技术有限公司」校准（已校准，v1）/)).toBeInTheDocument()
-    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2 家 · 首批目标 50 家')
     await waitFor(() => expect(queueReads).toBe(2))
     expect(submitted).toHaveLength(1)
     const body = submitted[0]
@@ -168,7 +168,7 @@ describe('核心公司校准面板', () => {
     fireEvent.click(screen.getByRole('button', { name: '提交校准' }))
 
     expect(await screen.findByText(/已保存「杭州鲁滨逊测试技术有限公司」校准（已校准，v1）/)).toBeInTheDocument()
-    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2 家 · 首批目标 50 家')
     expect(screen.queryByRole('button', { name: '提交校准' })).not.toBeInTheDocument()
     expect(screen.queryByText('校准队列加载中…')).not.toBeInTheDocument()
   })
@@ -192,7 +192,7 @@ describe('核心公司校准面板', () => {
     await waitFor(() => expect(queueReads).toBe(2))
     expect(screen.queryByText('后台队列暂不可用')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
-    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2/50')
+    expect(screen.getByRole('status', { name: /校准进度/ })).toHaveTextContent('已校准 2 家 · 首批目标 50 家')
   })
 
   it('同内容重提与幂等重放的回执如实呈现', async () => {
