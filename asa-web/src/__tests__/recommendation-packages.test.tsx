@@ -272,6 +272,7 @@ describe('版本化推荐包（recommendation-packages）', () => {
     fetchMock.mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/v1/candidate-actions/preflight')) return mockResponse({ token: 'tok-1', impact: '将标记该候选人为已推荐' })
+      if (url.includes('/api/v1/write-confirmations/activate')) return mockResponse({ ok: true, activated: true })
       if (url.includes('/api/v1/candidate-actions/commit')) return mockResponse({ ok: true })
       if (url.includes('/api/v1/consultant-recommendations/preflight')) return mockResponse({ token: 'consultant-tok-1', impact: '记录顾问确认推荐事实' })
       if (url.includes('/api/v1/consultant-recommendations/commit')) {

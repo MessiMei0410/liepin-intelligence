@@ -875,20 +875,27 @@ export const api = {
     json<JobProfileInsightsPayload>(`/api/v1/jobs/${jobId}/profile-insights`),
   disputeJobProfileItem: (jobId: number, item: { item_type: string; item_key: string; item_label?: string; note?: string }) =>
     write<JobProfileFeedbackResult>(`/api/v1/jobs/${jobId}/profile-insights/feedback`, { ...item }),
-  workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}) => write(`/api/v1/workflows/${id}/${action}`, payload),
+  workflowAction: (id: string, action: string, payload: Record<string, unknown> = {}, preflightToken = '') =>
+    workflowActionConfirmed(id, action, payload, preflightToken),
   confirmCopilotIntent: (payload: {
     intent: { kind: 'candidate_action'; action: string; message?: string } & Record<string, unknown>
     intent_hash: string; candidate_id: number; preflight_token: string; message?: string; session_id?: string
   }) => write<Record<string, unknown>>('/api/v1/copilot/intents/confirm', payload),
   retryStep: (id: number) => json<WriteAck>(`/api/agent/steps/${id}/retry`, { method: 'POST', body: '{}' }),
-  approval: (id: string, decision: string) => write(`/api/v1/approvals/${id}/decision`, { decision }),
+  approval: (id: string, decision: string, preflightToken = '', note = '') =>
+    approvalDecisionConfirmed(id, decision, preflightToken, note),
+  activateWriteConfirmation: (preflightToken: string) => activateWriteConfirmation(preflightToken),
+  approvalPreflight: (id: string, decision: string, note = '') =>
+    write<ApprovalDecisionPreflightResult>(`/api/v1/approvals/${encodeURIComponent(id)}/decision/preflight`, { decision, note }),
+  workflowActionPreflight: (id: string, action: string, note: string) =>
+    write<WorkflowActionPreflightResult>(`/api/v1/workflows/${encodeURIComponent(id)}/actions/preflight`, { action, note }),
   preflight: (candidate_id: number, action: string) => {
     const body: CandidateActionRequest = { request_id: requestId(), candidate_id, action }
     return json<PreflightResult>('/api/v1/candidate-actions/preflight', { method: 'POST', body: JSON.stringify(body) })
   },
   commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string) => {
     const body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string } = { candidate_id, action, preflight_token, note, ...(reason ? { reason } : {}) }
-    return write<CandidateActionResult>('/api/v1/candidate-actions/commit', body)
+    return candidateCommitConfirmed(candidate_id, body)
   },
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
     fetch('/api/asa/floating/candidate-update', {
@@ -1020,6 +1027,54 @@ const requestId = () => `web_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`
 const write = <T = WriteAck>(url: string, payload: Record<string, unknown>, method: 'POST' | 'PATCH' = 'POST'): Promise<T> => {
   const request_id = requestId()
   return json<T>(url, { method, headers: { 'Idempotency-Key': `${request_id}_${url}` }, body: JSON.stringify({ ...payload, request_id }) })
+}
+
+// ── 写确认链路（人确认机制闸门）──────────────────────────────────────────
+// 候选人动作 / 审批决定 / 工作流动作（cancel·pause·resume）的 Core 写端点都要求
+// 「preflight 签发 + 经 UI 激活」的一次性 token：激活端点按 ASAApp/ UA 前缀门控，
+// 模型（DSH 工具面 fetch 通道）拿不到激活能力。下列 helper 在 UI 侧完成
+// preflight → activate → 写入 三步；调用方（工作台按钮 / DSH 确认卡）都在 ASA
+// app 界面内运行，即任务书要求的「UI 发起的一次性激活」。DSH 确认卡路径携带
+// 模型 preflight 的 token 直接激活，不重复预检。
+
+export type WriteConfirmationActivation = { ok: boolean; activated: boolean; already_activated?: boolean; expires_at?: string }
+export type ApprovalDecisionPreflightResult = {
+  ok: boolean; token: string; expires_at: string; action: string; note?: string; impact?: string
+  approval: { approval_id: string; workflow_id?: string; title?: string; goal_title?: string; risk_level?: string; decision?: string }
+}
+export type WorkflowActionPreflightResult = {
+  ok: boolean; token: string; expires_at: string; action: string; note?: string; impact?: string
+  workflow: { workflow_id: string; status?: string; title?: string }
+}
+
+const activateWriteConfirmation = (preflightToken: string) =>
+  write<WriteConfirmationActivation>('/api/v1/write-confirmations/activate', { preflight_token: preflightToken })
+
+const candidateCommitConfirmed = async (
+  candidateId: number,
+  body: Omit<CandidateActionBody, 'request_id' | 'reason'> & { reason?: string },
+): Promise<CandidateActionResult> => {
+  await activateWriteConfirmation(body.preflight_token)
+  return write<CandidateActionResult>('/api/v1/candidate-actions/commit', body)
+}
+
+const approvalDecisionConfirmed = async (id: string, decision: string, preflightToken = '', note = ''): Promise<WriteAck> => {
+  const token = preflightToken || (await api.approvalPreflight(id, decision, note)).token
+  await activateWriteConfirmation(token)
+  return write(`/api/v1/approvals/${encodeURIComponent(id)}/decision`, { decision, note, preflight_token: token })
+}
+
+// 仅 cancel/pause/resume 落入人确认闸门（模型可申请的三个动作）；其余工作流动作维持原链路。
+const GATED_WORKFLOW_ACTIONS = new Set(['cancel', 'pause', 'resume'])
+
+const workflowActionConfirmed = async (
+  id: string, action: string, payload: Record<string, unknown> = {}, preflightToken = '',
+): Promise<WriteAck> => {
+  if (!GATED_WORKFLOW_ACTIONS.has(action)) return write(`/api/v1/workflows/${id}/${action}`, payload)
+  const note = String(payload.note || '')
+  const token = preflightToken || (await api.workflowActionPreflight(id, action, note)).token
+  await activateWriteConfirmation(token)
+  return write(`/api/v1/workflows/${id}/${action}`, { ...payload, preflight_token: token })
 }
 
 // 二期知识飞轮（knowledge_proposal）：Core 返回动态 dict（openapi 只描述为 object），

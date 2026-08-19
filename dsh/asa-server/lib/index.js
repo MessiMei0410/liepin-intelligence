@@ -14,7 +14,8 @@ import { createObjectRefCollector } from "./object-actions.js";
  *   POST /turn {message, session_id?} -> SSE 流（text 增量 + card + done），会话复用
  *   GET  /health                     -> {ok}
  * 流式：订阅 agent 会话的 session/event 火线，把 assistant/chunk(text-delta) 实时转成
- * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件；轮结束发 `done`。
+ * SSE `text` 事件；tool/result meta 里的 action_card 转成 SSE `card` 事件、confirm_request
+ * 转成 SSE `confirm_request` 事件（写确认卡）；轮结束发 `done`。
  * done 除 session_id/answer/ok/error 外，还聚合本轮工具结果 meta.object_refs 里的业务对象
  * （asa-tools 投影的工作流/候选人/岗位 ID）为 suggested_actions（操作芯片：打开工作流/
  * 人选/岗位弹窗，≤4）与 references（对象卡，≤8），空则不携带。同 session_id 复用 live agent（多轮记忆）。
@@ -72,9 +73,9 @@ const TOOL_LABELS = {
   asa_jobs: "查询岗位列表",
   asa_candidates: "查询候选人",
   asa_workflow: "查询工作流",
-  asa_candidate_preflight: "候选人操作预检",
-  asa_candidate_commit: "提交候选人操作",
-  asa_approval_decision: "提交审批决定",
+  asa_candidate_preflight: "候选人操作预检（发起界面确认）",
+  asa_approval_preflight: "审批决定预检（发起界面确认）",
+  asa_workflow_action_preflight: "工作流动作预检（发起界面确认）",
   asa_copilot_ask: "委托 Copilot 做领域分析",
 };
 
@@ -97,6 +98,18 @@ function writeSse(res, type, data) {
   if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+/** tool/result 事件 data → 待透传的 SSE 事件列表（card / confirm_request）。
+ *  纯函数导出以便 node:test 单测。confirm_request 必须带 preflight_token 才算有效。 */
+function toolResultSseEvents(data) {
+  const events = [];
+  const meta = data && data.meta;
+  const card = meta && meta.action_card;
+  if (card && typeof card === "object") events.push(["card", card]);
+  const confirm = meta && meta.confirm_request;
+  if (confirm && typeof confirm === "object" && confirm.preflight_token) events.push(["confirm_request", confirm]);
+  return events;
 }
 
 async function readBody(req) {
@@ -236,11 +249,12 @@ function apply(ctx) {
         const toolName = event.data && event.data.name;
         if (toolName) writeSse(res, "progress", { message: `${TOOL_LABELS[toolName] || `调用工具 ${toolName}`}…` });
       } else if (event.type === "tool/result") {
-        // 结构化卡片透传：asa_copilot_ask 经 presentationMeta 把 Copilot 的
-        // action_card（候选人名单卡等）挂到 tool/result 的 meta（完整 JSON 快照，
-        // 不受 render 16k 截断影响）。前端收到 card 事件后挂到本轮 assistant 消息。
-        const card = event.data && event.data.meta && event.data.meta.action_card;
-        if (card && typeof card === "object") writeSse(res, "card", card);
+        // 结构化透传：presentationMeta 把 action_card（名单卡等）与 confirm_request
+        // （写确认卡：preflight_token + 动作摘要 + 对象信息）挂到 tool/result meta
+        // （完整 JSON 快照，不受 render 16k 截断影响）。前端收到 card 事件后挂到本轮
+        // assistant 消息；收到 confirm_request 事件后渲染确认卡，用户确认后由前端调
+        // Core activate + 写端点完成写入。
+        for (const [type, payload] of toolResultSseEvents(event.data)) writeSse(res, type, payload);
         // 对象操作入口：asa-tools 只读工具把结果里的业务对象 ID 投到 meta.object_refs，
         // 轮末聚合成 suggested_actions/references（「都打开我看下」场景的点击入口）。
         objectRefs.add(event.data && event.data.meta && event.data.meta.object_refs);
@@ -373,4 +387,4 @@ function apply(ctx) {
   process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
-export { apply, inject, name };
+export { apply, inject, name, toolResultSseEvents };

@@ -1,13 +1,21 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
-// ASA Core 只读工具集（Phase 1）。所有工具只调 GET 只读接口，绝不写库。
-// 写动作（preflight/commit/approvals）将在 Phase 2 单独实现并强制走完整安全链路。
+// ASA Core 工具集。只读工具直调 GET；写动作对模型只暴露「预检申请」：
+// asa_candidate_preflight / asa_approval_preflight / asa_workflow_action_preflight
+// 只铸造一次性 preflight token（不写库），工具结果经 presentationMeta 投影
+// confirm_request → 常驻服务器透传 SSE → 前端确认卡。真正的写入由用户在
+// ASA 界面确认后完成（Core 侧 token 需经 UA 门控的 activate 端点激活才可写），
+// 模型靠自己的工具面无法完成任何业务写入——人确认是机制，不是 prompt 约定。
+//
+// UA 约定：必须是「非 ASAApp/ 前缀」。Core 的写确认激活端点
+// （POST /api/v1/write-confirmations/activate）按 ASAApp/ UA 前缀门控，
+// 本通道的 UA 过不去（此前 "ASAApp/dsh-sidecar" 会被门放过，已修正）。
 
 const name = "asa-tools";
 const inject = ["tools"];
 
 const ASA_BASE = process.env.ASA_CORE_URL || "http://127.0.0.1:8765";
-const UA = "ASAApp/dsh-sidecar";
+const UA = "asa-dsh-tools/1.0";
 
 async function getJson(path, exec) {
   const res = await fetch(`${ASA_BASE}${path}`, {
@@ -19,6 +27,18 @@ async function getJson(path, exec) {
     throw new Error(`ASA Core ${path} -> HTTP ${res.status}: ${text.slice(0, 500)}`);
   }
   return res.json();
+}
+
+async function postJson(path, payload, exec) {
+  const res = await fetch(`${ASA_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA },
+    body: JSON.stringify({ request_id: crypto.randomUUID(), ...payload }),
+    signal: exec.signal,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
+  return data;
 }
 
 function renderJson(value) {
@@ -167,117 +187,97 @@ function apply(ctx) {
     },
   }));
 
-  // ── Phase 2：受控写动作（preflight → commit，带幂等）。安全由 Core 服务端兜底：
-  //    一次性 5 分钟 token + Idempotency-Key + 停止/阶段不可倒退校验。
+  // ── 写动作 = 预检申请（人确认走 UI 激活，模型面无 commit/decision/action 工具）。
+  //    三个 preflight 工具都只读预检 + 铸造一次性 token，绝不写库；presentationMeta
+  //    把 confirm_request（token + 动作摘要 + 对象信息）投影到 tool/result meta，
+  //    常驻服务器据此透传 SSE confirm_request 事件，前端渲染确认卡。
+  //    用户点确认后由前端调 Core activate + 写端点；取消则零写请求。
+  const confirmMeta = (build) => ({
+    schema: { type: "object", additionalProperties: true },
+    render: (_args, value) => [{ type: "text", text: renderJson(value) }],
+    presentationMeta: (_args, value) => ({ confirm_request: value && typeof value === "object" ? build(value) : null }),
+  });
+
   ctx.tools.register(defineTool({
     name: "asa_candidate_preflight",
     description:
-      "对候选人动作做只读预检，返回一次性 preflight token（5 分钟有效）与影响预览，不写库。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进。",
+      "对候选人动作做只读预检并发起写入确认申请（不写库）：返回一次性 preflight token（5 分钟有效）与影响预览；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。action 取值：advance=复核通过 / contact=已联系 / recommend=已推荐给客户 / stop=停止推进。回答用户时必须说明「已在界面发起确认，等用户确认后才会写入」，不得声称已完成写入。",
     parameters: {
       candidate_id: { type: "integer", required: true, description: "job_candidates 关系 ID。" },
       action: { type: "string", required: true, description: "advance | contact | recommend | stop" },
     },
-    output: output(),
+    output: confirmMeta((value) => ({
+      kind: "candidate_action",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      action: value.action || "",
+      candidate: value.candidate && typeof value.candidate === "object" ? value.candidate : {},
+      impact: value.impact || "",
+    })),
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const res = await fetch(`${ASA_BASE}/api/v1/candidate-actions/preflight`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA },
-        body: JSON.stringify({ request_id: crypto.randomUUID(), candidate_id: args.candidate_id, action: args.action, note: "", reason: "", preflight_token: "" }),
-        signal: exec.signal,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(`preflight -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
-      return data;
+      return await postJson("/api/v1/candidate-actions/preflight", {
+        candidate_id: args.candidate_id, action: args.action, note: "", reason: "", preflight_token: "",
+      }, exec);
     },
   }));
 
+  // 审批决定申请（approve=批准 / reject=拒绝 / revise=退回修改）：预检 + 发起界面确认。
   ctx.tools.register(defineTool({
-    name: "asa_candidate_commit",
+    name: "asa_approval_preflight",
     description:
-      "提交候选人动作（真实写入）：必须携带 asa_candidate_preflight 返回的 token，带 Idempotency-Key 幂等。action 取值同 preflight。绝不在无 token 时提交。",
+      "对工作流/寻访审批发起决定确认申请（不写库）：decision 取值 approve=批准 / reject=拒绝 / revise=退回修改。返回一次性 preflight token（5 分钟有效）与审批摘要；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。回答用户时必须说明「已在界面发起确认，等用户确认后才会生效」，不得声称已完成审批。",
     parameters: {
-      candidate_id: { type: "integer", required: true, description: "job_candidates 关系 ID。" },
-      action: { type: "string", required: true, description: "advance | contact | recommend | stop" },
-      preflight_token: { type: "string", required: true, description: "asa_candidate_preflight 返回的 token。" },
-      note: { type: "string", description: "可选备注。" },
-      reason: { type: "string", description: "可选原因。" },
-    },
-    output: output(),
-    timeoutMs: 30000,
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      const requestId = crypto.randomUUID();
-      const res = await fetch(`${ASA_BASE}/api/v1/candidate-actions/commit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA, "Idempotency-Key": requestId },
-        body: JSON.stringify({ request_id: requestId, candidate_id: args.candidate_id, action: args.action, note: args.note || "", reason: args.reason || "", preflight_token: args.preflight_token }),
-        signal: exec.signal,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(`commit -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
-      return data;
-    },
-  }));
-
-  // 审批决定（R3 外部寻访等）：decision ∈ {approve, reject, revise}。
-  ctx.tools.register(defineTool({
-    name: "asa_approval_decision",
-    description:
-      "对工作流/寻访审批做决定（真实写入）：decision 取值 approve=批准 / reject=拒绝 / revise=退回修改。对应 POST /api/v1/approvals/{approval_id}/decision，带 Idempotency-Key 幂等。",
-    parameters: {
-      approval_id: { type: "string", required: true, description: "审批 ID，如 approval_xxx。" },
+      approval_id: { type: "string", required: true, description: "审批 ID，如 approval_xxx（用 asa_approvals 查询）。" },
       decision: { type: "string", required: true, description: "approve | reject | revise" },
       note: { type: "string", description: "可选审批备注。" },
     },
-    output: output(),
+    output: confirmMeta((value) => ({
+      kind: "approval_decision",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      approval: value.approval && typeof value.approval === "object" ? value.approval : {},
+      note: value.note || "",
+      impact: value.impact || "",
+    })),
     timeoutMs: 30000,
-    isConcurrencySafe: () => false,
+    isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const requestId = crypto.randomUUID();
-      const res = await fetch(`${ASA_BASE}/api/v1/approvals/${encodeURIComponent(args.approval_id)}/decision`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA, "Idempotency-Key": requestId },
-        body: JSON.stringify({ request_id: requestId, decision: args.decision, note: args.note || "" }),
-        signal: exec.signal,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(`approval decision -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
-      return data;
+      return await postJson(`/api/v1/approvals/${encodeURIComponent(args.approval_id)}/decision/preflight`, {
+        decision: args.decision, note: args.note || "",
+      }, exec);
     },
   }));
 
-  // 工作流动作（受控写）：cancel/pause/resume，note 必填，带 Idempotency-Key 幂等。
+  // 工作流动作申请（cancel=关闭 / pause=暂停 / resume=恢复，note 必填）：预检 + 发起界面确认。
   ctx.tools.register(defineTool({
-    name: "asa_workflow_action",
+    name: "asa_workflow_action_preflight",
     description:
-      "对工作流执行受控动作（真实写入）：action 取值 cancel=关闭 / pause=暂停 / resume=恢复，note 必填说明原因。对应 POST /api/v1/workflows/{workflow_id}/{action}，带 Idempotency-Key 幂等。",
+      "对工作流发起动作确认申请（不写库）：action 取值 cancel=关闭 / pause=暂停 / resume=恢复，note 必填说明原因。返回一次性 preflight token（5 分钟有效）；随后 ASA 界面会向用户弹出确认卡，由用户决定是否执行。回答用户时必须说明「已在界面发起确认，等用户确认后才会生效」，不得声称已执行动作。",
     parameters: {
       workflow_id: { type: "string", required: true, description: "工作流 ID，例如 workflow_a32622d8ff0c。" },
       action: { type: "string", required: true, description: "cancel | pause | resume" },
       note: { type: "string", required: true, description: "必填：执行该动作的原因说明。" },
     },
-    output: output(),
+    output: confirmMeta((value) => ({
+      kind: "workflow_action",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      workflow: value.workflow && typeof value.workflow === "object" ? value.workflow : {},
+      action: String(value.action || "").replace(/^workflow_action:/, ""),
+      note: value.note || "",
+      impact: value.impact || "",
+    })),
     timeoutMs: 30000,
-    isConcurrencySafe: () => false,
+    isConcurrencySafe: () => true,
     async execute(args, exec) {
-      if (!["cancel", "pause", "resume"].includes(args.action)) {
-        throw new Error(`不支持的工作流动作：${args.action}（仅 cancel | pause | resume）`);
-      }
       if (!String(args.note || "").trim()) {
-        throw new Error("asa_workflow_action 要求 note 必填：请说明执行该动作的原因。");
+        throw new Error("asa_workflow_action_preflight 要求 note 必填：请说明执行该动作的原因。");
       }
-      const requestId = crypto.randomUUID();
-      const res = await fetch(`${ASA_BASE}/api/v1/workflows/${encodeURIComponent(args.workflow_id)}/${args.action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA, "Idempotency-Key": requestId },
-        body: JSON.stringify({ request_id: requestId, note: args.note }),
-        signal: exec.signal,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(`workflow ${args.action} -> HTTP ${res.status}: ${JSON.stringify(data).slice(0, 500)}`);
-      return data;
+      return await postJson(`/api/v1/workflows/${encodeURIComponent(args.workflow_id)}/actions/preflight`, {
+        action: args.action, note: args.note,
+      }, exec);
     },
   }));
 
@@ -285,7 +285,7 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: "asa_copilot_ask",
     description:
-      "委托 ASA 现有 Python Copilot 回答需要领域情报的问题（业务上下文、异常分析、优先级、主动建议等），返回其富答案。对应 POST /api/v1/copilot/stream。纯 CRUD 读用 asa_* 工具，写动作走 preflight/commit 或审批工具。",
+      "委托 ASA 现有 Python Copilot 回答需要领域情报的问题（业务上下文、异常分析、优先级、主动建议等），返回其富答案。对应 POST /api/v1/copilot/stream。纯 CRUD 读用 asa_* 工具，写动作走 asa_*_preflight 申请（人确认在 ASA 界面完成）。",
     parameters: {
       message: { type: "string", required: true, description: "委托给 Copilot 的问题/指令（只读用途）。" },
       context: { type: "object", additionalProperties: true, description: "可选上下文，如 {type:'job', id:137}。" },

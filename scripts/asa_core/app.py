@@ -111,11 +111,32 @@ class WorkflowAction(WriteEnvelope):
     note: str = ""
     expected_plan_version: int | None = None
     expected_plan_hash: str = ""
+    # cancel/pause/resume 必填：workflow actions/preflight 签发且经 UI 激活的一次性 token。
+    preflight_token: str = ""
 
 
 class ApprovalDecision(WriteEnvelope):
     decision: str
     note: str = ""
+    # 必填：approvals decision/preflight 签发且经 UI 激活的一次性 token。
+    preflight_token: str = ""
+
+
+class ApprovalDecisionPreflight(WriteEnvelope):
+    # 审批决定预检：decision 三枚举 approve/reject/revise（非法 → 409）。
+    decision: str = Field(min_length=1)
+    note: str = ""
+
+
+class WorkflowActionPreflight(WriteEnvelope):
+    # 工作流动作预检：action 三枚举 cancel/pause/resume（非法 → 409），note 必填（409）。
+    action: str = Field(min_length=1)
+    note: str = ""
+
+
+class WriteConfirmationActivate(WriteEnvelope):
+    # 写确认激活：preflight 签发的一次性 token；激活后对应写端点才接受该 token。
+    preflight_token: str = Field(min_length=1)
 
 
 class ApprovalItemResponse(BaseModel):
@@ -198,6 +219,8 @@ class CopilotMessageResponse(BaseModel):
     workflow_progress: dict[str, Any] | None = None
     pending_intent: dict[str, Any] | None = None
     action_card: dict[str, Any] | None = None
+    # DSH 脑写确认请求（preflight 申请投影）：恢复会话时重渲染确认卡终态。
+    confirm_request: dict[str, Any] | None = None
     model_participation: dict[str, Any] | None = None
     created_at: str | None = None
 
@@ -233,6 +256,10 @@ class CopilotTurnRecordRequest(BaseModel):
     # 外部编排层轮末聚合的对象操作入口/对象卡：恢复会话时操作芯片仍可用。
     suggested_actions: list[dict[str, Any]] = Field(default_factory=list)
     references: list[dict[str, Any]] = Field(default_factory=list)
+    # DSH 写确认：confirm_request 随轮次落库；confirm_result（confirmed/cancelled 终态）
+    # 按 request_id 回写同轮 assistant 消息的 confirm_request.state。
+    confirm_request: dict[str, Any] | None = None
+    confirm_result: dict[str, Any] | None = None
 
 
 class CopilotTurnRecordResponse(BaseModel):
@@ -1073,6 +1100,8 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             action_card=body.action_card,
             suggested_actions=body.suggested_actions,
             references=body.references,
+            confirm_request=body.confirm_request,
+            confirm_result=body.confirm_result,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "record failed")
@@ -1403,8 +1432,22 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def create_workflow(body: WorkflowCreate, idempotency_key: str = Header(alias="Idempotency-Key")):
         return idem("workflow.create", body, idempotency_key, "workflow", "new", lambda: agent.create_goal(body.objective, body.context, body.priority))
 
+    @app.post("/api/v1/workflows/{workflow_id}/actions/preflight")
+    def workflow_action_preflight(workflow_id: str, body: WorkflowActionPreflight) -> dict[str, Any]:
+        # 工作流动作（cancel/pause/resume）两段确认第一段：发一次性未激活 token
+        # （5 分钟有效）；404=工作流不存在；409=动作非法/note 为空。
+        try:
+            return core.workflow_action_preflight(workflow_id, body.action, body.note)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/v1/workflows/{workflow_id}/{action_name}")
     def workflow_action(workflow_id: str, action_name: str, body: WorkflowAction, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 人确认闸门：cancel/pause/resume 必须携带 actions/preflight 签发且经 UI
+        # （write-confirmations/activate）激活的一次性 token；其余动作维持原链路。
+        gated = action_name in {"cancel", "pause", "resume"}
+        if gated and not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
         actions = {
             "start": lambda: agent.start_workflow(
                 workflow_id,
@@ -1420,17 +1463,39 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         }
         if action_name not in actions:
             raise HTTPException(404, "unknown workflow action")
-        return idem(f"workflow.{action_name}", body, idempotency_key, "workflow", workflow_id, actions[action_name])
+
+        def run() -> dict[str, Any]:
+            if gated:
+                core.consume_write_confirmation(body.preflight_token, workflow_id, f"workflow_action:{action_name}")
+            return actions[action_name]()
+
+        return idem(f"workflow.{action_name}", body, idempotency_key, "workflow", workflow_id, run)
 
     @app.get("/api/v1/approvals")
     def approvals(status: str = Query("pending"), limit: int = Query(100, ge=1, le=500)) -> ApprovalListResponse:
         # 只读审批列表（默认 pending），供 Agent/工作台查询待审批记录；status 传空串表示不按状态过滤。
         return ApprovalListResponse.model_validate(core.list_approvals(status, limit))
 
+    @app.post("/api/v1/approvals/{approval_id}/decision/preflight")
+    def approval_decision_preflight(approval_id: str, body: ApprovalDecisionPreflight) -> dict[str, Any]:
+        # 审批决定两段确认第一段：发一次性未激活 token（5 分钟有效）；
+        # 404=审批不存在；409=审批非 pending/decision 非法。
+        try:
+            return core.approval_decision_preflight(approval_id, body.decision, body.note)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.post("/api/v1/approvals/{approval_id}/decision")
     def approval(approval_id: str, body: ApprovalDecision, idempotency_key: str = Header(alias="Idempotency-Key")):
-        return idem("approval.decision", body, idempotency_key, "approval", approval_id,
-                    lambda: agent.decide_workflow_approval(approval_id, body.decision, body.note))
+        # 人确认闸门：必须携带 decision/preflight 签发且经 UI 激活的一次性 token。
+        if not body.preflight_token:
+            raise HTTPException(400, "preflight_token is required")
+
+        def decide() -> dict[str, Any]:
+            core.consume_write_confirmation(body.preflight_token, approval_id, f"approval_decision:{body.decision}")
+            return agent.decide_workflow_approval(approval_id, body.decision, body.note)
+
+        return idem("approval.decision", body, idempotency_key, "approval", approval_id, decide)
 
     @app.post("/api/v1/candidate-actions/preflight")
     def candidate_preflight(body: CandidateAction) -> dict[str, Any]:
@@ -1443,8 +1508,24 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def candidate_commit(body: CandidateAction, idempotency_key: str = Header(alias="Idempotency-Key")):
         if not body.preflight_token:
             raise HTTPException(400, "preflight_token is required")
-        return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id),
-                    lambda: core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason))
+
+        def commit() -> dict[str, Any]:
+            # 人确认闸门：token 必须先经 UI 激活（write-confirmations/activate），
+            # 未激活 → 409 confirmation_required（不消费 token，UI 仍可在有效期内激活）。
+            core.require_activated_preflight_token(body.preflight_token)
+            return core.candidate_commit(body.candidate_id, body.action, body.note, body.preflight_token, reason=body.reason)
+
+        return idem("candidate.commit", body, idempotency_key, "job_candidate", str(body.candidate_id), commit)
+
+    @app.post("/api/v1/write-confirmations/activate")
+    def write_confirmation_activate(request: Request, body: WriteConfirmationActivate, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 写确认激活（人确认闸门的 UI 侧）：仅限 ASA app（UA 前缀门，同 /api/v1/dsh-config）。
+        # 模型（DSH 工具面 fetch 通道）UA 不含 ASAApp/ 前缀，拿不到激活能力——
+        # 因此模型靠自己无法完成任何业务写入，必须由 UI 发起一次性激活。
+        if not app_ui_allowed(request):
+            return JSONResponse({"ok": False, "error": "仅 ASA 工作台界面可确认写入"}, status_code=403)
+        return idem("write_confirmation.activate", body, idempotency_key, "write_confirmation", body.preflight_token[-12:],
+                    lambda: core.activate_preflight_token(body.preflight_token))
 
     @app.post("/api/v1/consultant-recommendations/preflight")
     def consultant_recommendation_preflight(body: ConsultantRecommendationPreflight) -> dict[str, Any]:

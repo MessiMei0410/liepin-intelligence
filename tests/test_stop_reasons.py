@@ -84,6 +84,14 @@ def _commit_stop(client: TestClient, candidate_id: int, note: str = "", reason: 
         json={"request_id": f"pf-{uuid.uuid4().hex[:8]}", "candidate_id": candidate_id, "action": "stop"},
     )
     assert preflight.status_code == 200, preflight.text
+    # 人确认闸门：preflight token 经 UI 通道激活后才可 commit。
+    activate_id = f"act-{uuid.uuid4().hex[:8]}"
+    activated = client.post(
+        "/api/v1/write-confirmations/activate",
+        json={"request_id": activate_id, "preflight_token": preflight.json()["token"]},
+        headers={"User-Agent": "ASAApp/test-suite", "Idempotency-Key": activate_id},
+    )
+    assert activated.status_code == 200, activated.text
     request_id = f"stop-{uuid.uuid4().hex[:8]}"
     payload = {
         "request_id": request_id,

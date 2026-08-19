@@ -521,7 +521,9 @@ class CandidateActionsMixin:
         with self._preflight_lock:
             now = datetime.now()
             self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
-            self._preflight_tokens[token] = (candidate_id, action, expires)
+            # 候选人动作 token 铸造为未激活：HTTP commit 端点要求先经 UI 激活
+            # （write-confirmations/activate），否则 409 confirmation_required。
+            self._preflight_tokens[token] = (candidate_id, action, expires, False)
         return {
             "ok": True,
             "token": token,
@@ -542,8 +544,135 @@ class CandidateActionsMixin:
         with self._preflight_lock:
             now = datetime.now()
             self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
-            self._preflight_tokens[token] = (candidate_id, update_type, expires)
+            # 跟进记录 token 仅供 Python 脑 pending_intent 签名确认链路内部消费
+            # （不经 HTTP 写端点），铸造即激活，行为不变。
+            self._preflight_tokens[token] = (candidate_id, update_type, expires, True)
         return {"ok": True, "token": token, "expires_at": expires.isoformat(timespec="seconds"), "action": update_type, "candidate": {"id": candidate_id, "name": detail["name"]}}
+
+    # ------------------------------------------------------------------
+    # 写确认激活（人确认机制闸门）：候选人动作/审批决定/工作流动作的
+    # preflight token 铸造为未激活，必须经 UI 调用 activate 激活后才可写入。
+    # 激活端点按 ASAApp UA 前缀门控，模型（DSH 工具面 fetch 通道）过不去，
+    # 因此"模型靠自己的工具面无法完成业务写入"由机制而非 prompt 保证。
+    # 注意：闸门在 HTTP API 层执行（app.py），服务层 candidate_commit 等内部
+    # 调用方（Python 脑 intents/confirm 签名确认链路）不受影响。
+    # ------------------------------------------------------------------
+
+    def _mint_write_token(self, target: Any, action: str, *, activated: bool, minutes: int = 5) -> tuple[str, datetime]:
+        token = secrets.token_urlsafe(24)
+        expires = datetime.now() + timedelta(minutes=minutes)
+        with self._preflight_lock:
+            now = datetime.now()
+            self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
+            self._preflight_tokens[token] = (target, action, expires, activated)
+        return token, expires
+
+    def activate_preflight_token(self, preflight_token: str) -> dict[str, Any]:
+        """一次性激活（幂等）：UI 确认后调用。已激活 → already_activated=True；
+        无效/过期/已被 commit 消费 → ValueError（API 层映射 409 中文 detail）。"""
+        key = str(preflight_token or "")
+        with self._preflight_lock:
+            grant = self._preflight_tokens.get(key)
+            if not grant or grant[2] <= datetime.now():
+                raise ValueError("预检令牌无效、已过期或已被使用，请重新发起预检")
+            if grant[3]:
+                return {"ok": True, "activated": True, "already_activated": True, "expires_at": grant[2].isoformat(timespec="seconds")}
+            self._preflight_tokens[key] = (grant[0], grant[1], grant[2], True)
+            return {"ok": True, "activated": True, "already_activated": False, "expires_at": grant[2].isoformat(timespec="seconds")}
+
+    def require_activated_preflight_token(self, preflight_token: str) -> None:
+        """API 层闸门（peek，不消费）：token 存在但未激活 → 409 confirmation_required。
+        token 不存在/已消费时不动作，由下游 commit 按既有"无效/过期/已用"语义报错。
+        模型的失败 commit 尝试不烧毁 token，UI 确认卡仍可在有效期内激活。"""
+        with self._preflight_lock:
+            grant = self._preflight_tokens.get(str(preflight_token or ""))
+        if grant and not grant[3]:
+            raise ValueError("confirmation_required：该写入尚未经界面确认，请先在 ASA 工作台确认本次操作")
+
+    def consume_write_confirmation(self, preflight_token: str, target: Any, action: str) -> None:
+        """API 层闸门（消费）：审批决定/工作流动作等无服务层 token 校验的写端点，
+        在此原子完成"匹配 + 已激活 + 一次性核销"。"""
+        key = str(preflight_token or "")
+        with self._preflight_lock:
+            grant = self._preflight_tokens.get(key)
+            if not grant or grant[0] != target or grant[1] != action or grant[2] <= datetime.now():
+                raise ValueError("预检令牌无效、已过期或已被使用，请重新发起预检")
+            if not grant[3]:
+                raise ValueError("confirmation_required：该写入尚未经界面确认，请先在 ASA 工作台确认本次操作")
+            self._preflight_tokens.pop(key, None)
+
+    def approval_decision_preflight(self, approval_id: str, decision: str, note: str = "") -> dict[str, Any]:
+        """审批决定预检：审批存在（404）且为 pending（409），decision 三枚举（409）；
+        通过则发一次性未激活 token（5 分钟有效，需 UI 激活后才可 decision）。
+        note 原样回显（不落库），供确认卡与最终 decision 请求携带。"""
+        decision = str(decision or "").strip()
+        if decision not in {"approve", "reject", "revise"}:
+            raise ValueError("不支持的审批决定（decision 取值为 approve / reject / revise）")
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                """SELECT a.approval_id,a.workflow_id,a.goal_id,a.risk_level,a.title,a.status,a.created_at,
+                          g.title AS goal_title
+                     FROM agent_approvals a
+                     LEFT JOIN agent_goals g ON g.goal_id=a.goal_id
+                    WHERE a.approval_id=?""",
+                (str(approval_id or ""),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            raise LookupError("approval not found")
+        if str(row["status"] or "") != "pending":
+            raise ValueError("该审批已被处理，请刷新后查看最新状态")
+        token, expires = self._mint_write_token(str(row["approval_id"]), f"approval_decision:{decision}", activated=False)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": f"approval_decision:{decision}",
+            "note": " ".join(str(note or "").split()),
+            "approval": {
+                "approval_id": row["approval_id"],
+                "workflow_id": row["workflow_id"],
+                "goal_id": row["goal_id"],
+                "risk_level": row["risk_level"],
+                "title": row["title"],
+                "goal_title": row["goal_title"],
+                "decision": decision,
+            },
+            "impact": "审批决定将写入工作流状态，并记入统一审计。",
+        }
+
+    def workflow_action_preflight(self, workflow_id: str, action: str, note: str = "") -> dict[str, Any]:
+        """工作流动作预检：动作三枚举 cancel/pause/resume（409），note 必填（409），
+        工作流存在（404）；通过则发一次性未激活 token（5 分钟有效，需 UI 激活）。"""
+        action = str(action or "").strip()
+        if action not in {"cancel", "pause", "resume"}:
+            raise ValueError("不支持的工作流动作（action 取值为 cancel / pause / resume）")
+        note = " ".join(str(note or "").split())
+        if not note:
+            raise ValueError("工作流动作必须填写原因说明（note）")
+        try:
+            payload = self.workflow(workflow_id)
+        except ValueError as exc:
+            # 工作流详情对未知 id 抛 ValueError("工作流不存在")；预检对齐 404 语义。
+            raise LookupError("workflow not found") from exc
+        workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
+        goal = payload.get("goal") if isinstance(payload.get("goal"), dict) else {}
+        token, expires = self._mint_write_token(str(workflow_id), f"workflow_action:{action}", activated=False)
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": f"workflow_action:{action}",
+            "note": note,
+            "workflow": {
+                "workflow_id": str(workflow_id),
+                "status": workflow.get("status") or payload.get("status"),
+                "title": workflow.get("title") or goal.get("title"),
+            },
+            "impact": "工作流状态将变更，并记入统一审计。",
+        }
 
     def candidate_commit(self, candidate_id: int, action: str, note: str, preflight_token: str, *, reason: str = "") -> dict[str, Any]:
         with self._preflight_lock:
@@ -1038,7 +1167,8 @@ class CandidateActionsMixin:
         with self._preflight_lock:
             now = datetime.now()
             self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
-            self._preflight_tokens[token] = (candidate_id, "consultant_recommendation", expires)
+            # 顾问确认推荐仅走工作台 UI（模型工具面无此入口），铸造即激活，行为不变。
+            self._preflight_tokens[token] = (candidate_id, "consultant_recommendation", expires, True)
         return {
             "ok": True,
             "token": token,
@@ -1450,7 +1580,8 @@ class CandidateActionsMixin:
         with self._preflight_lock:
             now = datetime.now()
             self._preflight_tokens = {key: value for key, value in self._preflight_tokens.items() if value[2] > now}
-            self._preflight_tokens[token] = (int(package["job_candidate_id"]), f"recommendation_package_upgrade:{package_id}", expires)
+            # 推荐包升版仅走工作台 UI（模型工具面无此入口），铸造即激活，行为不变。
+            self._preflight_tokens[token] = (int(package["job_candidate_id"]), f"recommendation_package_upgrade:{package_id}", expires, True)
         return {
             "ok": True,
             "token": token,

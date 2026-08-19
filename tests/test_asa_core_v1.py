@@ -26,6 +26,18 @@ import liepin_workbench_server as legacy
 
 SOURCE_DB = env_path("ASA_SOURCE_DB", Path("/Users/messi/Documents/Codex/2026-06-26/re/outputs/talent_system_v3_20260629.db"))
 
+ASA_APP_HEADERS = {"User-Agent": "ASAApp/test-suite"}
+
+
+def _activate_write_confirmation(client: TestClient, token: str, request_id: str) -> None:
+    """写确认链路（人确认闸门）：preflight token 需经 UI 通道激活后才可写入。"""
+    response = client.post(
+        "/api/v1/write-confirmations/activate",
+        headers={**ASA_APP_HEADERS, "Idempotency-Key": request_id},
+        json={"request_id": request_id, "preflight_token": token},
+    )
+    assert response.status_code == 200, response.text
+
 
 def test_copilot_attachment_reads_xlsx_without_exposing_a_local_path(db_path: Path) -> None:
     workbook = openpyxl.Workbook()
@@ -1550,6 +1562,7 @@ def test_candidate_action_never_downgrades_a_later_stage(db_path: Path) -> None:
             "/api/v1/candidate-actions/preflight",
             json={"request_id": "no-downgrade-preflight", "candidate_id": 558, "action": "contact"},
         ).json()
+        _activate_write_confirmation(client, preflight["token"], "no-downgrade-activate")
         response = client.post(
             "/api/v1/candidate-actions/commit",
             headers={"Idempotency-Key": "no-downgrade-commit"},
@@ -1586,6 +1599,7 @@ def test_xsaas_review_pass_uses_x2_waiting_manual_contact(db_path: Path) -> None
             "/api/v1/candidate-actions/preflight",
             json={"request_id": "xsaas-pass-preflight", "candidate_id": 558, "action": "advance"},
         ).json()
+        _activate_write_confirmation(client, preflight["token"], "xsaas-pass-activate")
         response = client.post(
             "/api/v1/candidate-actions/commit",
             headers={"Idempotency-Key": "xsaas-pass-commit"},
@@ -1815,15 +1829,25 @@ def test_workflow_pause_and_resume_actions_use_the_core_route(db_path: Path) -> 
     )
 
     with TestClient(app) as client:
+        pause_preflight = client.post(
+            f"/api/v1/workflows/{workflow_id}/actions/preflight",
+            json={"request_id": "workflow-pause-preflight", "action": "pause", "note": "暂停"},
+        ).json()
+        _activate_write_confirmation(client, pause_preflight["token"], "workflow-pause-activate")
         paused = client.post(
             f"/api/v1/workflows/{workflow_id}/pause",
             headers={"Idempotency-Key": "workflow-pause-route"},
-            json={"request_id": "workflow-pause-route", "note": "暂停"},
+            json={"request_id": "workflow-pause-route", "note": "暂停", "preflight_token": pause_preflight["token"]},
         )
+        resume_preflight = client.post(
+            f"/api/v1/workflows/{workflow_id}/actions/preflight",
+            json={"request_id": "workflow-resume-preflight", "action": "resume", "note": "继续"},
+        ).json()
+        _activate_write_confirmation(client, resume_preflight["token"], "workflow-resume-activate")
         resumed = client.post(
             f"/api/v1/workflows/{workflow_id}/resume",
             headers={"Idempotency-Key": "workflow-resume-route"},
-            json={"request_id": "workflow-resume-route", "note": "继续"},
+            json={"request_id": "workflow-resume-route", "note": "继续", "preflight_token": resume_preflight["token"]},
         )
 
     assert paused.status_code == 200, paused.json()
@@ -1956,6 +1980,7 @@ def test_candidate_write_is_idempotent_and_preflight_is_single_use(db_path: Path
             "preflight_token": preflight["token"],
         }
         headers = {"Idempotency-Key": f"review-{candidate_id}"}
+        _activate_write_confirmation(client, preflight["token"], "test-activate")
         first = client.post("/api/v1/candidate-actions/commit", json=body, headers=headers)
         replay = client.post("/api/v1/candidate-actions/commit", json=body, headers=headers)
         reused = client.post(
@@ -1986,6 +2011,7 @@ def test_candidate_score_review_records_event_without_regressing_stage(db_path: 
             "/api/v1/candidate-actions/preflight",
             json={"request_id": "score-review-preflight", "candidate_id": candidate_id, "action": "review"},
         ).json()
+        _activate_write_confirmation(client, preflight["token"], "score-review-activate")
         response = client.post(
             "/api/v1/candidate-actions/commit",
             headers={"Idempotency-Key": "score-review-commit"},
@@ -2076,6 +2102,7 @@ def test_candidate_learning_failure_preserves_committed_business_write(
             "/api/v1/candidate-actions/preflight",
             json={"request_id": "learning-failure-preflight", "candidate_id": 558, "action": "advance"},
         ).json()
+        _activate_write_confirmation(client, preflight["token"], "learning-failure-activate")
         response = client.post(
             "/api/v1/candidate-actions/commit",
             headers={"Idempotency-Key": "learning-failure-commit"},
@@ -2128,6 +2155,7 @@ def test_user_business_actions_update_sourcing_keyword_memory(db_path: Path) -> 
                 json={"request_id": f"preflight-{action}", "candidate_id": 558, "action": action},
             ).json()
             request_id = f"commit-{action}-{uuid.uuid4().hex[:6]}"
+            _activate_write_confirmation(client, preflight["token"], f"activate-{action}-{uuid.uuid4().hex[:6]}")
             response = client.post(
                 "/api/v1/candidate-actions/commit",
                 headers={"Idempotency-Key": request_id},

@@ -3,6 +3,7 @@ import { Check, ChevronRight, CircleAlert, LoaderCircle, RotateCcw, Search, X } 
 import { api } from '../api'
 import type { AgentMessage } from './sessionModel'
 import type { AgentReference } from './transport'
+import { recordDshConfirmation } from './transport'
 
 const text = (value: unknown, fallback = '') => String(value ?? fallback).trim()
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -99,6 +100,119 @@ export function CandidateIntentConfirmation({ intent, sessionId }: { intent?: Re
   }
   if (result) return <section className="agent-execution-receipt verified" aria-label="候选人执行回执"><div><b>执行回执</b><strong>已完成</strong></div><p>{text(result.answer, `${text(candidate.name, '当前人选')}状态已更新`)}</p><small>已完成服务端回查</small></section>
   return <section className="agent-pending-intent" aria-label="候选人动作预检"><header><div><small>写入预检已通过</small><b>{text(intent.action_label, actionLabels[action] || '候选人状态动作')}</b></div><button type="button" aria-label="取消本次候选人动作" onClick={() => setCancelled(true)}><X size={15}/></button></header><dl><div><dt>人选</dt><dd>{text(candidate.name, `#${candidateId}`)}</dd></div><div><dt>岗位</dt><dd>{[text(candidate.client), text(candidate.job)].filter(Boolean).join(' / ') || '待确认'}</dd></div><div><dt>当前阶段</dt><dd>{text(candidate.stage, '待确认')}</dd></div></dl><p>{text(intent.confirm_text, '确认后将写入候选人状态。')}</p>{error && <div className="agent-card-error" role="alert">{error}</div>}<footer><button type="button" onClick={() => setCancelled(true)}>取消</button><button type="button" className="primary" disabled={busy} onClick={() => void commitCandidateIntent()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer></section>
+}
+
+// ── DSH 写确认卡（人确认闸门的 UI 侧）────────────────────────────────────
+// 模型（DSH 脑）对写动作只能发起 preflight 申请；asa-server 把 confirm_request
+// 透传到前端渲染本卡。用户点确认 → 前端调 Core activate（UA 门控，模型拿不到）
+// + 写端点（带 Idempotency-Key）；取消则零写请求。四态语义同浮窗确认卡：
+// pending（待确认）/ confirmed（已确认）/ cancelled（已取消）/ drift（409 漂移），
+// 另加 expired（5 分钟 token 过期，按 expires_at 本地判定，不发任何请求）。
+// 终态经 record-turn confirm_result 回写 Core，会话恢复后呈现终态。
+
+const candidateActionText: Record<string, string> = {
+  advance: '复核通过', contact: '已联系', recommend: '已推荐给客户', stop: '停止推进', review: '评分复核',
+}
+const decisionText: Record<string, string> = { approve: '批准', reject: '拒绝', revise: '退回修改' }
+const workflowActionText: Record<string, string> = { cancel: '关闭工作流', pause: '暂停工作流', resume: '恢复工作流' }
+
+export function WriteConfirmationCard({ request, sessionId }: { request?: Record<string, unknown> | null; sessionId: string }) {
+  const [cancelled, setCancelled] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<{ summary: string; receipt?: Record<string, unknown> }>()
+  if (!request) return null
+  const kind = text(request.kind)
+  const persistedState = text(request.state, 'pending')
+  const candidate = record(request.candidate)
+  const approval = record(request.approval)
+  const workflow = record(request.workflow)
+  const expiresAt = Date.parse(text(request.expires_at))
+  const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
+  const clientRequestId = text(request.client_request_id)
+
+  const title = kind === 'approval_decision'
+    ? `审批决定：${decisionText[text(approval.decision)] || text(approval.decision, '审批决定')}`
+    : kind === 'workflow_action'
+      ? workflowActionText[text(request.action)] || '工作流动作'
+      : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
+  const targetLines: Array<{ label: string; value: string }> = kind === 'approval_decision'
+    ? [
+        { label: '审批', value: text(approval.title, text(approval.approval_id, '待审批事项')) },
+        { label: '目标', value: text(approval.goal_title, text(approval.workflow_id, '待确认')) },
+      ]
+    : kind === 'workflow_action'
+      ? [
+          { label: '工作流', value: text(workflow.title, text(workflow.workflow_id, '待确认')) },
+          { label: '当前状态', value: text(workflow.status, '待确认') },
+        ]
+      : [
+          { label: '人选', value: text(candidate.name, `#${text(candidate.id)}`) },
+          { label: '当前阶段', value: text(candidate.stage, '待确认') },
+        ]
+  const noteText = text(request.note)
+
+  const backfill = (state: 'confirmed' | 'cancelled', summary: string, receipt?: Record<string, unknown>) => {
+    void recordDshConfirmation(sessionId, clientRequestId, { state, summary, ...(receipt ? { execution_receipt: receipt } : {}) })
+  }
+  const confirmWrite = async () => {
+    if (busy) return
+    setBusy(true); setError('')
+    try {
+      let summary = ''
+      if (kind === 'approval_decision') {
+        await api.approval(text(approval.approval_id), text(approval.decision), text(request.preflight_token), noteText)
+        summary = `已${decisionText[text(approval.decision)] || '处理'}审批：${text(approval.title, text(approval.approval_id))}`
+      } else if (kind === 'workflow_action') {
+        await api.workflowAction(text(workflow.workflow_id), text(request.action), { note: noteText }, text(request.preflight_token))
+        summary = `已执行：${workflowActionText[text(request.action)] || '工作流动作'}`
+      } else {
+        const candidateId = Number(candidate.id)
+        if (!Number.isFinite(candidateId) || !text(request.action)) {
+          setError('确认请求缺少候选人或动作信息')
+          return
+        }
+        const response = await api.commit(candidateId, text(request.action), text(request.preflight_token), noteText)
+        summary = `已同步到 ASA：${text(candidate.name, '当前人选')} ${candidateActionText[text(request.action)] || '状态已更新'}${response.stage ? `，当前阶段为“${response.stage}”` : ''}`
+      }
+      const receipt = {
+        version: 'execution_receipt_v1', state: '已完成', summary,
+        succeeded: 1, skipped: 0, failed: 0, verified: true,
+      }
+      setResult({ summary, receipt })
+      backfill('confirmed', summary, receipt)
+    } catch (value) {
+      // 409 漂移（token 过期/已用、审批已处理、状态已变化）：展示服务端中文 detail，不重试。
+      setError(value instanceof Error ? value.message : String(value))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const cancelWrite = () => {
+    if (busy) return
+    setCancelled(true)
+    backfill('cancelled', '用户取消，未写入')
+  }
+
+  if (result) {
+    return <section className="agent-execution-receipt verified" aria-label="写入执行回执"><div><b>执行回执</b><strong>已完成</strong></div><p>{result.summary}</p><small>已完成服务端写入</small></section>
+  }
+  if (persistedState === 'confirmed') {
+    return <section className="agent-execution-receipt verified" aria-label="写入执行回执"><div><b>执行回执</b><strong>已完成</strong></div><p>{text(request.result_summary, '该写入已确认并同步到 ASA')}</p><small>已完成服务端写入</small></section>
+  }
+  if (persistedState === 'cancelled' || cancelled) {
+    return <section className="agent-pending-intent is-closed" aria-label="写入确认已取消"><header><div><small>写入确认</small><b>{title}</b></div></header><p>已取消，未写入 ASA。</p></section>
+  }
+  if (expired) {
+    return <section className="agent-pending-intent is-closed" aria-label="写入确认已过期"><header><div><small>写入确认</small><b>{title}</b></div></header><p>确认请求已过期（5 分钟有效），未写入 ASA；如需执行，请让 ASA 重新发起。</p></section>
+  }
+  return <section className="agent-pending-intent" aria-label="写入确认">
+    <header><div><small>ASA 发起写入申请</small><b>{title}</b></div><button type="button" aria-label="取消本次写入" onClick={cancelWrite} disabled={busy}><X size={15}/></button></header>
+    <dl>{targetLines.map(line => <div key={line.label}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}{noteText && <div><dt>原因</dt><dd>{noteText}</dd></div>}</dl>
+    <p>{text(request.impact, '确认后将写入 ASA，并记入统一审计。')}</p>
+    {error && <div className="agent-card-error" role="alert">{error}（本次申请已失效，如需执行请让 ASA 重新发起）</div>}
+    <footer><button type="button" onClick={cancelWrite} disabled={busy}>取消</button><button type="button" className="primary" disabled={busy || Boolean(error)} onClick={() => void confirmWrite()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer>
+  </section>
 }
 
 export type InteractionMessage = Pick<AgentMessage, 'understanding_card' | 'execution_receipt' | 'suggested_actions'>
