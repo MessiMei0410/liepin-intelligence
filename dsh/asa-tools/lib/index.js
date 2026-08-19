@@ -279,6 +279,47 @@ function apply(ctx) {
     },
   }));
 
+  // 名单生成/筛选（领域能力下沉第一步）：直调 Core 确定性端点，不再委托 Copilot 的
+  // LLM 循环出名单。端点虽为 POST，语义纯查询重建——不写库、不建工作流、不走 LLM。
+  ctx.tools.register(defineTool({
+    name: "asa_pool_filter",
+    description:
+      "生成/刷新岗位候选人名单（只读）：纯查询重建名单卡，不写库、不建工作流、不走 LLM。对应 POST /api/v1/jobs/{job_id}/candidate-list/refresh。filter_mode 默认 ''（宽松口径：全量名单按阶段分组——未停止/已停止，bonder=true 时固晶/共晶/键合背景单列优先组）；传 'grade_filter' 为严格口径（按岗位职能域硬证据分级 A-核心/A-强/B-中，仅机械/软件/电源类岗位有确定性筛选模型，不支持的岗位会报错）。筛名单/看存量名单一律用本工具，不要委托 asa_copilot_ask 出名单。绝不写库。",
+    parameters: {
+      job_id: { type: "integer", required: true, description: "岗位 ID（jobs.id），例如 137。" },
+      filter_mode: { type: "string", description: "默认 '' 宽松全量名单；'grade_filter' = 严格分级过滤（仅机械/软件/电源域岗位支持）。" },
+      bonder: { type: "boolean", description: "true 时固晶/共晶/键合背景候选人单列优先组（仅宽松口径有效），默认 false。" },
+    },
+    output: {
+      ...output(),
+      // 名单卡经 presentationMeta 挂到 tool/result 事件的 meta（同 asa_copilot_ask 的
+      // action_card 投影）：render 文本有 16k 截断，卡片体量大时不能从 content 反解；
+      // 常驻服务器据此透传 SSE card 事件，前端自动弹名单弹窗。object_refs 投影岗位引用。
+      presentationMeta: (_args, value) => {
+        const card = value && typeof value === "object" && value.card && typeof value.card === "object" ? value.card : null;
+        const ctxRef = card && card.context && typeof card.context === "object" ? card.context : null;
+        return {
+          action_card: card,
+          object_refs: ctxRef && ctxRef.type === "job" && ctxRef.id != null
+            ? [{ type: "job", id: ctxRef.id, label: String(card.title || `岗位 #${ctxRef.id}`) }]
+            : [],
+        };
+      },
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const jobId = Number(args.job_id);
+      if (!Number.isInteger(jobId) || jobId <= 0) {
+        throw new Error("asa_pool_filter 要求 job_id 为正整数（jobs.id）。");
+      }
+      return await postJson(`/api/v1/jobs/${jobId}/candidate-list/refresh`, {
+        bonder: args.bonder === true,
+        filter_mode: typeof args.filter_mode === "string" ? args.filter_mode.trim() : "",
+      }, exec);
+    },
+  }));
+
   // ── 写动作 = 预检申请（人确认走 UI 激活，模型面无 commit/decision/action 工具）。
   //    三个 preflight 工具都只读预检 + 铸造一次性 token，绝不写库；presentationMeta
   //    把 confirm_request（token + 动作摘要 + 对象信息）投影到 tool/result meta，
