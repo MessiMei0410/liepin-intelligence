@@ -236,7 +236,15 @@ function apply(ctx) {
       message: { type: "string", required: true, description: "委托给 Copilot 的问题/指令（只读用途）。" },
       context: { type: "object", additionalProperties: true, description: "可选上下文，如 {type:'job', id:137}。" },
     },
-    output: output(),
+    output: {
+      ...output(),
+      // 名单卡等结构化卡片经 presentationMeta 挂到 tool/result 事件的 meta 上：
+      // render 文本有 16k 截断（renderJson），卡片体量大时不能从 content 反解；
+      // meta 是完整 JSON 快照，常驻服务器据此向前端透传 SSE card 事件。
+      presentationMeta: (_args, value) => ({
+        action_card: value && typeof value === "object" && value.action_card && typeof value.action_card === "object" ? value.action_card : null,
+      }),
+    },
     timeoutMs: 120000,
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -249,7 +257,8 @@ function apply(ctx) {
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`copilot stream -> HTTP ${res.status}: ${text.slice(0, 500)}`);
-      // 解析 SSE：done 事件里的 answer 是最终答案。
+      // 解析 SSE：done 事件里的 answer 是最终答案；done 原生携带顶层 action_card
+      // （/api/v1/copilot/stream 的 done 即 copilot() 完整结果，见 copilot_api.py）。
       for (const block of text.split(/\r?\n\r?\n/)) {
         let event = "";
         let data = "";
@@ -260,7 +269,14 @@ function apply(ctx) {
         if (event === "done") {
           try {
             const d = JSON.parse(data);
-            return { answer: d.answer || "", references: d.references || [], suggested_actions: d.suggested_actions || [], workflow_id: d.workflow_id ?? null, business_focus: d.business_focus ?? null };
+            return {
+              answer: d.answer || "",
+              references: d.references || [],
+              suggested_actions: d.suggested_actions || [],
+              workflow_id: d.workflow_id ?? null,
+              business_focus: d.business_focus ?? null,
+              action_card: d.action_card && typeof d.action_card === "object" ? d.action_card : null,
+            };
           } catch {
             return { answer: data };
           }

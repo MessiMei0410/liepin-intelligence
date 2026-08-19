@@ -922,13 +922,15 @@ def record_external_copilot_turn(
     context: dict[str, Any] | None = None,
     source: str = "dsh",
     model: str = "",
+    action_card: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
     DSH 路径的对话只存在于 DSH 常驻服务器内存，不写 Core；而会话列表/恢复是
     对 agent_copilot_messages 的 rollup，回填 user+assistant 两行即可让外部
     会话出现在任务列表并可刷新恢复。按 request_id 幂等（网络重试/重复提交不
-    产生重复行）。
+    产生重复行）。action_card（如候选人名单卡）一并落 structured_json，
+    恢复会话时前端可重渲染卡片。
     """
     session_id = str(session_id or "").strip()
     request_id = str(request_id or "").strip()
@@ -957,6 +959,9 @@ def record_external_copilot_turn(
             "request_id": request_id,
             "model_participation": {"mode": source, "label": "DSH 编排层", "model": str(model or "")},
         }
+        if isinstance(action_card, dict) and action_card:
+            assistant_structured["action_card"] = action_card
+            assistant_structured["action_cards"] = [action_card]
         conn.executemany(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)

@@ -56,6 +56,10 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
   （实测同问 120s → 77s）并收紧 `danger-full-access` 暴露面。副作用：Agent 不再能导出文件。
 - 常驻服务器每轮 stdout 打一行观测日志（session/成败/答案长度/耗时）；`tool/call` 事件
   转发为 SSE progress，前端可见工具执行进度。
+- `asa_copilot_ask` 透传 Copilot 结构化卡片：done 事件原生携带顶层 `action_card`
+  （如候选人名单卡），工具经 `presentationMeta` 挂到 `tool/result` meta（不受 render 16k
+  截断影响），常驻服务器转成 SSE `card` 事件，前端合并进 done 渲染名单弹窗并随
+  record-turn 回填 Core（恢复会话后卡片仍在）。
 
 > headless 一次性回退：直接 `dsh --profile asa "<任务>"`（无跨轮记忆）；
 > 常驻服务器（8891）是当前前端 DSH 路径。

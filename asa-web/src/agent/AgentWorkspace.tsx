@@ -555,6 +555,8 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           if (event.data.action_card && (event.data.action_card as CandidateListCardData).type === 'candidate_list') {
             setCandidateListDialog(event.data.action_card as CandidateListCardData)
           }
+        } else if (event.type === 'card') {
+          // DSH 透传的结构化卡片：transport 已合并进 done（action_card），这里不单独处理。
         } else {
           setTurnProgress('')
           streamFailed = true
