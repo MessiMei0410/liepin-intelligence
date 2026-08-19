@@ -354,6 +354,76 @@ function apply(ctx) {
     },
   }));
 
+  // 子集名单卡（与 asa_pool_filter 互补）：精读/评审/去重等"指定一组候选人"场景
+  // 出可操作 candidate_list 卡（用户规矩：凡给名单必须给可操作名单卡，禁止纯
+  // markdown 表格名单）。端点语义同 refresh——纯查询组装，不写库不走 LLM。
+  ctx.tools.register(defineTool({
+    name: "asa_candidate_list_card",
+    description:
+      "把一组指定候选人（job_candidates id）输出为可操作名单卡（只读）：精读/评审/去重等场景产出子集名单（如「精读 20 人后 ✅ 通过 4 人」）时必须用本工具出卡，禁止只给 markdown 表格名单。对应 POST /api/v1/candidates/list-card，纯查询组装——不写库、不建工作流、不走 LLM；库中不存在的 id 会在卡片 summary.skipped 注明，不报错。整池筛选/全量名单用 asa_pool_filter，指定子集名单用本工具。",
+    parameters: {
+      candidate_ids: { type: "array", required: true, description: "job_candidates 关系 ID 数组（正整数），数组顺序即卡片内顺序。" },
+      title: { type: "string", required: true, description: "名单标题，如「长越机械｜精读通过名单」。" },
+      groups: { type: "array", description: "可选分组：[{key, label, candidate_ids, priority?}]，如 [{key:'passed',label:'✅ 通过',candidate_ids:[...]}]；未被任何组覆盖的 id 自动归入「未分组」。" },
+      job_id: { type: "integer", description: "可选岗位上下文（jobs.id）；名单属于某岗位时传入，卡片可跳转岗位详情并投影岗位引用。跨岗位子集（如去重扫描结果）不传。" },
+    },
+    output: {
+      ...output(),
+      // 同 asa_pool_filter 的投影链路：card → meta.action_card → SSE card → 前端名单弹窗；
+      // context 为岗位时同时投影 object_refs 岗位引用。
+      presentationMeta: (_args, value) => {
+        const card = value && typeof value === "object" && value.card && typeof value.card === "object" ? value.card : null;
+        const ctxRef = card && card.context && typeof card.context === "object" ? card.context : null;
+        return {
+          action_card: card,
+          object_refs: ctxRef && ctxRef.type === "job" && ctxRef.id != null
+            ? [{ type: "job", id: ctxRef.id, label: String(card.title || `岗位 #${ctxRef.id}`) }]
+            : [],
+        };
+      },
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const rawIds = Array.isArray(args.candidate_ids) ? args.candidate_ids : [];
+      if (!rawIds.length) {
+        throw new Error("asa_candidate_list_card 要求 candidate_ids 为非空数组（job_candidates.id）。");
+      }
+      const ids = rawIds.map(Number);
+      if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+        throw new Error("asa_candidate_list_card 的 candidate_ids 必须全部是正整数（job_candidates.id）。");
+      }
+      const title = typeof args.title === "string" ? args.title.trim() : "";
+      if (!title) {
+        throw new Error("asa_candidate_list_card 要求 title 非空。");
+      }
+      const body = { candidate_ids: ids, title };
+      if (Array.isArray(args.groups) && args.groups.length) {
+        body.groups = args.groups.map((group, index) => {
+          const g = group && typeof group === "object" ? group : {};
+          const gids = (Array.isArray(g.candidate_ids) ? g.candidate_ids : []).map(Number);
+          if (gids.some((id) => !Number.isInteger(id) || id <= 0)) {
+            throw new Error(`groups[${index}].candidate_ids 必须全部是正整数。`);
+          }
+          return {
+            key: String(g.key || `group${index + 1}`),
+            label: String(g.label || g.key || `分组 ${index + 1}`),
+            candidate_ids: gids,
+            priority: g.priority === true,
+          };
+        });
+      }
+      if (args.job_id !== undefined && args.job_id !== null) {
+        const jobId = Number(args.job_id);
+        if (!Number.isInteger(jobId) || jobId <= 0) {
+          throw new Error("asa_candidate_list_card 的 job_id 为正整数（jobs.id）。");
+        }
+        body.context = { type: "job", id: jobId };
+      }
+      return await postJson("/api/v1/candidates/list-card", body, exec);
+    },
+  }));
+
   // ── 写动作 = 预检申请（人确认走 UI 激活，模型面无 commit/decision/action 工具）。
   //    三个 preflight 工具都只读预检 + 铸造一次性 token，绝不写库；presentationMeta
   //    把 confirm_request（token + 动作摘要 + 对象信息）投影到 tool/result meta，

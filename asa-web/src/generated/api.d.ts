@@ -208,6 +208,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/candidates/list-card": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Candidate Subset List Card */
+        post: operations["candidate_subset_list_card_api_v1_candidates_list_card_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{job_id}/profile-insights": {
         parameters: {
             query?: never;
@@ -2125,6 +2142,53 @@ export interface components {
              */
             filter_mode: string;
         };
+        /**
+         * CandidateSubsetContextBody
+         * @description 子集名单卡上下文：当前仅支持岗位（跨岗位子集可不传）。
+         */
+        CandidateSubsetContextBody: {
+            /**
+             * Type
+             * @default job
+             * @constant
+             */
+            type: "job";
+            /** Id */
+            id: number;
+        };
+        /**
+         * CandidateSubsetGroupBody
+         * @description 子集名单卡分组：key/label + 该组的 job_candidates id 列表。
+         */
+        CandidateSubsetGroupBody: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Candidate Ids */
+            candidate_ids?: number[];
+            /**
+             * Priority
+             * @default false
+             */
+            priority: boolean;
+        };
+        /**
+         * CandidateSubsetListCardBody
+         * @description 子集名单卡：精读/评审/去重等"指定一组候选人"场景出卡（对应整池卡的 refresh 端点）。
+         */
+        CandidateSubsetListCardBody: {
+            /** Candidate Ids */
+            candidate_ids?: number[];
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /** Groups */
+            groups?: components["schemas"]["CandidateSubsetGroupBody"][];
+            context?: components["schemas"]["CandidateSubsetContextBody"] | null;
+        };
         /** CompanyCalibrationSubmit */
         CompanyCalibrationSubmit: {
             /** Request Id */
@@ -3518,6 +3582,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CandidateListRefreshBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    candidate_subset_list_card_api_v1_candidates_list_card_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CandidateSubsetListCardBody"];
             };
         };
         responses: {

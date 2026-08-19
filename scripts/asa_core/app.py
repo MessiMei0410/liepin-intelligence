@@ -167,6 +167,28 @@ class CandidateListRefreshBody(BaseModel):
     filter_mode: str = ""
 
 
+class CandidateSubsetGroupBody(BaseModel):
+    """子集名单卡分组：key/label + 该组的 job_candidates id 列表。"""
+    key: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    candidate_ids: list[int] = Field(default_factory=list, max_length=500)
+    priority: bool = False
+
+
+class CandidateSubsetContextBody(BaseModel):
+    """子集名单卡上下文：当前仅支持岗位（跨岗位子集可不传）。"""
+    type: Literal["job"] = "job"
+    id: int = Field(ge=1)
+
+
+class CandidateSubsetListCardBody(BaseModel):
+    """子集名单卡：精读/评审/去重等"指定一组候选人"场景出卡（对应整池卡的 refresh 端点）。"""
+    candidate_ids: list[int] = Field(default_factory=list, max_length=500)
+    title: str = Field(default="", max_length=200)
+    groups: list[CandidateSubsetGroupBody] = Field(default_factory=list, max_length=50)
+    context: CandidateSubsetContextBody | None = None
+
+
 class CopilotAttachmentUpload(WriteEnvelope):
     file_name: str = Field(min_length=1, max_length=240)
     mime_type: str = Field(default="", max_length=160)
@@ -743,6 +765,21 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 名单卡静态快照刷新：重新按库内最新状态生成 candidate_list 卡片。
         # 不写库、不建工作流、不走 LLM——纯查询重建；404=岗位不存在。
         return core.candidate_list_card(job_id, bonder=body.bonder, filter_mode=body.filter_mode)
+
+    @app.post("/api/v1/candidates/list-card")
+    def candidate_subset_list_card(body: CandidateSubsetListCardBody) -> dict[str, Any]:
+        # 子集名单卡：精读/评审/去重等"指定一组候选人"场景（例：精读通过 4 人）
+        # 出可操作 candidate_list 卡，替代静态 markdown 表格名单。与 refresh 端点同口径——
+        # 不写库、不建工作流、不走 LLM；409=candidate_ids 为空/非法；不存在的 id 在
+        # summary.skipped 注明不报错。
+        try:
+            return core.candidate_subset_list_card(
+                body.candidate_ids, body.title,
+                groups=[group.model_dump() for group in body.groups],
+                context=body.context.model_dump() if body.context else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/v1/jobs/{job_id}/profile-insights")
     def job_profile_insights_get(job_id: int) -> dict[str, Any]:
