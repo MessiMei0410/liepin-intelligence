@@ -1,0 +1,147 @@
+{
+  "meta": {
+    "version": "v1.0",
+    "created": "2026-08-18",
+    "source": "顾问行业知识问答沉淀（2026-08-18）：电气工程师为何要懂伺服运动控制 + 半导体封装塑封机（transfer molding）电气工程师能力要求",
+    "usage": "通用行业原型（client_scoped=false）：塑封机/传递成型设备电气工程师岗的定向召回与简历评估；可复用于任何塑封、模压封装、IC封装产线设备客户的电气岗寻访",
+    "privacy": "无姓名、联系方式、候选人 id、简历原文",
+    "governance": "通用行业条目，不污染客户私有层；命中本原型的岗位需按具体客户校准公司池与职级口径；只命中关键词无项目证据的人选必须标记待核验"
+  },
+  "job_archetype": {
+    "archetype_id": "molding_machine_electrical_general",
+    "title": "塑封机（传递成型设备）电气工程师",
+    "client": "通用（半导体封装设备厂）",
+    "client_scoped": false,
+    "essence": "塑封机（transfer molding）整机电气系统：多轴伺服运动控制、合模压力控制（液压伺服/伺服扭矩）、注塑料筒压力-速度曲线、模具温控（PID）、PLC/总线、整机电气设计与现场调试",
+    "directions": [
+      {
+        "name": "塑封/模压封装设备",
+        "customers": ["封测厂", "先进封装产线", "IDM 封装部门", "功率模块（IGBT）封装线"],
+        "products": ["塑封机", "模压机", "传递成型设备", "真空塑封机"],
+        "competitors": ["山田尖端（Yamada）", "ASM", "文一科技", "国产塑封设备厂商"]
+      },
+      {
+        "name": "迁移相关设备家族",
+        "customers": ["封测/封装产线"],
+        "products": ["贴片机", "键合机", "固晶机", "点胶机", "分选机"],
+        "competitors": ["ASMPT", "K&S（库力索法）", "BESI", "新益昌", "凯格精机"]
+      }
+    ],
+    "location_policy": "按客户所在地确认；设备厂多在长三角/珠三角封装产业带，异地推进前确认 relocation",
+    "target_functions": ["电气工程师", "电气设计", "设备电气", "电气研发", "电气控制"]
+  },
+  "equipment_profile": {
+    "note": "塑封机 = 高级版注塑机：合模-注射-保压-固化循环，核心指标是节拍短、无气泡、不溢料、不伤芯片。电气系统六大摊：",
+    "subsystems": [
+      {
+        "name": "合模机构",
+        "detail": "数百吨合模压力，电驱（伺服）或液压驱动，要求压力稳、位置准"
+      },
+      {
+        "name": "注塑料筒（plunger）",
+        "detail": "把树脂下压进模具，速度与压力曲线精确，是塑封质量核心"
+      },
+      {
+        "name": "机械手/自动进出料",
+        "detail": "多轴联动抓料、放料、取料，快且准"
+      },
+      {
+        "name": "模具温控",
+        "detail": "百余度恒温，温度均匀性影响树脂固化质量"
+      },
+      {
+        "name": "整机控制大脑",
+        "detail": "PLC/控制器 + 触摸屏/上位机，常用三菱/西门子/基恩士；日系来源机型三菱多，总线 CC-Link/PROFINET/EtherCAT"
+      },
+      {
+        "name": "安全系统",
+        "detail": "光幕、双启动按钮等设备法规硬要求"
+      }
+    ]
+  },
+  "capability_tiers": {
+    "note": "参考口径，按职责范围定档不按 title 机械过滤；与 kb_level_mapping_v1 equipment_vendor 序列衔接",
+    "tiers": [
+      {
+        "tier": "初级（能干活的）",
+        "years_hint": "1-3 年",
+        "capabilities": ["配盘接线", "看懂原理图", "跟班调机", "简单 PLC 程序", "按手册设伺服参数"]
+      },
+      {
+        "tier": "中级（能当家的）",
+        "years_hint": "4-8 年",
+        "capabilities": ["独立调试多轴伺服（抖动/跑偏/不同步）", "液压伺服/压力闭环", "温控 PID 整定", "现场疑难故障定位", "主导整机交付到客户现场"]
+      },
+      {
+        "tier": "资深（能扛事的）",
+        "years_hint": "8 年+",
+        "capabilities": ["整机电气方案架构", "控制架构选型（总线方案/轴配置）", "节拍优化", "带团队", "对接客户技术要求"]
+      }
+    ],
+    "hunter_minimum_bar": "猎头判断的及格线看中级：若候选人对多轴伺服调试、压力稳定性、温度均匀性说不出具体做法，大概率是初级岗"
+  },
+  "keyword_groups": [
+    {
+      "group": "motion_control_core",
+      "targets": "运动控制核心词",
+      "terms": ["伺服", "多轴", "运动控制", "EtherCAT", "总线控制", "电子凸轮", "绝对定位", "联轴"]
+    },
+    {
+      "group": "hydraulic_pressure",
+      "targets": "液压/压力类（塑封机保压控制关键，特别加分）",
+      "terms": ["液压伺服", "伺服阀", "比例阀", "压力闭环", "保压", "压力曲线"]
+    },
+    {
+      "group": "temperature_control",
+      "targets": "温控类",
+      "terms": ["PID", "温控", "模具温控", "热流道", "温度曲线", "温度均匀性"]
+    },
+    {
+      "group": "plc_bus",
+      "targets": "PLC 与总线",
+      "terms": ["三菱", "Q系列", "西门子", "S7-1200", "S7-1500", "基恩士", "CC-Link", "PROFINET", "PLC"]
+    },
+    {
+      "group": "semiconductor_equipment",
+      "targets": "半导体设备经验（塑封机或迁移家族）",
+      "terms": ["塑封机", "模压机", "传递成型", "transfer molding", "贴片机", "键合机", "固晶机", "点胶机", "分选机", "封装设备", "半导体设备"]
+    },
+    {
+      "group": "bonus",
+      "targets": "加分项",
+      "terms": ["真空塑封", "IGBT", "功率模块", "MES", "上位机", "C#", "LabVIEW"]
+    }
+  ],
+  "negative_rules": [
+    "纯电工（只会接线通电、无控制系统开发证据）不进入工程师岗优先池",
+    "只命中技能标签但无项目证据（如说不出具体轴数、方案、故障）必须标记待核验",
+    "普通注塑机厂出身可召回但需补校：塑封机对模具精度/压力精细度/低应力/真空环境要求显著更高",
+    "异地不是排除项，但推进前必须确认 relocation 意愿"
+  ],
+  "interview_probes": [
+    {
+      "avoid": "别问\"你会伺服吗\"——答案永远是会",
+      "probe": "你之前那台塑封机，合模的压力是怎么控制的？电伺服还是液压？保压过程出过波动吗，怎么解决的？",
+      "true_signal": "能聊出伺服阀/压力闭环/PID 整定",
+      "false_signal": "只会说\"师傅调的\""
+    },
+    {
+      "probe": "整机几个伺服轴？用的什么总线方案？不同步怎么处理的？",
+      "true_signal": "答得上轴数、EtherCAT/脉冲、不同步排查法（中级以上）",
+      "false_signal": "含糊说不清"
+    },
+    {
+      "probe": "客户现场最难的一次调试是什么？",
+      "true_signal": "讲到具体现象与排查过程（气泡→排气/压力曲线；溢料→合模压力；温度不均→温控；节拍上不去→时序优化）",
+      "false_signal": "泛泛而谈无细节"
+    }
+  ],
+  "skills_ontology_nodes": ["运动控制", "多轴", "EtherCAT", "闭环控制", "温控", "压力控制", "PLC", "TwinCAT", "Codesys", "贴片机", "键合机", "封装设备"],
+  "level_mapping": {
+    "level_band": "senior",
+    "job_title_range": "高级工程师/资深工程师",
+    "accepted_candidate_levels": ["高级工程师", "资深工程师", "技术经理"],
+    "note": "按整机电气负责范围与多轴/压力/温控闭环深度定档，不按 title 机械过滤；设备厂序列对齐 kb_level_mapping equipment_vendor",
+    "applies_to": "塑封/模压/传递成型设备电气岗通用；具体客户岗位在落地时校准"
+  }
+}
