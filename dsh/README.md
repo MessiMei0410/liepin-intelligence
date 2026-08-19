@@ -80,7 +80,8 @@ DSH 轮次完成后前端自动回填 Core（`POST /api/v1/copilot/sessions/reco
 - 轮末对象操作入口（2026-08-19）：`asa_approvals`/`asa_workflow`/`asa_candidates`/`asa_jobs`
   经 `presentationMeta` 把结果里的业务对象 ID 投到 `tool/result` meta 的 `object_refs`，
   常驻服务器轮末聚合成 `suggested_actions`（`open_workflow`/`open_candidate`/`open_job`，
-  ≤4、按出现顺序去重）与 `references`（≤8）随 done 下发——「都打开我看下」场景的回答
+  ≤4、按出现顺序去重；芯片 label 带对象标题、同类对象只保留前 2 个入口，
+  完整列表由 `references` 对象卡承载）与 `references`（≤8）随 done 下发——「都打开我看下」场景的回答
   里有可点击入口（打开工作流详情/人选/岗位弹窗），并随 record-turn 回填（恢复会话后
   操作芯片仍可点击）。
 - Copilot 委托载荷透传（2026-08-19）：`asa_copilot_ask` 把 Copilot 脑 done 的

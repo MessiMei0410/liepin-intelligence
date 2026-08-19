@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   createObjectRefCollector,
   REFERENCES_MAX,
+  SAME_TYPE_ACTIONS_MAX,
   SUGGESTED_ACTIONS_MAX,
 } from "../lib/object-actions.js";
 
@@ -22,28 +23,75 @@ describe("createObjectRefCollector", () => {
       { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批", approval_id: "approval_1" },
     ]);
     const { suggested_actions, references } = collector.outputs();
+    // 芯片 label 带对象标题，多个审批/工作流芯片可区分。
     assert.deepEqual(suggested_actions, [
-      { type: "open_workflow", id: "workflow_aaa", label: "查看并审批" },
+      { type: "open_workflow", id: "workflow_aaa", label: "查看并审批：R3 外部寻访审批" },
     ]);
-    // references 面向前端对象卡：approval_id 为 asa-server 内部附加信息，不下发。
+    // references 面向前端对象卡：approval_id/action_label 为 asa-server 内部
+    // 附加信息，不下发。
     assert.deepEqual(references, [
       { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
     ]);
   });
 
-  it("候选人与岗位分别映射 open_candidate/open_job，按出现顺序", () => {
+  it("候选人与岗位分别映射 open_candidate/open_job，芯片 label 带标题与 subtitle", () => {
     const collector = createObjectRefCollector();
     collector.add([{ type: "candidate", id: 531, label: "张三", subtitle: "某半导体" }]);
     collector.add([{ type: "job", id: 142, label: "电源专家", subtitle: "士兰微" }]);
     const { suggested_actions, references } = collector.outputs();
     assert.deepEqual(suggested_actions, [
-      { type: "open_candidate", id: 531, label: "打开人选" },
-      { type: "open_job", id: 142, label: "打开岗位" },
+      { type: "open_candidate", id: 531, label: "打开人选：张三", subtitle: "某半导体" },
+      { type: "open_job", id: 142, label: "打开岗位：电源专家", subtitle: "士兰微" },
     ]);
     assert.deepEqual(references, [
       { type: "candidate", id: 531, label: "张三", subtitle: "某半导体" },
       { type: "job", id: 142, label: "电源专家", subtitle: "士兰微" },
     ]);
+  });
+
+  it("label 缺省时芯片退回通用文案", () => {
+    const collector = createObjectRefCollector();
+    collector.add([{ type: "job", id: 142 }]);
+    const { suggested_actions, references } = collector.outputs();
+    assert.deepEqual(suggested_actions, [
+      { type: "open_job", id: 142, label: "打开岗位" },
+    ]);
+    assert.deepEqual(references, [{ type: "job", id: 142, label: "岗位" }]);
+  });
+
+  it("同类对象芯片只保留前 2 个，references 保留完整列表", () => {
+    // 2026-08-19 验收：asa_jobs 列表结果曾生成一排一模一样的“打开岗位”芯片。
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
+      { type: "job", id: 111, label: "技术市场经理", subtitle: "士兰微" },
+      { type: "job", id: 154, label: "电源专家", subtitle: "士兰微" },
+      { type: "job", id: 160, label: "固晶设备专家", subtitle: "长越科技" },
+    ]);
+    const { suggested_actions, references } = collector.outputs();
+    assert.equal(suggested_actions.length, SAME_TYPE_ACTIONS_MAX);
+    assert.deepEqual(suggested_actions, [
+      { type: "open_job", id: 137, label: "打开岗位：机械高级工程师", subtitle: "长越科技" },
+      { type: "open_job", id: 111, label: "打开岗位：技术市场经理", subtitle: "士兰微" },
+    ]);
+    // references 不截断同类：完整列表由对象卡承载。
+    assert.deepEqual(references.map((ref) => ref.id), [137, 111, 154, 160]);
+  });
+
+  it("同类上限按类型独立计数：岗位占满名额不影响人选/工作流芯片", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 137, label: "机械高级工程师" },
+      { type: "job", id: 111, label: "技术市场经理" },
+      { type: "job", id: 154, label: "电源专家" },
+      { type: "candidate", id: 531, label: "张三" },
+      { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批" },
+    ]);
+    const { suggested_actions } = collector.outputs();
+    assert.deepEqual(
+      suggested_actions.map((action) => `${action.type}:${action.id}`),
+      ["open_job:137", "open_job:111", "open_candidate:531", "open_workflow:workflow_aaa"],
+    );
   });
 
   it("type+id 去重：多次工具结果重复出现只保留首个", () => {
@@ -77,16 +125,28 @@ describe("createObjectRefCollector", () => {
     ]);
   });
 
-  it("上限：suggested_actions ≤4、references ≤8（超出截断、保序）", () => {
+  it("上限：suggested_actions ≤4（同类 ≤2）、references ≤8（超出截断、保序）", () => {
     const collector = createObjectRefCollector();
+    // 混类型验证总上限：同类芯片先被 SAME_TYPE_ACTIONS_MAX 截断。
     collector.add(Array.from({ length: 12 }, (_, index) => ({
       type: "workflow", id: `workflow_${index}`, label: `审批 ${index}`,
+    })));
+    collector.add(Array.from({ length: 3 }, (_, index) => ({
+      type: "job", id: index + 1, label: `岗位 ${index + 1}`,
+    })));
+    collector.add(Array.from({ length: 3 }, (_, index) => ({
+      type: "candidate", id: index + 1, label: `人选 ${index + 1}`,
     })));
     const { suggested_actions, references } = collector.outputs();
     assert.equal(suggested_actions.length, SUGGESTED_ACTIONS_MAX);
     assert.equal(references.length, REFERENCES_MAX);
     assert.equal(suggested_actions[0].id, "workflow_0");
-    assert.equal(suggested_actions[SUGGESTED_ACTIONS_MAX - 1].id, `workflow_${SUGGESTED_ACTIONS_MAX - 1}`);
+    // 同类只留前 2 个，随后轮到下一类型的首个对象。
+    assert.deepEqual(
+      suggested_actions.map((action) => action.id),
+      ["workflow_0", "workflow_1", 1, 2, 1, 2].slice(0, SUGGESTED_ACTIONS_MAX),
+    );
+    assert.equal(references[0].id, "workflow_0");
     assert.equal(references[REFERENCES_MAX - 1].id, `workflow_${REFERENCES_MAX - 1}`);
   });
 });
