@@ -159,6 +159,39 @@ describe('轻量工作流浮层', () => {
     expect(screen.getByRole('button', { name: '批准本次寻访' })).toBeEnabled()
   })
 
+  it('待审批时显示「已等待」（以审批发起时间为基准），不再从工作流首次启动起算「已运行」', async () => {
+    // 2026-08-19 dogfood：审批当天 11:07 发起，面板却显示「已运行 389 小时」——
+    // 长生命周期多轮工作流的 started_at 是十几前轮次的首次启动时间，等待期全被算进运行时长。
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true })))
+    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000).toISOString().replace('T', ' ').slice(0, 19)
+    const value: Workflow = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'waiting_approval', started_at: '2026-08-03 08:00:00' },
+      approvals: [{ approval_id: 'approval-1', title: '执行多渠道寻访', risk_level: 'R3', status: 'pending', created_at: twoHoursAgo }],
+    }
+    renderDialog(value)
+
+    const progress = screen.getByLabelText(/工作流进度/)
+    await waitFor(() => expect(progress).toHaveTextContent('已等待'), { timeout: 3000 })
+    expect(progress).not.toHaveTextContent('已运行')
+  })
+
+  it('运行中显示「已运行」（以工作流启动时间为基准）', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true })))
+    const halfHourAgo = new Date(Date.now() - 1800_000).toISOString().replace('T', ' ').slice(0, 19)
+    const value: Workflow = {
+      ...plannedWorkflow,
+      workflow: { ...plannedWorkflow.workflow, status: 'running', started_at: halfHourAgo },
+      steps: [{ id: 1, sequence: 1, business_label: '执行渠道寻访', risk_level: '中', status: 'running' }],
+      progress: { completed: 0, total: 1, ratio: 0 },
+    }
+    renderDialog(value)
+
+    const progress = screen.getByLabelText(/工作流进度/)
+    await waitFor(() => expect(progress).toHaveTextContent('已运行'), { timeout: 3000 })
+    expect(progress).not.toHaveTextContent('已等待')
+  })
+
   it('暂停成功不等待悬挂回读，并立即切换为继续入口', async () => {
     const reload = vi.fn(() => new Promise<void>(() => {}))
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => mockResponse({ ok: true })))

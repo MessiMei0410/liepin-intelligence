@@ -52,6 +52,25 @@ describe('Agent conversation state machine', () => {
     expect(done.messages[1].content).toBe('结论如下')
   })
 
+  it('turn_notice 在 turn_done 之后到达仍按 turnRequestId 挂到本轮消息（回填失败提示）', () => {
+    const streaming = agentConversationReducer(initialAgentConversationState, {
+      type: 'turn_started', requestId: 'request-1', message: '分析一下', context: { type: 'page' }, retry: false,
+    })
+    const done = agentConversationReducer(streaming, {
+      type: 'turn_done', requestId: 'request-1', result: { ok: true, session_id: 'task-1', answer: '结论如下' },
+    })
+    // done 已把 activeRequestId 清空；notice 必须绕过该守卫仍能找到本轮 assistant 消息
+    expect(done.activeRequestId).toBeNull()
+    const noticed = agentConversationReducer(done, {
+      type: 'turn_notice', requestId: 'request-1', notice: '本轮对话未能保存，刷新后可能丢失',
+    })
+    expect(noticed.messages[1].notice).toBe('本轮对话未能保存，刷新后可能丢失')
+    expect(noticed.messages[0].notice).toBeUndefined()
+    // 别的轮次 request 的 notice 不影响本轮
+    const foreign = agentConversationReducer(done, { type: 'turn_notice', requestId: 'request-x', notice: '不该出现' })
+    expect(foreign.messages[1].notice).toBeUndefined()
+  })
+
   it('turn_subagent 按 run.id 归并流式更新；turn_done 的 subagents 快照覆盖流式聚合', () => {
     const streaming = agentConversationReducer(initialAgentConversationState, {
       type: 'turn_started', requestId: 'request-1', message: '背调这两个人', context: { type: 'page' }, retry: false,

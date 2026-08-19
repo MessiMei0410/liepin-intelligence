@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAgentTurn, brainMode, parseAgentSse, streamAgentTurn } from '../agent/transport'
+import { createAgentTurn, brainMode, parseAgentSse, recordDshTurn, streamAgentTurn, DSH_RECORD_FAILED_NOTICE } from '../agent/transport'
 import type { AgentSseEvent } from '../agent/transport'
 
 describe('Agent transport', () => {
@@ -216,7 +216,7 @@ describe('Agent transport', () => {
     history.replaceState(null, '', '/')
   })
 
-  it('DSH 轮次完成后回填 Core，回填失败不影响流式结果', async () => {
+  it('DSH 轮次完成后回填 Core；回填重试仍失败时给出 persist_failed 提示、不影响流式结果', async () => {
     vi.stubGlobal('location', { search: '?brain=dsh' })
     const encoder = new TextEncoder()
     const sse = 'event: done\r\ndata: {"ok":true,"session_id":"s-dsh","answer":"完成"}\r\n\r\n'
@@ -256,8 +256,47 @@ describe('Agent transport', () => {
       expect(JSON.parse(record?.body || '{}')).toMatchObject({
         session_id: 's-dsh', request_id: 'request-9', message: '你好', answer: '完成', source: 'dsh',
       })
-      // 回填接口 500 不影响本轮流式结果
-      expect(events.map(event => event.type)).toEqual(['done'])
+      // 回填 500：按指数退避共尝试 3 次（2026-08-19 dogfood P0：Core 抖动单次失败丢整段持久化）
+      expect(calls.filter(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))).toHaveLength(3)
+      // 最终失败：done 照常（不阻断使用），随后补一条 persist_failed 供消息流可见提示
+      expect(events.map(event => event.type)).toEqual(['done', 'persist_failed'])
+      expect(events[1]).toEqual({ type: 'persist_failed', data: { message: DSH_RECORD_FAILED_NOTICE } })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }, 15000)
+
+  it('recordDshTurn：瞬时网络异常指数退避重试，第三次成功返回 true', async () => {
+    let attempts = 0
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => {
+      attempts += 1
+      if (attempts < 3) throw new Error('connection reset')
+      return { ok: true, json: async () => ({}) } as unknown as Response
+    }))
+    try {
+      const ok = await recordDshTurn(
+        createAgentTurn('s-1', '你好', { type: 'page' }, 'request-r1'),
+        { session_id: 's-1', answer: '完成' },
+        { baseDelayMs: 0 },
+      )
+      expect(ok).toBe(true)
+      expect(attempts).toBe(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('recordDshTurn：非 2xx 视为失败并重试，最终失败返回 false', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => ({ ok: false, status: 502, json: async () => ({}) } as unknown as Response))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const ok = await recordDshTurn(
+        createAgentTurn('s-1', '你好', { type: 'page' }, 'request-r2'),
+        { session_id: 's-1', answer: '完成' },
+        { baseDelayMs: 0 },
+      )
+      expect(ok).toBe(false)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
     } finally {
       vi.unstubAllGlobals()
     }

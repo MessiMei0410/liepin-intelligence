@@ -67,6 +67,9 @@ export type AgentSseEvent =
   // DSH 子代理生命周期增量（asa-server SSE subagent 事件）：start/end 逐条到达，
   // transport 聚合进 done 的 subagents；流式期透传给上层做卡片实时状态更新。
   | { type: 'subagent'; data: { event: 'start' | 'end'; id: string; label?: string; status: AgentSubagentRun['status']; summary?: string } }
+  // 本地合成事件（不经 SSE 解析）：done 后回填 Core 重试仍失败时由 streamDshTurn 发出，
+  // 上层据此在消息流给用户一条可见提示（不阻断使用）。
+  | { type: 'persist_failed'; data: { message: string } }
   | { type: 'done'; data: AgentTurnResult }
   | { type: 'error'; data: { error: string } }
 
@@ -235,49 +238,67 @@ async function getDshConfig(): Promise<{ token: string; url: string }> {
 }
 
 // DSH 轮次回填 Core：DSH 对话只存在其服务器内存，回填后才会进入会话列表
-//（agent_copilot_messages rollup）并可刷新恢复。失败仅告警，绝不影响流式主流程。
+//（agent_copilot_messages rollup）并可刷新恢复。
 // 调用方必须 await：上层 done 后立即 refreshSessions，若回填仍在飞行，列表会抢在
 // 回填落库前返回——新会话在任务栏"消失"直到下次刷新（2026-08-19 验收 asa-9564e93f）。
-async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Promise<void> {
-  try {
-    // 写确认请求一并回填（注入本轮 request_id：恢复会话后确认/取消的终态
-    // 回写需要它定位同一轮 assistant 消息）。
-    const confirmRequest = data.confirm_request && typeof data.confirm_request === 'object'
-      ? { ...(data.confirm_request as Record<string, unknown>), client_request_id: turn.requestId }
-      : null
-    await fetch('/api/v1/copilot/sessions/record-turn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: String(data.session_id || turn.sessionId),
-        request_id: turn.requestId,
-        message: turn.message,
-        answer: String(data.answer || ''),
-        context: turn.context,
-        source: 'dsh',
-        // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
-        ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
-        ...(Array.isArray(data.action_cards) && data.action_cards.length ? { action_cards: data.action_cards } : {}),
-        // 子代理运行终态一并回填：恢复会话时「子代理执行」卡片可见终态。
-        ...(Array.isArray(data.subagents) && data.subagents.length ? { subagents: data.subagents } : {}),
-        // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
-        ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
-        ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
-        ...(confirmRequest ? { confirm_request: confirmRequest } : {}),
-        // Copilot 委托载荷（asa-server 并入 done）：理解卡/执行回执/焦点/模型参与/
-        // 工作流进度卡一并回填，恢复会话时这些卡/条仍可重渲染。
-        ...(data.understanding_card && typeof data.understanding_card === 'object' ? { understanding_card: data.understanding_card } : {}),
-        ...(data.execution_receipt && typeof data.execution_receipt === 'object' ? { execution_receipt: data.execution_receipt } : {}),
-        ...(data.analysis_card && typeof data.analysis_card === 'object' ? { analysis_card: data.analysis_card } : {}),
-        ...(data.business_focus && typeof data.business_focus === 'object' ? { business_focus: data.business_focus } : {}),
-        ...(data.model_participation && typeof data.model_participation === 'object' ? { model_participation: data.model_participation } : {}),
-        ...(data.workflow_progress && typeof data.workflow_progress === 'object' ? { workflow_progress: data.workflow_progress } : {}),
-        ...(typeof data.workflow_id === 'string' && data.workflow_id ? { workflow_id: data.workflow_id } : {}),
-      }),
-    })
-  } catch (error) {
-    console.warn('DSH 轮次回填 Core 失败（不影响本轮结果）', error)
+// Core 重启/抖动时单次失败曾导致整段对话丢持久化（2026-08-19 dogfood P0）：改为
+// 指数退避重试（默认共 3 次），且把非 2xx 响应当失败处理（此前只看网络异常）；
+// 最终失败返回 false，由调用方发 persist_failed 事件在消息流给出可见提示。
+export const DSH_RECORD_FAILED_NOTICE = '本轮对话内容未能保存到工作台，刷新后可能丢失本轮记录；可继续正常对话。'
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+export async function recordDshTurn(
+  turn: AgentTurn,
+  data: Record<string, unknown>,
+  { attempts = 3, baseDelayMs = 400 }: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<boolean> {
+  // 写确认请求一并回填（注入本轮 request_id：恢复会话后确认/取消的终态
+  // 回写需要它定位同一轮 assistant 消息）。
+  const confirmRequest = data.confirm_request && typeof data.confirm_request === 'object'
+    ? { ...(data.confirm_request as Record<string, unknown>), client_request_id: turn.requestId }
+    : null
+  const body = JSON.stringify({
+    session_id: String(data.session_id || turn.sessionId),
+    request_id: turn.requestId,
+    message: turn.message,
+    answer: String(data.answer || ''),
+    context: turn.context,
+    source: 'dsh',
+    // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
+    ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
+    ...(Array.isArray(data.action_cards) && data.action_cards.length ? { action_cards: data.action_cards } : {}),
+    // 子代理运行终态一并回填：恢复会话时「子代理执行」卡片可见终态。
+    ...(Array.isArray(data.subagents) && data.subagents.length ? { subagents: data.subagents } : {}),
+    // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
+    ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
+    ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
+    ...(confirmRequest ? { confirm_request: confirmRequest } : {}),
+    // Copilot 委托载荷（asa-server 并入 done）：理解卡/执行回执/焦点/模型参与/
+    // 工作流进度卡一并回填，恢复会话时这些卡/条仍可重渲染。
+    ...(data.understanding_card && typeof data.understanding_card === 'object' ? { understanding_card: data.understanding_card } : {}),
+    ...(data.execution_receipt && typeof data.execution_receipt === 'object' ? { execution_receipt: data.execution_receipt } : {}),
+    ...(data.analysis_card && typeof data.analysis_card === 'object' ? { analysis_card: data.analysis_card } : {}),
+    ...(data.business_focus && typeof data.business_focus === 'object' ? { business_focus: data.business_focus } : {}),
+    ...(data.model_participation && typeof data.model_participation === 'object' ? { model_participation: data.model_participation } : {}),
+    ...(data.workflow_progress && typeof data.workflow_progress === 'object' ? { workflow_progress: data.workflow_progress } : {}),
+    ...(typeof data.workflow_id === 'string' && data.workflow_id ? { workflow_id: data.workflow_id } : {}),
+  })
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch('/api/v1/copilot/sessions/record-turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+      if (response.ok) return true
+      console.warn(`DSH 轮次回填 Core 返回 ${response.status}（第 ${attempt}/${attempts} 次）`)
+    } catch (error) {
+      console.warn(`DSH 轮次回填 Core 失败（第 ${attempt}/${attempts} 次）`, error)
+    }
+    if (attempt < attempts) await sleep(baseDelayMs * 2 ** (attempt - 1))
   }
+  return false
 }
 
 // DSH 写确认终态回填：用户在确认卡点确认/取消后，按 (session_id, request_id)
@@ -376,8 +397,12 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   }
   parseAgentSse(buffer).forEach(track)
   // 回填先于 resolve：调用方随后 refreshSessions 时新会话必然已在列表里。
-  // recordDshTurn 内部捕获全部异常，await 不会打断流式结果。
-  if (doneData && (doneData as { ok?: unknown }).ok !== false) await recordDshTurn(turn, doneData)
+  // recordDshTurn 内部捕获全部异常，await 不会打断流式结果；重试后仍失败时
+  // 发 persist_failed，由 AgentWorkspace 在本轮消息下渲染可见提示（不阻断使用）。
+  if (doneData && (doneData as { ok?: unknown }).ok !== false) {
+    const persisted = await recordDshTurn(turn, doneData)
+    if (!persisted) onEvent({ type: 'persist_failed', data: { message: DSH_RECORD_FAILED_NOTICE } })
+  }
 }
 
 export async function streamAgentTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {

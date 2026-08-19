@@ -62,9 +62,14 @@ export function CompactWorkflowDialog({
 
   const now = useWorkflowLiveSync(displayValue, reload)
 
-  const runningFor = live && displayValue.workflow.started_at && now > 0
-    ? `已运行 ${elapsed(displayValue.workflow.started_at, displayValue.workflow.finished_at, now)}`
-    : live ? '运行中' : mapped.label
+  // 时长基准与 WorkflowPanel 对齐（2026-08-19 dogfood：审批等待中的工作流显示
+  // 「已运行 389 小时」——那是从工作流首次启动起算的墙钟，含大量等待时间，误导）。
+  // 待审批时以审批发起时间为基准显示「已等待」，只有真正在跑才显示「已运行」。
+  const runningFor = status === 'waiting_approval' && pendingApprovals[0]?.created_at && now > 0
+    ? `已等待 ${elapsed(pendingApprovals[0].created_at, undefined, now)}`
+    : live && displayValue.workflow.started_at && now > 0
+      ? `已运行 ${elapsed(displayValue.workflow.started_at, displayValue.workflow.finished_at, now)}`
+      : live ? '运行中' : mapped.label
 
   // 弹出为独立窗口：macOS 宿主 openDetachedDialog 打开可自由拖出屏幕的原生窗口。
   const detachPanel = (anchor?: DragResizeAnchor): boolean => {

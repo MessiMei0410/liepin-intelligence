@@ -226,6 +226,47 @@ describe("job/workflow 引用相关性过滤（2026-08-19 验收：长越名单�
   });
 });
 
+describe("审批引用命中别名（label 换 goal 标题后保住相关性命中）", () => {
+  it("同名审批芯片以 goal 标题区分；回答引用原动作标题（别名）仍判命中", () => {
+    // 2026-08-19 dogfood：两条 R3 审批芯片都叫「查看并审批：执行多渠道寻访」无法区分。
+    // asa_approvals 投影改 label=goal 标题、aliases=[审批 title]（见 asa-tools）。
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "workflow", id: "workflow_sl", label: "士兰微 / 电源专家｜第3轮寻访", aliases: ["执行多渠道寻访"], approval_id: "approval_1" },
+      { type: "workflow", id: "workflow_cy", label: "长越科技 / 机械高级工程师｜第5轮寻访", aliases: ["执行多渠道寻访"], approval_id: "approval_2" },
+    ]);
+    // 回答只说"执行多渠道寻访"（不含完整 goal 标题）：label 不命中，别名命中，两条都保留
+    const { suggested_actions, references } = collector.outputs({ answer: "当前有 2 条执行多渠道寻访的 R3 审批待你决定。" });
+    assert.deepEqual(suggested_actions.map((action) => action.label), [
+      "查看并审批：士兰微 / 电源专家｜第3轮寻访",
+      "查看并审批：长越科技 / 机械高级工程师｜第5轮寻访",
+    ]);
+    // references 不下发内部字段（approval_id/aliases）
+    assert.deepEqual(references, [
+      { type: "workflow", id: "workflow_sl", label: "士兰微 / 电源专家｜第3轮寻访" },
+      { type: "workflow", id: "workflow_cy", label: "长越科技 / 机械高级工程师｜第5轮寻访" },
+    ]);
+  });
+
+  it("别名只救命中项：回答点名单个 goal 标题时另一条仍被过滤", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "workflow", id: "workflow_sl", label: "士兰微｜第3轮寻访", aliases: ["执行多渠道寻访"] },
+      { type: "workflow", id: "workflow_cy", label: "长越科技｜第5轮寻访", aliases: ["执行多渠道寻访"] },
+    ]);
+    const out = collector.outputs({ answer: "长越科技｜第5轮寻访 的审批可以批了。" });
+    assert.deepEqual(out.references.map((ref) => ref.id), ["workflow_cy"]);
+    assert.deepEqual(out.suggested_actions.map((action) => action.id), ["workflow_cy"]);
+  });
+
+  it("与 label 相同的别名被去重丢弃", () => {
+    const collector = createObjectRefCollector();
+    collector.add([{ type: "workflow", id: "workflow_a", label: "第5轮寻访", aliases: ["第5轮寻访", "  "] }]);
+    const { references } = collector.outputs({ answer: "第5轮寻访 已批。" });
+    assert.deepEqual(references, [{ type: "workflow", id: "workflow_a", label: "第5轮寻访" }]);
+  });
+});
+
 describe("相关性兜底：全未命中时整组放回 job/workflow", () => {
   it("回答以别的方式指代（无任何对象名命中）时放回非 candidate 对象", () => {
     const collector = createObjectRefCollector();

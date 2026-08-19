@@ -45,6 +45,11 @@ export function createObjectRefCollector() {
         label: explicitLabel || REF_FALLBACK_LABELS[type],
         // 有真实对象名（非兜底文案）才能按 answer 文本命中过滤（见 outputs）。
         named: Boolean(explicitLabel),
+        // 命中别名：label 换成目标/岗位标题后（如审批芯片用 goal_title 区分同名审批），
+        // 回答引用原动作标题（"执行多渠道寻访"）时仍算命中，相关性过滤（#71/#78）不误杀。
+        aliases: Array.isArray(ref.aliases)
+          ? ref.aliases.map(value => String(value || "").trim()).filter(value => value && value !== (explicitLabel || REF_FALLBACK_LABELS[type]))
+          : [],
       };
       // 操作芯片 label 带对象标题（subtitle 一并下发，前端可展示客户/公司），
       // 避免列表查询后一排“打开岗位”无法区分；对象无显式 label 时退回通用文案。
@@ -70,12 +75,14 @@ export function createObjectRefCollector() {
     const answer = String(options.answer || "");
     const relevant = (ref) => {
       if (!answer) return true; // 无回答文本不过滤（兼容无 answer 调用方）
-      if (ref.type === "candidate") return ref.named && answer.includes(ref.label);
+      // 命中 = label 或任一别名出现在回答里（别名见 add()：label 换目标标题后保留原动作标题命中）。
+      const hit = answer.includes(ref.label) || ref.aliases.some((alias) => answer.includes(alias));
+      if (ref.type === "candidate") return ref.named && hit;
       if (!ref.named) return true; // 无名 job/workflow 保底
       // 只认对象名（岗位标题/工作流标题）命中：客户名（subtitle）命中不可靠——
       // 同客户多岗位时会把无关岗位救回（2026-08-19 验收：长越名单下"自动化软件
       // 高级工程师"芯片，因 subtitle 同为"长越科技"被误留）。
-      return answer.includes(ref.label);
+      return hit;
     };
     const visibleAll = options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs;
     let visible = visibleAll.filter(relevant);
@@ -101,11 +108,11 @@ export function createObjectRefCollector() {
       if (ref.subtitle) action.subtitle = ref.subtitle;
       suggested_actions.push(action);
     }
-    // references 面向前端对象卡：action_label/approval_id/named 为 asa-server 内部
+    // references 面向前端对象卡：action_label/approval_id/named/aliases 为 asa-server 内部
     // 附加信息，不下发。
     const references = visible
       .slice(0, REFERENCES_MAX)
-      .map(({ approval_id: _approvalId, action_label: _actionLabel, named: _named, ...ref }) => ref);
+      .map(({ approval_id: _approvalId, action_label: _actionLabel, named: _named, aliases: _aliases, ...ref }) => ref);
     return { suggested_actions, references };
   }
 
