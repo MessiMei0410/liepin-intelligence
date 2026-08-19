@@ -546,4 +546,126 @@ describe('Agent transport', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('解析 DSH 常驻服务器透传的 subagent 增量事件', () => {
+    const events = parseAgentSse([
+      'event: subagent\ndata: {"event":"start","id":"run-1","label":"背调甲","status":"running"}\n\n',
+      'event: subagent\ndata: {"event":"end","id":"run-1","status":"done","summary":"已核实"}\n\n',
+    ].join(''))
+    expect(events).toEqual([
+      { type: 'subagent', data: { event: 'start', id: 'run-1', label: '背调甲', status: 'running' } },
+      { type: 'subagent', data: { event: 'end', id: 'run-1', status: 'done', summary: '已核实' } },
+    ])
+  })
+
+  it('DSH subagent 事件流式透传且聚合进 done.subagents，回填 record-turn 一并带上', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = [
+      'event: progress\r\ndata: {"message":"DSH 编排中…"}\r\n\r\n',
+      'event: subagent\r\ndata: {"event":"start","id":"run-1","label":"背调甲","status":"running"}\r\n\r\n',
+      'event: subagent\r\ndata: {"event":"start","id":"run-2","label":"背调乙","status":"running"}\r\n\r\n',
+      'event: subagent\r\ndata: {"event":"end","id":"run-1","status":"done","summary":"甲已核实"}\r\n\r\n',
+      'event: text\r\ndata: {"content":"背调结果如下"}\r\n\r\n',
+      'event: done\r\ndata: {"ok":true,"session_id":"s-sub","answer":"背调结果如下"}\r\n\r\n',
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-sub', '背调这两个人', { type: 'page' }, 'request-sub'), new AbortController().signal, event => events.push(event))
+      // subagent 增量事件流式透传给上层（AgentWorkspace 显式处理），done 聚合终态快照：
+      // run-1 完成带摘要，run-2 仍 running（后台委派轮末未 settle）。
+      expect(events.map(event => event.type)).toEqual(['progress', 'subagent', 'subagent', 'subagent', 'text', 'done'])
+      expect(events[1]).toEqual({ type: 'subagent', data: { event: 'start', id: 'run-1', label: '背调甲', status: 'running' } })
+      expect(events[5]).toEqual({
+        type: 'done',
+        data: expect.objectContaining({
+          subagents: [
+            { id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' },
+            { id: 'run-2', label: '背调乙', status: 'running' },
+          ],
+        }),
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
+      expect(record).toBeTruthy()
+      expect(JSON.parse(record?.body || '{}')).toMatchObject({
+        session_id: 's-sub', request_id: 'request-sub', source: 'dsh',
+        subagents: [
+          { id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' },
+          { id: 'run-2', label: '背调乙', status: 'running' },
+        ],
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('DSH done 自带 subagents 时不被流式聚合覆盖', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const serverSnapshot = [{ id: 'run-1', label: '背调甲', status: 'done', summary: '甲已核实' }]
+    const sse = [
+      'event: subagent\r\ndata: {"event":"start","id":"run-1","label":"背调甲","status":"running"}\r\n\r\n',
+      `event: done\r\ndata: ${JSON.stringify({ ok: true, session_id: 's-sub2', answer: '好', subagents: serverSnapshot })}\r\n\r\n`,
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async input => {
+      const url = String(input)
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-sub2', '背调', { type: 'page' }, 'request-sub2'), new AbortController().signal, event => events.push(event))
+      expect(events[1]).toEqual({ type: 'done', data: expect.objectContaining({ subagents: serverSnapshot }) })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

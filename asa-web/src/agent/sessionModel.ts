@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { AgentContext, AgentReference } from './transport'
+import type { AgentContext, AgentReference, AgentSubagentRun } from './transport'
 
 const contextSchema = z.object({
   type: z.string().optional(),
@@ -15,6 +15,14 @@ const referenceSchema = z.object({
 })
 
 const structuredRecord = z.record(z.string(), z.unknown())
+
+// DSH 子代理运行（流式 subagent 事件聚合 / 恢复会话时 Core 回填）。
+const subagentRunSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().default(''),
+  status: z.enum(['running', 'done', 'failed', 'stopped']),
+  summary: z.string().nullish().transform(value => value || undefined),
+})
 
 const sessionSummarySchema = z.object({
   session_id: z.string().min(1),
@@ -49,6 +57,8 @@ const messageSchema = z.object({
   action_cards: z.array(structuredRecord).optional(),
   // DSH 写确认卡（含 state 终态：pending/confirmed/cancelled；过期由前端按 expires_at 判定）。
   confirm_request: structuredRecord.nullable().optional(),
+  // DSH 子代理运行（subagent 事件聚合；恢复会话时 Core 回填终态）。
+  subagents: z.array(subagentRunSchema).optional(),
   model_participation: structuredRecord.nullable().optional(),
   strategy_patch: structuredRecord.nullable().optional(),
   strategy_patch_applied: z.boolean().optional(),
@@ -99,9 +109,10 @@ const sessionSearchSchema = z.object({
 })
 
 export type AgentSessionSummary = z.infer<typeof sessionSummarySchema>
-export type AgentMessage = Omit<z.infer<typeof messageSchema>, 'context' | 'references'> & {
+export type AgentMessage = Omit<z.infer<typeof messageSchema>, 'context' | 'references' | 'subagents'> & {
   context?: AgentContext
   references?: AgentReference[]
+  subagents?: AgentSubagentRun[]
 }
 export type AgentSession = Omit<z.infer<typeof sessionSchema>, 'messages'> & { messages: AgentMessage[] }
 export type AgentSessionUpdate = z.infer<typeof sessionUpdateSchema>

@@ -3,6 +3,7 @@ import { Activity, Archive, Banknote, BookPlus, Building2, ChevronDown, Clipboar
 import { api, AgentMessage, AgentSessionSearchMatch, AgentSessionSummary, AnalysisTemplate, FloatingBridgeContext, Job, Workbench, WorkbenchItem, WorkbenchLane, workbenchLaneCount } from '../api'
 import { AgentObjectEmbed } from './AgentObjectEmbed'
 import { AgentMessageContent, AgentThinking, AgentThinkingBlock } from './AgentMessageContent'
+import { AgentSubagentBlock } from './AgentSubagentBlock'
 import { AgentPageContextBar } from './AgentPageContextBar'
 import { ModelAuditPanel } from './ModelAuditPanel'
 import { SourcingResultCard, type SourcingResultCardData } from '../workflows/SourcingResultCard'
@@ -576,6 +577,14 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           // DSH 透传的结构化卡片：transport 已合并进 done（action_card），这里不单独处理。
         } else if (event.type === 'confirm_request') {
           // DSH 透传的写确认请求：transport 已合并进 done（confirm_request），这里不单独处理。
+        } else if (event.type === 'subagent') {
+          // DSH 子代理生命周期：流式更新本轮 assistant 消息的「子代理执行」卡片。
+          setTurnProgress('')
+          dispatch({
+            type: 'turn_subagent',
+            requestId: turn.requestId,
+            run: { id: event.data.id, label: event.data.label || '', status: event.data.status, summary: event.data.summary },
+          })
         } else {
           setTurnProgress('')
           streamFailed = true
@@ -1090,7 +1099,7 @@ export function AgentWorkspace({ jobs = [], workbench, templates, context, templ
           return <Fragment key={messageKey}>
             {dayLabel && <div className="agent-day-divider" role="separator"><span>{dayLabel}</span></div>}
             <div className={`agent-message ${message.role} ${message.invalidated ? 'is-invalidated' : ''}`}>
-          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span>{message.created_at && <time className="agent-message-time" dateTime={message.created_at}>{formatMessageTime(message.created_at)}</time>}{message.role === 'assistant' && message.content && <button className={`agent-message-copy ${copiedMessageKey === `${index}:${message.created_at || ''}` ? 'copied' : ''}`} aria-label="复制消息内容" title="复制消息内容" onClick={() => void copyMessage(`${index}:${message.created_at || ''}`, message.content)}>{copiedMessageKey === `${index}:${message.created_at || ''}` ? <span>已复制</span> : <ClipboardCopy size={11}/>}</button>}<div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.role === 'assistant' && message.thinking && <AgentThinkingBlock thinking={message.thinking} streaming={loading && index === messages.length - 1}/>}{message.content
+          <span className="agent-message-role">{message.role === 'user' ? '你' : 'ASA'}</span>{message.created_at && <time className="agent-message-time" dateTime={message.created_at}>{formatMessageTime(message.created_at)}</time>}{message.role === 'assistant' && message.content && <button className={`agent-message-copy ${copiedMessageKey === `${index}:${message.created_at || ''}` ? 'copied' : ''}`} aria-label="复制消息内容" title="复制消息内容" onClick={() => void copyMessage(`${index}:${message.created_at || ''}`, message.content)}>{copiedMessageKey === `${index}:${message.created_at || ''}` ? <span>已复制</span> : <ClipboardCopy size={11}/>}</button>}<div className="agent-message-content">{message.role === 'assistant' && message.model_participation && <small className={`agent-model-participation ${String(message.model_participation.mode || 'rules')}`} title={String(message.model_participation.model || '')}>{String(message.model_participation.label || '规则生成')}</small>}{message.role === 'assistant' && message.thinking && <AgentThinkingBlock thinking={message.thinking} streaming={loading && index === messages.length - 1}/>}{message.role === 'assistant' && message.subagents && message.subagents.length > 0 && <AgentSubagentBlock subagents={message.subagents} streaming={loading && index === messages.length - 1}/>}{message.content
             ? <AgentMessageContent content={message.content}/>
             : loading && index === messages.length - 1
               ? <AgentThinking label={turnProgress ? `正在处理：${turnProgress}` : 'ASA 正在思考'}/>

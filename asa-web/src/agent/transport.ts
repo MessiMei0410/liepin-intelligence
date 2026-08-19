@@ -10,6 +10,15 @@ export type AgentReference = {
   href?: string
 }
 
+// DSH 子代理运行（subagent/subagent_fork 委派）：asa-server 把 Cordis subagent/start|end
+// 透传为 SSE subagent 增量事件，transport 聚合成该数组挂到本轮 assistant 消息。
+export type AgentSubagentRun = {
+  id: string
+  label: string
+  status: 'running' | 'done' | 'failed' | 'stopped'
+  summary?: string
+}
+
 export type AgentTurnResult = {
   ok?: boolean
   session_id: string
@@ -32,6 +41,8 @@ export type AgentTurnResult = {
   pending_intent?: Record<string, unknown> | null
   action_card?: Record<string, unknown> | null
   action_cards?: Array<Record<string, unknown>>
+  // DSH 子代理运行终态（done 快照）：渲染「子代理执行」卡片并随 record-turn 回填。
+  subagents?: AgentSubagentRun[]
   // DSH 写确认请求（preflight 申请投影）：前端渲染确认卡，用户确认后调 Core 激活+写入。
   confirm_request?: Record<string, unknown> | null
   model_participation?: Record<string, unknown> | null
@@ -53,6 +64,9 @@ export type AgentSseEvent =
   | { type: 'thinking'; data: { content: string } }
   | { type: 'card'; data: Record<string, unknown> }
   | { type: 'confirm_request'; data: Record<string, unknown> }
+  // DSH 子代理生命周期增量（asa-server SSE subagent 事件）：start/end 逐条到达，
+  // transport 聚合进 done 的 subagents；流式期透传给上层做卡片实时状态更新。
+  | { type: 'subagent'; data: { event: 'start' | 'end'; id: string; label?: string; status: AgentSubagentRun['status']; summary?: string } }
   | { type: 'done'; data: AgentTurnResult }
   | { type: 'error'; data: { error: string } }
 
@@ -72,6 +86,16 @@ const contextEventSchema = z.object({
 const textEventSchema = z.object({ content: z.string() })
 const progressEventSchema = z.object({ message: z.string() })
 const cardEventSchema = structuredRecord
+const subagentStatusSchema = z.enum(['running', 'done', 'failed', 'stopped'])
+const subagentRunSchema = z.object({
+  id: z.string().min(1), label: z.string().default(''), status: subagentStatusSchema,
+  summary: z.string().nullish().transform(value => value || undefined),
+})
+const subagentEventSchema = z.object({
+  event: z.enum(['start', 'end']), id: z.string().min(1),
+  label: z.string().optional(), status: subagentStatusSchema,
+  summary: z.string().nullish().transform(value => value || undefined),
+})
 const doneEventSchema = z.object({
   ok: z.boolean().optional(), session_id: z.string().min(1), answer: z.string(), error: z.string().optional(), context: contextSchema.optional(),
   references: z.array(referenceSchema).optional(), suggested_actions: z.array(structuredRecord).optional(),
@@ -82,6 +106,7 @@ const doneEventSchema = z.object({
   workflow_progress: structuredRecord.nullable().optional(), pending_intent: structuredRecord.nullable().optional(),
   action_card: structuredRecord.nullable().optional(),
   action_cards: z.array(structuredRecord).optional(),
+  subagents: z.array(subagentRunSchema).optional(),
   confirm_request: structuredRecord.nullable().optional(),
   understanding_card: structuredRecord.nullable().optional(),
   execution_receipt: structuredRecord.nullable().optional(),
@@ -132,7 +157,8 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
       : event === 'progress' ? progressEventSchema.safeParse(value)
         : event === 'card' ? cardEventSchema.safeParse(value)
           : event === 'confirm_request' ? cardEventSchema.safeParse(value)
-            : event === 'done' ? doneEventSchema.safeParse(value)
+            : event === 'subagent' ? subagentEventSchema.safeParse(value)
+              : event === 'done' ? doneEventSchema.safeParse(value)
               : event === 'error' ? errorEventSchema.safeParse(value)
                 : undefined
   if (!parsed) return undefined
@@ -143,6 +169,7 @@ const parseEvent = (block: string): AgentSseEvent | undefined => {
   if (event === 'progress') return { type: 'progress', data: parsed.data as { message: string } }
   if (event === 'card') return { type: 'card', data: parsed.data as Record<string, unknown> }
   if (event === 'confirm_request') return { type: 'confirm_request', data: parsed.data as Record<string, unknown> }
+  if (event === 'subagent') return { type: 'subagent', data: parsed.data as Extract<AgentSseEvent, { type: 'subagent' }>['data'] }
   if (event === 'done') {
     const data = parsed.data as AgentTurnResult
     return { type: 'done', data: { ...data, workflow_progress: synthesizeWorkflowProgress(data) } }
@@ -231,6 +258,8 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
         ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
         ...(Array.isArray(data.action_cards) && data.action_cards.length ? { action_cards: data.action_cards } : {}),
+        // 子代理运行终态一并回填：恢复会话时「子代理执行」卡片可见终态。
+        ...(Array.isArray(data.subagents) && data.subagents.length ? { subagents: data.subagents } : {}),
         // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
         ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
         ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
@@ -304,6 +333,9 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   // 不单独转发——上层事件循环只认 context/progress/text/thinking/done/error。
   let cardData: Record<string, unknown> | null = null
   let confirmRequestData: Record<string, unknown> | null = null
+  // DSH 子代理运行聚合：SSE subagent 增量事件按 id 归并，流式期透传给上层实时更新卡片，
+  // 轮末快照合并进 done（subagents），与 card/confirm_request 同一「拦截+并入 done」路径。
+  const subagentRuns = new Map<string, AgentSubagentRun>()
   const track = (event: AgentSseEvent) => {
     if (event.type === 'card') {
       cardData = event.data
@@ -313,10 +345,22 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
       confirmRequestData = event.data
       return
     }
+    if (event.type === 'subagent') {
+      const { id } = event.data
+      const run = subagentRuns.get(id) || { id, label: '', status: 'running' as const }
+      if (event.data.label) run.label = event.data.label
+      run.status = event.data.status
+      if (event.data.summary) run.summary = event.data.summary
+      subagentRuns.set(id, run)
+      // 透传给上层：AgentWorkspace 显式处理 subagent 事件做卡片流式更新（不到 else 判失败分支）。
+      onEvent(event)
+      return
+    }
     if (event.type === 'done') {
       const merged = { ...event.data }
       if (cardData && !merged.action_card) merged.action_card = cardData
       if (confirmRequestData && !merged.confirm_request) merged.confirm_request = confirmRequestData
+      if (subagentRuns.size && !merged.subagents) merged.subagents = [...subagentRuns.values()]
       event.data = merged
       doneData = (event.data || {}) as Record<string, unknown>
     }

@@ -209,6 +209,46 @@ class CopilotRecordTurnTest(AgentDbCase):
         self.assertIsNone(assistant["workflow_id"])
         service.close()
 
+    def test_record_turn_persists_subagents_for_session_restore(self) -> None:
+        """DSH 子代理运行终态（SSE subagent 事件聚合）回填后落 structured_json，
+        恢复会话时详情带出 subagents，前端可重渲染「子代理执行」卡片终态。"""
+        subagents = [
+            {"id": "run-1", "label": "背调候选人甲", "status": "done", "summary": "甲已核实，在职。"},
+            {"id": "run-2", "label": "背调候选人乙", "status": "failed"},
+            {"id": "run-3", "label": "调研竞品岗位", "status": "running"},
+        ]
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-subagents",
+            request_id="req-subagents-1",
+            message="背调这两个人",
+            answer="背调结果如下……",
+            context={"type": "page"},
+            source="dsh",
+            subagents=subagents,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recorded"])
+
+        detail = service.get_copilot_session("asa-test-subagents")
+        assistant = detail["messages"][1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["subagents"], subagents)
+        service.close()
+
+    def test_record_turn_without_subagents_keeps_detail_clean(self) -> None:
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-nosubagents",
+            request_id="req-nosubagents-1",
+            message="你好", answer="你好！",
+            context={"type": "page"}, source="dsh",
+        )
+        self.assertTrue(result["recorded"])
+        detail = service.get_copilot_session("asa-test-nosubagents")
+        self.assertEqual(detail["messages"][1]["subagents"], [])
+        service.close()
+
     def test_delegate_sessions_hidden_from_session_list_but_auditable(self) -> None:
         """孤儿会话治理：::dsh-delegate 派生 session 与遗留 dsh- 前缀 session
         不进会话列表 rollup，但消息仍在库中可审计（详情可按 id 取回）。"""

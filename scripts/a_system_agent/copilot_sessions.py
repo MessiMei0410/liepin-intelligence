@@ -839,6 +839,8 @@ def get_copilot_session(self, session_id: str, limit: int = 100, offset: int = 0
                     # 恢复会话时前端按 state/expires_at 渲染 已确认/已取消/已过期/待确认。
                     "confirm_request": structured.get("confirm_request"),
                     "model_participation": structured.get("model_participation"),
+                    # DSH 子代理运行终态：恢复会话时重渲染「子代理执行」卡片。
+                    "subagents": structured.get("subagents") or [],
                     "analysis_card": structured.get("analysis_card"),
                     # 策略建议补丁：浮窗恢复会话时可重渲染「应用到策略」操作栏
                     "strategy_patch": structured.get("strategy_patch"),
@@ -940,6 +942,7 @@ def record_external_copilot_turn(
     business_focus: dict[str, Any] | None = None,
     model_participation: dict[str, Any] | None = None,
     action_cards: list[dict[str, Any]] | None = None,
+    subagents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """回填外部编排层（DSH）的一轮对话到 agent_copilot_messages。
 
@@ -1044,6 +1047,10 @@ def record_external_copilot_turn(
             stored_request = dict(confirm_request)
             stored_request.setdefault("state", "pending")
             assistant_structured["confirm_request"] = stored_request
+        # DSH 子代理运行终态：恢复会话时重渲染「子代理执行」卡片。
+        clean_subagents = [dict(item) for item in (subagents or []) if isinstance(item, dict)]
+        if clean_subagents:
+            assistant_structured["subagents"] = clean_subagents
         conn.executemany(
             """INSERT INTO agent_copilot_messages
                (session_id,context_type,context_id,role,content,structured_json)

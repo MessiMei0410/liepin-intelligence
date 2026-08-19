@@ -8,6 +8,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import { createObjectRefCollector } from "./object-actions.js";
 import { delegateDoneFields } from "./copilot-payload.js";
+import { createSubagentTracker } from "./subagent-events.js";
 
 /**
  * @asa/dsh-asa-server — ASA 常驻 Agent 服务器（resident runner）。
@@ -19,6 +20,8 @@ import { delegateDoneFields } from "./copilot-payload.js";
  * SSE `text` 事件、assistant/chunk(reasoning-delta) 转成 SSE `thinking` 事件（思考过程透传）；
  * tool/result meta 里的 action_card 转成 SSE `card` 事件、confirm_request
  * 转成 SSE `confirm_request` 事件（写确认卡）；轮结束发 `done`。
+ * 子代理委派（subagent/subagent_fork 工具）的生命周期经 agent.ctx 上的 Cordis
+ * `subagent/start|end` 事件转成 SSE `subagent` 增量事件（start/end），终态数组随 done 下发。
  * text/thinking 增量走时间窗聚合（createDeltaAggregator）：token 级小 chunk 不逐条发 SSE
  * （前端每事件一次 setState + markdown 全量重解析，高频重渲染肉眼卡顿），攒够
  * maxChars 或 windowMs 到点 flush 一次；card/confirm_request/progress/done 前强制 flush
@@ -389,6 +392,10 @@ function apply(ctx) {
     // 上下文），轮末组装成 workflow_progress 等并入 done（与 Copilot 脑直连同形）。
     // 一轮可能多次委托，最后一次的载荷生效（与 action_card 单卡语义一致）。
     let copilotPayload = null;
+    // 本轮子代理生命周期聚合：agent.ctx 上的 subagent/start|end（dsh-subagent 按派生父
+    // agent scope 分发，本 agent 的委派都能收到）转成 SSE `subagent` 增量事件，轮末
+    // 终态数组随 done 下发（前端渲染「子代理执行」卡片并回填）。
+    const subagents = createSubagentTracker();
 
     // 客户端断连（前端 abort / 关页）：取消本轮，止损并尽早释放会话队列。
     const onClose = () => {
@@ -429,6 +436,8 @@ function apply(ctx) {
         if (toolName) {
           deltas.flush();
           writeSse(res, "progress", { message: toolCallProgressMessage(toolName) });
+          // 子代理委派工具（subagent/subagent_fork）：登记描述，供 subagent/start 配对 label。
+          subagents.noteToolCall(toolName, event.data && event.data.arguments);
         }
       } else if (event.type === "tool/result") {
         // 结构化透传：presentationMeta 把 action_card（名单卡等）与 confirm_request
@@ -455,6 +464,35 @@ function apply(ctx) {
         }
       } else if (event.type === "turn/end") {
         reason = event.data && event.data.reason;
+      }
+    });
+
+    // 子代理生命周期（dsh-subagent 的 Cordis 事件，按派生父 agent scope 分发——
+    // agent.ctx 监听即只收到本 agent 的委派，无需全局订阅）。label 优先读子 session 的
+    // subagent/descriptor（durable label），读不到退 tool/call 描述按序兜底。
+    const readDescriptorLabel = (childId) => {
+      try {
+        const child = ctx.get("agents").get(childId);
+        const descriptor = child && child.session && Array.isArray(child.session.events)
+          ? child.session.events.find((item) => item.type === "subagent/descriptor")
+          : null;
+        return descriptor && descriptor.data && typeof descriptor.data.label === "string" ? descriptor.data.label : "";
+      } catch {
+        return "";
+      }
+    };
+    const disposeSubagentStart = agent.ctx.on("subagent/start", (info) => {
+      const data = subagents.start(info, readDescriptorLabel(info && info.id));
+      if (data) {
+        deltas.flush();
+        writeSse(res, "subagent", data);
+      }
+    });
+    const disposeSubagentEnd = agent.ctx.on("subagent/end", (info) => {
+      const data = subagents.end(info);
+      if (data) {
+        deltas.flush();
+        writeSse(res, "subagent", data);
       }
     });
 
@@ -501,10 +539,14 @@ function apply(ctx) {
       const { suggested_actions, references } = objectRefs.outputs({ answer, candidateListCard: finalHasCandidateListCard });
       // 轮末强制 flush：聚合窗口里残留的 text/thinking 必须先于 done 下发保序。
       deltas.flush();
+      // 子代理终态快照：本轮派生的子代理（含仍 running 的后台委派）随 done 下发，
+      // 前端渲染终态卡片并随 record-turn 回填。
+      const subagentRuns = subagents.list();
       writeSse(res, "done", {
         session_id: sessionId,
         answer,
         ok: reason?.kind === "completed",
+        ...(subagentRuns.length ? { subagents: subagentRuns } : {}),
         ...(suggested_actions.length ? { suggested_actions } : {}),
         ...(references.length ? { references } : {}),
         // Copilot 委托载荷并入 done：understanding_card/execution_receipt/business_focus/
@@ -524,6 +566,8 @@ function apply(ctx) {
       deltas.flush();
       res.off("close", onClose);
       dispose();
+      disposeSubagentStart();
+      disposeSubagentEnd();
       entry.busy = false;
       if (pool.has(sessionId)) touch(sessionId, entry);
       // 每轮一行观测日志（session/结果/答案长度/耗时），用于排查截断与卡轮。
@@ -624,3 +668,4 @@ function apply(ctx) {
 }
 
 export { apply, inject, name, toolResultSseEvents, chunkSseDelta, createDeltaAggregator, toolCallProgressMessage, TOOL_RESULT_PROGRESS_MESSAGE, archiveStaleSessionLog, encodeSegment, projectKey, isIntermediateAnswer, shouldFollowupCandidateList, CANDIDATE_LIST_FOLLOWUP_PROMPT, mergeCopilotPayload };
+export { createSubagentTracker, isSubagentToolCall, subagentSummaryText, subagentTerminalStatus, subagentToolCallLabel } from "./subagent-events.js";
