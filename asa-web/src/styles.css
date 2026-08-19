@@ -1674,3 +1674,59 @@ button:disabled{cursor:not-allowed;opacity:.58}
 :root[data-theme="dark"] .agent-home-band>button{border-bottom-color:var(--line-soft)}
 :root[data-theme="dark"] .agent-analysis-row{border-bottom-color:var(--line-soft)}
 :root[data-theme="dark"] .agent-home-band>button em,:root[data-theme="dark"] .agent-analysis-row em{color:var(--focus)}
+/* ============================================================================
+   Dark theme v3（2026-08-19）：页面级自检犬（outputs/dogfood_pages_20260819）
+   实证的四块重灾区——P1 分析结果页白底浅字（.analysis-* 族 + .workspace-head
+   背景写死 #fff）、P2 评估 tab 数值隐身（.assessment-fit-summary b 等硬编码
+   #20231f 深字落在深底）、P3 履历正文暗灰-on-暗底（.work-duty li 的
+   var(--fg,#2a332a)，--fg 全仓无定义）、P4 人选进度看板卡片白底
+   （.stage>button 写死 #fff）；并收 P9 瑕疵：深色下原生控件白块
+   （.jobs-sort select/.lifecycle-form 控件/.jobs-search）与 Agent 首页
+   「再显示 20 项」白块（.agent-home-pagination button）。
+   统一沿用既有令牌，全部包在 [data-theme="dark"] 下，浅色模式零改动。
+   ============================================================================ */
+/* --- P1 分析结果页 --- */
+:root[data-theme="dark"] .workspace-head,:root[data-theme="dark"] .analysis-metrics,
+:root[data-theme="dark"] .analysis-section,:root[data-theme="dark"] .analysis-trends{background:var(--surface)}
+:root[data-theme="dark"] .workspace-head span{color:#8ab4f8}
+:root[data-theme="dark"] .analysis-table th{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .analysis-table td{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .analysis-state{background:var(--amber-soft);border-color:#4d3b16;color:var(--amber)}
+:root[data-theme="dark"] .analysis-state.error{background:var(--red-soft);border-color:#5a3230;color:var(--red)}
+:root[data-theme="dark"] .trend-bars i.empty{background:var(--line)}
+:root[data-theme="dark"] .trend-delta.up{color:var(--green)}
+:root[data-theme="dark"] .trend-delta.down{color:var(--red)}
+/* --- P2 评估 tab（CandidateAssessment）硬编码深字 --- */
+:root[data-theme="dark"] .assessment-fit-summary b,:root[data-theme="dark"] .assessment-facts b,
+:root[data-theme="dark"] .assessment-current-move b{color:var(--text)}
+:root[data-theme="dark"] .assessment-summary{color:var(--text)}
+:root[data-theme="dark"] .assessment-detail>summary{color:var(--text)}
+:root[data-theme="dark"] .assessment-fit-criterion-text{color:var(--text)}
+:root[data-theme="dark"] .assessment-segments td{border-bottom-color:var(--line-soft)}
+:root[data-theme="dark"] .assessment-evidence-toggle button{background:var(--surface)}
+/* --- P3 履历 tab 正文（.work-duty li 的 --fg 全仓无定义，恒为深灰 #2a332a） --- */
+:root[data-theme="dark"] .work-duty li{color:var(--text)}
+:root[data-theme="dark"] .resume-timeline:before{background:var(--line)}
+:root[data-theme="dark"] .resume-timeline>div>i{border-color:var(--surface)}
+/* --- P4 人选进度看板候选人卡片 --- */
+:root[data-theme="dark"] .stage>button{background:var(--surface)}
+/* --- P9 深色下原生控件/杂项白块 --- */
+:root[data-theme="dark"]{color-scheme:dark}
+:root[data-theme="dark"] .jobs-search{background:var(--surface)}
+:root[data-theme="dark"] .jobs-sort select{background:var(--surface);color:var(--text)}
+:root[data-theme="dark"] .lifecycle-form select,:root[data-theme="dark"] .lifecycle-form input,
+:root[data-theme="dark"] .lifecycle-form textarea{background:var(--surface);color:var(--text)}
+:root[data-theme="dark"] .agent-home-pagination{border-top-color:var(--line-soft)}
+:root[data-theme="dark"] .agent-home-pagination button{background:var(--surface);color:var(--focus)}
+:root[data-theme="dark"] .agent-home-pagination button:hover{background:var(--surface-sub)}
+/* P9「待处理 570」主按钮发洗：.section-head span{color:var(--muted)} 后代选择器
+   命中了头部按钮内的文字 span，盖掉了按钮自身的 primary 前景色 */
+:root[data-theme="dark"] .section-head .button span{color:inherit}
+/* --- 通用 tag 浅底芯片（默认/muted/neutral 写死浅灰底，深色下为亮块） --- */
+:root[data-theme="dark"] .tag{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .tag.muted{background:var(--surface-sub);color:var(--muted)}
+:root[data-theme="dark"] .tag.neutral{background:var(--surface-sub);color:var(--muted)}
+/* 上面的通用 .tag 覆盖优先级高于 .tag.good 等双色类，这里按既有令牌重新扶正语义色 */
+:root[data-theme="dark"] .tag.good,:root[data-theme="dark"] .tag.ok{background:var(--green-soft);color:var(--green)}
+:root[data-theme="dark"] .tag.warn{background:var(--amber-soft);color:var(--amber)}
+:root[data-theme="dark"] .tag.bad,:root[data-theme="dark"] .tag.danger{background:var(--red-soft);color:var(--red)}
