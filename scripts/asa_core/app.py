@@ -313,6 +313,9 @@ class CopilotTurnRecordRequest(BaseModel):
     # DSH 子代理运行终态（asa-server SSE subagent 事件聚合）：恢复会话时重渲染
     # 「子代理执行」卡片。元素形态 {id, label, status: running|done|failed|stopped, summary?}。
     subagents: list[dict[str, Any]] = Field(default_factory=list)
+    # 非 completed 轮（aborted/超时/error）也回填：answer 为已流式输出的部分内容，
+    # turn_error 记录中断原因——刷新后会话不丢用户问句与部分回答（dogfood P0-2）。
+    turn_error: str = Field(default="", max_length=500)
 
 
 class CopilotTurnRecordResponse(BaseModel):
@@ -1187,6 +1190,7 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             model_participation=body.model_participation,
             action_cards=body.action_cards,
             subagents=body.subagents,
+            turn_error=body.turn_error,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "record failed")

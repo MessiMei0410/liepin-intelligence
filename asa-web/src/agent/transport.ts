@@ -329,6 +329,31 @@ export async function recordDshConfirmation(
   }
 }
 
+// 非 completed 轮（aborted/超时/error，done.ok=false）回填：用户问句与已流式输出的
+// 部分答案同样落库，刷新/掉线后不再整轮消失（dogfood P0-2：剧本 2 委托连续超时，
+// turn 300s 被 abort，ok=false 跳过回填，reload 后问答丢失）。与 recordDshTurn 并列、
+// 不改其重试语义；turn_error 记录中断原因供恢复时区分部分回答。
+async function recordDshIncompleteTurn(turn: AgentTurn, data: Record<string, unknown>): Promise<void> {
+  try {
+    await fetch('/api/v1/copilot/sessions/record-turn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: String(data.session_id || turn.sessionId),
+        request_id: turn.requestId,
+        message: turn.message,
+        answer: String(data.answer || ''),
+        context: turn.context,
+        source: 'dsh',
+        turn_error: String(data.error || 'turn did not complete'),
+      }),
+    })
+  } catch (error) {
+    console.warn('DSH 中断轮回填 Core 失败（不影响本轮结果）', error)
+  }
+}
+
+
 async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (event: AgentSseEvent) => void): Promise<void> {
   const { token, url } = await getDshConfig()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -399,9 +424,15 @@ async function streamDshTurn(turn: AgentTurn, signal: AbortSignal, onEvent: (eve
   // 回填先于 resolve：调用方随后 refreshSessions 时新会话必然已在列表里。
   // recordDshTurn 内部捕获全部异常，await 不会打断流式结果；重试后仍失败时
   // 发 persist_failed，由 AgentWorkspace 在本轮消息下渲染可见提示（不阻断使用）。
-  if (doneData && (doneData as { ok?: unknown }).ok !== false) {
-    const persisted = await recordDshTurn(turn, doneData)
-    if (!persisted) onEvent({ type: 'persist_failed', data: { message: DSH_RECORD_FAILED_NOTICE } })
+  // 非 completed 轮（aborted/超时）走 recordDshIncompleteTurn 同样回填——用户问句与
+  // 部分答案不落库的话，刷新后整轮从会话里消失（dogfood P0-2）。
+  if (doneData) {
+    if ((doneData as { ok?: unknown }).ok !== false) {
+      const persisted = await recordDshTurn(turn, doneData)
+      if (!persisted) onEvent({ type: 'persist_failed', data: { message: DSH_RECORD_FAILED_NOTICE } })
+    } else {
+      await recordDshIncompleteTurn(turn, doneData)
+    }
   }
 }
 

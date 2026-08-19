@@ -351,6 +351,58 @@ describe('Agent transport', () => {
     }
   })
 
+  it('非 completed 轮（done.ok=false）也回填 record-turn 并带 turn_error，刷新后不丢整轮', async () => {
+    // dogfood P0-2：委托连续超时 → DSH turn 300s abort → done.ok=false，
+    // 旧逻辑跳过回填，reload 后该轮问答从会话消失。
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const sse = [
+      'event: text\r\ndata: {"content":"我先看下岗位管道数据……"}\r\n\r\n',
+      'event: done\r\ndata: {"ok":false,"session_id":"s-abort","answer":"我先看下岗位管道数据……","error":"turn aborted (timeout)"}\r\n\r\n',
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-abort', '下一步怎么打', { type: 'page' }, 'request-abort'), new AbortController().signal, event => events.push(event))
+      const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
+      expect(record).toBeTruthy()
+      expect(JSON.parse(record?.body || '{}')).toMatchObject({
+        session_id: 's-abort', request_id: 'request-abort', message: '下一步怎么打',
+        answer: '我先看下岗位管道数据……', source: 'dsh', turn_error: 'turn aborted (timeout)',
+      })
+      // 中断轮的部分内容仍按原事件流透出（上层决定如何展示）
+      expect(events.map(event => event.type)).toEqual(['text', 'done'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('解析 DSH 常驻服务器透传的 card 事件', () => {
     const events = parseAgentSse('event: card\ndata: {"type":"candidate_list","context":{"type":"job","id":142},"summary":{"total":7}}\n\n')
     expect(events).toEqual([

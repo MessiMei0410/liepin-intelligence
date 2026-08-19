@@ -68,6 +68,8 @@ const messageSchema = z.object({
   strategy_patch_applied_count: z.number().nullable().optional(),
   invalidated: z.boolean().optional(),
   invalidated_reason: z.string().optional(),
+  // 非 completed 轮（aborted/超时）中断原因：恢复会话时区分「部分回答」与完整回答。
+  turn_error: z.string().optional(),
   revoked_actions: z.array(structuredRecord).optional(),
   created_at: z.string().optional(),
 })
