@@ -583,7 +583,7 @@ body{background:var(--bg)}
 .agent-markdown{min-width:0;color:inherit}
 .agent-markdown>:first-child{margin-top:0}
 .agent-markdown>:last-child{margin-bottom:0}
-.agent-markdown p{margin:0 0 12px}
+.agent-markdown p{margin:0 0 12px;white-space:pre-wrap}
 .agent-markdown h1,.agent-markdown h2,.agent-markdown h3,.agent-markdown h4{margin:22px 0 8px;color:#202124;line-height:1.4;letter-spacing:0}
 .agent-markdown h1{font-size:18px}
 .agent-markdown h2{font-size:15px}
