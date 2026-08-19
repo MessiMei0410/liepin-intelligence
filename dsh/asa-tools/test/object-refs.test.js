@@ -15,7 +15,7 @@ function registerTools() {
 }
 
 describe("object_refs 投影", () => {
-  it("asa_approvals：items → workflow 引用（带 approval_id）", () => {
+  it("asa_approvals：items → workflow 引用（带 approval_id）；label 优先 goal 标题、审批 title 降为命中别名", () => {
     const tool = registerTools().get("asa_approvals");
     const value = {
       ok: true,
@@ -25,9 +25,11 @@ describe("object_refs 投影", () => {
         { approval_id: "approval_3", workflow_id: "" }, // 无 workflow_id 剔除
       ],
     };
+    // label 优先 goal 标题（同名审批可区分）；label 换成 goal 标题时原审批 title 作命中别名，
+    // 空 title 不产生别名（专项见 approvals-label.test.js）。
     assert.deepEqual(tool.output.presentationMeta({}, value), {
       object_refs: [
-        { type: "workflow", id: "workflow_aaa", label: "R3 外部寻访审批", approval_id: "approval_1" },
+        { type: "workflow", id: "workflow_aaa", label: "寻访", aliases: ["R3 外部寻访审批"], approval_id: "approval_1" },
         { type: "workflow", id: "workflow_bbb", label: "发布岗位", approval_id: "approval_2" },
       ],
     });

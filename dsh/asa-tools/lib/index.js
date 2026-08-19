@@ -260,10 +260,16 @@ function apply(ctx) {
       presentationMeta: (_args, value) => objectRefsMeta(
         // 审批条目归属于工作流：轮末操作入口是打开对应工作流详情弹窗（查看并审批），
         // approval_id 一并带上供调用方需要时使用。
+        // label 优先用 goal 标题（含客户/岗位/轮次，如「长越科技 / 机械高级工程师｜第5轮寻访」）：
+        // 同名 R3 审批（审批 title 都是"执行多渠道寻访"）的芯片由此可区分
+        // （2026-08-19 dogfood：士兰微/长越两条芯片文案完全相同）。原审批 title 降为
+        // 命中别名：回答引用"执行多渠道寻访"时相关性过滤（#71/#78）仍判命中。
         listItems(value).map((item) => item && item.workflow_id
           ? {
             type: "workflow", id: item.workflow_id,
-            label: String(item.title || item.goal_title || "工作流审批"),
+            label: String(item.goal_title || item.title || "工作流审批"),
+            // 仅当 label 确实换成了 goal 标题才把审批 title 降为别名（否则别名与 label 相同，冗余）。
+            ...(item.goal_title && item.title && String(item.title) !== String(item.goal_title) ? { aliases: [String(item.title)] } : {}),
             ...(item.approval_id ? { approval_id: item.approval_id } : {}),
           }
           : null),
