@@ -315,4 +315,66 @@ describe('Agent transport', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('DSH done 带 suggested_actions/references：done 事件透传，回填 record-turn 一并带上', async () => {
+    vi.stubGlobal('location', { search: '?brain=dsh' })
+    const encoder = new TextEncoder()
+    const suggestedActions = [
+      { type: 'open_workflow', id: 'workflow_aaa', label: '查看并审批' },
+      { type: 'open_candidate', id: 531, label: '打开人选' },
+    ]
+    const references = [
+      { type: 'workflow', id: 'workflow_aaa', label: 'R3 外部寻访审批' },
+      { type: 'candidate', id: 531, label: '张三', subtitle: '某半导体' },
+    ]
+    const sse = [
+      'event: text\r\ndata: {"content":"有 2 条待审批"}\r\n\r\n',
+      `event: done\r\ndata: ${JSON.stringify({ ok: true, session_id: 's-act', answer: '有 2 条待审批', suggested_actions: suggestedActions, references })}\r\n\r\n`,
+    ].join('')
+    const streamResponse = () => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let sent = false
+          return {
+            read: () => Promise.resolve(sent
+              ? { value: undefined, done: true }
+              : (sent = true, { value: encoder.encode(sse), done: false })),
+          }
+        },
+      },
+    }) as unknown as Response
+
+    const calls: Array<{ url: string; body?: string }> = []
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, body: init?.body ? String(init.body) : undefined })
+      if (url.includes('/api/v1/dsh-config')) {
+        return { ok: true, json: async () => ({ token: 'tok-1', url: 'http://127.0.0.1:8891/turn' }) } as unknown as Response
+      }
+      if (url.includes('/api/v1/copilot/sessions/record-turn')) {
+        return { ok: true, json: async () => ({ ok: true }) } as unknown as Response
+      }
+      return streamResponse()
+    }))
+
+    try {
+      const events: AgentSseEvent[] = []
+      await streamAgentTurn(createAgentTurn('s-act', '查一下待审批', { type: 'page' }, 'request-act'), new AbortController().signal, event => events.push(event))
+      expect(events.map(event => event.type)).toEqual(['text', 'done'])
+      expect(events[1]).toEqual({
+        type: 'done',
+        data: expect.objectContaining({ suggested_actions: suggestedActions, references }),
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const record = calls.find(call => call.url.includes('/api/v1/copilot/sessions/record-turn'))
+      expect(record).toBeTruthy()
+      expect(JSON.parse(record?.body || '{}')).toMatchObject({
+        session_id: 's-act', request_id: 'request-act', source: 'dsh',
+        suggested_actions: suggestedActions, references,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })

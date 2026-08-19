@@ -211,6 +211,9 @@ async function recordDshTurn(turn: AgentTurn, data: Record<string, unknown>): Pr
         source: 'dsh',
         // 结构化卡片（名单卡等）一并回填：恢复会话时前端可重渲染卡片。
         ...(data.action_card && typeof data.action_card === 'object' ? { action_card: data.action_card } : {}),
+        // 轮末对象操作入口/对象卡一并回填：恢复会话时操作芯片仍可点击。
+        ...(Array.isArray(data.suggested_actions) && data.suggested_actions.length ? { suggested_actions: data.suggested_actions } : {}),
+        ...(Array.isArray(data.references) && data.references.length ? { references: data.references } : {}),
       }),
     })
   } catch (error) {

@@ -105,6 +105,39 @@ class CopilotRecordTurnTest(AgentDbCase):
         detail = service.get_copilot_session("asa-test-nocard")
         self.assertIsNone(detail["messages"][1]["action_card"])
         self.assertEqual(detail["messages"][1]["action_cards"], [])
+        self.assertEqual(detail["messages"][1]["suggested_actions"], [])
+        self.assertEqual(detail["messages"][1]["references"], [])
+        service.close()
+
+    def test_record_turn_persists_suggested_actions_and_references(self) -> None:
+        """DSH 轮末聚合的对象操作入口回填后落 structured_json，恢复会话时操作芯片仍可用。"""
+        actions = [
+            {"type": "open_workflow", "id": "workflow_aaa", "label": "查看并审批"},
+            {"type": "open_candidate", "id": 531, "label": "打开人选"},
+        ]
+        references = [
+            {"type": "workflow", "id": "workflow_aaa", "label": "R3 外部寻访审批"},
+            {"type": "candidate", "id": 531, "label": "张三", "subtitle": "某半导体"},
+        ]
+        service = AgentService(self.db_path, FakeLLM(fake_assessment()))
+        result = service.record_external_copilot_turn(
+            session_id="asa-test-actions",
+            request_id="req-actions-1",
+            message="查一下现在有哪些待审批",
+            answer="有 2 条待审批……",
+            context={"type": "page"},
+            source="dsh",
+            suggested_actions=actions,
+            references=references,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recorded"])
+
+        detail = service.get_copilot_session("asa-test-actions")
+        assistant = detail["messages"][1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["suggested_actions"], actions)
+        self.assertEqual(assistant["references"], references)
         service.close()
 
 
