@@ -13,6 +13,7 @@ import { useGlobalDialogDrag } from '../shared/useGlobalDialogDrag'
 import { isBareDetached } from '../shared/nativeBridge'
 import { BareCandidateList } from '../agent/BareCandidateList'
 import { CANDIDATE_UPDATED_EVENT, type CandidateUpdatedDetail } from '../shared/candidateEvents'
+import { ErrorBoundary } from '../shared/ErrorBoundary'
 import { LeaveConfirmDialog } from '../components/LeaveConfirmDialog'
 import { hasDirtyForms, subscribeDirtyForms } from '../shared/dirtyForm'
 
@@ -584,11 +585,13 @@ export function App() {
   if (isBareDetached()) {
     return <div className="shell bare-shell">
       {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
+      <ErrorBoundary label="详情面板">
       <Suspense fallback={panelFallback}>
         {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
         {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
         {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={closeOverlay} />}
       </Suspense>
+      </ErrorBoundary>
       {!bareList && !job && !candidate && !workflow && !error && <div className="bare-empty" role="status">页面已关闭，可直接关闭此窗口。</div>}
       {pendingLeave && <LeaveConfirmDialog dirtyCount={dirtyCount} onConfirm={confirmLeave} onCancel={() => setPendingLeave(undefined)} />}
       {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
@@ -632,11 +635,13 @@ export function App() {
       </>}
     </aside>}
     <Suspense fallback={panelFallback}>
+      <ErrorBoundary label="详情面板">
       {job && <JobPanel value={job} close={closeOverlay} openCandidate={openCandidate} changed={() => refreshJobDetail(job.id)} />}
       {candidate && <CandidatePanel value={candidate} close={closeOverlay} changed={() => refreshCandidateDetail(candidate.id)} />}
       {workflow && <WorkflowSurface value={workflow} jobs={jobs} close={closeOverlay} reload={() => refreshWorkflowDetail(workflow.workflow.workflow_id)} openCandidate={openCandidate} archived={() => { closeOverlay(); setRefreshKey(value => value + 1) }} />}
       {templateDialog && <AnalysisTemplateDialog catalogs={analysisCatalog} template={templateDialog === 'new' ? undefined : templateDialog} busy={analysisBusy === 'template-save'} onCancel={() => setTemplateDialog(undefined)} onSave={saveTemplate} onDelete={templateDialog === 'new' ? undefined : deleteTemplate} />}
       {pendingLeave && <LeaveConfirmDialog dirtyCount={dirtyCount} onConfirm={confirmLeave} onCancel={() => setPendingLeave(undefined)} />}
+      </ErrorBoundary>
     </Suspense>
     {error && <div className="toast"><ShieldAlert/> {error}<button onClick={() => setError('')}><X/></button></div>}
     {notice && <div className="toast success"><Database/> {notice}<button onClick={() => setNotice('')}><X/></button></div>}
