@@ -19,7 +19,7 @@ DSH 负责多步编排 / 子代理 / goal / workflow，领域情报继续留在�
 
 | 类 | 工具 | 说明 |
 | --- | --- | --- |
-| 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` / `asa_approvals` | 直读 ASA Core（GET） |
+| 只读 | `asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_candidate_profile` / `asa_workflow` / `asa_approvals` | 直读 ASA Core（GET；`asa_candidate_profile` 取单人完整档案含简历原文，full_text 8000 字截断） |
 | 写动作预检申请 | `asa_candidate_preflight` / `asa_approval_preflight` / `asa_workflow_action_preflight` | 只读预检 + 铸造一次性 token（**不写库**）；确认请求经 `presentationMeta` → SSE `confirm_request` → 前端确认卡 |
 | 领域情报委托 | `asa_copilot_ask` | 转发 `/api/v1/copilot/stream`，取现有 Copilot 富答案 |
 

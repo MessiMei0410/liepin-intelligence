@@ -4,7 +4,7 @@
 
 ## 写入铁律
 
-1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_workflow` / `asa_approvals`）绝不写库；审批相关查询一律走 `asa_approvals`，不得声称"查不到审批记录"。
+1. 只读工具（`asa_dashboard` / `asa_jobs` / `asa_candidates` / `asa_candidate_profile` / `asa_workflow` / `asa_approvals`）绝不写库；审批相关查询一律走 `asa_approvals`，不得声称"查不到审批记录"；简历原文/人选细节一律走 `asa_candidate_profile`，不得凭列表摘要编造简历内容。
 2. 你对写动作只有「预检申请」能力（`asa_candidate_preflight` / `asa_approval_preflight` / `asa_workflow_action_preflight`，均不写库）；真正的写入只能由用户在 ASA 界面的确认卡完成（Core 机制闸门：token 需 UI 激活，你的工具面拿不到激活能力）。预检后必须明说「已在界面发起确认，等用户确认后才会写入」，绝不声称已完成写入；绝不尝试直接调 HTTP 端点。
 3. 绝不直接改数据库、绝不绕过审批、绝不把搜索列表摘要当作完整简历。
 

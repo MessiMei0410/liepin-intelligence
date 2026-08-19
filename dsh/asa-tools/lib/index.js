@@ -161,6 +161,59 @@ function apply(ctx) {
     },
   }));
 
+  // 简历原文/档案体量护栏：full_text 截断，防止一次工具调用撑爆上下文。
+  const RESUME_TEXT_CAP = 8000;
+  const capText = (value) => {
+    const text = String(value || "");
+    return text.length > RESUME_TEXT_CAP ? `${text.slice(0, RESUME_TEXT_CAP)}\n…（原文共 ${text.length} 字，已截断，完整原文请在 ASA 界面候选人卡片查看）` : text;
+  };
+
+  ctx.tools.register(defineTool({
+    name: "asa_candidate_profile",
+    description:
+      "读取单个候选人完整档案（只读）：基本信息、学历、任职经历、简历原文（summary/work_text/project_text/education_text/full_text，full_text 超 8000 字截断）、最近事件。对应 GET /api/v1/candidates/{candidate_id}。需要简历原文、比对两位人选、核验细节时用本工具，不要凭列表摘要编造简历内容。绝不写库。",
+    parameters: {
+      candidate_id: {
+        type: "number",
+        required: true,
+        description: "job_candidates 关系 ID（即列表/卡片里的候选人 ID），例如 969。",
+      },
+    },
+    output: {
+      ...output(),
+      presentationMeta: (_args, value) => {
+        const c = value && value.candidate;
+        return objectRefsMeta(c && c.id != null
+          ? [{ type: "candidate", id: c.id, label: String(c.name || `人选 #${c.id}`), subtitle: String(c.current_company || "") }]
+          : []);
+      },
+    },
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const data = await getJson(`/api/v1/candidates/${Number(args.candidate_id)}`, exec);
+      const c = data.candidate || {};
+      const resume = c.resume && typeof c.resume === "object" ? c.resume : {};
+      return {
+        candidate: {
+          id: c.id, person_id: c.person_id, name: c.name,
+          current_company: c.current_company, current_title: c.current_title,
+          city: c.city, education: c.education, experience: c.experience,
+          client: c.client, job: c.job, clean_stage: c.clean_stage,
+          is_stopped: c.is_stopped, stop_reason_label: c.stop_reason_label,
+          resume: {
+            summary: resume.summary || "",
+            work_text: resume.work_text || "",
+            project_text: resume.project_text || "",
+            education_text: resume.education_text || "",
+            full_text: capText(resume.full_text),
+          },
+          recent_events: (Array.isArray(c.events) ? c.events : []).slice(-5),
+        },
+      };
+    },
+  }));
+
   ctx.tools.register(defineTool({
     name: "asa_workflow",
     description:
