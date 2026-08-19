@@ -39,6 +39,7 @@ from .service_copilot_bridge import (  # noqa: F401 模块级兼容 re-export（
     _COPILOT_CORRECTION_RE,
 )
 from .service_dedupe import CandidateDedupeMixin  # noqa: F401
+from .service_filter_notes import FilterNotesMixin  # noqa: F401
 from .service_resume_backfill import ResumeBackfillMixin  # noqa: F401
 from .service_workflow_ops import WorkflowOpsMixin, _funnel_detail  # noqa: F401
 from .stop_reasons import STOP_REASON_LABELS, UNLABELED_STOP_REASON_LABEL
@@ -126,7 +127,7 @@ def _resume_overview_summary(resume: dict[str, Any]) -> str:
     return ""
 
 
-class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, CandidateDedupeMixin, ResumeBackfillMixin):
+class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, CandidateDedupeMixin, ResumeBackfillMixin, FilterNotesMixin):
     """ASA Core 服务门面。
 
     Mixin 组合 facade（P2-1）：候选人动作/预检/幂等在 CandidateActionsMixin
@@ -282,6 +283,9 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, C
 
         - job 不存在 → 404（LookupError 全局映射）
         - bonder=True 时按固晶/共晶/键合关键词重建优先分组（原卡有该组时前端应传回）
+        - 岗位有筛选口径便签（job_filter_notes，R2-3）时附进口径声明：answer 追加
+          一行、card 带 filter_note 字段——模型与用户都能看到"生效了什么口径"。
+          便签只是口径声明，不改变确定性筛选逻辑。
         """
         if filter_mode == "grade_filter":
             from a_system_agent.candidate_pool_filter import filter_job_candidates, format_grade_card, job_filter_domain
@@ -303,6 +307,7 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, C
                 raise ValueError("该岗位暂无可用的严格筛选模型")
             result = filter_job_candidates(str(self.db_path), int(job_id), client=client, domain=domain)
             answer, card = format_grade_card(result, client=client, job_title=title, job_id=int(job_id))
+            answer, card = self._attach_filter_note(int(job_id), answer, card)
             return {"ok": True, "answer": answer, "card": card}
 
         from a_system_agent.copilot_handler import _build_candidate_list_card
@@ -310,7 +315,23 @@ class CoreService(CandidateActionsMixin, CopilotBridgeMixin, WorkflowOpsMixin, C
         answer, card = _build_candidate_list_card(str(self.db_path), int(job_id), "固晶" if bonder else "")
         if not card:
             raise LookupError("job not found")
+        answer, card = self._attach_filter_note(int(job_id), answer, card)
         return {"ok": True, "answer": answer, "card": card}
+
+    def _attach_filter_note(self, job_id: int, answer: str, card: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """把岗位口径便签附进名单卡（有便签时）：card.filter_note + answer 口径声明行。
+        answer 文本是模型的直接证据输入：口径声明必须进文本，模型才能照口径作答。"""
+        try:
+            payload = self.get_job_filter_note(job_id)
+        except Exception:  # 便签读取失败不阻塞名单卡主链路（如无 job_filter_notes 表的旧库）
+            return answer, card
+        note = payload.get("note")
+        if not note:
+            return answer, card
+        card = dict(card)
+        card["filter_note"] = dict(note)
+        note_line = f"口径便签（{note['updated_at']} 起生效，是给人和模型看的口径声明，不改变确定性筛选逻辑）：{note['note']}"
+        return f"{answer}\n{note_line}" if answer else note_line, card
 
     def candidate_subset_list_card(
         self,

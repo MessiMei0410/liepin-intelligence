@@ -255,3 +255,62 @@ describe('DSH 写确认卡（record_event 记面试）', () => {
     })
   })
 })
+
+// dogfood R2-3：岗位筛选口径便签确认卡（filter_note）——岗位/新旧便签展示 + commit 携带 note。
+const filterNoteRequest = {
+  kind: 'filter_note',
+  preflight_token: 'tok-dsh-fn',
+  expires_at: '2099-01-01T00:00:00',
+  action: 'job_filter_note',
+  job: { id: 137, title: '机械高级工程师', client: '长越科技' },
+  note: '六自由度运动台（6-DOF）经验作为大加分项',
+  previous_note: '',
+  impact: '确认后保存为该岗位的筛选口径便签：之后出名单卡时随口径声明显示。',
+  client_request_id: 'agent_req-fn',
+}
+
+describe('DSH 写确认卡（filter_note 口径便签）', () => {
+  let fetchMock: Mock<typeof fetch>
+  const filterNoteCommitUrl = '/api/v1/jobs/137/filter-notes'
+
+  beforeEach(() => {
+    fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
+      if (url.includes(filterNoteCommitUrl)) return mockResponse({ ok: true, job_id: 137, note: filterNoteRequest.note, already_saved: false })
+      if (url.includes(recordTurnUrl)) return mockResponse({ ok: true, updated: true })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('渲染岗位与新旧便签对照', () => {
+    render(<WriteConfirmationCard request={filterNoteRequest} sessionId="asa-s1" />)
+    const card = screen.getByRole('region', { name: '写入确认' })
+    expect(card).toHaveTextContent('保存筛选口径便签')
+    expect(card).toHaveTextContent('长越科技 / 机械高级工程师')
+    expect(card).toHaveTextContent('六自由度运动台（6-DOF）经验作为大加分项')
+    expect(card).toHaveTextContent('当前便签')
+  })
+
+  it('确认：activate 后 POST jobs/{id}/filter-notes（携带 note 与 token），回执展示已保存', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={filterNoteRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('已保存筛选口径便签')
+    const commit = fetchMock.mock.calls.find(([input]) => String(input).includes(filterNoteCommitUrl))
+    expect(commit).toBeDefined()
+    expect(JSON.parse(String((commit?.[1] as RequestInit).body))).toMatchObject({
+      note: '六自由度运动台（6-DOF）经验作为大加分项', preflight_token: 'tok-dsh-fn',
+    })
+    await waitFor(() => {
+      const backfill = fetchMock.mock.calls.find(([input]) => String(input).includes(recordTurnUrl))
+      expect(backfill).toBeDefined()
+      expect(JSON.parse(String((backfill?.[1] as RequestInit).body))).toMatchObject({ confirm_result: { state: 'confirmed' } })
+    })
+  })
+})

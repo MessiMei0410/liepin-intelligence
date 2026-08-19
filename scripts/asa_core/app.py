@@ -153,6 +153,17 @@ class ResumeBackfillCommit(WriteEnvelope):
     note: str = ""
 
 
+class JobFilterNotePreflight(WriteEnvelope):
+    # 岗位筛选口径便签写申请：便签内容（≤500 字）。
+    note: str = Field(min_length=1, max_length=500)
+
+
+class JobFilterNoteCommit(WriteEnvelope):
+    # 口径便签写入：note + filter-notes/preflight 签发且经 UI 激活的一次性 token。
+    note: str = Field(min_length=1, max_length=500)
+    preflight_token: str = Field(min_length=1)
+
+
 class ApprovalItemResponse(BaseModel):
     approval_id: str
     workflow_id: str
@@ -795,6 +806,31 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
         # 名单卡静态快照刷新：重新按库内最新状态生成 candidate_list 卡片。
         # 不写库、不建工作流、不走 LLM——纯查询重建；404=岗位不存在。
         return core.candidate_list_card(job_id, bonder=body.bonder, filter_mode=body.filter_mode)
+
+    # 岗位级筛选口径便签（dogfood R2-3）：跨会话"以后筛选按 X 口径"的持久化通道。
+    # 便签是给人和模型看的口径声明（名单卡口径声明携带展示），不参与确定性筛选逻辑。
+    # 写走确认链：preflight 铸未激活 token → UI activate → commit 消费（模型工具面过不了激活门）。
+    @app.get("/api/v1/jobs/{job_id}/filter-notes")
+    def job_filter_notes_get(job_id: int) -> dict[str, Any]:
+        # 只读：无便签 → 200 + note=null；404=岗位不存在。
+        return core.get_job_filter_note(job_id)
+
+    @app.post("/api/v1/jobs/{job_id}/filter-notes/preflight")
+    def job_filter_note_preflight(job_id: int, body: JobFilterNotePreflight) -> dict[str, Any]:
+        # 口径便签写申请（不写库）：404=岗位不存在；409=便签为空/超长。
+        try:
+            return core.filter_note_preflight(job_id, body.note)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/jobs/{job_id}/filter-notes")
+    def job_filter_note_commit(job_id: int, body: JobFilterNoteCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 口径便签写入：人确认闸门（token 需 UI 激活）在 consume_write_confirmation 内执行；
+        # 走 idem 幂等封装（重放返回首次响应）。
+        def commit() -> dict[str, Any]:
+            return core.filter_note_commit(job_id, body.note, body.preflight_token, request_id=body.request_id)
+
+        return idem("job.filter_note", body, idempotency_key, "job", str(job_id), commit)
 
     @app.post("/api/v1/candidates/list-card")
     def candidate_subset_list_card(body: CandidateSubsetListCardBody) -> dict[str, Any]:

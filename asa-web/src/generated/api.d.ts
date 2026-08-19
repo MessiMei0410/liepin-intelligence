@@ -208,6 +208,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/filter-notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Filter Notes Get */
+        get: operations["job_filter_notes_get_api_v1_jobs__job_id__filter_notes_get"];
+        put?: never;
+        /** Job Filter Note Commit */
+        post: operations["job_filter_note_commit_api_v1_jobs__job_id__filter_notes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/filter-notes/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Filter Note Preflight */
+        post: operations["job_filter_note_preflight_api_v1_jobs__job_id__filter_notes_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/list-card": {
         parameters: {
             query?: never;
@@ -2774,6 +2809,22 @@ export interface components {
              */
             source_revision: string;
         };
+        /** JobFilterNoteCommit */
+        JobFilterNoteCommit: {
+            /** Request Id */
+            request_id: string;
+            /** Note */
+            note: string;
+            /** Preflight Token */
+            preflight_token: string;
+        };
+        /** JobFilterNotePreflight */
+        JobFilterNotePreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Note */
+            note: string;
+        };
         /** JobProfileFeedbackCreate */
         JobProfileFeedbackCreate: {
             /** Request Id */
@@ -3685,6 +3736,113 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CandidateListRefreshBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_filter_notes_get_api_v1_jobs__job_id__filter_notes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_filter_note_commit_api_v1_jobs__job_id__filter_notes_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobFilterNoteCommit"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_filter_note_preflight_api_v1_jobs__job_id__filter_notes_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobFilterNotePreflight"];
             };
         };
         responses: {
