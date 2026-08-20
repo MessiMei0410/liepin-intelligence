@@ -73,25 +73,32 @@ export function createObjectRefCollector() {
    */
   function outputs(options = {}) {
     const answer = String(options.answer || "");
+    // 强命中 = label 或别名出现在回答里；弱命中 = 客户/公司名（subtitle）命中。
+    // subtitle 匹配先剥公司后缀——回答里说「长越/长川」而 subtitle 是「长越科技」
+    // （2026-08-20 实证：全名匹配会漏、退化成全量兜底）。
+    const shortClientForms = (subtitle) => {
+      const base = String(subtitle || "").trim();
+      if (!base) return [];
+      const short = base.replace(/（.*?）/g, "").replace(/(科技|股份|集团|控股|微电子|半导体|技术)?(股份|集团|控股)?(有限公司|有限责任公司|股份有限公司)?$/, "").trim();
+      return short && short !== base ? [base, short] : [base];
+    };
+    const strongHit = (ref) => answer.includes(ref.label) || ref.aliases.some((alias) => answer.includes(alias));
+    const weakHit = (ref) => shortClientForms(ref.subtitle).some((form) => form.length >= 2 && answer.includes(form));
     const relevant = (ref) => {
       if (!answer) return true; // 无回答文本不过滤（兼容无 answer 调用方）
-      // 命中 = label 或任一别名出现在回答里（别名见 add()：label 换目标标题后保留原动作标题命中）。
-      const hit = answer.includes(ref.label) || ref.aliases.some((alias) => answer.includes(alias));
-      if (ref.type === "candidate") return ref.named && hit;
+      if (ref.type === "candidate") return ref.named && strongHit(ref);
       if (!ref.named) return true; // 无名 job/workflow 保底
-      // 只认对象名（岗位标题/工作流标题）命中：客户名（subtitle）命中不可靠——
-      // 同客户多岗位时会把无关岗位救回（2026-08-19 验收：长越名单下"自动化软件
-      // 高级工程师"芯片，因 subtitle 同为"长越科技"被误留）。
-      return hit;
+      return strongHit(ref);
     };
     const visibleAll = options.candidateListCard ? refs.filter((ref) => ref.type !== "candidate") : refs;
     let visible = visibleAll.filter(relevant);
-    // 兜底：有回答文本但一个都没命中时，说明回答以别的方式指代这些对象，
-    // 整组放回 job/workflow（宁可多不可丢——历史 Copilot 轮与转述轮 answer 形态
-    // 不一）；candidate 不参与兜底（全量名单前 N 条不等于回答提及，维持全弃）。
     if (answer && visible.length === 0) {
-      const nonCandidate = visibleAll.filter((ref) => ref.type !== "candidate");
-      if (nonCandidate.length > 0) visible = nonCandidate;
+      // 分级兜底（2026-08-20 验收：「长越 4 岗+长川 6 岗」式回答岗位名零命中时，
+      // 全量兜底把士兰微的无关岗位也放出来了）：先按弱命中（客户名）收窄——
+      // 同客户多岗位已有强命中在上一轮挡住，跨客户误留由弱命中过滤；
+      // 弱命中也为零才整组放回 job/workflow。candidate 一律不参与兜底。
+      const weak = visibleAll.filter((ref) => ref.type !== "candidate" && ref.named && weakHit(ref));
+      visible = weak.length > 0 ? weak : visibleAll.filter((ref) => ref.type !== "candidate");
     }
     const perType = new Map();
     const suggested_actions = [];
