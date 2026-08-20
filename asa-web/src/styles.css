@@ -1730,3 +1730,12 @@ button:disabled{cursor:not-allowed;opacity:.58}
 :root[data-theme="dark"] .tag.good,:root[data-theme="dark"] .tag.ok{background:var(--green-soft);color:var(--green)}
 :root[data-theme="dark"] .tag.warn{background:var(--amber-soft);color:var(--amber)}
 :root[data-theme="dark"] .tag.bad,:root[data-theme="dark"] .tag.danger{background:var(--red-soft);color:var(--red)}
+/* --- 新版本就绪提示条：固定顶部居中细条，不挤压布局；浮窗窄屏收缩为一行 --- */
+.version-update-banner{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:var(--z-toast);display:flex;align-items:center;gap:10px;max-width:calc(100vw - 24px);padding:6px 8px 6px 14px;border:1px solid var(--line);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-2);font-size:12px;color:var(--muted);white-space:nowrap}
+.version-update-text{overflow:hidden;text-overflow:ellipsis}
+.version-update-banner .version-update-reload{display:inline-flex;align-items:center;gap:5px;border:0;border-radius:999px;padding:4px 12px;background:var(--green);color:#fff;font-size:12px;cursor:pointer;flex:0 0 auto}
+.version-update-banner .version-update-reload svg{width:13px;height:13px}
+.version-update-banner .version-update-dismiss{display:inline-flex;align-items:center;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:4px;flex:0 0 auto}
+.version-update-banner .version-update-dismiss svg{width:13px;height:13px}
+:root[data-theme="dark"] .version-update-banner{background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] .version-update-banner .version-update-reload{color:#0f1a14}

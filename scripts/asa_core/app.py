@@ -743,6 +743,27 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
     def health() -> dict[str, Any]:
         return {"ok": True, "service": "asa-core", "version": "1.0.0", "db": str(db_path)}
 
+    @app.get("/api/v1/app-version")
+    def app_version() -> Response:
+        """前端构建指纹：WKWebView 壳内常驻的旧 bundle 据此轮询比对，发现 dist 已重建。
+
+        指纹来自 Vite 构建时落盘的 dist/build.json（vite.config.ts 的 asa-build-id 插件）。
+        旧 dist 没有该文件时 build_id 为 null，前端视为「无信息」不提示，避免误报。
+        """
+        index = ASA_WEB_DIST / "index.html"
+        if not index.exists():
+            return JSONResponse({"ok": False, "error": "ASA Web 尚未构建", "build_id": None}, status_code=503)
+        build_id: str | None = None
+        build_file = ASA_WEB_DIST / "build.json"
+        try:
+            payload = json.loads(build_file.read_text(encoding="utf-8"))
+            value = payload.get("build_id")
+            if isinstance(value, str) and value:
+                build_id = value
+        except (OSError, json.JSONDecodeError):
+            pass
+        return JSONResponse({"ok": True, "build_id": build_id})
+
     @app.get("/api/v1/bootstrap")
     def bootstrap() -> dict[str, Any]:
         now = time.time()

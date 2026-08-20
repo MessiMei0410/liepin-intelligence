@@ -21,6 +21,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/app-version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * App Version
+         * @description 前端构建指纹：WKWebView 壳内常驻的旧 bundle 据此轮询比对，发现 dist 已重建。
+         *
+         *     指纹来自 Vite 构建时落盘的 dist/build.json（vite.config.ts 的 asa-build-id 插件）。
+         *     旧 dist 没有该文件时 build_id 为 null，前端视为「无信息」不提示，避免误报。
+         */
+        get: operations["app_version_api_v1_app_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/bootstrap": {
         parameters: {
             query?: never;
@@ -3395,6 +3418,26 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    app_version_api_v1_app_version_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

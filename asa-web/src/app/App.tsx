@@ -15,6 +15,7 @@ import { BareCandidateList } from '../agent/BareCandidateList'
 import { CANDIDATE_UPDATED_EVENT, type CandidateUpdatedDetail } from '../shared/candidateEvents'
 import { ErrorBoundary } from '../shared/ErrorBoundary'
 import { LeaveConfirmDialog } from '../components/LeaveConfirmDialog'
+import { VersionUpdateBanner } from '../components/VersionUpdateBanner'
 import { hasDirtyForms, subscribeDirtyForms } from '../shared/dirtyForm'
 
 // 浮层/次屏组件按需懒加载（P2-2）：四个主 tab 首屏保持直出，点击打开面板时才拉取对应 chunk
@@ -584,6 +585,7 @@ export function App() {
   // 纯净模式（独立窗口，hash 带 bare=1）：只渲染目标页面，不带 Agent 主界面/导航/侧栏。
   if (isBareDetached()) {
     return <div className="shell bare-shell">
+      <VersionUpdateBanner />
       {bareList && <BareCandidateList onOpenCandidate={id => void openCandidate(id)} />}
       <ErrorBoundary label="详情面板">
       <Suspense fallback={panelFallback}>
@@ -599,6 +601,7 @@ export function App() {
   }
 
   return <div className={`shell ${tab === 'agent' && !analysis ? 'agent-mode' : ''}`}>
+    <VersionUpdateBanner />
     <aside className="nav">
       <div className="brand"><span>ASA</span><strong>Agent</strong><small>Recruiting Workbench</small></div>
       <nav>{tabs.map(([id, label, icon]) => <button key={id} className={!analysis && tab === id ? 'active' : ''} onClick={() => navigateTab(id)}>{icon}<span>{label}</span>{tabBadge(id)}</button>)}</nav>
