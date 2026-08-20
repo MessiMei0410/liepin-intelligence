@@ -45,6 +45,7 @@ def _current_assessed_candidates(self, job_id: int) -> list[dict[str, Any]]:
                    p.city,p.education,p.experience,
                    a.fit_score,a.fit_level,a.recommendation,a.confidence,
                    a.next_action,a.created_at AS assessed_at,
+                   jc.clean_stage AS current_stage,jc.raw_status AS raw_status,
                    COALESCE((
                        SELECT sp.source_type
                        FROM source_profiles sp

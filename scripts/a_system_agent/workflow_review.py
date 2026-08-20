@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from .workflow_plan import _dumps, _loads, _mask_candidate_name, _row
+from .stage_breakdown import assessed_stage_breakdown, assessed_stage_summary
 
 
 class WorkflowReviewMixin:
@@ -228,6 +229,10 @@ class WorkflowReviewMixin:
             queue["score_75_plus"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) >= 75])
             queue["verify_first"] = len([entry for entry in assessed_items if entry.get("recommendation") == "verify_first"])
             queue["low_score"] = len([entry for entry in assessed_items if int(entry.get("fit_score") or 0) < 55])
+            # 归因口径：把人选当前阶段分布注入队列（stopped=已分流淘汰，不算「没动」）。
+            # stage_summary 为标量，compact 压缩后仍保留；与名单/漏斗同一套计数。
+            queue["stage_breakdown"] = assessed_stage_breakdown(assessed_items)
+            queue["stage_summary"] = assessed_stage_summary(assessed_items)
             if int(queue.get("started") or 0) == 0:
                 item["output"]["summary"] = f"本轮没有新增待评估人选；岗位当前已有 {len(assessed_items)} 位评估结果。"
         if summary_only and len(_dumps(item["output"]).encode("utf-8")) > 160_000:

@@ -145,7 +145,9 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
             ],
         }
     if capability_id == "candidate_batch_assessment":
-        def assessment_stats() -> tuple[dict[str, int], list[dict[str, Any]]]:
+        from .stage_breakdown import assessed_stage_breakdown, assessed_stage_summary
+
+        def assessment_stats() -> tuple[dict[str, Any], list[dict[str, Any]]]:
             if context_type != "job" or not context_id:
                 return ({"completed": len(completed), "score_75_plus": 0, "verify_first": 0, "low_score": 0}, [])
             assessed_items = self._current_assessed_candidates(context_id)
@@ -154,6 +156,10 @@ def _execute_workflow_capability(self, capability_id: str, context: dict[str, An
                 "score_75_plus": len([item for item in assessed_items if int(item.get("fit_score") or 0) >= 75]),
                 "verify_first": len([item for item in assessed_items if item.get("recommendation") == "verify_first"]),
                 "low_score": len([item for item in assessed_items if int(item.get("fit_score") or 0) < 55]),
+                # 与读取路径（workflow_review._step_item）同一归因口径：
+                # 按当前阶段分解，已停止=已分流，不计入「没动」。
+                "stage_breakdown": assessed_stage_breakdown(assessed_items),
+                "stage_summary": assessed_stage_summary(assessed_items),
             }, assessed_items)
 
         conn = self._connect()
