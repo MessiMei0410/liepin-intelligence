@@ -21,6 +21,19 @@ describe("toolResultSseEvents", () => {
     assert.deepEqual(toolResultSseEvents({ meta: { confirm_request: { kind: "candidate_action" } } }), []);
   });
 
+  it("filter_note_batch 批量确认请求带 items 数组无损透传", () => {
+    const confirm = {
+      kind: "filter_note_batch",
+      preflight_token: "tok-batch-1",
+      action: "job_filter_note_batch",
+      items: [
+        { job_id: 137, job: { id: 137, title: "机械高级工程师", client: "长越科技" }, note: "口径 A", previous_note: "" },
+        { job_id: 138, job: { id: 138, title: "软件高级工程师", client: "长越科技" }, note: "口径 B", previous_note: "旧" },
+      ],
+    };
+    assert.deepEqual(toolResultSseEvents({ meta: { confirm_request: confirm } }), [["confirm_request", confirm]]);
+  });
+
   it("card 与 confirm_request 可同时透传；空 meta 零事件", () => {
     const card = { type: "candidate_list" };
     const confirm = { kind: "workflow_action", preflight_token: "tok-2", action: "pause" };

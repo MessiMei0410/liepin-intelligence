@@ -266,6 +266,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/filter-notes/batch-preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Filter Notes Batch Preflight */
+        post: operations["job_filter_notes_batch_preflight_api_v1_jobs_filter_notes_batch_preflight_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/filter-notes/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Filter Notes Batch Commit */
+        post: operations["job_filter_notes_batch_commit_api_v1_jobs_filter_notes_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/candidates/list-card": {
         parameters: {
             query?: never;
@@ -2832,6 +2866,29 @@ export interface components {
              */
             source_revision: string;
         };
+        /** JobFilterNoteBatchCommit */
+        JobFilterNoteBatchCommit: {
+            /** Request Id */
+            request_id: string;
+            /** Items */
+            items: components["schemas"]["JobFilterNoteBatchItem"][];
+            /** Preflight Token */
+            preflight_token: string;
+        };
+        /** JobFilterNoteBatchItem */
+        JobFilterNoteBatchItem: {
+            /** Job Id */
+            job_id: number;
+            /** Note */
+            note: string;
+        };
+        /** JobFilterNoteBatchPreflight */
+        JobFilterNoteBatchPreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Items */
+            items: components["schemas"]["JobFilterNoteBatchItem"][];
+        };
         /** JobFilterNoteCommit */
         JobFilterNoteCommit: {
             /** Request Id */
@@ -3898,6 +3955,76 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_filter_notes_batch_preflight_api_v1_jobs_filter_notes_batch_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobFilterNoteBatchPreflight"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_filter_notes_batch_commit_api_v1_jobs_filter_notes_batch_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobFilterNoteBatchCommit"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
