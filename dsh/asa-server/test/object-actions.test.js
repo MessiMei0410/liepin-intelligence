@@ -213,9 +213,10 @@ describe("job/workflow 引用相关性过滤（2026-08-19 验收：长越名单�
     // 岗位名命中则精确过滤：回答点名"机械高级工程师"→ 只留 137，154（电源专家）剔除
     const byTitle = collector.outputs({ answer: "长越科技机械高级工程师岗的存量名单已筛完。" });
     assert.deepEqual(byTitle.references.map((ref) => ref.id), [137]);
-    // 只提客户名、任何岗位名都未命中 → 触发兜底整组放回（宁可多不可丢）
+    // 只提客户名、任何岗位名都未命中 → 弱命中按客户收窄：长越科技命中留 137，
+    // 士兰微未提及弃 154（2026-08-20 起；再之前是兜底整组放回，会把无关客户带出）
     const byClient = collector.outputs({ answer: "长越科技这个岗位的名单已出。" });
-    assert.deepEqual(byClient.references.map((ref) => ref.id), [154, 137]);
+    assert.deepEqual(byClient.references.map((ref) => ref.id), [137]);
   });
 
   it("无回答文本时不过滤（兼容无 answer 调用方）", () => {
@@ -277,5 +278,31 @@ describe("相关性兜底：全未命中时整组放回 job/workflow", () => {
     const out = collector.outputs({ answer: "这个岗位的情况如上所述。" });
     // 岗位名未命中 → 兜底放回 job；candidate 不参与兜底（维持全弃）
     assert.deepEqual(out.references, [{ type: "job", id: 154, label: "电源专家", subtitle: "士兰微" }]);
+  });
+});
+
+describe("分级匹配：强命中优先，弱命中（客户名）收窄，全未命中兜底（2026-08-20 验收）", () => {
+  it("回答只提客户名不提岗位名：同客户岗位留、跨客户岗位弃", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 154, label: "电源专家", subtitle: "士兰微" },
+      { type: "job", id: 111, label: "技术市场经理/总监（PC电源）", subtitle: "士兰微" },
+      { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
+      { type: "job", id: 138, label: "自动化软件高级工程师", subtitle: "长越科技" },
+      { type: "job", id: 201, label: "高级电气工程师", subtitle: "长川科技" },
+    ]);
+    // 「长越 4 岗 + 长川 6 岗」式回答：岗位名零命中 → 弱命中按客户收窄
+    const out = collector.outputs({ answer: "已为长越、长川两个客户名下所有在推岗位发起确认（长越 4 岗 + 长川 6 岗）。" });
+    assert.deepEqual(out.references.map((ref) => ref.id), [137, 138, 201]);
+  });
+
+  it("有强命中时弱命中不参与（同客户无关岗位仍被剔除）", () => {
+    const collector = createObjectRefCollector();
+    collector.add([
+      { type: "job", id: 137, label: "机械高级工程师", subtitle: "长越科技" },
+      { type: "job", id: 138, label: "自动化软件高级工程师", subtitle: "长越科技" },
+    ]);
+    const out = collector.outputs({ answer: "长越科技机械高级工程师岗名单已出。" });
+    assert.deepEqual(out.references.map((ref) => ref.id), [137]);
   });
 });
