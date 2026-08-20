@@ -896,8 +896,19 @@ export const api = {
     write<ApprovalDecisionPreflightResult>(`/api/v1/approvals/${encodeURIComponent(id)}/decision/preflight`, { decision, note }),
   workflowActionPreflight: (id: string, action: string, note: string) =>
     write<WorkflowActionPreflightResult>(`/api/v1/workflows/${encodeURIComponent(id)}/actions/preflight`, { action, note }),
-  preflight: (candidate_id: number, action: string) => {
-    const body: CandidateActionRequest = { request_id: requestId(), candidate_id, action }
+  preflight: (candidate_id: number, action: string, options: { loser_id?: number; note?: string; event?: { event_type: string; event_status?: string; occurred_at?: string } } = {}) => {
+    // options：DSH 确认卡「重新预检」用——merge 需 loser_id、record_event 需事件字段
+    // （token 绑定事件类型），其余动作与既有工作台按钮一样只带三字段。
+    const body: CandidateActionRequest & Partial<Pick<CandidateActionBody, 'loser_id' | 'event_type' | 'event_status' | 'occurred_at' | 'note'>> = {
+      request_id: requestId(), candidate_id, action,
+      ...(options.loser_id ? { loser_id: options.loser_id } : {}),
+      ...(options.note ? { note: options.note } : {}),
+      ...(options.event ? {
+        event_type: options.event.event_type,
+        event_status: options.event.event_status ?? '',
+        occurred_at: options.event.occurred_at ?? '',
+      } : {}),
+    }
     return json<PreflightResult>('/api/v1/candidate-actions/preflight', { method: 'POST', body: JSON.stringify(body) })
   },
   commit: (candidate_id: number, action: string, preflight_token: string, note = '', reason?: string, loser_id?: number, event?: { event_type: string; event_status?: string; occurred_at?: string }) => {
@@ -911,8 +922,14 @@ export const api = {
     }
     return candidateCommitConfirmed(candidate_id, body)
   },
+  resumeBackfillPreflight: (candidate_id: number, resume_id = '') =>
+    // DSH 确认卡「重新预检」用：快照只由 Core 从桥接存储取（扩展直推），前端只传定位参数。
+    write<ResumeBackfillPreflightResult>('/api/v1/candidates/resume-backfill/preflight', { candidate_id, resume_id }),
   resumeBackfillCommit: (candidate_id: number, preflight_token: string, note = '') =>
     resumeBackfillCommitConfirmed(candidate_id, preflight_token, note),
+  jobFilterNotePreflight: (jobId: number, note: string) =>
+    // DSH 确认卡「重新预检」用：按卡片已有 note 重新铸 token。
+    write<JobFilterNotePreflightResult>(`/api/v1/jobs/${jobId}/filter-notes/preflight`, { note }),
   jobFilterNoteCommit: (jobId: number, note: string, preflightToken: string) =>
     jobFilterNoteCommitConfirmed(jobId, note, preflightToken),
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
@@ -1077,6 +1094,13 @@ const candidateCommitConfirmed = async (
 }
 
 // 简历回填（#61 写确认链路）：Core 返回动态 dict，按 service_resume_backfill 实际 payload 收窄声明。
+// preflight 快照只从桥接存储取（扩展直推，30 分钟 TTL）；快照过期 Core 409
+// 「未读到当前页简历快照…」，确认卡重预检时映射为「页面快照已过期」提示。
+export type ResumeBackfillPreflightResult = {
+  ok?: boolean; token?: string; expires_at?: string; action?: string; impact?: string;
+  unchanged?: boolean; message?: string;
+  candidate?: Record<string, unknown>; resume?: Record<string, unknown>; diff?: Array<Record<string, unknown>>;
+}
 export type ResumeBackfillCommitResult = WriteAck & {
   action?: string; candidate_id?: number; person_id?: number; source_profile_id?: number;
   profile_updated?: boolean; business_event_id?: number; summary?: string; already_applied?: boolean;
@@ -1095,6 +1119,11 @@ const resumeBackfillCommitConfirmed = async (
 }
 
 // 岗位筛选口径便签（R2-3）：DSH 确认卡 filter_note kind 的提交通道（activate + 写端点）。
+// preflight 按 service_filter_notes 实际 payload 收窄声明（Core 返回动态 dict）。
+export type JobFilterNotePreflightResult = {
+  ok?: boolean; token: string; expires_at?: string; action?: string; impact?: string;
+  job?: Record<string, unknown>; note?: string; previous_note?: string;
+}
 export type JobFilterNoteCommitResult = { ok: boolean; job_id: number; note: string; already_saved?: boolean }
 
 const jobFilterNoteCommitConfirmed = async (
