@@ -273,6 +273,25 @@ def _banned_companies(db_path: str, client: str, kb_dir: str | None = None) -> l
         return []
 
 
+def _job_gender_requirement(conn: sqlite3.Connection, job_id: int) -> str:
+    """读取岗位性别要求开关（jobs.gender_requirement，migration 16）。
+
+    '' = 不限（默认）；'male_only' = 客户口径不推进女性人选，引擎排除铁证女性。
+    合成库/旧库无该列时按 '' 处理（防御式读取，绝不因缺列失败）。
+    """
+    try:
+        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "gender_requirement" not in cols:
+            return ""
+        row = conn.execute(
+            "SELECT gender_requirement FROM jobs WHERE id=?", (int(job_id),)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    value = str(row["gender_requirement"] or "").strip() if row else ""
+    return value if value == "male_only" else ""
+
+
 def filter_job_candidates(
     db_path: str,
     job_id: int,
@@ -290,13 +309,21 @@ def filter_job_candidates(
     max_salary_k: 期望月薪上限(K)，候选人期望薪资上限超过该值 → D-期望超限。
     cities: 期望城市关键词，命中任一即保留；不命中 → D-城市不符。
     两者默认 None 均不过滤，向后兼容。
+
+    性别维度（migration 16 的 jobs.gender_requirement）：岗位为 male_only 时，
+    铁证推断为 female 的人选判 X-排除（reason 带证据片段）；推断为 unknown 的
+    一律保留并在输出标注「性别待核验」（防误杀红线：unknown 不得排除）。
+    开关缺省/缺列时完全不参与分级。
     """
+    from .gender_inference import infer_gender
+
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     profiles = _candidate_profiles(db_path)
     source_texts = _source_resume_texts(db_path)
     banned = _banned_companies(db_path, client) if client else []
     try:
+        gender_requirement = _job_gender_requirement(conn, job_id)
         if not domain:
             job_row = conn.execute("SELECT title FROM jobs WHERE id=?", (job_id,)).fetchone()
             domain = job_filter_domain(str(job_row["title"] or "") if job_row else "")
@@ -352,6 +379,25 @@ def filter_job_candidates(
             })
             continue
         prof = prof or {}
+        # 性别维度（仅 male_only 岗位）：铁证 female → X-排除；unknown 保留待核验。
+        gender_info: dict[str, Any] = {"gender": "", "evidence": None}
+        if gender_requirement == "male_only":
+            gender_info = infer_gender(
+                str(r["display_name"] or ""),
+                str(prof.get("profile_summary") or ""),
+                src_txt,
+            )
+            if gender_info["gender"] == "female":
+                ev = gender_info.get("evidence") or {}
+                snippet = str(ev.get("snippet") or "")
+                results.append({
+                    "id": r["id"], "name": r["display_name"], "company": co, "title": r["current_title"] or "",
+                    "city": r["city"] or "", "education": r["education"] or "", "experience": r["experience"] or "",
+                    "stage": stage, "grade": "X-排除", "score": 0, "hard_hits": [],
+                    "reason": f"客户口径：不推进女性人选（证据：{snippet}）",
+                    "gender": "female", "gender_evidence": snippet,
+                })
+                continue
         salary_k_max, exp_city = _parse_expectation(str(prof.get("profile_summary") or ""))
         if max_salary_k and salary_k_max is not None and salary_k_max > max_salary_k:
             results.append({
@@ -447,19 +493,30 @@ def filter_job_candidates(
         else:
             grade = "D-无证据"
             reason = "简历无岗位硬证据"
+        gender = str(gender_info.get("gender") or "")
+        if gender_requirement == "male_only" and gender == "unknown":
+            # 防误杀红线：unknown 保留，但必须显式标注待人工核验
+            reason = f"{reason}；性别待核验"
         results.append({
             "id": r["id"], "name": r["display_name"], "company": co, "title": r["current_title"] or "",
             "city": r["city"] or "", "education": edu, "experience": r["experience"] or "",
             "stage": stage, "grade": grade, "score": score, "hard_hits": hard_hits[:10], "reason": reason,
+            "gender": gender,
+            "gender_evidence": str((gender_info.get("evidence") or {}).get("snippet") or ""),
         })
 
     results.sort(key=lambda x: -x["score"])
     capped = results[:max_candidates]
+    gender_excluded = sum(1 for c in results if c.get("gender") == "female" and c.get("grade") == "X-排除")
+    gender_unknown = sum(1 for c in results if c.get("gender") == "unknown")
     return {
         "job_id": job_id,
         "client": client,
         "total": len(results),
         "candidates": capped,
+        "gender_requirement": gender_requirement,
+        "gender_excluded": gender_excluded,
+        "gender_unknown": gender_unknown,
         # 截断口径声明（dogfood P1-3：total 是全量分级人数，candidates 可能被
         # max_candidates 截断；消费方引用分级数字/占比时必须知道是否截断，
         # 否则截断子集的计数会被当成全池口径——C-弱 180 被报成 134 的根因）。
@@ -493,6 +550,12 @@ def format_grade_list(result: dict[str, Any]) -> str:
     lines.append(
         f"可推进 {review_count} 人（仅 A/B 级）；已排除 {excluded_count} 人（C/D/U 及明确排除证据）。"
     )
+    if result.get("gender_requirement") == "male_only":
+        lines.append(
+            f"性别口径：客户要求不推进女性人选（male_only）——已凭铁证排除 "
+            f"{result.get('gender_excluded') or 0} 人（简历性别字段/女士称呼）；"
+            f"{result.get('gender_unknown') or 0} 人性别待核验（一律保留，不排除）。"
+        )
 
     def _grade_block(grade: str, group: list[dict[str, Any]]) -> None:
         if not group:
@@ -500,9 +563,10 @@ def format_grade_list(result: dict[str, Any]) -> str:
         lines.append(f"### {grade}（{len(group)} 人）")
         for c in group:
             ev = "、".join(c["hard_hits"][:6]) if c["hard_hits"] else c["reason"]
+            marker = "｜性别待核验" if c.get("gender") == "unknown" else ""
             lines.append(
                 f"- {c['name']} | {c['company'][:20]} | {c['title'][:16]} "
-                f"| {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}"
+                f"| {c['city'][:6]} | {c['education']}/{c['experience'][:6]} | 证据:{ev}{marker}"
             )
 
     lines.append("## 可推进（A/B 级，建议优先复核）")
@@ -563,7 +627,12 @@ def format_grade_card(
             "active": active,
             "stopped": len(candidates) - active,
             "pending_evidence": pending,
+            # 性别口径（male_only 岗位）：铁证女性排除计数；unknown 保留待核验
+            "gender_excluded": int(result.get("gender_excluded") or 0),
+            "gender_unknown": int(result.get("gender_unknown") or 0),
         },
         "groups": groups,
     }
+    if result.get("gender_requirement") == "male_only":
+        card["gender_requirement"] = "male_only"
     return format_grade_list(result), card

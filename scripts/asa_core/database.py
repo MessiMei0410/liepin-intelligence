@@ -464,6 +464,17 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        16,
+        "job_gender_requirement",
+        # 岗位侧性别要求结构化开关（客户硬性口径：长越/长川"不推进女性人选"）。
+        # '' = 不限（默认，全部存量岗位）；'male_only' = 确定性分级排除铁证女性人选。
+        # 取值只走写确认链（口径便签 commit 检测到性别限制词时同事务置位），
+        # 引擎只读；unknown 性别一律保留待核验，绝不排除。
+        """
+        ALTER TABLE jobs ADD COLUMN gender_requirement TEXT NOT NULL DEFAULT '';
+        """,
+    ),
 ]
 
 
