@@ -314,3 +314,169 @@ describe('DSH 写确认卡（filter_note 口径便签）', () => {
     })
   })
 })
+
+// 重新预检（repreflight）：expired（token 5 分钟过期）与 drift（409 漂移失败）
+// 的卡不再是死路——用卡片自身参数走对应 preflight 端点换新 token 回到 pending；
+// 确认动作仍由人点「确认执行」，重预检不直接执行写入。
+const candidatePreflightUrl = '/api/v1/candidate-actions/preflight'
+const resumeBackfillPreflightUrl = '/api/v1/candidates/resume-backfill/preflight'
+
+const expiredCandidateRequest = { ...candidateRequest, expires_at: '2020-01-01T00:00:00' }
+
+describe('DSH 写确认卡（重新预检）', () => {
+  let fetchMock: Mock<typeof fetch>
+
+  beforeEach(() => {
+    fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes(candidatePreflightUrl)) return mockResponse({ token: 'tok-new-1', impact: '候选人将进入复核通过阶段', expires_at: '2099-01-01T00:00:00' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
+      if (url.includes(commitUrl)) return mockResponse({ ok: true, stage: 'S2 复核通过/待联系' })
+      if (url.includes(recordTurnUrl)) return mockResponse({ ok: true, updated: true })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('过期卡出「重新预检」按钮（替换死路文案），不提供确认按钮', () => {
+    render(<WriteConfirmationCard request={expiredCandidateRequest} sessionId="asa-s1" />)
+    const card = screen.getByRole('region', { name: '写入确认已过期' })
+    expect(card).toHaveTextContent('确认请求已过期')
+    expect(card).not.toHaveTextContent('请让 ASA 重新发起')
+    expect(screen.getByRole('button', { name: '重新预检' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: '确认执行' })).not.toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('重预检成功回到可确认态，确认执行走新 token', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={expiredCandidateRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('region', { name: '写入确认' })).toHaveTextContent('张桂芳')
+    const preflight = fetchMock.mock.calls.find(([input]) => String(input).includes(candidatePreflightUrl))
+    expect(preflight).toBeDefined()
+    expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({ candidate_id: 558, action: 'advance' })
+    // 回到 pending：仍未写入，确认动作由人再点一次
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(commitUrl))).toBe(false)
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('张桂芳')
+    const activate = fetchMock.mock.calls.find(([input]) => String(input).includes(activateUrl))
+    const commit = fetchMock.mock.calls.find(([input]) => String(input).includes(commitUrl))
+    expect(JSON.parse(String((activate?.[1] as RequestInit).body))).toMatchObject({ preflight_token: 'tok-new-1' })
+    expect(JSON.parse(String((commit?.[1] as RequestInit).body))).toMatchObject({
+      candidate_id: 558, action: 'advance', preflight_token: 'tok-new-1',
+    })
+  })
+
+  it('重预检失败：展示服务端中文错误，卡保持过期态可再试', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes(candidatePreflightUrl)) return mockResponse({ detail: '候选人状态已变化，请重新评估' }, false, 409)
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={expiredCandidateRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('候选人状态已变化')
+    expect(screen.getByRole('region', { name: '写入确认已过期' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新预检' })).toBeEnabled()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes(commitUrl))).toBe(false)
+  })
+
+  it('漂移 409 卡同样可重预检：换新 token 后确认执行成功', async () => {
+    let activateFailures = 1
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes(candidatePreflightUrl)) return mockResponse({ token: 'tok-new-2', impact: '候选人将进入复核通过阶段', expires_at: '2099-01-01T00:00:00' })
+      if (url.includes(activateUrl)) {
+        if (activateFailures > 0) {
+          activateFailures -= 1
+          return mockResponse({ detail: '预检令牌无效、已过期或已被使用，请重新发起预检' }, false, 409)
+        }
+        return mockResponse({ ok: true, activated: true })
+      }
+      if (url.includes(commitUrl)) return mockResponse({ ok: true, stage: 'S2 复核通过/待联系' })
+      if (url.includes(recordTurnUrl)) return mockResponse({ ok: true, updated: true })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={candidateRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('预检令牌无效、已过期或已被使用')
+    expect(screen.getByRole('button', { name: '确认执行' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: '确认执行' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('张桂芳')
+    const commit = fetchMock.mock.calls.find(([input]) => String(input).includes(commitUrl))
+    expect(JSON.parse(String((commit?.[1] as RequestInit).body))).toMatchObject({ preflight_token: 'tok-new-2' })
+  })
+
+  it('record_event 过期卡重预检：携带事件字段（token 绑定事件类型）', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={{ ...recordEventRequest, expires_at: '2020-01-01T00:00:00' }} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('region', { name: '写入确认' })).toHaveTextContent('记录面试/事件')
+    const preflight = fetchMock.mock.calls.find(([input]) => String(input).includes(candidatePreflightUrl))
+    expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({
+      candidate_id: 968, action: 'record_event',
+      event_type: 'interview_scheduled', event_status: 'scheduled', occurred_at: '2026-08-20 14:00:00',
+      note: '一面：客户现场',
+    })
+  })
+
+  it('merge 过期卡重预检：携带 loser_id', async () => {
+    const mergeExpired = {
+      kind: 'candidate_action',
+      preflight_token: 'tok-dsh-merge',
+      expires_at: '2020-01-01T00:00:00',
+      action: 'merge',
+      candidate: { id: 969, name: '武先生', stage: '触达待核验' },
+      merge: {
+        winner: { id: 969, name: '武先生' },
+        loser: { id: 546, name: '武斌', stage: 'H5 最近寻访/初筛不通过' },
+        diff: [], loser_already_stopped: false,
+      },
+      impact: '合并不物理删行。',
+      client_request_id: 'agent_req-merge-exp',
+    }
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={mergeExpired} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('region', { name: '写入确认' })).toHaveTextContent('合并去重')
+    const preflight = fetchMock.mock.calls.find(([input]) => String(input).includes(candidatePreflightUrl))
+    expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({
+      candidate_id: 969, action: 'merge', loser_id: 546,
+    })
+  })
+
+  it('简历回填重预检：快照过期（30 分钟 TTL）给出明确提示而非裸错', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes(resumeBackfillPreflightUrl)) return mockResponse({ detail: '未读到当前页简历快照：请先在猎聘打开该人选的详情页（浏览器扩展会自动上报快照），再发起简历回填' }, false, 409)
+      throw new Error(`未预期的请求：${url}`)
+    })
+    const backfillExpired = {
+      kind: 'resume_backfill',
+      preflight_token: 'tok-rb-exp',
+      expires_at: '2020-01-01T00:00:00',
+      action: 'resume_backfill',
+      candidate: { id: 901, name: '杜明', stage: 'S1 新增寻访/待复核', client: '华虹客户', job: '设备工程师' },
+      resume: { resume_id: 'res-du-1', captured_at: '2026-08-19T10:00:00' },
+      diff: [{ field: 'full_text', label: '简历全文', change: 'updated', before_chars: 900, after_chars: 1600 }],
+      impact: '简历档案将按当前页快照更新。',
+      client_request_id: 'agent_req-rb-exp',
+    }
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={backfillExpired} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('页面快照已过期，请在详情页重新打开后再试')
+    const preflight = fetchMock.mock.calls.find(([input]) => String(input).includes(resumeBackfillPreflightUrl))
+    expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({ candidate_id: 901, resume_id: 'res-du-1' })
+  })
+})

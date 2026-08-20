@@ -154,6 +154,8 @@ export function CandidateIntentConfirmation({ intent, sessionId }: { intent?: Re
 // pending（待确认）/ confirmed（已确认）/ cancelled（已取消）/ drift（409 漂移），
 // 另加 expired（5 分钟 token 过期，按 expires_at 本地判定，不发任何请求）。
 // 终态经 record-turn confirm_result 回写 Core，会话恢复后呈现终态。
+// expired / drift（409）不是死路：卡片用自身携带的参数重新走对应 preflight
+// 端点换新 token，回到 pending 待确认——确认动作仍由人点，重预检不直接执行。
 
 const candidateActionText: Record<string, string> = {
   advance: '复核通过', contact: '已联系', recommend: '已推荐给客户', stop: '停止推进', review: '评分复核', merge: '合并去重',
@@ -170,6 +172,9 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<{ summary: string; receipt?: Record<string, unknown> }>()
+  // 重预检签发的新 token/过期时间（expired 与 409 漂移共用）；确认仍用最新一份。
+  const [refreshed, setRefreshed] = useState<{ token: string; expiresAt: string } | null>(null)
+  const [repreflightBusy, setRepreflightBusy] = useState(false)
   if (!request) return null
   const kind = text(request.kind)
   const persistedState = text(request.state, 'pending')
@@ -191,7 +196,8 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   // 岗位筛选口径便签（R2-3）：job 带岗位信息，note=新便签，previous_note=当前便签对照。
   const isFilterNote = kind === 'filter_note'
   const filterNoteJob = record(request.job)
-  const expiresAt = Date.parse(text(request.expires_at))
+  const activeToken = refreshed?.token || text(request.preflight_token)
+  const expiresAt = Date.parse(refreshed?.expiresAt || text(request.expires_at))
   const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
   const clientRequestId = text(request.client_request_id)
 
@@ -255,10 +261,10 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
     try {
       let summary = ''
       if (kind === 'approval_decision') {
-        await api.approval(text(approval.approval_id), text(approval.decision), text(request.preflight_token), noteText)
+        await api.approval(text(approval.approval_id), text(approval.decision), activeToken, noteText)
         summary = `已${decisionText[text(approval.decision)] || '处理'}审批：${text(approval.title, text(approval.approval_id))}`
       } else if (kind === 'workflow_action') {
-        await api.workflowAction(text(workflow.workflow_id), text(request.action), { note: noteText }, text(request.preflight_token))
+        await api.workflowAction(text(workflow.workflow_id), text(request.action), { note: noteText }, activeToken)
         summary = `已执行：${workflowActionText[text(request.action)] || '工作流动作'}`
       } else if (isResumeBackfill) {
         const candidateId = Number(candidate.id)
@@ -266,7 +272,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           setError('确认请求缺少候选人信息')
           return
         }
-        const response = await api.resumeBackfillCommit(candidateId, text(request.preflight_token), noteText)
+        const response = await api.resumeBackfillCommit(candidateId, activeToken, noteText)
         summary = response.already_applied
           ? `${text(candidate.name, '当前人选')}的简历已是最新，无需重复回填`
           : text(response.summary, `已回填 ${text(candidate.name, '当前人选')} 的简历`)
@@ -276,7 +282,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
           setError('确认请求缺少岗位或便签内容')
           return
         }
-        const response = await api.jobFilterNoteCommit(jobId, text(request.note), text(request.preflight_token))
+        const response = await api.jobFilterNoteCommit(jobId, text(request.note), activeToken)
         summary = response.already_saved
           ? '该口径便签此前已保存，未重复写入'
           : `已保存筛选口径便签：${[text(filterNoteJob.client), text(filterNoteJob.title)].filter(Boolean).join(' / ') || `岗位 #${jobId}`}——出名单时将随口径声明显示`
@@ -292,7 +298,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
             setError('确认请求缺少废弃方（loser）信息')
             return
           }
-          await api.commit(candidateId, 'merge', text(request.preflight_token), noteText, undefined, loserId)
+          await api.commit(candidateId, 'merge', activeToken, noteText, undefined, loserId)
           summary = `已合并去重：${text(mergeLoser.name, '废弃方')} 已停止并指向 ${text(candidate.name, '保留方')}`
         } else if (isRecordEvent) {
           const eventType = text(eventInfo.event_type)
@@ -300,7 +306,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
             setError('确认请求缺少事件类型')
             return
           }
-          const response = await api.commit(candidateId, 'record_event', text(request.preflight_token), text(eventInfo.notes, noteText), undefined, undefined, {
+          const response = await api.commit(candidateId, 'record_event', activeToken, text(eventInfo.notes, noteText), undefined, undefined, {
             event_type: eventType,
             event_status: text(eventInfo.event_status) || undefined,
             occurred_at: text(eventInfo.occurred_at) || undefined,
@@ -310,7 +316,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
             ? `${text(candidate.name, '当前人选')}的「${text(eventInfo.label, '事件')}」此前已记录，未重复写入`
             : `已记录：${text(candidate.name, '当前人选')}「${text(recorded.event_type_label, text(eventInfo.label, '事件'))}」${text(recorded.event_time, text(eventInfo.occurred_at))}`
         } else {
-          const response = await api.commit(candidateId, text(request.action), text(request.preflight_token), noteText)
+          const response = await api.commit(candidateId, text(request.action), activeToken, noteText)
           summary = `已同步到 ASA：${text(candidate.name, '当前人选')} ${candidateActionText[text(request.action)] || '状态已更新'}${response.stage ? `，当前阶段为“${response.stage}”` : ''}`
         }
       }
@@ -332,6 +338,70 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
     setCancelled(true)
     backfill('cancelled', '用户取消，未写入')
   }
+  // 重新预检：expired（token 5 分钟过期）与 drift（409 漂移失败）共用——用卡片
+  // 自身携带的参数走对应 preflight 端点换新 token，成功后回到 pending 待确认。
+  // 重预检只换 token，不执行写入；确认动作仍由人点「确认执行」。
+  const repreflight = async () => {
+    if (busy || repreflightBusy) return
+    setRepreflightBusy(true); setError('')
+    try {
+      let token = ''
+      let newExpiresAt = ''
+      if (kind === 'approval_decision') {
+        const approvalId = text(approval.approval_id)
+        if (!approvalId) { setError('确认请求缺少审批信息'); return }
+        const response = await api.approvalPreflight(approvalId, text(approval.decision), noteText)
+        token = response.token; newExpiresAt = response.expires_at
+      } else if (kind === 'workflow_action') {
+        const workflowId = text(workflow.workflow_id)
+        if (!workflowId || !text(request.action)) { setError('确认请求缺少工作流或动作信息'); return }
+        const response = await api.workflowActionPreflight(workflowId, text(request.action), noteText)
+        token = response.token; newExpiresAt = response.expires_at
+      } else if (isResumeBackfill) {
+        const candidateId = Number(candidate.id)
+        if (!Number.isFinite(candidateId)) { setError('确认请求缺少候选人信息'); return }
+        const response = await api.resumeBackfillPreflight(candidateId, text(backfillResume.resume_id))
+        if (response.unchanged || !response.token) {
+          setError(text(response.message, '页面简历与本地档案一致，无需回填。'))
+          return
+        }
+        token = response.token; newExpiresAt = text(response.expires_at)
+      } else if (isFilterNote) {
+        const jobId = Number(filterNoteJob.id)
+        if (!Number.isFinite(jobId) || !text(request.note)) { setError('确认请求缺少岗位或便签内容'); return }
+        const response = await api.jobFilterNotePreflight(jobId, text(request.note))
+        token = response.token; newExpiresAt = text(response.expires_at)
+      } else {
+        const candidateId = Number(candidate.id)
+        if (!Number.isFinite(candidateId) || !text(request.action)) { setError('确认请求缺少候选人或动作信息'); return }
+        if (isMerge && !Number.isFinite(Number(mergeLoser.id))) { setError('确认请求缺少废弃方（loser）信息'); return }
+        if (isRecordEvent && !text(eventInfo.event_type)) { setError('确认请求缺少事件类型'); return }
+        const response = await api.preflight(candidateId, text(request.action), {
+          ...(isMerge ? { loser_id: Number(mergeLoser.id) } : {}),
+          ...(isRecordEvent ? {
+            note: text(eventInfo.notes, noteText),
+            event: {
+              event_type: text(eventInfo.event_type),
+              event_status: text(eventInfo.event_status) || undefined,
+              occurred_at: text(eventInfo.occurred_at) || undefined,
+            },
+          } : {}),
+        })
+        token = response.token; newExpiresAt = text(response.expires_at)
+      }
+      setRefreshed({ token, expiresAt: newExpiresAt })
+    } catch (value) {
+      let message = value instanceof Error ? value.message : String(value)
+      // 简历快照 30 分钟 TTL：Core 409「未读到当前页简历快照…」映射为可操作的明确提示。
+      if (isResumeBackfill && /未读到当前页简历快照/.test(message)) {
+        message = '页面快照已过期，请在详情页重新打开后再试'
+      }
+      setError(message)
+    } finally {
+      setRepreflightBusy(false)
+    }
+  }
+  const repreflightButton = <button type="button" disabled={busy || repreflightBusy} onClick={() => void repreflight()}>{repreflightBusy ? <LoaderCircle className="spin" size={14}/> : <RotateCcw size={14}/>}重新预检</button>
 
   if (result) {
     return <section className="agent-execution-receipt verified" aria-label="写入执行回执"><div><b>执行回执</b><strong>已完成</strong></div><p>{result.summary}</p><small>已完成服务端写入</small></section>
@@ -343,7 +413,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
     return <section className="agent-pending-intent is-closed" aria-label="写入确认已取消"><header><div><small>写入确认</small><b>{title}</b></div></header><p>已取消，未写入 ASA。</p></section>
   }
   if (expired) {
-    return <section className="agent-pending-intent is-closed" aria-label="写入确认已过期"><header><div><small>写入确认</small><b>{title}</b></div></header><p>确认请求已过期（5 分钟有效），未写入 ASA；如需执行，请让 ASA 重新发起。</p></section>
+    return <section className="agent-pending-intent is-closed" aria-label="写入确认已过期"><header><div><small>写入确认</small><b>{title}</b></div></header><p>确认请求已过期（5 分钟有效），未写入 ASA；可直接重新预检后继续，无需重新下指令。</p>{error && <div className="agent-card-error" role="alert">{error}</div>}<footer><button type="button" onClick={cancelWrite} disabled={busy || repreflightBusy}>取消</button>{repreflightButton}</footer></section>
   }
   return <section className="agent-pending-intent" aria-label="写入确认">
     <header><div><small>ASA 发起写入申请</small><b>{title}</b></div><button type="button" aria-label="取消本次写入" onClick={cancelWrite} disabled={busy}><X size={15}/></button></header>
@@ -363,8 +433,8 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
       </div>
     })}</dl>}
     <p>{text(request.impact, '确认后将写入 ASA，并记入统一审计。')}</p>
-    {error && <div className="agent-card-error" role="alert">{error}（本次申请已失效，如需执行请让 ASA 重新发起）</div>}
-    <footer><button type="button" onClick={cancelWrite} disabled={busy}>取消</button><button type="button" className="primary" disabled={busy || Boolean(error)} onClick={() => void confirmWrite()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer>
+    {error && <div className="agent-card-error" role="alert">{error}</div>}
+    <footer><button type="button" onClick={cancelWrite} disabled={busy || repreflightBusy}>取消</button>{error && repreflightButton}<button type="button" className="primary" disabled={busy || repreflightBusy || Boolean(error)} onClick={() => void confirmWrite()}>{busy ? <LoaderCircle className="spin" size={14}/> : <Check size={14}/>}确认执行</button></footer>
   </section>
 }
 
