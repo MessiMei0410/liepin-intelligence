@@ -199,6 +199,11 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   // 岗位筛选口径便签（R2-3）：job 带岗位信息，note=新便签，previous_note=当前便签对照。
   const isFilterNote = kind === 'filter_note'
   const filterNoteJob = record(request.job)
+  // 岗位建档：job 带客户解析结果（client_is_new/client_match）与岗位字段全量回显，
+  // warnings 带模糊匹配/缺 JD 等提示（重复岗位 Core 预检已 409，到不了确认卡）。
+  const isJobCreate = kind === 'job_create'
+  const jobCreate = record(request.job)
+  const jobCreateWarnings = list(request.warnings).map(item => text(item)).filter(Boolean)
   const activeToken = refreshed?.token || text(request.preflight_token)
   const expiresAt = Date.parse(refreshed?.expiresAt || text(request.expires_at))
   const expired = persistedState === 'pending' && Number.isFinite(expiresAt) && expiresAt <= Date.now()
@@ -210,9 +215,11 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
       ? workflowActionText[text(request.action)] || '工作流动作'
       : isResumeBackfill
         ? '简历回填'
-        : isFilterNote
-          ? '保存筛选口径便签'
-          : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
+        : isJobCreate
+          ? '岗位建档'
+          : isFilterNote
+            ? '保存筛选口径便签'
+            : `候选人动作：${candidateActionText[text(request.action)] || text(request.action, '状态动作')}`
   const targetLines: Array<{ label: string; value: string }> = kind === 'approval_decision'
     ? [
         { label: '审批', value: text(approval.title, text(approval.approval_id, '待审批事项')) },
@@ -228,6 +235,16 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
             { label: '岗位', value: [text(filterNoteJob.client), text(filterNoteJob.title)].filter(Boolean).join(' / ') || `岗位 #${text(filterNoteJob.id)}` },
             { label: '新便签', value: text(request.note) },
             { label: '当前便签', value: text(request.previous_note, '无') },
+          ]
+      : isJobCreate
+        ? [
+            { label: '客户', value: `${text(jobCreate.client, '待确认')}${jobCreate.client_is_new === true ? '（将新建客户）' : ''}` },
+            { label: '岗位', value: text(jobCreate.title, '待确认') },
+            { label: '方向', value: text(jobCreate.direction, '未填写') },
+            { label: 'Base', value: text(jobCreate.base, '未填写') },
+            ...(text(jobCreate.priority) ? [{ label: '优先级', value: text(jobCreate.priority) }] : []),
+            { label: 'JD', value: text(jobCreate.jd_text) || '未提供（建档后待补充）' },
+            ...jobCreateWarnings.map(warning => ({ label: '提示', value: warning })),
           ]
       : isResumeBackfill
         ? [
@@ -289,6 +306,21 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
         summary = response.already_saved
           ? '该口径便签此前已保存，未重复写入'
           : `已保存筛选口径便签：${[text(filterNoteJob.client), text(filterNoteJob.title)].filter(Boolean).join(' / ') || `岗位 #${jobId}`}——出名单时将随口径声明显示`
+      } else if (isJobCreate) {
+        const clientName = text(jobCreate.client)
+        const title = text(jobCreate.title)
+        if (!clientName || !title) {
+          setError('确认请求缺少客户或岗位信息')
+          return
+        }
+        const response = await api.jobCreateCommit({
+          client_name: clientName, title,
+          direction: text(jobCreate.direction), base: text(jobCreate.base),
+          jd_text: text(jobCreate.jd_text), priority: text(jobCreate.priority),
+        }, activeToken)
+        summary = response.already_created
+          ? `该岗位此前已建档（岗位 #${response.job_id}），未重复创建`
+          : `已建档：岗位 #${response.job_id}（${text(response.client_name, clientName)} / ${text(response.title, title)}）${response.client_created ? '，同时新建了客户档案' : ''}——初始状态待启动，不会自动启动寻访`
       } else {
         const candidateId = Number(candidate.id)
         if (!Number.isFinite(candidateId) || !text(request.action)) {
@@ -374,6 +406,16 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
         if (!Number.isFinite(jobId) || !text(request.note)) { setError('确认请求缺少岗位或便签内容'); return }
         const response = await api.jobFilterNotePreflight(jobId, text(request.note))
         token = response.token; newExpiresAt = text(response.expires_at)
+      } else if (isJobCreate) {
+        const clientName = text(jobCreate.client)
+        const title = text(jobCreate.title)
+        if (!clientName || !title) { setError('确认请求缺少客户或岗位信息'); return }
+        const response = await api.jobCreatePreflight({
+          client_name: clientName, title,
+          direction: text(jobCreate.direction), base: text(jobCreate.base),
+          jd_text: text(jobCreate.jd_text), priority: text(jobCreate.priority),
+        })
+        token = response.token; newExpiresAt = text(response.expires_at)
       } else {
         const candidateId = Number(candidate.id)
         if (!Number.isFinite(candidateId) || !text(request.action)) { setError('确认请求缺少候选人或动作信息'); return }
@@ -420,7 +462,7 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   }
   return <section className="agent-pending-intent" aria-label="写入确认">
     <header><div><small>ASA 发起写入申请</small><b>{title}</b></div><button type="button" aria-label="取消本次写入" onClick={cancelWrite} disabled={busy}><X size={15}/></button></header>
-    <dl>{targetLines.map(line => <div key={line.label}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}{noteText && <div><dt>原因</dt><dd>{noteText}</dd></div>}</dl>
+    <dl>{targetLines.map((line, index) => <div key={`${line.label}-${index}`}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}{noteText && <div><dt>原因</dt><dd>{noteText}</dd></div>}</dl>
     {isMerge && mergeDiff.length > 0 && <dl aria-label="合并字段比对">{mergeDiff.map(item => <div key={text(item.field)}><dt>{text(item.label, '字段')}</dt><dd>{item.same === true ? text(item.winner, '—') : `保留：${text(item.winner, '—')} ｜ 废弃：${text(item.loser, '—')}`}</dd></div>)}</dl>}
     {isResumeBackfill && backfillDiff.length > 0 && <dl aria-label="简历新旧比对">{backfillDiff.map(item => {
       const change = text(item.change, 'unchanged')

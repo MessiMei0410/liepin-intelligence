@@ -2,7 +2,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 
 // ASA Core 工具集。只读工具直调 GET；写动作对模型只暴露「预检申请」：
 // asa_candidate_preflight / asa_approval_preflight / asa_workflow_action_preflight
-// / asa_resume_backfill / asa_job_filter_note_preflight
+// / asa_resume_backfill / asa_job_filter_note_preflight / asa_job_create_preflight
 // / asa_job_filter_notes_batch_preflight（多岗位同类写申请一张卡确认）
 // 只铸造一次性 preflight token（不写库），工具结果经 presentationMeta 投影
 // confirm_request → 常驻服务器透传 SSE → 前端确认卡。真正的写入由用户在
@@ -674,6 +674,53 @@ function apply(ctx) {
         return { job_id: jobId, note };
       });
       return await postJson("/api/v1/jobs/filter-notes/batch-preflight", { items }, exec);
+    },
+  }));
+
+  // 岗位建档申请（不写库）：用户说「某公司新增某岗位」（可能无明确 JD）时用本工具
+  // 发起界面确认。Core 预检解析客户（精确/模糊匹配既有客户，匹配不到则确认后新建）
+  // 并检测同客户同名重复岗位；确认卡由用户决定建档。建档只登记岗位（初始待启动），
+  // 绝不自动启动寻访/抓取；未落库前模型不得声称"已建档"。
+  ctx.tools.register(defineTool({
+    name: "asa_job_create_preflight",
+    description:
+      "申请新建岗位建档（不写库）：用户提出「某公司新增某岗位」（如「士兰微新增市场总监岗位，没有明确 JD，主要负责汽车市场，base 杭州」）时用本工具发起界面确认。Core 预检会解析客户（既有客户精确/模糊匹配，匹配不到则确认后新建客户，确认卡会明示）并检测同客户同名重复岗位（重复则报错，应改用既有岗位）；返回一次性 preflight token（5 分钟有效）；随后 ASA 界面弹出确认卡，由用户决定是否建档。建档只登记岗位（初始状态：待启动），不会自动启动任何寻访/抓取。回答用户时必须说明「已在界面发起确认，等用户确认后才会建档」，未确认前不得声称「已建档/已新增岗位」。",
+    parameters: {
+      client_name: { type: "string", required: true, description: "客户公司名，如「士兰微」；既有客户会精确/模糊匹配，匹配不到将在确认后新建客户。" },
+      title: { type: "string", required: true, description: "岗位名称，如「市场总监」。" },
+      direction: { type: "string", description: "负责方向/市场，如「汽车市场」。" },
+      base: { type: "string", description: "工作地点，如「杭州」。" },
+      jd_text: { type: "string", description: "JD 原文/职责描述（可选；没有明确 JD 可不传，确认卡会标注待补充）。" },
+      priority: { type: "string", description: "优先级（可选），如「P0-最急」。" },
+    },
+    output: confirmMeta((value) => ({
+      kind: "job_create",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      action: "job_create",
+      job: value.job && typeof value.job === "object" ? value.job : {},
+      warnings: Array.isArray(value.warnings) ? value.warnings : [],
+      impact: value.impact || "",
+    })),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const clientName = String(args.client_name || "").trim();
+      const title = String(args.title || "").trim();
+      if (!clientName) {
+        throw new Error("asa_job_create_preflight 要求 client_name 非空（客户公司名）。");
+      }
+      if (!title) {
+        throw new Error("asa_job_create_preflight 要求 title 非空（岗位名称）。");
+      }
+      return await postJson("/api/v1/jobs/preflight", {
+        client_name: clientName,
+        title,
+        direction: String(args.direction || ""),
+        base: String(args.base || ""),
+        jd_text: String(args.jd_text || ""),
+        priority: String(args.priority || ""),
+      }, exec);
     },
   }));
 

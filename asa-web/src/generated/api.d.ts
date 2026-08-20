@@ -190,7 +190,8 @@ export interface paths {
         /** Jobs */
         get: operations["jobs_api_v1_jobs_get"];
         put?: never;
-        post?: never;
+        /** Job Create Commit */
+        post: operations["job_create_commit_api_v1_jobs_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -208,6 +209,23 @@ export interface paths {
         get: operations["job_api_v1_jobs__job_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Job Create Preflight */
+        post: operations["job_create_preflight_api_v1_jobs_preflight_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2866,6 +2884,66 @@ export interface components {
              */
             source_revision: string;
         };
+        /** JobCreateCommit */
+        JobCreateCommit: {
+            /** Request Id */
+            request_id: string;
+            /** Client Name */
+            client_name: string;
+            /** Title */
+            title: string;
+            /**
+             * Direction
+             * @default
+             */
+            direction: string;
+            /**
+             * Base
+             * @default
+             */
+            base: string;
+            /**
+             * Jd Text
+             * @default
+             */
+            jd_text: string;
+            /**
+             * Priority
+             * @default
+             */
+            priority: string;
+            /** Preflight Token */
+            preflight_token: string;
+        };
+        /** JobCreatePreflight */
+        JobCreatePreflight: {
+            /** Request Id */
+            request_id: string;
+            /** Client Name */
+            client_name: string;
+            /** Title */
+            title: string;
+            /**
+             * Direction
+             * @default
+             */
+            direction: string;
+            /**
+             * Base
+             * @default
+             */
+            base: string;
+            /**
+             * Jd Text
+             * @default
+             */
+            jd_text: string;
+            /**
+             * Priority
+             * @default
+             */
+            priority: string;
+        };
         /** JobFilterNoteBatchCommit */
         JobFilterNoteBatchCommit: {
             /** Request Id */
@@ -3791,6 +3869,41 @@ export interface operations {
             };
         };
     };
+    job_create_commit_api_v1_jobs_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobCreateCommit"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     job_api_v1_jobs__job_id__get: {
         parameters: {
             query?: never;
@@ -3801,6 +3914,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_create_preflight_api_v1_jobs_preflight_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobCreatePreflight"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
