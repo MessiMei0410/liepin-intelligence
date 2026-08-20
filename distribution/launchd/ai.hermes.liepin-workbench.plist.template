@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ASA Core（FastAPI，127.0.0.1:8765）launchd 模板。
+  安装时由 install.sh 把 __ASA_HOME__ / __HOME__ 替换为实际路径后写入
+  ~/Library/LaunchAgents/ai.hermes.liepin-workbench.plist。
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.hermes.liepin-workbench</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__ASA_HOME__/venv/bin/python3</string>
+		<string>-m</string>
+		<string>asa_core.app</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8765</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__ASA_HOME__/app</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>A_SYSTEM_DB</key>
+		<string>__ASA_HOME__/data/asa.db</string>
+		<key>ASA_WEB_DIST</key>
+		<string>__ASA_HOME__/web/dist</string>
+		<key>A_SYSTEM_AGENT_BASE_URL</key>
+		<string>https://api.deepseek.com/v1</string>
+		<key>A_SYSTEM_AGENT_MODEL</key>
+		<string>deepseek-v4-flash</string>
+		<key>A_SYSTEM_AGENT_KEYCHAIN_SERVICE</key>
+		<string>a-system-agent-deepseek</string>
+		<key>A_SYSTEM_AGENT_KEYCHAIN_ACCOUNT</key>
+		<string>api.deepseek.com</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+		<key>NetworkState</key>
+		<true/>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__ASA_HOME__/logs/asa-core.log</string>
+	<key>StandardErrorPath</key>
+	<string>__ASA_HOME__/logs/asa-core.err.log</string>
+</dict>
+</plist>
