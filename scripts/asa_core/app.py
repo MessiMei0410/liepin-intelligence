@@ -182,6 +182,21 @@ class JobFilterNoteBatchCommit(WriteEnvelope):
     preflight_token: str = Field(min_length=1)
 
 
+class JobCreatePreflight(WriteEnvelope):
+    # 岗位建档预检：客户名 + 岗位名必填；方向/base/JD/优先级选填。
+    client_name: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=160)
+    direction: str = Field(default="", max_length=200)
+    base: str = Field(default="", max_length=120)
+    jd_text: str = Field(default="", max_length=8000)
+    priority: str = Field(default="", max_length=60)
+
+
+class JobCreateCommit(JobCreatePreflight):
+    # 岗位建档写入：字段 + jobs/preflight 签发且经 UI 激活的一次性 token。
+    preflight_token: str = Field(min_length=1)
+
+
 class ApprovalItemResponse(BaseModel):
     approval_id: str
     workflow_id: str
@@ -839,6 +854,35 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
 
     @app.get("/api/v1/jobs/{job_id}")
     def job(job_id: int) -> dict[str, Any]: return core.job(job_id)
+
+    # 岗位建档（用户实证卡点：「新增岗位」此前无入口，Agent 只能让用户手动建）。
+    # 写走确认链：preflight 解析客户/查重/铸未激活 token → UI activate → commit 落库。
+    # 建档只登记岗位（初始 待启动/intake），绝不自动启动任何寻访/抓取。
+    @app.post("/api/v1/jobs/preflight")
+    def job_create_preflight(body: JobCreatePreflight) -> dict[str, Any]:
+        # 建档申请（不写库）：409=客户名多义/同客户同名岗位已存在/字段非法。
+        try:
+            return core.job_create_preflight(
+                body.client_name, body.title,
+                direction=body.direction, base=body.base,
+                jd_text=body.jd_text, priority=body.priority,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/jobs")
+    def job_create_commit(body: JobCreateCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 岗位建档写入：人确认闸门（token 需 UI 激活）在 consume_write_confirmation 内执行；
+        # 走 idem 幂等封装（重放返回首次响应）；审计由 execute_idempotent 统一落库。
+        def commit() -> dict[str, Any]:
+            return core.job_create_commit(
+                body.client_name, body.title, body.preflight_token,
+                direction=body.direction, base=body.base,
+                jd_text=body.jd_text, priority=body.priority, request_id=body.request_id,
+            )
+
+        return idem("job.create", body, idempotency_key, "job",
+                    f"{body.client_name.strip()}::{body.title.strip()}", commit)
 
     @app.post("/api/v1/jobs/{job_id}/candidate-list/refresh")
     def job_candidate_list_refresh(job_id: int, body: CandidateListRefreshBody) -> dict[str, Any]:

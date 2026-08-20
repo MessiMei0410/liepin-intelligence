@@ -101,6 +101,7 @@ const TOOL_LABELS = {
   asa_resume_backfill: "简历回填预检（发起界面确认）",
   asa_job_filter_notes: "读取岗位筛选口径便签",
   asa_job_filter_note_preflight: "岗位筛选口径便签申请（发起界面确认）",
+  asa_job_create_preflight: "岗位建档申请（发起界面确认）",
   asa_copilot_ask: "委托 Copilot 做领域分析",
 };
 

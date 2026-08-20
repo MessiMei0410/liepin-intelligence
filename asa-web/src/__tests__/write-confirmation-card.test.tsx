@@ -480,3 +480,106 @@ describe('DSH 写确认卡（重新预检）', () => {
     expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({ candidate_id: 901, resume_id: 'res-du-1' })
   })
 })
+
+// 岗位建档确认卡（job_create）：客户解析结果（含「将新建客户」）/岗位/方向/Base/JD +
+// 提示行展示；确认走 activate + POST /api/v1/jobs；过期/409 可重预检换新 token。
+const jobCreateRequest = {
+  kind: 'job_create',
+  preflight_token: 'tok-dsh-jc',
+  expires_at: '2099-01-01T00:00:00',
+  action: 'job_create',
+  job: {
+    client: '杭州士兰微电子有限公司', client_id: 2, client_is_new: false, client_match: 'fuzzy',
+    title: '市场总监', direction: '汽车市场', base: '杭州', priority: '', jd_text: '',
+  },
+  warnings: ['客户名「士兰微」按既有客户「杭州士兰微电子有限公司」匹配建档', '未提供 JD 文本：建档后岗位职责/要求为空，可后续补充'],
+  impact: '确认后将在既有客户「杭州士兰微电子有限公司」下建档岗位「市场总监」（初始状态：待启动）；建档只登记岗位，不会自动启动任何寻访/抓取。',
+  client_request_id: 'agent_req-jc',
+}
+const jobCreatePreflightUrl = '/api/v1/jobs/preflight'
+const jobCreateCommitUrl = '/api/v1/jobs'
+
+describe('DSH 写确认卡（job_create 岗位建档）', () => {
+  let fetchMock: Mock<typeof fetch>
+
+  beforeEach(() => {
+    fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input)
+      if (url.includes(jobCreatePreflightUrl)) return mockResponse({ token: 'tok-jc-new', expires_at: '2099-01-01T00:00:00' })
+      if (url.includes(activateUrl)) return mockResponse({ ok: true, activated: true })
+      if (url.includes(jobCreateCommitUrl)) return mockResponse({
+        ok: true, already_created: false, job_id: 401, client_id: 2,
+        client_name: '杭州士兰微电子有限公司', client_created: false, title: '市场总监',
+      })
+      if (url.includes(recordTurnUrl)) return mockResponse({ ok: true, updated: true })
+      throw new Error(`未预期的请求：${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('渲染客户/岗位/方向/Base/JD 与提示行', () => {
+    render(<WriteConfirmationCard request={jobCreateRequest} sessionId="asa-s1" />)
+    const card = screen.getByRole('region', { name: '写入确认' })
+    expect(card).toHaveTextContent('岗位建档')
+    expect(card).toHaveTextContent('杭州士兰微电子有限公司')
+    expect(card).toHaveTextContent('市场总监')
+    expect(card).toHaveTextContent('汽车市场')
+    expect(card).toHaveTextContent('杭州')
+    expect(card).toHaveTextContent('未提供（建档后待补充）')
+    expect(card).toHaveTextContent('按既有客户「杭州士兰微电子有限公司」匹配建档')
+    expect(card).not.toHaveTextContent('将新建客户')
+  })
+
+  it('新客户：客户行明示「将新建客户」', () => {
+    const newClientRequest = {
+      ...jobCreateRequest,
+      job: { ...jobCreateRequest.job, client: '全新客户', client_id: null, client_is_new: true, client_match: 'new' },
+    }
+    render(<WriteConfirmationCard request={newClientRequest} sessionId="asa-s1" />)
+    expect(screen.getByRole('region', { name: '写入确认' })).toHaveTextContent('全新客户（将新建客户）')
+  })
+
+  it('确认：activate 后 POST /api/v1/jobs（携带字段与 token），回执展示已建档 #id 并回填 confirmed', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={jobCreateRequest} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('已建档：岗位 #401')
+    const urls = fetchMock.mock.calls.map(([input]) => String(input))
+    const activateIndex = urls.findIndex(url => url.includes(activateUrl))
+    const commitIndex = urls.findIndex(url => url.includes(jobCreateCommitUrl) && !url.includes(jobCreatePreflightUrl))
+    expect(activateIndex).toBeGreaterThanOrEqual(0)
+    expect(commitIndex).toBeGreaterThan(activateIndex)
+    expect(JSON.parse(String((fetchMock.mock.calls[commitIndex][1] as RequestInit).body))).toMatchObject({
+      client_name: '杭州士兰微电子有限公司', title: '市场总监', direction: '汽车市场', base: '杭州',
+      preflight_token: 'tok-dsh-jc',
+    })
+    await waitFor(() => {
+      const backfill = fetchMock.mock.calls.find(([input]) => String(input).includes(recordTurnUrl))
+      expect(backfill).toBeDefined()
+      expect(JSON.parse(String((backfill?.[1] as RequestInit).body))).toMatchObject({
+        session_id: 'asa-s1', request_id: 'agent_req-jc',
+        confirm_result: { state: 'confirmed' },
+      })
+    })
+  })
+
+  it('过期卡重预检：POST /api/v1/jobs/preflight 换新 token 后确认执行成功', async () => {
+    const user = userEvent.setup()
+    render(<WriteConfirmationCard request={{ ...jobCreateRequest, expires_at: '2020-01-01T00:00:00' }} sessionId="asa-s1" />)
+    await user.click(screen.getByRole('button', { name: '重新预检' }))
+    expect(await screen.findByRole('region', { name: '写入确认' })).toHaveTextContent('岗位建档')
+    const preflight = fetchMock.mock.calls.find(([input]) => String(input).includes(jobCreatePreflightUrl))
+    expect(preflight).toBeDefined()
+    expect(JSON.parse(String((preflight?.[1] as RequestInit).body))).toMatchObject({
+      client_name: '杭州士兰微电子有限公司', title: '市场总监',
+    })
+    await user.click(screen.getByRole('button', { name: '确认执行' }))
+    expect(await screen.findByRole('region', { name: '写入执行回执' })).toHaveTextContent('已建档：岗位 #401')
+    const activate = fetchMock.mock.calls.find(([input]) => String(input).includes(activateUrl))
+    expect(JSON.parse(String((activate?.[1] as RequestInit).body))).toMatchObject({ preflight_token: 'tok-jc-new' })
+  })
+})

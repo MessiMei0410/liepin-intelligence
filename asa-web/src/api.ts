@@ -141,6 +141,9 @@ export type ContractAnchor = [
   // 批量口径便签（多岗位一张确认卡）：批量预检 + 批量写入路由入锚（generated/api.d.ts 已 regenerate）。
   paths['/api/v1/jobs/filter-notes/batch-preflight']['post'],
   paths['/api/v1/jobs/filter-notes/batch']['post'],
+  // 岗位建档（写确认链）：预检 + 写入路由入锚（generated/api.d.ts 已 regenerate）。
+  paths['/api/v1/jobs/preflight']['post'],
+  paths['/api/v1/jobs']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -940,6 +943,11 @@ export const api = {
     write<JobFilterNoteBatchPreflightResult>('/api/v1/jobs/filter-notes/batch-preflight', { items }),
   jobFilterNoteBatchCommit: (items: JobFilterNoteBatchItem[], preflightToken: string) =>
     jobFilterNoteBatchCommitConfirmed(items, preflightToken),
+  jobCreatePreflight: (fields: JobCreateFields) =>
+    // DSH 确认卡「重新预检」用：按卡片已有字段重新铸 token（Core 侧重新解析客户/查重）。
+    write<JobCreatePreflightResult>('/api/v1/jobs/preflight', { ...fields }),
+  jobCreateCommit: (fields: JobCreateFields, preflightToken: string) =>
+    jobCreateCommitConfirmed(fields, preflightToken),
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
     fetch('/api/asa/floating/candidate-update', {
       method: 'POST',
@@ -1170,6 +1178,30 @@ const jobFilterNoteBatchCommitConfirmed = async (
   return write<JobFilterNoteBatchCommitResult>('/api/v1/jobs/filter-notes/batch', {
     items, preflight_token: preflightToken,
   })
+}
+
+// 岗位建档（写确认链）：DSH 确认卡 job_create kind 的预检（重预检）+ 提交通道。
+// Core 预检解析客户（精确/模糊/新建）并查重；commit 只登记岗位（初始待启动），
+// 不自动启动任何寻访/抓取。按 service_job_create 实际 payload 收窄声明。
+export type JobCreateFields = {
+  client_name: string; title: string; direction?: string; base?: string; jd_text?: string; priority?: string
+}
+export type JobCreatePreflightResult = {
+  ok?: boolean; token: string; expires_at?: string; action?: string; impact?: string;
+  job?: Record<string, unknown>; warnings?: string[];
+}
+export type JobCreateCommitResult = {
+  ok: boolean; job_id: number; client_id?: number | null; client_name?: string;
+  client_created?: boolean; title?: string; already_created?: boolean;
+  receipt?: { idempotent_replay?: boolean; request_id?: string; audit_event_id?: number | string }
+}
+
+const jobCreateCommitConfirmed = async (
+  fields: JobCreateFields,
+  preflightToken: string,
+): Promise<JobCreateCommitResult> => {
+  await activateWriteConfirmation(preflightToken)
+  return write<JobCreateCommitResult>('/api/v1/jobs', { ...fields, preflight_token: preflightToken })
 }
 
 const approvalDecisionConfirmed = async (id: string, decision: string, preflightToken = '', note = ''): Promise<WriteAck> => {
