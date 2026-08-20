@@ -683,7 +683,9 @@ def llm_extract_signals(llm: Any, payload: dict[str, Any]) -> dict[str, Any]:
     if not callable(request):
         raise LLMError("模型客户端不支持雷达信号抽取（缺 _request）")
     text = request(RADAR_EXTRACT_SYSTEM_PROMPT, payload, temperature=0.1)
-    return OpenAICompatibleLLM._json_object(text)
+    # 实例方法需显式传实例：OpenAICompatibleLLM._json_object(text) 丢 self 会 TypeError
+    # （雷达周扫 2026-08-20 首次冒烟即因此失败）；llm 即 OpenAICompatibleLLM 实例。
+    return OpenAICompatibleLLM._json_object(llm, text)
 
 
 Extractor = Callable[[Any, dict[str, Any]], dict[str, Any]]
