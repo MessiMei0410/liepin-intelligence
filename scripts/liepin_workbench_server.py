@@ -812,6 +812,12 @@ def show_asa_floating_app() -> dict[str, Any]:
     return {"ok": True, "message": "已唤起 ASA Copilot", "app": str(app)}
 
 
+# 候选人变更的停止口径：与名单卡服务端分组（a_system_agent.copilot_intent._STOP_TOKENS）
+# 及 floating_context_is_stopped 对齐——阶段文本命中停止词即视为已停止，
+# 避免“H5 初筛不通过”标签却 is_stopped=False、人仍留在可推进分组的矛盾态。
+_CANDIDATE_CHANGE_STOP_TOKENS = ("初筛不通过", "停止", "淘汰", "关闭", "screen_rejected")
+
+
 def _clean_candidate_change(change: dict[str, Any]) -> dict[str, Any]:
     """校验并规整化候选人变更条目。"""
     job_candidate_id = change.get("job_candidate_id") or change.get("id")
@@ -820,7 +826,10 @@ def _clean_candidate_change(change: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError):
         raise ValueError("job_candidate_id/id 必须是整数")
     stage = clean(change.get("stage"))
-    is_stopped = bool(change.get("is_stopped"))
+    stage_text = stage.lower()
+    is_stopped = bool(change.get("is_stopped")) or any(
+        token in stage_text for token in _CANDIDATE_CHANGE_STOP_TOKENS
+    )
     result: dict[str, Any] = {
         "job_candidate_id": job_candidate_id,
         "is_stopped": is_stopped,

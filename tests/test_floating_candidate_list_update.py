@@ -89,3 +89,29 @@ def test_record_requires_valid_candidate_id():
         assert False, "应抛出 ValueError"
     except ValueError as exc:
         assert "job_candidate_id" in str(exc)
+
+
+def test_is_stopped_inferred_from_stage_stop_tokens():
+    """口径对齐：上报方漏标 is_stopped 时，阶段文本命中停止词（与名单卡
+    copilot_intent._STOP_TOKENS 同口径）即视为已停止，杜绝
+    “H5 初筛不通过 标签 + is_stopped=False 留在可推进组”的矛盾态。"""
+    job_id = 143
+    server.record_floating_candidate_update(job_id, {"job_candidate_id": 1, "stage": "H5 最近寻访/初筛不通过"})
+    server.record_floating_candidate_update(job_id, {"job_candidate_id": 2, "stage": "H5 淘汰", "is_stopped": False})
+    server.record_floating_candidate_update(job_id, {"job_candidate_id": 3, "stage": "H5 screen_rejected"})
+    result = server.drain_floating_candidate_updates(job_id)
+    by_id = {item["job_candidate_id"]: item for item in result["changes"]}
+    assert by_id[1]["is_stopped"] is True
+    assert by_id[2]["is_stopped"] is True
+    assert by_id[3]["is_stopped"] is True
+
+
+def test_is_stopped_not_inferred_from_active_stage():
+    """活跃阶段（含“最近寻访”）不误判为停止。"""
+    job_id = 144
+    server.record_floating_candidate_update(job_id, {"job_candidate_id": 1, "stage": "S2 复核通过/待联系"})
+    server.record_floating_candidate_update(job_id, {"job_candidate_id": 2, "stage": "H5 最近寻访", "is_stopped": False})
+    result = server.drain_floating_candidate_updates(job_id)
+    by_id = {item["job_candidate_id"]: item for item in result["changes"]}
+    assert by_id[1]["is_stopped"] is False
+    assert by_id[2]["is_stopped"] is False
