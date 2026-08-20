@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Check, ChevronRight, CircleAlert, LoaderCircle, RotateCcw, Search, X } from 'lucide-react'
 import { api } from '../api'
+import { FilterNoteBatchConfirmCard } from './FilterNoteBatchConfirmCard'
 import type { AgentMessage } from './sessionModel'
 import type { AgentReference } from './transport'
 import { recordDshConfirmation } from './transport'
@@ -177,6 +178,8 @@ export function WriteConfirmationCard({ request, sessionId }: { request?: Record
   const [repreflightBusy, setRepreflightBusy] = useState(false)
   if (!request) return null
   const kind = text(request.kind)
+  // 批量口径便签（filter_note_batch，多岗位一张卡）：独立组件承载，状态机与本卡一致。
+  if (kind === 'filter_note_batch') return <FilterNoteBatchConfirmCard request={request} sessionId={sessionId} />
   const persistedState = text(request.state, 'pending')
   const candidate = record(request.candidate)
   const approval = record(request.approval)

@@ -138,6 +138,9 @@ export type ContractAnchor = [
   paths['/api/v1/jobs/{job_id}/filter-notes']['get'],
   paths['/api/v1/jobs/{job_id}/filter-notes/preflight']['post'],
   paths['/api/v1/jobs/{job_id}/filter-notes']['post'],
+  // 批量口径便签（多岗位一张确认卡）：批量预检 + 批量写入路由入锚（generated/api.d.ts 已 regenerate）。
+  paths['/api/v1/jobs/filter-notes/batch-preflight']['post'],
+  paths['/api/v1/jobs/filter-notes/batch']['post'],
 ]
 // 请求体引用生成的 components schema：Core 改字段（如 CandidateAction 增删属性）会在这里炸出类型错误。
 type CandidateActionBody = components['schemas']['CandidateAction']
@@ -932,6 +935,11 @@ export const api = {
     write<JobFilterNotePreflightResult>(`/api/v1/jobs/${jobId}/filter-notes/preflight`, { note }),
   jobFilterNoteCommit: (jobId: number, note: string, preflightToken: string) =>
     jobFilterNoteCommitConfirmed(jobId, note, preflightToken),
+  jobFilterNoteBatchPreflight: (items: JobFilterNoteBatchItem[]) =>
+    // 批量确认卡「重新预检」用：按卡片已有 items 重新铸一个绑定整批哈希的 token。
+    write<JobFilterNoteBatchPreflightResult>('/api/v1/jobs/filter-notes/batch-preflight', { items }),
+  jobFilterNoteBatchCommit: (items: JobFilterNoteBatchItem[], preflightToken: string) =>
+    jobFilterNoteBatchCommitConfirmed(items, preflightToken),
   notifyFloatingCandidateUpdate: (job_id: number, change: { job_candidate_id: number; stage?: string; is_stopped: boolean }) =>
     fetch('/api/asa/floating/candidate-update', {
       method: 'POST',
@@ -1134,6 +1142,33 @@ const jobFilterNoteCommitConfirmed = async (
   await activateWriteConfirmation(preflightToken)
   return write<JobFilterNoteCommitResult>(`/api/v1/jobs/${jobId}/filter-notes`, {
     note, preflight_token: preflightToken,
+  })
+}
+
+// 批量口径便签（多岗位一张确认卡）：DSH 确认卡 filter_note_batch kind 的通道。
+// token 绑定整批 items 的规范化哈希（Core service_filter_notes 口径）；
+// 原子语义——任一岗位不存在则 409 全不写。
+export type JobFilterNoteBatchItem = { job_id: number; note: string }
+export type JobFilterNoteBatchEntry = {
+  job_id: number; note: string; previous_note?: string;
+  job?: { id?: number; title?: string; client?: string };
+}
+export type JobFilterNoteBatchPreflightResult = {
+  ok?: boolean; token: string; expires_at?: string; action?: string; impact?: string;
+  items?: JobFilterNoteBatchEntry[];
+}
+export type JobFilterNoteBatchCommitResult = {
+  ok: boolean; total: number; saved: number; already_saved: number;
+  results: Array<{ job_id: number; note: string; already_saved?: boolean }>;
+}
+
+const jobFilterNoteBatchCommitConfirmed = async (
+  items: JobFilterNoteBatchItem[],
+  preflightToken: string,
+): Promise<JobFilterNoteBatchCommitResult> => {
+  await activateWriteConfirmation(preflightToken)
+  return write<JobFilterNoteBatchCommitResult>('/api/v1/jobs/filter-notes/batch', {
+    items, preflight_token: preflightToken,
   })
 }
 

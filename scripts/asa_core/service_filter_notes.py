@@ -17,12 +17,16 @@ migration 15）：
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from typing import Any
 
 from .database import connect
 
 FILTER_NOTE_MAX_CHARS = 500
+# 批量口径便签（多岗位一张确认卡）：单批上限，防卡片/请求体失控。
+FILTER_NOTE_BATCH_MAX_ITEMS = 50
 
 
 def _detect_male_only(note_text: str) -> str:
@@ -49,6 +53,40 @@ def _read_gender_requirement(conn: sqlite3.Connection, job_id: int) -> str:
 
 class FilterNotesMixin:
     """岗位筛选口径便签：读取 / preflight / commit（写确认链三段）。"""
+
+    def _normalize_filter_note_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """批量项校验 + 规范化：job_id 正整数、note 去连续空白后非空且 ≤500 字；
+        同一岗位在一批里重复出现 → ValueError（409）。返回规范化清单（保持入参顺序）。"""
+        if not items:
+            raise ValueError("批量口径便签至少包含 1 项")
+        if len(items) > FILTER_NOTE_BATCH_MAX_ITEMS:
+            raise ValueError(f"批量口径便签单批最多 {FILTER_NOTE_BATCH_MAX_ITEMS} 项")
+        normalized: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in items:
+            job_id = int((item or {}).get("job_id") or 0)
+            if job_id <= 0:
+                raise ValueError("批量口径便签的 job_id 必须为正整数")
+            note = " ".join(str((item or {}).get("note") or "").split())
+            if not note:
+                raise ValueError("口径便签内容不能为空")
+            if len(note) > FILTER_NOTE_MAX_CHARS:
+                raise ValueError(f"口径便签最长 {FILTER_NOTE_MAX_CHARS} 字")
+            if job_id in seen:
+                raise ValueError(f"岗位 #{job_id} 在批量清单中重复，请合并为一项")
+            seen.add(job_id)
+            normalized.append({"job_id": job_id, "note": note})
+        return normalized
+
+    @staticmethod
+    def _filter_note_batch_target(items: list[dict[str, Any]]) -> str:
+        """批量 token 的绑定目标：items 清单（job_id+note，按 job_id 排序）规范化哈希。
+        预检哪一批就只能提交哪一批——改任何一个岗位/便签，token 校验即失败。"""
+        canonical = json.dumps(
+            sorted((item["job_id"], item["note"]) for item in items),
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        return f"job_filter_note_batch:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
 
     def _job_brief(self, conn, job_id: int):
         return conn.execute(
@@ -186,5 +224,136 @@ class FilterNotesMixin:
                     "确定性分级将排除铁证为女性的候选人（性别不明的保留并标注待核验）。"
                 )
             return result
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # 批量口径便签（多岗位一张确认卡）：DSH 对多岗位并发发起 N 张确认卡时，
+    # 管道一轮只递最后一张（confirm_request 单值槽），其余 N-1 张 token 白过期。
+    # 批量预检铸**一个**未激活 token 绑定整批 items 的规范化哈希；批量 commit
+    # 原子落库——任一岗位不存在 → 409 全不写；逐项幂等 request_id 派生。
+    # ------------------------------------------------------------------
+
+    def filter_notes_batch_preflight(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """批量口径便签写申请（不写库）：校验全部岗位存在 + 便签合法，铸一个一次性
+        未激活 token（5 分钟有效，绑定整批 items 哈希）。逐项回显当前便签供确认卡对照。"""
+        normalized = self._normalize_filter_note_items(items)
+        conn = connect(self.db_path)
+        try:
+            entries: list[dict[str, Any]] = []
+            for item in normalized:
+                job = self._job_brief(conn, item["job_id"])
+                if not job:
+                    raise LookupError(f"job not found: {item['job_id']}")
+                row = conn.execute(
+                    "SELECT note FROM job_filter_notes WHERE job_id=?",
+                    (item["job_id"],),
+                ).fetchone()
+                entries.append({
+                    "job_id": item["job_id"],
+                    "job": {"id": int(job["id"]), "title": str(job["title"] or ""), "client": str(job["client"] or "")},
+                    "note": item["note"],
+                    "previous_note": str(row["note"]) if row else "",
+                    # 与单岗位链路同口径的性别桥标记：确认卡须向用户明说该开关会落位。
+                    "gender_requirement_detected": _detect_male_only(item["note"]) == "male_only",
+                })
+        finally:
+            conn.close()
+        token, expires = self._mint_write_token(
+            self._filter_note_batch_target(normalized), "job_filter_note_batch", activated=False,
+        )
+        detected = sum(1 for entry in entries if entry["gender_requirement_detected"])
+        impact = (f"确认后一次性保存 {len(entries)} 个岗位的筛选口径便签：之后出名单卡时随口径声明显示；"
+                  "便签不改变确定性筛选逻辑本身（关键词变更需走代码变更）。")
+        if detected:
+            impact += (f"其中 {detected} 项检测到性别限制口径：确认后将同时把对应岗位的性别要求开关置为 "
+                       "male_only，确定性分级将排除铁证为女性的候选人（性别不明的保留并标注待核验）。")
+        return {
+            "ok": True,
+            "token": token,
+            "expires_at": expires.isoformat(timespec="seconds"),
+            "action": "job_filter_note_batch",
+            "items": entries,
+            "impact": impact,
+        }
+
+    def filter_notes_batch_commit(
+        self,
+        items: list[dict[str, Any]],
+        preflight_token: str,
+        *,
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """批量口径便签写入：token 绑定整批 items 哈希（预检哪批只能写哪批）。
+        原子语义：任一岗位不存在 → ValueError（409），一个都不写；全部 upsert 在
+        同一事务提交。逐项幂等：每项 request_id 派生为「{request_id}:{job_id}」，
+        重放项返回 already_saved，不重复写入。"""
+        normalized = self._normalize_filter_note_items(items)
+        self.consume_write_confirmation(
+            preflight_token, self._filter_note_batch_target(normalized), "job_filter_note_batch",
+        )
+        conn = connect(self.db_path)
+        try:
+            missing = [item["job_id"] for item in normalized if not self._job_brief(conn, item["job_id"])]
+            if missing:
+                raise ValueError(f"岗位不存在（{', '.join(f'#{j}' for j in missing)}），本次批量未写入任何便签")
+            # 性别桥置位所需列的防御式检测（合成库/未迁移旧库无该列时跳过置位）。
+            cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(jobs)")}
+            has_gender_column = "gender_requirement" in cols
+            results: list[dict[str, Any]] = []
+            for item in normalized:
+                job_id = item["job_id"]
+                male_only = _detect_male_only(item["note"]) == "male_only"
+                # 逐项派生幂等键：同批重放时该项直接回已保存，不重复 upsert。
+                item_request_id = f"{request_id}:{job_id}" if request_id else ""
+                existing = conn.execute(
+                    "SELECT request_id FROM job_filter_notes WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                replay = bool(
+                    existing
+                    and str(existing["request_id"] or "")
+                    and str(existing["request_id"]) == item_request_id
+                    and item_request_id
+                )
+                if not replay:
+                    conn.execute(
+                        """INSERT INTO job_filter_notes (job_id, note, updated_by, request_id)
+                           VALUES (?,?,?,?)
+                           ON CONFLICT(job_id) DO UPDATE SET
+                               note=excluded.note, updated_by=excluded.updated_by,
+                               request_id=excluded.request_id,
+                               updated_at=datetime('now','localtime')""",
+                        (job_id, item["note"], "consultant", item_request_id),
+                    )
+                    # 便签→结构化开关的桥（与单岗位链路同口径）：同事务落 male_only。
+                    if male_only and has_gender_column:
+                        conn.execute(
+                            "UPDATE jobs SET gender_requirement='male_only' WHERE id=?",
+                            (job_id,),
+                        )
+                results.append({
+                    "job_id": job_id, "note": item["note"], "already_saved": replay,
+                    "gender_requirement_detected": male_only,
+                    "gender_requirement": _read_gender_requirement(conn, job_id),
+                })
+            conn.commit()
+            applied = sum(
+                1 for r in results
+                if r["gender_requirement_detected"] and r["gender_requirement"] == "male_only"
+            )
+            payload: dict[str, Any] = {
+                "ok": True,
+                "total": len(results),
+                "saved": sum(1 for r in results if not r["already_saved"]),
+                "already_saved": sum(1 for r in results if r["already_saved"]),
+                "results": results,
+            }
+            if applied:
+                payload["notice"] = (
+                    f"{applied} 项检测到性别限制口径：已将对应岗位性别要求置为 male_only，"
+                    "确定性分级将排除铁证为女性的候选人（性别不明的保留并标注待核验）。"
+                )
+            return payload
         finally:
             conn.close()

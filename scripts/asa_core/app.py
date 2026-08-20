@@ -164,6 +164,24 @@ class JobFilterNoteCommit(WriteEnvelope):
     preflight_token: str = Field(min_length=1)
 
 
+class JobFilterNoteBatchItem(BaseModel):
+    # 批量口径便签单项：岗位 + 便签（≤500 字）。
+    job_id: int = Field(gt=0)
+    note: str = Field(min_length=1, max_length=500)
+
+
+class JobFilterNoteBatchPreflight(WriteEnvelope):
+    # 批量口径便签写申请：多岗位一次预检、一张确认卡（≤50 项）。
+    items: list[JobFilterNoteBatchItem] = Field(min_length=1, max_length=50)
+
+
+class JobFilterNoteBatchCommit(WriteEnvelope):
+    # 批量口径便签写入：items + batch-preflight 签发且经 UI 激活的一次性 token
+    # （token 绑定整批 items 的规范化哈希，改任何一项即校验失败）。
+    items: list[JobFilterNoteBatchItem] = Field(min_length=1, max_length=50)
+    preflight_token: str = Field(min_length=1)
+
+
 class ApprovalItemResponse(BaseModel):
     approval_id: str
     workflow_id: str
@@ -852,6 +870,28 @@ def create_app(*, db_path: Path = DEFAULT_DB, host: str = "127.0.0.1", port: int
             return core.filter_note_commit(job_id, body.note, body.preflight_token, request_id=body.request_id)
 
         return idem("job.filter_note", body, idempotency_key, "job", str(job_id), commit)
+
+    # 批量口径便签（多岗位一张确认卡）：DSH 多岗位并发发 N 张单卡时管道只递最后一张，
+    # 其余 token 白过期；批量预检铸一个绑定整批 items 哈希的 token，一张卡确认全部生效。
+    # 原子语义：任一岗位不存在 → 409 全不写。
+    @app.post("/api/v1/jobs/filter-notes/batch-preflight")
+    def job_filter_notes_batch_preflight(body: JobFilterNoteBatchPreflight) -> dict[str, Any]:
+        # 批量口径便签写申请（不写库）：404=任一岗位不存在；409=items 为空/超长/重复岗位/便签非法。
+        try:
+            return core.filter_notes_batch_preflight([item.model_dump() for item in body.items])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/v1/jobs/filter-notes/batch")
+    def job_filter_notes_batch_commit(body: JobFilterNoteBatchCommit, idempotency_key: str = Header(alias="Idempotency-Key")):
+        # 批量口径便签写入：人确认闸门（token 需 UI 激活）在 consume_write_confirmation 内执行；
+        # 走 idem 幂等封装（重放返回首次响应）；原子落库——任一岗位不存在 → 409 全不写。
+        def commit() -> dict[str, Any]:
+            return core.filter_notes_batch_commit(
+                [item.model_dump() for item in body.items], body.preflight_token, request_id=body.request_id,
+            )
+
+        return idem("job.filter_note_batch", body, idempotency_key, "job_filter_note_batch", f"batch:{len(body.items)}", commit)
 
     @app.post("/api/v1/candidates/list-card")
     def candidate_subset_list_card(body: CandidateSubsetListCardBody) -> dict[str, Any]:

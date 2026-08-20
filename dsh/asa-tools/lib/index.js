@@ -3,6 +3,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 // ASA Core 工具集。只读工具直调 GET；写动作对模型只暴露「预检申请」：
 // asa_candidate_preflight / asa_approval_preflight / asa_workflow_action_preflight
 // / asa_resume_backfill / asa_job_filter_note_preflight
+// / asa_job_filter_notes_batch_preflight（多岗位同类写申请一张卡确认）
 // 只铸造一次性 preflight token（不写库），工具结果经 presentationMeta 投影
 // confirm_request → 常驻服务器透传 SSE → 前端确认卡。真正的写入由用户在
 // ASA 界面确认后完成（Core 侧 token 需经 UA 门控的 activate 端点激活才可写），
@@ -623,6 +624,56 @@ function apply(ctx) {
         throw new Error("asa_job_filter_note_preflight 要求 note 非空。");
       }
       return await postJson(`/api/v1/jobs/${jobId}/filter-notes/preflight`, { note }, exec);
+    },
+  }));
+
+  // 批量口径便签写申请（不写库）：多岗位/多对象同类写申请一律走本工具——
+  // 铸**一个**绑定整批 items 哈希的 token，前端出**一张**批量确认卡，用户点一次
+  // 全部生效。逐岗位各发一张单卡会让管道一轮只递最后一张（confirm_request
+  // 单值槽），其余 token 白过期，禁止那样做。原子语义：任一岗位不存在 → 全不写。
+  ctx.tools.register(defineTool({
+    name: "asa_job_filter_notes_batch_preflight",
+    description:
+      "批量申请保存多个岗位的筛选口径便签（不写库）：同一轮要给 2 个及以上岗位保存口径便签时**必须用本工具一次发起**（禁止逐岗位多次调用单岗位工具——多张确认卡只有最后一张会送达，其余白过期）。返回一个一次性 preflight token（5 分钟有效）与逐岗位当前便签对照；随后 ASA 界面弹出**一张**批量确认卡，由用户一次确认全部生效。原子语义：任一岗位不存在则全部不写入。便签是口径声明，不改变确定性筛选逻辑本身。回答用户时必须说明「已在界面发起确认，等用户确认后才会保存」，未确认前不得声称「已记录/已记住」。",
+    parameters: {
+      items: { type: "array", required: true, description: "待保存清单（2-50 项，同一岗位不得重复）：[{job_id: 岗位 ID（jobs.id 正整数）, note: 口径便签内容（≤500 字）}]。" },
+    },
+    output: confirmMeta((value) => ({
+      kind: "filter_note_batch",
+      preflight_token: value.token || "",
+      expires_at: value.expires_at || "",
+      action: "job_filter_note_batch",
+      items: Array.isArray(value.items) ? value.items : [],
+      impact: value.impact || "",
+    })),
+    timeoutMs: 30000,
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const rawItems = Array.isArray(args.items) ? args.items : [];
+      if (rawItems.length < 1) {
+        throw new Error("asa_job_filter_notes_batch_preflight 要求 items 为非空数组：[{job_id, note}]。");
+      }
+      if (rawItems.length > 50) {
+        throw new Error("asa_job_filter_notes_batch_preflight 单批最多 50 项。");
+      }
+      const seen = new Set();
+      const items = rawItems.map((item, index) => {
+        const entry = item && typeof item === "object" ? item : {};
+        const jobId = Number(entry.job_id);
+        if (!Number.isInteger(jobId) || jobId <= 0) {
+          throw new Error(`items[${index}].job_id 必须为正整数（jobs.id）。`);
+        }
+        if (seen.has(jobId)) {
+          throw new Error(`岗位 #${jobId} 在 items 中重复，请合并为一项。`);
+        }
+        seen.add(jobId);
+        const note = typeof entry.note === "string" ? entry.note.trim() : "";
+        if (!note) {
+          throw new Error(`items[${index}].note 必须非空。`);
+        }
+        return { job_id: jobId, note };
+      });
+      return await postJson("/api/v1/jobs/filter-notes/batch-preflight", { items }, exec);
     },
   }));
 
